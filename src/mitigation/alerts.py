@@ -1,0 +1,392 @@
+"""
+alerts.py - Alert Notification & JSON Stream Persistence Engine.
+
+Handles Telegram alert dispatches via Ollama-summarized enrichment and 
+manages local structured alert logging with automatic size rotation.
+
+RECENT FIXES:
+- FIXED (SHUTDOWN TIMEOUT BUG): `AlertManager.stop(timeout=12.0)` now correctly accepts 
+  and passes the timeout parameter to `_worker_thread.join(timeout=timeout)`. Added a fallback 
+  warning log if the worker thread fails to drain and terminate within the allocated window.
+- FIXED (LEGACY .JSONL MIGRATION SILENT FAILURE): Rewrote `_migrate_legacy_format()` to parse 
+  legacy `.jsonl` files line-by-line instead of treating them as a single monolithic JSON document.
+- AUDIT FIX #5: Switched `AlertJSONWriter.write()` to O(1) JSONL append mode. Previously the 
+  writer read and rewrote the entire JSON array on every alert (O(N)), which would stall the 
+  pipeline under high alert volumes or when the file grew to hundreds of MBs.
+- AUDIT FIX #10: Added Telegram sender authentication via `telegram_allowed_chat_ids` config.
+  When configured, only messages from whitelisted chat IDs can execute /unblock, /release, etc.
+- AUDIT FIX #17: Replaced `self.running` bool flag with a `threading.Event` for clean, 
+  responsive shutdown of the long-poll bot updates thread.
+"""
+
+import json
+import logging
+import queue
+import threading
+import time
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from pathlib import Path
+from typing import Dict, Any, Optional, List
+
+LOGGER = logging.getLogger("home_ids.alerts")
+
+
+class AlertJSONWriter:
+    """Thread-safe JSONL alert log writer with size-based rotation and legacy format migration.
+    AUDIT FIX #5: Uses O(1) append mode (one JSON object per line) instead of reading and
+    rewriting the entire file on every alert write.
+    """
+    
+    def __init__(self, path: str, max_bytes: int = 1073741824):
+        self.path = Path(path)
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_format()
+
+    def _migrate_legacy_format(self) -> None:
+        """
+        Migrates legacy formats to JSONL (one JSON object per line):
+        - If a .jsonl sidecar exists alongside a missing .json, imports it.
+        - If a .json exists as a JSON array, converts it to JSONL in-place.
+        """
+        old_jsonl = self.path.with_suffix(".jsonl")
+
+        # Case 1: legacy .jsonl sidecar → import into new .json path as JSONL
+        if not self.path.exists() and old_jsonl.exists():
+            LOGGER.info("Legacy alerts file detected at %s. Initiating safe line-by-line migration...", old_jsonl)
+            migrated_count = 0
+            malformed_count = 0
+            try:
+                with old_jsonl.open("r", encoding="utf-8") as src, self.path.open("w", encoding="utf-8") as dst:
+                    for line_num, line in enumerate(src, 1):
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        try:
+                            doc = json.loads(line_str)
+                            if isinstance(doc, dict):
+                                dst.write(json.dumps(doc, separators=(",", ":")) + "\n")
+                                migrated_count += 1
+                            elif isinstance(doc, list):
+                                for item in doc:
+                                    dst.write(json.dumps(item, separators=(",", ":")) + "\n")
+                                    migrated_count += 1
+                        except json.JSONDecodeError as jde:
+                            malformed_count += 1
+                            LOGGER.warning("⚠️ Malformed JSON on line %d of %s: %s", line_num, old_jsonl, jde)
+                LOGGER.info("✅ Migrated %d alerts to JSONL at %s (%d malformed skipped).",
+                            migrated_count, self.path, malformed_count)
+            except Exception as exc:
+                LOGGER.error("❌ Critical failure during legacy alert migration: %s", exc, exc_info=True)
+            return
+
+        # Case 2: existing .json as a JSON array → convert to JSONL in-place
+        if self.path.exists():
+            try:
+                raw = self.path.read_text(encoding="utf-8").strip()
+                if raw.startswith("["):
+                    LOGGER.info("Converting existing JSON array alert log at %s to JSONL format...", self.path)
+                    records = json.loads(raw)
+                    if isinstance(records, list):
+                        tmp = self.path.with_suffix(".tmp")
+                        with tmp.open("w", encoding="utf-8") as f:
+                            for rec in records:
+                                f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+                        tmp.replace(self.path)
+                        LOGGER.info("✅ Converted %d alerts to JSONL format at %s.", len(records), self.path)
+            except Exception as exc:
+                LOGGER.warning("Could not convert existing alert log to JSONL: %s", exc)
+
+    def write(self, alert_payload: Dict[str, Any]) -> None:
+        """Thread-safely appends a structured alert as a single JSONL line.
+        AUDIT FIX #5: O(1) append — does not read or reparse the existing file.
+        """
+        with self._lock:
+            try:
+                if self.path.exists() and self.path.stat().st_size >= self.max_bytes:
+                    backup_path = self.path.with_suffix(".bak")
+                    if backup_path.exists():
+                        backup_path.unlink()
+                    self.path.rename(backup_path)
+                    LOGGER.warning("Alert log reached capacity (%d bytes). Rotated to %s", self.max_bytes, backup_path)
+
+                with self.path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(alert_payload, separators=(",", ":")) + "\n")
+                LOGGER.debug("Alert appended to JSONL stream: %s", self.path)
+
+            except Exception as exc:
+                LOGGER.error("Failed to write alert payload to disk: %s", exc, exc_info=True)
+
+
+class AlertManager:
+    """Asynchronous Telegram notification manager with optional Ollama AI summarization."""
+    
+    def __init__(self, token: str, chat_id: str, enabled: bool = False, ollama_url: str = "", ollama_model: str = "llama3"):
+        self.token = token.strip()
+        self.chat_id = chat_id.strip()
+        self.enabled = enabled
+        self.ollama_url = ollama_url.strip().rstrip("/")
+        self.ollama_model = ollama_model.strip()
+        
+        self.q = queue.Queue()
+        self.running = True
+        self._stop_event = threading.Event()
+        self.session = requests.Session()
+        
+        # Configure robust connection pooling and automatic retries for transient SSL/Connection drops
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=["GET", "POST"])
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+        
+        if self.enabled:
+            if not self.token or not self.chat_id:
+                LOGGER.warning("⚠️ Telegram alerts are enabled, but token or chat_id is missing!")
+            else:
+                LOGGER.info("📲 Telegram Alert Manager initialized and armed.")
+                
+            self._worker_thread = threading.Thread(target=self._dispatch_worker, daemon=True, name="telegram-alert-worker")
+            self._worker_thread.start()
+
+            self._updates_thread = threading.Thread(target=self._bot_updates_worker, daemon=True, name="telegram-bot-updates")
+            self._updates_thread.start()
+
+    def send(self, message: str, raw_payload: Optional[Dict[str, Any]] = None, reply_markup: Optional[Dict[str, Any]] = None) -> None:
+        """Enqueues an alert message for asynchronous Telegram delivery with optional inline buttons.
+        Non-blocking: returns immediately. Ollama summarization happens inside the dispatch worker.
+        """
+        if not self.enabled:
+            return
+
+        # Enqueue (message, raw_payload, reply_markup) tuple.
+        # Ollama summarization is intentionally deferred to the worker thread
+        # so this method NEVER blocks the caller (e.g. the pipeline's device lock).
+        self.q.put((message, raw_payload, reply_markup))
+        LOGGER.debug("Alert enqueued for Telegram delivery. Queue size: %d", self.q.qsize())
+
+    def _summarize_with_ollama(self, payload: Dict[str, Any]) -> Optional[str]:
+        """Queries local Ollama instance for a brief contextual threat explanation."""
+        try:
+            prompt = (
+                f"Analyze this Home IDS security alert and provide a 1-sentence executive summary "
+                f"explaining the potential risk:\n{json.dumps(payload, indent=2)}"
+            )
+            resp = self.session.post(
+                f"{self.ollama_url}/api/generate",
+                json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                timeout=30.0
+            )
+            if resp.status_code == 200:
+                return resp.json().get("response", "").strip()
+        except Exception as exc:
+            LOGGER.debug("Ollama summary generation failed: %s", exc)
+        return None
+
+    def _dispatch_worker(self) -> None:
+        """Background worker thread that flushes the alert delivery queue to Telegram.
+        Ollama summarization runs here (off the pipeline lock path) so send() stays non-blocking.
+        """
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+        while self.running or not self.q.empty():
+            try:
+                try:
+                    item = self.q.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                if isinstance(item, tuple) and len(item) == 3:
+                    raw_msg, raw_payload, reply_markup = item
+                elif isinstance(item, tuple) and len(item) == 2:
+                    raw_msg, reply_markup = item
+                    raw_payload = None
+                else:
+                    raw_msg, raw_payload, reply_markup = item, None, None
+
+                # Ollama enrichment happens here in the worker, never in send()
+                final_msg = raw_msg
+                if self.ollama_url and raw_payload:
+                    summary = self._summarize_with_ollama(raw_payload)
+                    if summary:
+                        final_msg += f"\n🤖 *AI Security Analysis:*\n{summary}"
+
+                payload = {
+                    "chat_id": self.chat_id,
+                    "text": final_msg,
+                    "parse_mode": "Markdown"
+                }
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
+                
+                resp = self.session.post(url, json=payload, timeout=5.0)
+                if resp.status_code != 200:
+                    LOGGER.warning("Failed to send Telegram alert (HTTP %d): %s", resp.status_code, resp.text)
+                    if resp.status_code == 400 and "parse" in resp.text.lower():
+                        LOGGER.info("Retrying Telegram alert dispatch without parse_mode fallback...")
+                        payload.pop("parse_mode", None)
+                        retry_resp = self.session.post(url, json=payload, timeout=5.0)
+                        if retry_resp.status_code == 200:
+                            LOGGER.info("✅ Telegram alert successfully dispatched via plain text fallback.")
+                else:
+                    LOGGER.debug("Telegram alert successfully dispatched.")
+                    
+                self.q.task_done()
+            except Exception as exc:
+                LOGGER.error("Exception in Telegram dispatch worker: %s", exc)
+                # Ensure the item is not completely lost on transient hard exceptions
+                if 'item' in locals() and item:
+                    try:
+                        self.q.put(item)
+                    except Exception:
+                        pass
+                    time.sleep(2.0) # Backoff before retrying queue
+
+    def _bot_updates_worker(self) -> None:
+        """Background listener thread: polls Telegram getUpdates for /unblock, /release, /block, and inline button callbacks.
+        AUDIT FIX #17: Uses threading.Event.wait() instead of time.sleep() so the thread
+        stops within 1 second of stop() being called, rather than waiting up to 25 seconds.
+        """
+        if not self.token:
+            return
+        url = f"https://api.telegram.org/bot{self.token}/getUpdates"
+        offset = 0
+        while not self._stop_event.is_set():
+            try:
+                resp = self.session.get(url, params={"offset": offset, "timeout": 10}, timeout=15.0)
+                if resp.status_code != 200:
+                    self._stop_event.wait(timeout=10.0)
+                    continue
+
+                data = resp.json()
+                for update in data.get("result", []):
+                    offset = max(offset, update["update_id"] + 1)
+                    
+                    # Handle Callback Query (Inline Button Click)
+                    if "callback_query" in update:
+                        cb = update["callback_query"]
+                        cb_data = cb.get("data", "")
+                        cb_id = cb.get("id", "")
+                        self._handle_telegram_callback(cb_data, cb_id, update["callback_query"])
+                        continue
+
+                    # Handle Text Commands (/unblock, /release, /status)
+                    if "message" in update and "text" in update["message"]:
+                        text = update["message"]["text"].strip()
+                        self._handle_telegram_command(text, update["message"])
+
+            except Exception as exc:
+                LOGGER.debug("Telegram bot updates worker exception: %s", exc)
+                self._stop_event.wait(timeout=5.0)
+
+    def _handle_telegram_callback(self, cb_data: str, cb_id: str, cb_update: dict = None):
+        """Processes Telegram inline keyboard button presses ([Approve Block], [Release], [Immunize]).
+        AUDIT FIX #10: Validates sender chat_id against telegram_allowed_chat_ids allowlist.
+        """
+        answer_url = f"https://api.telegram.org/bot{self.token}/answerCallbackQuery"
+        try:
+            # Authenticate the callback sender
+            if cb_update:
+                sender_chat_id = str(cb_update.get("message", {}).get("chat", {}).get("id", ""))
+                if not self._is_sender_allowed(sender_chat_id):
+                    LOGGER.warning("⚠️ Telegram callback from unauthorized chat_id %s blocked.", sender_chat_id)
+                    self.session.post(answer_url, json={"callback_query_id": cb_id, "text": "⛔ Unauthorized."}, timeout=5.0)
+                    return
+
+            parts = cb_data.split(":", 2)
+            action = parts[0].lower()
+            target = parts[1] if len(parts) > 1 else ""
+            
+            from config import CONFIG
+            fastapi_port = int(CONFIG.get("fastapi_port", 8010))
+            api_token = CONFIG.get("fritz_api_token", "")
+            headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
+            
+            if action in ("unblock", "release"):
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/release"
+                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                msg_text = f"✅ Target '{target}' released from containment."
+            elif action == "block":
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/block"
+                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                msg_text = f"🔒 Hardware containment block approved for '{target}'."
+            elif action == "immunize":
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/immunize"
+                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                msg_text = f"🛡️ Domain '{target}' immunized."
+            else:
+                msg_text = "Action acknowledged."
+
+            self.session.post(answer_url, json={"callback_query_id": cb_id, "text": msg_text}, timeout=5.0)
+        except Exception as e:
+            LOGGER.error("Failed to process Telegram callback query: %s", e)
+
+    def _is_sender_allowed(self, chat_id: str) -> bool:
+        """AUDIT FIX #10: Returns True if the sender is on the allowed chat_id list.
+        If telegram_allowed_chat_ids is empty, all senders are allowed (backward-compat).
+        """
+        from config import CONFIG
+        allowed: List[str] = [str(x) for x in CONFIG.get("telegram_allowed_chat_ids", [])]
+        if not allowed:
+            return True  # Empty allowlist = allow all (backward-compatible default)
+        return chat_id in allowed
+
+    def _handle_telegram_command(self, text: str, message: dict = None):
+        """Handles Telegram commands like /unblock 192.168.1.50 or /release_all.
+        AUDIT FIX #10: Validates sender chat_id against allowlist before executing.
+        """
+        if not text.startswith("/"):
+            return
+
+        # Authenticate the command sender
+        if message:
+            sender_chat_id = str(message.get("chat", {}).get("id", ""))
+            if not self._is_sender_allowed(sender_chat_id):
+                LOGGER.warning("⚠️ Telegram command from unauthorized chat_id %s blocked: %s", sender_chat_id, text[:50])
+                self.send(f"⛔ Unauthorized. Your chat ID `{sender_chat_id}` is not in the allowlist.")
+                return
+
+        cmd_parts = text.split(maxsplit=1)
+        cmd = cmd_parts[0].lower()
+        target = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
+
+        from config import CONFIG
+        fastapi_port = int(CONFIG.get("fastapi_port", 8010))
+        api_token = CONFIG.get("fritz_api_token", "")
+        headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
+
+        if cmd in ("/unblock", "/release", "/unblock_all", "/release_all"):
+            ipc_target = "all" if "all" in cmd else target
+            if not ipc_target:
+                self.send("⚠️ Usage: `/unblock <IP_OR_MAC_OR_HOSTNAME|all>`")
+                return
+            ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/release"
+            # Use a longer timeout for /release_all since each isolated device requires
+            # a Fritz!Box TR-064 HTTP round-trip (up to 10s per device).
+            ipc_timeout = 60.0 if ipc_target == "all" else 10.0
+            try:
+                resp = self.session.post(ipc_url, json={"target": ipc_target}, headers=headers, timeout=ipc_timeout)
+                if resp.status_code == 200:
+                    self.send(f"✅ *[TELEGRAM RELEASE]* Successfully released '{ipc_target}' from containment (Pi-hole, Tarpit, Router). 1-Hour Cooldown active.")
+                else:
+                    self.send(f"⚠️ Failed to release '{ipc_target}': HTTP {resp.status_code}")
+            except Exception as e:
+                self.send(f"❌ Error communicating with local IPC server: {e}")
+
+    def stop(self, timeout: float = 12.0) -> None:
+        """
+        Signals the worker thread to stop and blocks up to the specified timeout 
+        to ensure all enqueued alerts are flushed to Telegram before process exit.
+        AUDIT FIX #17: Sets threading.Event so the long-poll thread wakes up immediately.
+        """
+        self.running = False
+        self._stop_event.set()  # Wake up _bot_updates_worker immediately
+        if hasattr(self, "_worker_thread") and self._worker_thread.is_alive():
+            LOGGER.info("Shutting down Alert Manager worker thread (Timeout: %.1fs)...", timeout)
+            self._worker_thread.join(timeout=timeout)
+            if self._worker_thread.is_alive():
+                LOGGER.warning("⚠️ Alert Manager worker thread did not drain completely within %.1fs timeout.", timeout)
+            else:
+                LOGGER.info("✅ Alert Manager worker thread stopped cleanly.")

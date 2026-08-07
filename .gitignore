@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local Runtime State & Sensitive Data Stores
+state/
+*.log
+*.jsonl
+alerts.json
+ids_state.json
+fp_trust_cache.json
+fp_sigma_shifts.json
+models/*.pkl
+models/*.onnx
+!config.json
+
+# Environment Secrets
+.env
+.env.*
+
+# IDE / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

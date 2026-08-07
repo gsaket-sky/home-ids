@@ -1,0 +1,590 @@
+{
+  "title": "Home IDS \ud83d\udee1\ufe0f Tier 2: Network & Lateral Movement (Zeek NDR)",
+  "uid": "ids-tier2-ndr",
+  "tags": [
+    "ids",
+    "tier2",
+    "ndr",
+    "zeek",
+    "showcase"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "PROMETHEUS_DS",
+        "label": "Prometheus Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "current": {
+          "selected": true,
+          "text": "prometheus",
+          "value": "dfm29b4en3im8e"
+        }
+      },
+      {
+        "name": "LOKI_DS",
+        "label": "Loki Datasource",
+        "type": "datasource",
+        "query": "loki",
+        "refresh": 1,
+        "current": {
+          "selected": true,
+          "text": "loki",
+          "value": "bfrzhndwa4y68e"
+        }
+      },
+      {
+        "name": "device",
+        "label": "Device / Hostname",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${PROMETHEUS_DS}"
+        },
+        "query": "label_values(home_ids_risk_score, hostname)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "customAllValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "",
+      "gridPos": {
+        "h": 2,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \ud83e\udded [Triage Hub](/d/ids-master-hub-ultimate?var-device=${device}) | [\ud83d\udcca DNS & ML Diagnostics](/d/ids-tier2-dns?var-device=${device}) | **\ud83d\udd12 Network & Lateral (Zeek NDR)** | [\ud83c\udf0d GeoIP & OSINT Intel](/d/ids-tier2-geo?var-device=${device}) | [\u2699\ufe0f Engine System Health](/d/ids-system-health)"
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83d\udcd6 Novice Analyst Guide: TLS Fingerprinting, Deception & Covert Bypass",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 2
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \ud83d\udd12 Advanced TLS Fingerprinting & Deception Traps\n* **JA3 / JA4+ TLS Hits:** Matches client hello TLS fingerprints against SSLBL/Abuse.ch threat feeds. Red `> 0` indicates known C2 frameworks (Cobalt Strike, Sliver, Qakbot).\n* **Honeypot Hits:** Any connection to internal deception IP addresses instantly triggers red alerts.\n* **DoH Intercepts:** Intercepts malware trying to bypass local Pi-hole DNS by talking directly to Cloudflare/Google DoH IPs."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Malicious JA3 TLS Hits",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_ja3_malicious{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} (JA3)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Malicious JA4+ TLS Fingerprints",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_ja4_malicious{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} (JA4+)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Honeypot Deception Hits",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_honeypot_hits{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} (Honeypot)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "DoH Direct Intercepts",
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_doh_bypass{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83d\udcd6 Novice Analyst Guide: Lateral Movement & Beaconing Periodicity",
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \u2694\ufe0f Internal Lateral Movement & Command-and-Control Beaconing\n* **Lateral Scans:** Detects internal probing across SMB (445), RDP (3389), SSH (22), NetBIOS, and WinRM.\n* **Beaconing C2 Channels:** Measures periodicity ($CV < 0.10$) and traffic concentration to detect automated heartbeats to C2 infrastructure."
+      }
+    },
+    {
+      "type": "table",
+      "title": "\ud83c\udfaf Active Internal Lateral Movement Probes",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "sum by (hostname) (increase(home_ids_zeek_lateral_events_total{hostname=~\"$device\"}[1h])) > 0",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "hostname": "Attacking Host",
+              "Value": "Probes (1h)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center"
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probes (1h)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Beaconing C2 Channels (Low-Jitter Periodicity)",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_beaconing_c2_count{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} C2 Channels"
+        },
+        {
+          "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} Min Jitter CV"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83d\udcd6 Novice Analyst Guide: Port Scanning, Exfiltration & Payload Size Breakdown",
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \ud83d\udce4 Outbound Payload Transfer Classification & Network Exfiltration\n* **`< 1 KB` (Green - Normal):** Heartbeat signals, NTP time sync, DNS queries, telemetry ping.\n* **`1 KB - 500 KB` (Green - Normal):** Standard web page loading, API JSON data, small image assets.\n* **`500 KB - 10 MB` (Yellow - Elevated):** High-res photo downloads, audio streams, document syncs.\n* **`10 MB - 500 MB` (Orange - High Volume):** HD/4K Video streaming (YouTube/Netflix), OS/software updates.\n* **`> 500 MB` (Red - Critical Exfiltration Hazard):** Unencrypted database dumps, archive exfiltration, active malware C2 exfil ($Z > 3.0$ triggers immediate alert).\n* **Port Scans (S0/REJ):** Unanswered TCP connection requests. Spikes indicate port scanning / network discovery."
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "TCP Port Scans (S0 Connection Failures & Rejections)",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_s0_rej_count{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} (S0/REJ)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 20
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbound Payload Volume & Baseline Deviation Z-Score",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_outbound_bytes_window{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} Outbound Bytes"
+        },
+        {
+          "expr": "home_ids_outbound_bytes_zscore{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} Exfil Z-Score"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 4
+              },
+              {
+                "color": "red",
+                "value": 6
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Zeek Notice & Protocol Anomaly Events",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "dfm29b4en3im8e"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_notices{hostname=~\"$device\"}",
+          "legendFormat": "{{hostname}} Notices"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 10
+          }
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "\ud83d\udd0e Forensic Logs: Network Security, Lateral & Exfiltration Alerts (Loki)",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "bfrzhndwa4y68e"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"home_ids_alerts\"} | json",
+          "datasource": {
+            "type": "loki",
+            "uid": "bfrzhndwa4y68e"
+          }
+        }
+      ],
+      "options": {
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
+    }
+  ]
+}

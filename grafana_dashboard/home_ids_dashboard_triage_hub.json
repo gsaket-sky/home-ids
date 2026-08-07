@@ -1,0 +1,2280 @@
+{
+  "title": "Home IDS \ud83d\udee1\ufe0f Tier 1: Master Triage Hub (Ultimate SOC Edition)",
+  "uid": "ids-master-hub-ultimate",
+  "tags": [
+    "ids",
+    "hub",
+    "soc",
+    "showcase",
+    "production"
+  ],
+  "timezone": "browser",
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "PROMETHEUS_DS",
+        "label": "Prometheus Datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "refresh": 1,
+        "current": {
+          "selected": true,
+          "text": "default",
+          "value": "default"
+        }
+      },
+      {
+        "name": "LOKI_DS",
+        "label": "Loki Datasource",
+        "type": "datasource",
+        "query": "loki",
+        "refresh": 1,
+        "current": {
+          "selected": true,
+          "text": "default",
+          "value": "default"
+        }
+      },
+      {
+        "name": "device",
+        "label": "Device / Hostname",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${PROMETHEUS_DS}"
+        },
+        "query": "label_values(home_ids_risk_score, hostname)",
+        "refresh": 1,
+        "includeAll": true,
+        "allValue": ".*",
+        "customAllValue": ".*",
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": ".*"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "text",
+      "title": "Navigation Matrix",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 3
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### **\ud83e\udded Triage Hub** | [\ud83d\udcca DNS & ML Diagnostics](/d/ids-tier2-dns?var-device=${device}) | [\ud83d\udd12 Network & Lateral (Zeek NDR)](/d/ids-tier2-ndr?var-device=${device}) | [\ud83c\udf0d GeoIP & OSINT Intel](/d/ids-tier2-geo?var-device=${device}) | [\u2699\ufe0f Engine System Health](/d/ids-system-health)"
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83d\udcd6 Novice Analyst Guide: Core Subsystem Operational Health & Automated Protection",
+      "gridPos": {
+        "x": 0,
+        "y": 83,
+        "w": 12,
+        "h": 8
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \u2699\ufe0f How to Interpret Operational Health & Protected Subsystems\n* **Zeek NDR & Pipeline Lag:** Green `ONLINE` indicates live packet sniffing. Lag under 5s shows real-time processing.\n* **IPS Armed Status:** Shows whether automated mitigation modules are active: **Pi-hole IPS** (DNS sinkholing), **Router Webhook** (WAN isolation), and **Scapy Tarpit** (Layer-2 ARP blackhole).\n* **Scapy Traps & Queue:** Displays count of devices trapped in ARP blackholes and active retry buffers."
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Zeek NDR Status",
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_status",
+          "legendFormat": "Status"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ONLINE",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "OFFLINE",
+                  "color": "red"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pi-hole IPS",
+      "gridPos": {
+        "x": 6,
+        "y": 53,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_ips_pihole_status",
+          "legendFormat": "Pi-hole"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ARMED",
+                  "color": "blue"
+                },
+                "0": {
+                  "text": "DISABLED",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Router Webhook",
+      "gridPos": {
+        "x": 12,
+        "y": 53,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_ips_router_status",
+          "legendFormat": "Router"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ARMED",
+                  "color": "blue"
+                },
+                "0": {
+                  "text": "DISABLED",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Tarpit ARP",
+      "gridPos": {
+        "x": 18,
+        "y": 53,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_ips_tarpit_status",
+          "legendFormat": "Tarpit"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "ARMED",
+                  "color": "blue"
+                },
+                "0": {
+                  "text": "DISABLED",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active ARP Traps",
+      "gridPos": {
+        "x": 0,
+        "y": 59,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(home_ids_ips_tarpit_active) or vector(0)",
+          "legendFormat": "Trapped"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Pipeline Lag",
+      "gridPos": {
+        "x": 6,
+        "y": 59,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_collector_lag_seconds",
+          "legendFormat": "Lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 5,
+                "color": "yellow"
+              },
+              {
+                "value": 15,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "ML Model State",
+      "gridPos": {
+        "x": 12,
+        "y": 59,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_ml_model_loaded",
+          "legendFormat": "ML Ready"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "LOADED",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "UNLOADED",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Alert Queue Size",
+      "gridPos": {
+        "x": 18,
+        "y": 59,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_alert_queue_size",
+          "legendFormat": "Queue"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 5,
+                "color": "yellow"
+              },
+              {
+                "value": 20,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Process RAM (RSS)",
+      "gridPos": {
+        "x": 0,
+        "y": 65,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "RAM"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 838860800,
+                "color": "yellow"
+              },
+              {
+                "value": 1610612736,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Process CPU Usage (%)",
+      "gridPos": {
+        "x": 6,
+        "y": 65,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total[1m]) * 100",
+          "legendFormat": "CPU %"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 20,
+                "color": "yellow"
+              },
+              {
+                "value": 60,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Process FDs (Open / Max)",
+      "gridPos": {
+        "x": 12,
+        "y": 65,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "process_open_fds",
+          "legendFormat": "Open FDs"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 250,
+                "color": "yellow"
+              },
+              {
+                "value": 800,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Process Uptime",
+      "gridPos": {
+        "x": 18,
+        "y": 65,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "time() - process_start_time_seconds",
+          "legendFormat": "Uptime"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "yellow"
+              },
+              {
+                "value": 3600,
+                "color": "green"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Garbage Collection Rate",
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(python_gc_collections_total[5m]))",
+          "legendFormat": "GC Rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 1.0,
+                "color": "yellow"
+              },
+              {
+                "value": 5.0,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Python Interpreter Version",
+      "gridPos": {
+        "x": 6,
+        "y": 71,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "python_info",
+          "legendFormat": "CPython"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "CPython 3.14",
+                  "color": "purple"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "\ud83d\udea8 Master Threat Ledger (Complete Multi-Vector Device Matrix)",
+      "gridPos": {
+        "x": 0,
+        "y": 3,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_risk_score{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "home_ids_ips_router_isolated_active{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "RB"
+        },
+        {
+          "expr": "home_ids_ips_tarpit_active{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "TP"
+        },
+        {
+          "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "KC"
+        },
+        {
+          "expr": "home_ids_dns_txt_null_ratio{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "TN"
+        },
+        {
+          "expr": "home_ids_ml_anomaly_score{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        },
+        {
+          "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "C"
+        },
+        {
+          "expr": "home_ids_risk_velocity{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "D"
+        },
+        {
+          "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "E"
+        },
+        {
+          "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "F"
+        },
+        {
+          "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "G"
+        },
+        {
+          "expr": "home_ids_zeek_ja4_malicious{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "H"
+        },
+        {
+          "expr": "home_ids_zeek_honeypot_hits{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "I"
+        },
+        {
+          "expr": "home_ids_zeek_lateral_events_total{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "J"
+        },
+        {
+          "expr": "home_ids_zeek_doh_bypass{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "K"
+        },
+        {
+          "expr": "home_ids_zeek_s0_rej_count{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "L"
+        },
+        {
+          "expr": "home_ids_outbound_bytes_window{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "M"
+        },
+        {
+          "expr": "home_ids_probation_status{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "N"
+        },
+        {
+          "expr": "home_ids_baseline_poisoned{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "O"
+        },
+        {
+          "expr": "home_ids_safe_device{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "P"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "joinByField",
+          "options": {
+            "byField": "hostname",
+            "mode": "outer"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "Time 2": true,
+              "Time 3": true,
+              "Time 4": true,
+              "Time 5": true,
+              "Time 6": true,
+              "Time 7": true,
+              "Time 8": true,
+              "Time 9": true,
+              "Time 10": true,
+              "Time 11": true,
+              "Time 12": true,
+              "Time 13": true,
+              "Time 14": true,
+              "Time 15": true,
+              "Time 16": true,
+              "Time 17": true,
+              "Time 18": true,
+              "Time 19": true,
+              "__name__": true,
+              "device": true,
+              "device_type": true,
+              "instance": true,
+              "job": true,
+              "mac": true
+            },
+            "renameByName": {
+              "hostname": "Hostname",
+              "Value #A": "Live Risk",
+              "Value #RB": "Fritz! Router Block",
+              "Value #TP": "Layer-2 Tarpit Trapped",
+              "Value #KC": "Kill-Chain Phase",
+              "Value #TN": "TXT/NULL Abuse",
+              "Value #B": "ML Outlier",
+              "Value #C": "Markov Score",
+              "Value #D": "Risk Velocity",
+              "Value #E": "TI Risk",
+              "Value #F": "AbuseIPDB",
+              "Value #G": "VirusTotal",
+              "Value #H": "JA4+ Hits",
+              "Value #I": "Honeypot",
+              "Value #J": "Lateral Moves",
+              "Value #K": "DoH Intercepts",
+              "Value #L": "Port Scans",
+              "Value #M": "Outbound Bytes",
+              "Value #N": "Probation",
+              "Value #O": "Baseline Frozen",
+              "Value #P": "Safe Listed"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "desc": true,
+                "displayName": "Live Risk"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hostname"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Device physical hostname & IP identity. Click links to jump directly to dedicated forensic analysis rooms."
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "\ud83d\udcc8 Open Forensic Room: AI Behavioral & DGA Diagnostics",
+                    "url": "/d/ids-tier2-dns?var-device=${__data.fields.Hostname}",
+                    "targetBlank": true
+                  },
+                  {
+                    "title": "\ud83d\udd12 Open Forensic Room: Zeek NDR & Network Exfiltration",
+                    "url": "/d/ids-tier2-ndr?var-device=${__data.fields.Hostname}",
+                    "targetBlank": true
+                  },
+                  {
+                    "title": "\ud83c\udf0d Open Forensic Room: GeoIP Matrix & OSINT Mapping",
+                    "url": "/d/ids-tier2-geo?var-device=${__data.fields.Hostname}",
+                    "targetBlank": true
+                  }
+                ]
+              },
+              {
+                "id": "custom.align",
+                "value": "left"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Live Risk"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Composite device threat risk score (0.0 to 10.0+).\n\u2022 0.0 - 3.9 (Green): Normal / Low Risk\n\u2022 4.0 - 5.9 (Yellow): Early Warning Anomaly\n\u2022 6.0 - 7.9 (Orange): Alert Threshold Breached\n\u2022 >= 8.0 (Red): Critical Threat / Hardware IPS Isolation"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 4
+                    },
+                    {
+                      "color": "orange",
+                      "value": 6
+                    },
+                    {
+                      "color": "red",
+                      "value": 8
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Fritz! Router Block"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Fritz!Box Router Hardware WAN Isolation State:\n\u2022 0 (Green): WAN Internet Routing Unblocked / Normal Connectivity\n\u2022 >= 1 (Red): \u26d4 HARDWARE ISOLATED AT ROUTER (TR-064 SOAP Webhook Active)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Layer-2 Tarpit Trapped"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Layer-2 Scapy ARP Blackhole Containment State:\n\u2022 0 (Green): Normal Local Subnet Communication\n\u2022 >= 1 (Orange): \u26a0\ufe0f TRAPPED IN LAYER-2 TARPIT (Active ARP Poisoning)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "orange",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Kill-Chain Phase"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Lockheed Martin Cyber Kill-Chain Active Attack Phase:\n\u2022 0 (Green): NORMAL (Standard Traffic)\n\u2022 1 (Yellow): RECON (Port Scans / High NXDOMAIN)\n\u2022 2 (Orange): C2 (Command & Control Beaconing / Suspicious TLDs)\n\u2022 3 (Red): LATERAL (Internal LAN Movement / Port Scanning)\n\u2022 4 (Purple): EXFIL (Data Exfiltration / DNS Covert Tunneling)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "orange",
+                      "value": 2
+                    },
+                    {
+                      "color": "red",
+                      "value": 3
+                    },
+                    {
+                      "color": "purple",
+                      "value": 4
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TXT/NULL Abuse"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "DNS Record Type Abuse Ratio (TXT/NULL/ANY queries vs total queries):\n\u2022 < 0.05 (Green): Standard Web Traffic (A/AAAA queries 95%+)\n\u2022 0.05 - 0.15 (Yellow): Elevated Non-Standard DNS Queries\n\u2022 >= 0.15 (Red): Severe DNS Record Abuse / Active Covert DNS Tunneling"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.05
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.15
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ML Outlier"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "IsolationForest structural feature outlier score (0.0 to 1.0).\n\u2022 < 0.02 (Green): Normal Structural Alignment\n\u2022 0.02 - 0.049 (Yellow): Moderate Feature Deviation\n\u2022 >= 0.05 (Red): Severe Outlier / Unknown Malware Behavioral Contradiction"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.02
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.05
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Markov Score"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Markov Chain kill-chain transition improbability (0.0 to 1.0).\n\u2022 < 0.50 (Green): Normal State Transitions\n\u2022 0.50 - 0.89 (Yellow): Unlikely Kill-Chain Phase Jump\n\u2022 >= 0.90 (Red): Highly Anomalous Kill-Chain Attack Sequence"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.5
+                    },
+                    {
+                      "color": "red",
+                      "value": 0.9
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Risk Velocity"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Rate of risk score escalation Z-score compared to historical hourly baseline.\n\u2022 <= 1.0 (Green): Normal Stable Risk\n\u2022 1.1 - 3.9 (Yellow): Fast Risk Acceleration\n\u2022 >= 4.0 (Red): Explosive Risk Acceleration / Active Attack Surge"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1.1
+                    },
+                    {
+                      "color": "red",
+                      "value": 4.0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TI Risk"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Consolidated Threat Intelligence penalty score from OTX, ThreatFox & URLHaus.\n\u2022 0.0 (Green): Clean / No Threat Intel Matches\n\u2022 1.0 - 3.1 (Yellow): Suspicious IOC Match\n\u2022 >= 3.2 (Red): Confirmed High-Confidence Malicious C2 / Malware IOC"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 3.2
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "AbuseIPDB"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "External IP Abuse Confidence score penalty.\n\u2022 0.0 (Green): Clean Remote IP\n\u2022 >= 3.0 (Red): Remote Endpoint Flagged for Scans, Attacks, or Botnet Infrastructure"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 3.0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "VirusTotal"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "VirusTotal multi-engine threat detection penalty.\n\u2022 0.0 (Green): Clean Domain/IP\n\u2022 1.0 - 2.9 (Yellow): Single Engine Flagged\n\u2022 >= 3.0 (Red): Multi-Vendor Confirmed Malicious Domain/IP"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1.0
+                    },
+                    {
+                      "color": "red",
+                      "value": 3.0
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "JA4+ Hits"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Malicious TLS/SSL client fingerprint (JA3/JA4) match count.\n\u2022 0 (Green): Clean SSL/TLS Handshakes\n\u2022 >= 1 (Red): Known Malware TLS Fingerprint Identified (e.g. Cobalt Strike, AsyncRAT)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Honeypot"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Deception honeypot connection probe count.\n\u2022 0 (Green): No Internal Decoy Probing\n\u2022 >= 1 (Red): Active Internal Reconnaissance / Attacker Probing Decoy Targets"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Lateral Moves"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Unauthorized internal LAN connection attempts across endpoints.\n\u2022 0 (Green): Normal Segmented Traffic\n\u2022 1 - 4 (Yellow): Internal Port Sweep / Probe\n\u2022 >= 5 (Red): Active Internal Lateral Movement Attack"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "DoH Intercepts"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "DNS-over-HTTPS queries attempting to bypass Pi-hole filtering.\n\u2022 0 (Green): Standard DNS Protocol\n\u2022 1 - 4 (Yellow): Encrypted DNS Tunnel Attempt\n\u2022 >= 5 (Red): Persistent Evasion & Filtering Bypass Attack"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Port Scans"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Unanswered TCP connection requests (S0 connection failures & rejections).\n\u2022 < 5 (Green): Normal TCP Drops / Timeouts\n\u2022 5 - 19 (Yellow): Port Scanning / Probing Activity\n\u2022 >= 20 (Red): Aggressive Port Scan / Network Discovery"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 5
+                    },
+                    {
+                      "color": "red",
+                      "value": 20
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Outbound Bytes"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Outbound payload data transfer volume & packet size classification:\n\u2022 < 1 KB (Green): Telemetry, Heartbeats & DNS Keep-Alives (Normal)\n\u2022 1 KB - 500 KB (Green): Web Browsing & Standard API Calls (Normal)\n\u2022 500 KB - 10 MB (Yellow): Audio Streaming, Images & Sync (Elevated)\n\u2022 10 MB - 500 MB (Orange): Video Streaming & Software Updates (High Volume)\n\u2022 > 500 MB (Red): Massive File Dump / Data Exfiltration Hazard (Critical)"
+              },
+              {
+                "id": "unit",
+                "value": "bytes"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 524288
+                    },
+                    {
+                      "color": "orange",
+                      "value": 10485760
+                    },
+                    {
+                      "color": "red",
+                      "value": 524288000
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Probation"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "24-hour learning probation status.\n\u2022 0 (Green): Established Historical Baseline\n\u2022 1 (Yellow): Device in Probation (Building Baseline Stats)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Baseline Frozen"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Baseline poisoning freeze status.\n\u2022 0 (Green): Active Baseline Updates\n\u2022 1 (Red): Baseline Updates Frozen (High Risk >= 4.0) to Prevent Attacker Manipulation"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Safe Listed"
+            },
+            "properties": [
+              {
+                "id": "description",
+                "value": "Operator trust / whitelist status.\n\u2022 0 (Transparent): Actively Monitored Device\n\u2022 1 (Blue): Operator Whitelisted Device (Exempted from IPS Isolation)"
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": 0
+                    },
+                    {
+                      "color": "blue",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83d\udcd6 Novice Analyst Guide: IPS Audit & Threat Intelligence Feed Breakdown",
+      "gridPos": {
+        "x": 12,
+        "y": 83,
+        "w": 12,
+        "h": 8
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \ud83d\udee1\ufe0f Automated IPS Audit & Threat Intel Feeds\n* **Pi-hole Block Audit:** Lists exact domains automatically injected into Pi-hole gravity blocklists.\n* **Threat Intel Hits:** Tracks exact IOC matches parsed from AlienVault OTX, AbuseIPDB, URLHaus, and ThreatFox.\n* **IPS Errors:** Shows failures encountered when issuing blocking commands to downstream APIs."
+      }
+    },
+    {
+      "type": "table",
+      "title": "\ud83d\uded1 Domains Automatically Blocked by Script (Pi-hole IPS)",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (hostname, domain) (increase(home_ids_ips_pihole_blocks_total{hostname=~\"$device\"}[$__range])) > 0",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "hostname": "Target Device",
+              "domain": "Blocked Domain",
+              "Value": "Times Blocked"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "desc": true,
+                "displayName": "Times Blocked"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Times Blocked"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 2
+                    },
+                    {
+                      "color": "red",
+                      "value": 5
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              },
+              {
+                "id": "custom.align",
+                "value": "center"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "\ud83d\udce1 Threat Intelligence Feed Matches",
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (source, ioc_type) (increase(home_ids_ti_ioc_hits_total[$__range])) > 0",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "source": "Intel Feed Source",
+              "ioc_type": "IOC Category",
+              "Value": "Matches"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": [
+              {
+                "desc": true,
+                "displayName": "Matches"
+              }
+            ]
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Matches"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 1
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "\u26a0\ufe0f IPS Errors & Whitelist Exemptions",
+      "gridPos": {
+        "x": 0,
+        "y": 33,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum by (target_type) (increase(home_ids_ips_errors_total[$__range])) > 0",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "home_ids_safe_device{hostname=~\"$device\"} > 0",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "__name__": true,
+              "device": true,
+              "device_type": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "target_type": "Error Module",
+              "hostname": "Exempt Device",
+              "Value #A": "Error Count",
+              "Value #B": "Safe State"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Error Count"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": 0
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "logs",
+      "title": "\ud83d\udcdc High-Priority System Security Alerts (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 99,
+        "w": 24,
+        "h": 18
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "${LOKI_DS}"
+      },
+      "targets": [
+        {
+          "expr": "{job=\"home_ids_alerts\"} | json"
+        }
+      ],
+      "options": {
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "enableLogDetails": true
+      }
+    },
+    {
+      "type": "text",
+      "title": "\ud83e\udd16 Autonomous False-Positive Elimination Engine (CL-AFPE) \u2014 Real-Time Triage & Self-Healing",
+      "gridPos": {
+        "x": 0,
+        "y": 91,
+        "w": 24,
+        "h": 8
+      },
+      "transparent": true,
+      "options": {
+        "mode": "markdown",
+        "content": "### \ud83e\udd16 **CL-AFPE Autonomous Triage Engine**\nIntercepts alert breaches (`risk >= 6.0`) before Telegram notification and evaluates them through a 3-stage pipeline:\n* **Stage 1 (Hard-Stop):** ThreatIntel IOC, JA3/JA4+, Lateral Movement, Honeypot access\n* **Stage 2 (LightGBM ONNX):** Tabular $P(\\text{FP})$ classifier on Tranco rank, label entropy, Z-score, device type\n* **Stage 3 (FastEmbed Vector Match):** Cosine similarity against 50+ safe vendor patterns (BAAI/bge-small-en-v1.5)"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "LightGBM ONNX Status",
+      "gridPos": {
+        "x": 12,
+        "y": 71,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_fp_lgbm_model_status",
+          "legendFormat": "LightGBM"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "LOADED (Stage 2)",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "WARMING UP",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "FastEmbed Model Status",
+      "gridPos": {
+        "x": 18,
+        "y": 71,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_fp_embed_model_status",
+          "legendFormat": "FastEmbed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "LOADED (Stage 3)",
+                  "color": "green"
+                },
+                "0": {
+                  "text": "WARMING UP",
+                  "color": "orange"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Immunized Base Domains",
+      "gridPos": {
+        "x": 0,
+        "y": 77,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_fp_trust_cache_size",
+          "legendFormat": "Trust Cache"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds",
+            "steps": [
+              {
+                "value": 0,
+                "color": "blue"
+              },
+              {
+                "value": 5,
+                "color": "green"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Autonomously Suppressed FPs",
+      "gridPos": {
+        "x": 6,
+        "y": 77,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(home_ids_fp_suppressed_total) or vector(0)",
+          "legendFormat": "Auto-Muted"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Confirmed Threats",
+      "gridPos": {
+        "x": 12,
+        "y": 77,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(home_ids_fp_confirmed_threats_total) or vector(0)",
+          "legendFormat": "Threats"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds",
+            "steps": [
+              {
+                "value": 0,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Total Evaluated Alerts",
+      "gridPos": {
+        "x": 18,
+        "y": 77,
+        "w": 6,
+        "h": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "sum(home_ids_fp_evaluations_total) or vector(0)",
+          "legendFormat": "Evaluated"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds",
+            "steps": [
+              {
+                "value": 0,
+                "color": "purple"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "\ud83d\udcca Stage-by-Stage Suppression Breakdown & Per-Device Sensitivity Shifts",
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_fp_confidence_score{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "A"
+        },
+        {
+          "expr": "home_ids_fp_sigma_shifts_total{hostname=~\"$device\"}",
+          "format": "table",
+          "instant": true,
+          "refId": "B"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Time 1": true,
+              "__name__": true,
+              "device": true,
+              "instance": true,
+              "job": true
+            },
+            "renameByName": {
+              "hostname": "Device Hostname",
+              "Value #A": "Latest FP Confidence (0=Threat, 1=FP)",
+              "Value #B": "Cumulative Sigma Shifts (TUNE UP/DOWN)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "center"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Latest FP Confidence (0=Threat, 1=FP)"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": 0
+                    },
+                    {
+                      "color": "yellow",
+                      "value": 0.55
+                    },
+                    {
+                      "color": "green",
+                      "value": 0.8
+                    }
+                  ]
+                }
+              },
+              {
+                "id": "custom.displayMode",
+                "value": "color-background"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
