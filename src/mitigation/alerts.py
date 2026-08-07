@@ -132,7 +132,7 @@ class AlertManager:
         self.ollama_url = ollama_url.strip().rstrip("/")
         self.ollama_model = ollama_model.strip()
         
-        self.q = queue.Queue()
+        self.q = queue.Queue(maxsize=1000)
         self.running = True
         self._stop_event = threading.Event()
         self.session = requests.Session()
@@ -165,8 +165,11 @@ class AlertManager:
         # Enqueue (message, raw_payload, reply_markup) tuple.
         # Ollama summarization is intentionally deferred to the worker thread
         # so this method NEVER blocks the caller (e.g. the pipeline's device lock).
-        self.q.put((message, raw_payload, reply_markup))
-        LOGGER.debug("Alert enqueued for Telegram delivery. Queue size: %d", self.q.qsize())
+        try:
+            self.q.put_nowait((message, raw_payload, reply_markup))
+            LOGGER.debug("Alert enqueued for Telegram delivery. Queue size: %d", self.q.qsize())
+        except queue.Full:
+            LOGGER.error("Telegram alert queue is FULL (maxsize reached). Dropping alert to prevent RAM exhaustion.")
 
     def _summarize_with_ollama(self, payload: Dict[str, Any]) -> Optional[str]:
         """Queries local Ollama instance for a brief contextual threat explanation."""

@@ -519,6 +519,8 @@ class AbuseIPDB:
             return
         with self._lock:
             if ip not in self._bad_ips and not self._is_live_cached(ip) and ip not in self._queued_items:
+                if len(self._queued_items) >= 10000:
+                    return
                 self._queued_items.add(ip)
                 heapq.heappush(self._queue, (priority, time.time(), ip))
                 LOGGER.debug("Enqueued IP for AbuseIPDB live analysis: %s", ip)
@@ -724,6 +726,8 @@ class VirusTotalClient:
         k = f"domain:{domain}"
         with self._lock:
             if not self._is_cached(k) and k not in self._queued_items: 
+                if len(self._queued_items) >= 10000:
+                    return
                 self._queued_items.add(k)
                 heapq.heappush(self._queue, (priority, time.time(), "domain", domain))
                 LOGGER.debug("Enqueued domain for VT analysis: %s", domain)
@@ -738,6 +742,8 @@ class VirusTotalClient:
         k = f"ip:{ip}"
         with self._lock:
             if not self._is_cached(k) and k not in self._queued_items: 
+                if len(self._queued_items) >= 10000:
+                    return
                 self._queued_items.add(k)
                 heapq.heappush(self._queue, (priority, time.time(), "ip", ip))
                 LOGGER.debug("Enqueued IP for VT analysis: %s", ip)
