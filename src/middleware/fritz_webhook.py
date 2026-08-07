@@ -221,6 +221,11 @@ def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
         fp._immunize_domain(payload.target, "telegram_operator")
         
+        # Reset device validation flags and increment FP count
+        for state in sm._states.values():
+            state.fp_count = getattr(state, "fp_count", 0) + 1
+            state.has_validated_threat = False
+        
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
         return {"status": "success", "immunized": payload.target}
@@ -245,6 +250,9 @@ def ipc_block(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         # Locate the device by IP in the state_manager to get its MAC and DevID
         dev_id = sm.resolve_device_id(payload.target, "unknown")
         state = sm.get_device_state(dev_id)
+        if state:
+            state.has_validated_threat = True
+            state.confirmed_threat_count = getattr(state, "confirmed_threat_count", 0) + 1
         
         # Explicit mitigation bypasses interactive mode checks
         # Interactive mode logic only runs when checking to SEND an alert.

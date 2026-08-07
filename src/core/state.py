@@ -144,6 +144,11 @@ class DeviceState:
         self.last_alert_signature = ""
         self.killchain_history = deque(maxlen=5)
         
+        # SecOps Operator Validation Tracking
+        self.has_validated_threat = False
+        self.confirmed_threat_count = 0
+        self.fp_count = 0
+        
         LOGGER.debug("DeviceState profile instantiated for ID: %s (IP: %s, Hostname: %s)", device_id, client_ip, hostname)
 
     def is_poisoned(self, risk_score: float) -> bool:
@@ -171,6 +176,9 @@ class DeviceState:
             "last_alert_risk": self.last_alert_risk,
             "last_alert_signature": self.last_alert_signature,
             "killchain_history": list(self.killchain_history),
+            "has_validated_threat": self.has_validated_threat,
+            "confirmed_threat_count": self.confirmed_threat_count,
+            "fp_count": self.fp_count,
             "rate_baseline": self.rate_baseline.to_dict(),
             "entropy_baseline": self.entropy_baseline.to_dict(),
             "unique_baseline": self.unique_baseline.to_dict(),
@@ -200,6 +208,10 @@ class DeviceState:
         obj.last_alert_risk = data.get("last_alert_risk", 0.0)
         obj.last_alert_signature = data.get("last_alert_signature", "")
         obj.killchain_history = deque(data.get("killchain_history", []), maxlen=5)
+        
+        obj.has_validated_threat = data.get("has_validated_threat", False)
+        obj.confirmed_threat_count = data.get("confirmed_threat_count", 0)
+        obj.fp_count = data.get("fp_count", 0)
         
         if "rate_baseline" in data: obj.rate_baseline = EWMABaseline.from_dict(data["rate_baseline"], alpha)
         if "entropy_baseline" in data: obj.entropy_baseline = EWMABaseline.from_dict(data["entropy_baseline"], alpha)

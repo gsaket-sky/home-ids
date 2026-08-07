@@ -102,11 +102,14 @@ class RiskScorer:
 
         max_label_length = safe_float(features.get("max_label_length", 0), 0.0)
         dns_tunneling_domains = safe_float(features.get("dns_tunneling_domains", 0), 0.0)
+        dga_score = safe_float(features.get("dga_score", 0.0), 0.0)
+        nx_z = text_nx_z
+        entropy = entropy_avg
 
         volume_dampener = 1.0 if total >= 100.0 else max(0.1, total / 100.0)
 
         st_domains = getattr(state.rolling, "domains", {}) if hasattr(state, "rolling") else {}
-        top_domain = max(st_domains, key=st_domains.get, default=None) if st_domains else None
+        top_domain = features.get("top_domain") or (max(st_domains, key=st_domains.get, default=None) if st_domains else None)
 
         seen_domains = getattr(state, "seen_domains", set()) if hasattr(state, "seen_domains") else set()
         top_domain_is_familiar = bool(top_domain and top_domain in seen_domains)
@@ -131,9 +134,9 @@ class RiskScorer:
             if query_rate > threshold_limit and threshold_limit > 10:
                 add("Dynamic Query Threshold Exceeded", 2.5, round(query_rate, 2), f"Query rate {query_rate:.1f} exceeds dynamic threshold limit {threshold_limit:.1f} ({'+' if sigma_shift>=0 else ''}{sigma_shift:.2f}σ FP shift)")
 
-        if sigma_shift < 0:
-            boost = min(abs(sigma_shift) * 2.0, 3.5)
-            add("Threat History Sensitivity Boost", boost, round(sigma_shift, 2), f"Device sensitivity automatically tuned UP ({sigma_shift:.2f}σ shift due to past confirmed threats)")
+        if sigma_shift < 0 and getattr(state, "has_validated_threat", False):
+            boost = min(abs(sigma_shift) * 1.5, 2.0)
+            add("Threat History Sensitivity Boost", boost, round(sigma_shift, 2), f"Device sensitivity tuned UP ({sigma_shift:.2f}σ shift due to past validated threat)")
 
         if not is_infra:
             if (dns_tunneling_domains >= 2 or (max_label_length > 55 and not _is_cdn_or_cloud_domain(top_domain or ""))) and not is_telemetry:
@@ -206,36 +209,47 @@ class RiskScorer:
 
             if nd_ratio > 0.25 and total >= 30 and not is_telemetry:
                 add("First-seen domain burst", min(nd_ratio * 4.0, 2.0) * volume_dampener, round(nd_ratio, 3), f"New infrastructure share expansion ({int(nd)} domains)")
+            if (dga_score > 0.40 or (nx_z > 3.0 and entropy > 3.4)) and not is_telemetry:
+                dga_val = min(7.5, max(dga_score * 7.5, (nx_z * 0.8) + (entropy * 0.5)))
+                add("DGA / Botnet Command & Control", dga_val, round(dga_score, 3), f"Algorithmic domain structure detected (Entropy: {entropy:.2f}, NX-Z: {nx_z:.1f})")
 
-            if dd_ratio > 0.10 and total >= 30 and not is_telemetry:
-                add("Deep DNS structures", min(dd_ratio * 4.0, 2.0) * volume_dampener, round(dd_ratio, 3), f"Deep subdomains share expansion ({int(dd)} domains)")
+        query_rate_z = safe_float(features.get("query_rate_z", 0.0), 0.0)
+        if query_rate_z > 3.0 and not is_infra:
+            add("Anomalous Query Rate Spike", min(query_rate_z * 0.75, 4.0), round(query_rate_z, 2), f"DNS query velocity {query_rate_z:.1f}σ above diurnal baseline")
 
-            if tc > 0.7 and nx > 0.2 and text_nx_z > 3.0 and not is_telemetry:
-                add("NXDOMAIN TLD concentration", (tc - 0.7) * 5 * volume_dampener * context_dampener, round(tc, 3), f"Failures concentrated in anomalous TLD structure{context_detail}")
+        unique_domains_z = safe_float(features.get("unique_domains_z", 0.0), 0.0)
+        if unique_domains_z > 3.0 and not is_infra and not is_telemetry:
+            add("First-seen domain burst", min(unique_domains_z * 0.6, 3.5), round(unique_domains_z, 2), f"Unique destination domain count {unique_domains_z:.1f}σ above normal")
 
+        beacon_tdr = safe_float(features.get("beacon_tdr", 0.0), 0.0)
+        beacon_total = safe_float(features.get("beacon_total", 0.0), 0.0)
+        if beacon_tdr > 0.45 and beacon_total >= 10 and not is_infra:
+            tdr, total = beacon_tdr, beacon_total
             beacon_score = 0.0
-            if total >= 5:
-                if tdr > 0.95: beacon_score = 3.5
-                elif tdr > 0.85 and total >= 10: beacon_score = 2.5
-                elif tdr > 0.75 and total >= 15: beacon_score = 1.5
+            if tdr > 0.90 and total >= 30: beacon_score = 3.5
+            elif tdr > 0.80 and total >= 20: beacon_score = 2.5
+            elif tdr > 0.75 and total >= 15: beacon_score = 1.5
 
             if is_telemetry:
                 beacon_score *= 0.1
 
             add("Persistent single-target beaconing", beacon_score * context_dampener, round(tdr, 3), f"Concentrated tracking (total_queries={int(total)}){context_detail}")
 
+        ti_risk = safe_float(features.get("ti_risk", 0.0), 0.0)
+        has_high_confidence_threat = (ti_risk > 0) or bool(features.get("has_tier1_zeek_notice", False))
+
         if ml_score > 0.02 and not is_infra:
             if is_on_probation:
                 if top_domain_is_familiar or is_telemetry:
                     ml_penalty = min(ml_score * 10.0, 1.0)
                 else:
-                    ml_cap = 2.0 if device_type in ["phone", "tablet", "laptop", "desktop"] else 3.5
+                    ml_cap = 1.5 if not has_high_confidence_threat else (2.0 if device_type in ["phone", "tablet", "laptop", "desktop"] else 3.5)
                     ml_penalty = min(ml_score * 40.0, ml_cap)
-                add("ML absolute structural outlier (Probationary)", ml_penalty, round(ml_score, 4), "Device structure severely contradicts global home network cluster parameters")
+                add("ML absolute structural outlier (Probationary)", ml_penalty, round(ml_score, 4), "Device structure contradicts baseline parameters")
             else:
-                add("ML anomaly matrix alert", min(ml_score * 40.0, 4.0), round(ml_score, 4), "Per-device IsolationForest anomaly margin")
+                ml_cap = 1.5 if not has_high_confidence_threat else 4.0
+                add("ML anomaly matrix alert", min(ml_score * 40.0, ml_cap), round(ml_score, 4), "Per-device IsolationForest anomaly margin")
 
-        ti_risk = safe_float(features.get("ti_risk", 0.0), 0.0)
         add("Threat intelligence IOC", min(ti_risk, 4.0), round(ti_risk, 3), "Domain or IP matched loaded IOC feeds")
 
         abuse_risk = safe_float(features.get("abuseipdb_risk", 0.0), 0.0)
@@ -246,11 +260,19 @@ class RiskScorer:
 
         outbound_bytes_z = safe_float(features.get("outbound_bytes_z", 0.0), 0.0)
         zeek_outbound_bytes = safe_float(features.get("zeek_outbound_bytes", 0.0), 0.0)
-        if outbound_bytes_z > 5.0 and zeek_outbound_bytes > 2500000: 
+
+        _CLOUD_VENDOR_API_DOMAINS = frozenset({
+            "coinbase.com", "microsoft.com", "apple.com", "amazonaws.com", "google.com",
+            "azure.com", "cloudflare.com", "fritz.box", "github.com", "sentry.io"
+        })
+        is_vendor_cloud_api = any(top_domain.endswith(d) for d in _CLOUD_VENDOR_API_DOMAINS) if top_domain else False
+
+        if outbound_bytes_z > 5.0 and zeek_outbound_bytes > 2500000 and not is_vendor_cloud_api: 
             add("Exfiltration Payload Burst", 6.5, round(outbound_bytes_z, 2), f"Massive outbound data anomaly severely breaking distribution bounds (Z: {outbound_bytes_z:.2f})")
-        elif outbound_bytes_z > 3.5 and zeek_outbound_bytes > 250000: 
-            add("Anomalous Outbound Traffic", 4.0, round(outbound_bytes_z, 2), f"Elevated outbound data (Z: {outbound_bytes_z:.2f})")
-        elif zeek_outbound_bytes > 50000000 and not is_telemetry:
+        elif outbound_bytes_z > 3.5 and zeek_outbound_bytes > 250000 and not is_telemetry: 
+            payload_score = 1.5 if is_vendor_cloud_api else 4.0
+            add("Anomalous Outbound Traffic", payload_score, round(outbound_bytes_z, 2), f"Elevated outbound data (Z: {outbound_bytes_z:.2f})")
+        elif zeek_outbound_bytes > 50000000 and not is_telemetry and not is_vendor_cloud_api:
             add("Absolute Outbound Exfiltration Payload", 4.5, zeek_outbound_bytes, f"High volume outbound transfer breach ({zeek_outbound_bytes/1048576:.1f} MB uploaded)")
 
         lateral_moves_count = safe_float(features.get("zeek_lateral_moves", 0), 0.0)
@@ -259,15 +281,11 @@ class RiskScorer:
 
         zeek_ja3 = safe_float(features.get("zeek_ja3_malicious", 0), 0.0)
         if zeek_ja3 > 0:
-            add("Malicious TLS Fingerprint (JA3)", 6.5, min(zeek_ja3, 100), f"Known malware cryptographic handshake ({int(zeek_ja3)} hits)")
+            add("Malicious TLS Fingerprint (JA3)", 7.5, zeek_ja3, "TLS Client Hello matched known malicious C2 / Cobalt Strike fingerprint")
 
         zeek_ja4 = safe_float(features.get("zeek_ja4_malicious", 0), 0.0)
         if zeek_ja4 > 0:
-            add("Malicious TLS Fingerprint (JA4+)", 7.0, min(zeek_ja4, 100), f"Next-Gen malware cryptographic handshake ({int(zeek_ja4)} hits)")
-
-        doh_bypass_count = safe_float(features.get("zeek_doh_bypass", 0), 0.0)
-        if doh_bypass_count > 0:
-            add("DoH Tunneling / Evasion", 5.0, min(doh_bypass_count, 100), f"Direct upstream encrypted DNS bypass ({int(doh_bypass_count)} hits)")
+            add("Malicious TLS Fingerprint (JA4+)", 8.5, zeek_ja4, "TLS Client Hello matched known malicious JA4+ Threat Feed hash")
 
         zeek_ports = safe_float(features.get("zeek_susp_ports", 0), 0.0)
         if zeek_ports > 0:
