@@ -350,7 +350,10 @@ class RiskScorer:
         })
 
         if zeek_alerts:
-            zeek_notice_total = 0.0
+            _TIER_1_NOTICES = {"Scan::Port_Scan", "SMB::Exploit", "Botnet::C2", "Zeek::Malware"}
+            _TIER_2_NOTICES = {"DNS::External_Name", "DNS::TXT_Abuse", "SSL::Old_Version"}
+            _TIER_3_NOTICES = {"SSL::Invalid_Server_Cert", "SSL::Self_Signed"}
+            
             for alert in (zeek_alerts or []):
                 conf  = safe_float(alert.get("confidence", 0.8), 0.8)
                 atype = alert.get("type", "")
@@ -358,13 +361,19 @@ class RiskScorer:
                     pass 
                 elif atype == "zeek_notice":
                     note = alert.get("note", "")
-                    if note in _BENIGN_ZEEK_WEIRD:
+                    if note in _BENIGN_ZEEK_WEIRD or note in {"DHCP::Message", "weird:bad_TCP_checksum"}:
                         continue   
-                    zeek_notice_total += conf * 1.5
-
-            capped_notice = min(zeek_notice_total, 2.0)
-            if capped_notice > 0:
-                add("Zeek notice", capped_notice, None, "Zeek protocol anomaly (capped)")
+                    
+                    if note in _TIER_1_NOTICES:
+                        note_score = conf * 4.0
+                    elif note in _TIER_2_NOTICES:
+                        note_score = conf * 1.5
+                    elif note in _TIER_3_NOTICES:
+                        note_score = conf * 0.5
+                    else:
+                        note_score = conf * 1.0
+                        
+                    add(f"Zeek notice ({note})", note_score, None, f"Zeek protocol anomaly: {note}")
 
         risk = sum(f["score"] for f in factors)
         if amplifier != 1.0 and risk > 0 and not is_infra:

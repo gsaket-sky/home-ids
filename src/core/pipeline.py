@@ -510,6 +510,9 @@ class EnginePipeline:
                                     mac_addr=getattr(state, "mac_address", "unknown"),
                                     domain=target_malicious_domain
                                 )
+                                
+                            if bool(self.config.get("interactive_blocking_enabled", False)) and "UNBLOCKED" in containment_status:
+                                containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
                             self.alert_writer.write(alert_payload)
                             alerts_total.inc()
