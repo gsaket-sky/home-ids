@@ -32,7 +32,7 @@ from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 
-from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status
+from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
@@ -90,9 +90,28 @@ class EnginePipeline:
         self.geoip_engine = geoip_engine or GeoIPEngine(db_path=self.config.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")), asn_db_path=self.config.get("geoip_asn_db", ""))
 
         cache_dir = state_dir / "ti_cache"
-        self.abuseipdb = AbuseIPDB(api_key=self.config.get("abuseipdb_api_key", ""), cache_dir=cache_dir, refresh_interval=int(self.config.get("ti_refresh_interval", 3600)))
+        abuse_key = self.config.get("abuseipdb_api_key", "")
+        self.abuseipdb = AbuseIPDB(api_key=abuse_key, cache_dir=cache_dir, refresh_interval=int(self.config.get("ti_refresh_interval", 3600)))
         self.abuseipdb.start_refresh_thread()
-        self.virustotal = VirusTotalClient(api_key=self.config.get("virustotal_api_key", ""), cache_dir=cache_dir)
+        if abuse_key:
+            LOGGER.info("AbuseIPDB integration activated successfully.")
+            integration_status_metric.labels("abuseipdb").set(1)
+        else:
+            integration_status_metric.labels("abuseipdb").set(0)
+            
+        vt_key = self.config.get("virustotal_api_key", "")
+        self.virustotal = VirusTotalClient(api_key=vt_key, cache_dir=cache_dir)
+        if vt_key:
+            LOGGER.info("VirusTotal integration activated successfully.")
+            integration_status_metric.labels("virustotal").set(1)
+        else:
+            integration_status_metric.labels("virustotal").set(0)
+            
+        if self.ti_engine and self.ti_engine.otx_api_key:
+            LOGGER.info("AlienVault OTX integration activated successfully.")
+            integration_status_metric.labels("otx").set(1)
+        else:
+            integration_status_metric.labels("otx").set(0)
 
         self.dns_extractor = FeatureExtractor()
         safe_ips = set(self.config.get("safe_ips", []))
@@ -110,6 +129,12 @@ class EnginePipeline:
         self.risk_scorer = RiskScorer()
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(token=self.config.get("telegram_token", ""), chat_id=self.config.get("telegram_chat_id", ""), enabled=bool(self.config.get("telegram_enabled", False)), ollama_url=self.config.get("ollama_url", ""), ollama_model=self.config.get("ollama_model", "llama3"))
+        if self.config.get("telegram_token") and bool(self.config.get("telegram_enabled", False)):
+            interactive = "ENABLED" if self.config.get("interactive_blocking_enabled", False) else "DISABLED"
+            LOGGER.info(f"Telegram integration activated (Interactive Blocking: {interactive}).")
+            integration_status_metric.labels("telegram").set(1)
+        else:
+            integration_status_metric.labels("telegram").set(0)
         
         self.ips_mitigator = ips_mitigator or IPSMitigator(config=self.config, state_manager=self.state_manager, stream_writer=self.alert_writer)
         self.ips_mitigator.state_manager = self.state_manager
@@ -336,9 +361,16 @@ class EnginePipeline:
 
             abuse_risk = 0.0
             if dest_ip and dest_ip != "unknown":
+                self.abuseipdb.enqueue_ip(dest_ip)
                 if self.abuseipdb.lookup(dest_ip):
                     abuse_risk = 4.0
                     ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
+                else:
+                    live_risk = self.abuseipdb.get_live_risk(dest_ip)
+                    if live_risk > 0:
+                        abuse_risk = live_risk
+                        ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
+                        
             features["abuseipdb_risk"] = abuse_risk
 
             if dest_ip and dest_ip != "unknown":

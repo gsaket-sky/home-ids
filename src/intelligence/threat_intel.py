@@ -482,20 +482,142 @@ class ThreatIntel:
 
 class AbuseIPDB:
     _BLACKLIST_URL = "https://api.abuseipdb.com/api/v2/blacklist?confidenceMinimum=75&limit=10000&plaintext"
+    _CHECK_URL = "https://api.abuseipdb.com/api/v2/check?ipAddress={}"
+    _RATE_DELAY = 16.0
+    _DAILY_CAP = 480
     
     def __init__(self, api_key: str, cache_dir: Path, refresh_interval: int = 3600):
         self.api_key = api_key
         self.cache_file = cache_dir / "abuseipdb_blacklist.txt"
+        self.live_cache_file = cache_dir / "abuseipdb_live.json.gz"
         self.refresh_interval = refresh_interval
         self._bad_ips = set()
+        self._live_cache = {}
+        self._queue = []
+        self._queued_items = set()
+        self._last_req = 0.0
+        self._today_count = 0
+        self._today_date = ""
         self._lock = threading.RLock()
         
         LOGGER.debug("AbuseIPDB wrapper initialized.")
         self._load_cache()
+        self._load_live_cache()
 
     def start_refresh_thread(self) -> None: 
         LOGGER.info("Starting AbuseIPDB background refresh thread.")
         threading.Thread(target=self._refresh_loop, daemon=True, name="abuseipdb-refresh").start()
+        if self.api_key:
+            LOGGER.info("Starting AbuseIPDB async live worker thread.")
+            threading.Thread(target=self._live_worker_loop, daemon=True, name="abuseipdb-live").start()
+
+    def enqueue_ip(self, ip: str, priority: int = 5) -> None:
+        if not self.api_key or not ip or ip == "unknown": return
+        try:
+            if not ipaddress.ip_address(ip).is_global: return
+        except ValueError:
+            return
+        with self._lock:
+            if ip not in self._bad_ips and not self._is_live_cached(ip) and ip not in self._queued_items:
+                self._queued_items.add(ip)
+                heapq.heappush(self._queue, (priority, time.time(), ip))
+                LOGGER.debug("Enqueued IP for AbuseIPDB live analysis: %s", ip)
+                
+    def _is_live_cached(self, key: str) -> bool:
+        e = self._live_cache.get(key)
+        return bool(e and time.time() < e["expires"])
+
+    def _save_live_cache(self) -> None:
+        try:
+            with self._lock: 
+                d = dict(self._live_cache)
+            import gzip, json
+            with gzip.open(self.live_cache_file, "wt", encoding="utf-8") as f: 
+                json.dump(d, f)
+            LOGGER.debug("AbuseIPDB live cache flushed to disk.")
+        except Exception as exc: 
+            LOGGER.error("Failed to save AbuseIPDB live cache: %s", exc)
+
+    def _load_live_cache(self) -> None:
+        if not self.live_cache_file.exists(): 
+            return
+        try:
+            import gzip, json
+            with gzip.open(self.live_cache_file, "rt", encoding="utf-8") as f: 
+                data = json.load(f)
+            now = time.time()
+            with self._lock: 
+                self._live_cache = {k: v for k, v in data.items() if v.get("expires", 0) > now}
+            LOGGER.debug("AbuseIPDB live cache loaded from disk.")
+        except Exception as exc: 
+            LOGGER.error("Failed to load AbuseIPDB live cache: %s", exc)
+
+    def _live_worker_loop(self) -> None:
+        LOGGER.debug("AbuseIPDB live worker loop active.")
+        while True:
+            item = None
+            import time
+            with self._lock:
+                t = time.strftime("%Y-%m-%d")
+                if t != self._today_date: 
+                    self._today_count = 0
+                    self._today_date = t
+                if self._queue and self._today_count < self._DAILY_CAP:
+                    import heapq
+                    _, _, val = heapq.heappop(self._queue)
+                    self._queued_items.discard(val)
+                    item = val
+                    
+            if item is None: 
+                time.sleep(5)
+                continue
+                
+            w = self._RATE_DELAY - (time.time() - self._last_req)
+            if w > 0: 
+                time.sleep(w)
+                
+            try:
+                LOGGER.debug("Executing AbuseIPDB live API query for IP: %s", item)
+                res = self._live_query(item)
+                with self._lock:
+                    cache_ttl = 86400 if res else 60
+                    self._live_cache[item] = {"result": res, "expires": time.time() + cache_ttl}
+                    if res is not None: 
+                        self._today_count += 1
+                    if len(self._live_cache) > 2000: 
+                        del self._live_cache[next(iter(self._live_cache))]
+                self._save_live_cache()
+            except Exception as exc:
+                LOGGER.error("AbuseIPDB live worker loop encountered an error: %s", exc)
+            finally: 
+                self._last_req = time.time()
+
+    def _live_query(self, ip: str) -> dict:
+        u = self._CHECK_URL.format(ip)
+        from urllib.request import Request, urlopen
+        from urllib.error import URLError
+        import json
+        req = Request(u, headers={"Key": self.api_key, "Accept": "application/json", "User-Agent": "home-ids/1.0"})
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                with urlopen(req, timeout=15) as r: 
+                    data = json.loads(r.read())
+                LOGGER.debug("AbuseIPDB API response success for %s", ip)
+                return data.get("data", {})
+            except URLError as e:
+                import time
+                if hasattr(e, 'code') and e.code == 429:
+                    LOGGER.warning("AbuseIPDB Rate limit hit (429). Backing off (Attempt %d/%d).", attempt+1, max_retries)
+                    time.sleep((2 ** attempt) * 2)
+                    continue
+                elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
+                    LOGGER.warning("AbuseIPDB Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
+                    time.sleep(2 ** attempt)
+                    continue
+                LOGGER.error("AbuseIPDB Query failed conclusively for %s: %s", ip, e)
+                break
+        return None
     
     def _refresh_loop(self) -> None:
         time.sleep(15)
@@ -557,17 +679,27 @@ class AbuseIPDB:
             except Exception as exc:
                 LOGGER.warning("Failed to load AbuseIPDB cache: %s", exc)
                 
+    def get_live_risk(self, ip: str) -> float:
+        import time
+        with self._lock:
+            e = self._live_cache.get(ip)
+            if e and time.time() < e["expires"] and e["result"]:
+                score = e["result"].get("abuseConfidenceScore", 0)
+                # Cap contribution at 4.0 (like VT)
+                return min((score / 100.0) * 6.0, 4.0)
+        return 0.0
+
     def lookup(self, ip: str) -> bool:
         with self._lock: 
             match = ip in self._bad_ips
             if match:
-                LOGGER.debug("AbuseIPDB match for IP: %s", ip)
+                LOGGER.debug("AbuseIPDB blacklist match for IP: %s", ip)
             return match
 
 class VirusTotalClient:
     _BASE = "https://www.virustotal.com/api/v3"
     _RATE_DELAY = 16.0
-    _DAILY_CAP = 480
+    _DAILY_CAP = 950
     
     def __init__(self, api_key: str, cache_dir: Path):
         self.api_key = api_key
@@ -587,7 +719,7 @@ class VirusTotalClient:
             threading.Thread(target=self._worker_loop, daemon=True, name="vt-worker").start()
 
     def enqueue_domain(self, domain: str, priority: int = 5) -> None:
-        if not self.api_key or not domain: 
+        if not self.api_key or not domain or domain == "unknown": 
             return
         k = f"domain:{domain}"
         with self._lock:
@@ -597,7 +729,11 @@ class VirusTotalClient:
                 LOGGER.debug("Enqueued domain for VT analysis: %s", domain)
 
     def enqueue_ip(self, ip: str, priority: int = 5) -> None:
-        if not self.api_key or not ip or ip == "unknown": 
+        if not self.api_key or not ip or ip == "unknown": return
+        try:
+            import ipaddress
+            if not ipaddress.ip_address(ip).is_global: return
+        except ValueError:
             return
         k = f"ip:{ip}"
         with self._lock:

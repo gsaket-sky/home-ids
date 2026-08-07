@@ -58,6 +58,7 @@ events_processed_metric = Counter("home_ids_events_processed_total", "Processed 
 zeek_status_metric = Gauge("home_ids_zeek_status", "Zeek collector operational status")
 zeek_events_processed_metric = Counter("home_ids_zeek_events_processed_total", "Total Zeek log events parsed")
 alerts_total = Counter("home_ids_alerts_total", "IDS alerts triggered")
+integration_status_metric = Gauge("home_ids_integration_status", "Operational status of external integrations (1=active, 0=inactive)", ["integration"])
 
 # 🛡️ Split IPS Architecture Status & Telemetry
 ips_pihole_status = Gauge("home_ids_ips_pihole_status", "Pi-hole Mitigation operational state (1=active, 0=bypass)")
