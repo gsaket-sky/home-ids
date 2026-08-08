@@ -82,19 +82,20 @@ flowchart TD
         E --> I[OSINT Threat Intel Feeds\nOTX, AbuseIPDB, VirusTotal]
     end
 
-    subgraph Scoring ["3. Multi-Vector Risk Engine"]
-        F & G & H & I --> J[Calculate Composite Risk Score 0.0 - 15.0]
+    subgraph Scoring ["3. Hypothesis & Evidence Engine (HEE)"]
+        F & G & H & I --> J[Map Facts to Evidence Graph]
+        J --> K[Evaluate Threat Hypotheses]
+        K --> L[Calculate Threat Confidence 0.0 - 1.0]
     end
 
-    subgraph Triage ["4. CL-AFPE Autonomous FP Engine"]
-        J --> K{Is Risk >= 6.0?}
-        K -- No --> L[🟢 Normal Activity / Telemetry]
-        K -- Yes --> M[Stage 1: Rule & Tranco Top-1M Filter]
-        M --> N[Stage 2: LightGBM ONNX Classifier]
-        N --> O[Stage 3: FastEmbed Vector Cosine Similarity]
-        O --> P{Verdict?}
+    subgraph Triage ["4. CL-AFPE & Local AI SOC (Ollama)"]
+        L --> M{Is Threat Confidence High?}
+        M -- No --> N[🟢 Normal Activity / Telemetry]
+        M -- Yes --> O[Stage 1: CL-AFPE LightGBM/FastEmbed Suppression]
+        O --> P{FP Verdict?}
         P -- False Positive --> Q[🛡️ Auto-Suppress Alert & Learn Baseline]
-        P -- Confirmed Threat --> R[🚨 Confirmed Security Breach]
+        P -- Real Threat --> R[Stage 2: AI SOC Analyst LLaMA 3.1]
+        R --> S[🚨 Confirmed Security Breach + AI Summary]
     end
 
     subgraph Action ["5. Response & Mitigation Layer"]
@@ -109,7 +110,8 @@ flowchart TD
 ### Core Subsystems Explained:
 1. **Network Data Collectors**: Home-IDS ingests raw data from **Zeek NDR** (Network Detection and Response) and **Pi-hole FTL** (DNS Resolver).
 2. **Feature Extractor**: Computes over 40 behavioral attributes every few seconds (e.g., query volume, domain randomness/entropy, payload sizes, port scan attempts, and TLS fingerprints).
-3. **Multi-Vector Scoring**: Combines statistical deviation ($Z$-scores), machine learning anomaly scores (IsolationForest), sequence probability (Markov chains), and live Threat Intelligence feeds into a unified **Risk Score** ranging from `0.0` (Safe) to `15.0` (Critical Breach).
+3. **Hypothesis & Evidence Engine (HEE)**: Combines statistical deviation, temporal machine learning anomaly scores (IsolationForest with time-of-day awareness), and live Threat Intelligence feeds into a structured **Evidence Graph**. It evaluates this graph against threat hypotheses to calculate a **Threat Confidence** from `0.0` to `1.0`.
+4. **Local AI SOC Analyst**: When high-confidence threats are confirmed by the CL-AFPE, the full evidence graph is passed to a local **Ollama (LLaMA 3.1)** instance which operates as a Tier-2 SOC Analyst. It investigates the telemetry and appends a 1-sentence executive summary directly to your Telegram alert.
 
 ---
 
@@ -126,7 +128,7 @@ sequenceDiagram
     participant S3 as Stage 3: FastEmbed Vector Similarity
     participant Action as Action Dispatcher
 
-    Pipeline->>S1: Send Alert (Risk >= 6.0)
+    Pipeline->>S1: Send Alert (Threat Confidence is High)
     alt Is Domain in Tranco Top 1M or Local Trust Cache?
         S1-->>Pipeline: 🟢 Suppress (Trusted Infrastructure)
     else Unknown Domain / Anomalous Behavioral Pattern
@@ -323,11 +325,11 @@ If a smart refrigerator suddenly starts uploading gigabytes of data or making th
 Connecting to high-risk IP addresses or server hosts located in regions known for hosting cybercrime infrastructure or flagged by international threat feeds.
 
 #### 🔍 How Home-IDS Detects It
-- **GeoIP & ASN Lookup**: Cross-references destination IPs against MaxMind GeoLite2 databases to compute Country Threat Density and ASN Risk Scores.
+- **GeoIP & ASN Lookup**: Cross-references destination IPs against MaxMind GeoLite2 databases to compute Country Threat Density and ASN Threat Confidences.
 - **OSINT Threat Feeds**: Real-time integration with **AbuseIPDB**, **VirusTotal**, and **AlienVault OTX**.
 
 #### 🛡️ Automated Action Taken
-- Adds OSINT risk points (+3.0 to +6.0) to composite risk score.
+- Adds OSINT risk points (+3.0 to +6.0) to composite threat confidence.
 
 #### 📋 Analyst Playbook (What To Do Next)
 1. **Inspect Country Heatmap**: Check the Grafana **GeoIP & OSINT Dashboard** to see destination countries.
