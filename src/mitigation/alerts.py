@@ -182,7 +182,7 @@ class AlertManager:
             )
             prompt = f"Alert Payload:\n{json.dumps(payload, indent=2)}"
             
-            resp = self.session.post(
+            resp = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json={
                     "model": self.ollama_model, 
@@ -190,7 +190,7 @@ class AlertManager:
                     "prompt": prompt, 
                     "stream": False
                 },
-                timeout=30.0
+                timeout=5.0
             )
             if resp.status_code == 200:
                 return resp.json().get("response", "").strip()
