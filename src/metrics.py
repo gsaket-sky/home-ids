@@ -12,7 +12,6 @@ from prometheus_client import Gauge, Counter
 
 _DEV_LABELS = ["device", "hostname", "device_type"]
 
-risk_metric = Gauge("home_ids_risk_score", "DEPRECATED: Overall IDS risk score", _DEV_LABELS)
 threat_confidence_metric = Gauge("home_ids_threat_confidence", "Threat Confidence (0.0 to 1.0)", _DEV_LABELS)
 anomaly_confidence_metric = Gauge("home_ids_anomaly_confidence", "Anomaly Confidence (0.0 to 1.0)", _DEV_LABELS)
 decision_state_metric = Gauge("home_ids_decision_state", "HEE State (0=BENIGN, 1=ANOMALOUS, 2=SUSPICIOUS, 3=HIGH, 4=CRITICAL)", _DEV_LABELS)
@@ -23,7 +22,7 @@ blocked_ratio_metric = Gauge("home_ids_blocked_ratio", "Blocked DNS ratio", _DEV
 nxdomain_ratio_metric = Gauge("home_ids_nxdomain_ratio", "NXDOMAIN ratio", _DEV_LABELS)
 suspicious_domains_metric = Gauge("home_ids_suspicious_domains", "Suspicious/DGA-like domains", _DEV_LABELS)
 
-ml_anomaly_metric = Gauge("home_ids_ml_anomaly_score", "IsolationForest anomaly score", _DEV_LABELS)
+
 markov_anomaly_metric = Gauge("home_ids_markov_anomaly_score", "Markov chain state transition anomaly score", _DEV_LABELS)
 zscore_query_metric = Gauge("home_ids_zscore_query_rate", "Query-rate z-score", _DEV_LABELS)
 zscore_entropy_metric = Gauge("home_ids_zscore_entropy", "Entropy z-score", _DEV_LABELS)
@@ -32,9 +31,9 @@ zscore_unique_metric = Gauge("home_ids_zscore_unique_domains", "Unique-domain z-
 def remove_stale_device_metrics(device_id: str, hostname: str, device_type: str = "unknown") -> None:
     """Removes obsolete label tuples from Prometheus gauges when a device is pruned or IP rebinds."""
     gauges = [
-        risk_metric, query_rate_metric, unique_domains_metric, entropy_metric,
+        query_rate_metric, unique_domains_metric, entropy_metric,
         blocked_ratio_metric, nxdomain_ratio_metric, suspicious_domains_metric,
-        ml_anomaly_metric, markov_anomaly_metric, zscore_query_metric,
+        markov_anomaly_metric, zscore_query_metric,
         zscore_entropy_metric, zscore_unique_metric
     ]
     for g in gauges:

@@ -104,7 +104,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_ml_anomaly_score{hostname=~\"$device\"}",
+          "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
           "legendFormat": "{{hostname}} (ML Outlier)"
         }
       ],

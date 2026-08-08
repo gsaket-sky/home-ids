@@ -16,9 +16,9 @@ import math
 from typing import Dict, Any
 
 from metrics import (
-    risk_metric, threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
+    threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
     blocked_ratio_metric, nxdomain_ratio_metric, suspicious_domains_metric,
-    ml_anomaly_metric, markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
+    markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
     zscore_unique_metric, new_domains_metric, deep_domains_metric,
     nxdomain_tld_conc_metric, zscore_nxdomain_metric, zscore_blocked_metric,
     zscore_dga_metric, risk_velocity_metric, zeek_conn_count_metric,
@@ -48,9 +48,9 @@ from metrics import (
 LOGGER = logging.getLogger("home_ids.metrics_sync")
 
 _DEVICE_GAUGES = (
-    risk_metric, threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
+    threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
     blocked_ratio_metric, nxdomain_ratio_metric, suspicious_domains_metric,
-    ml_anomaly_metric, markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
+    markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
     zscore_unique_metric, new_domains_metric, deep_domains_metric,
     nxdomain_tld_conc_metric, zscore_nxdomain_metric, zscore_blocked_metric,
     zscore_dga_metric, risk_velocity_metric, zeek_conn_count_metric,
@@ -189,8 +189,6 @@ class MetricsExporter:
             rate_baseline_n = sum(getattr(state.rate_baseline, "n", [0, 0])) if hasattr(state, "rate_baseline") else 0
             probation_status_metric.labels(str_dev_id, str_host, str_type).set(1.0 if rate_baseline_n < 288 else 0.0)
 
-            risk_metric.labels(str_dev_id, str_host, str_type).set(risk_score)
-            
             if decision:
                 threat_confidence_metric.labels(str_dev_id, str_host, str_type).set(decision.get("threat_confidence", 0.0))
                 
@@ -198,7 +196,6 @@ class MetricsExporter:
                 state_val = state_map.get(decision.get("state", "BENIGN"), 0)
                 decision_state_metric.labels(str_dev_id, str_host, str_type).set(state_val)
 
-            ml_anomaly_metric.labels(str_dev_id, str_host, str_type).set(ml_score)
             anomaly_confidence_metric.labels(str_dev_id, str_host, str_type).set(ml_score)
             markov_anomaly_metric.labels(str_dev_id, str_host, str_type).set(features.get("markov_anomaly", 0.0))
 
