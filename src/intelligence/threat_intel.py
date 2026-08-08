@@ -609,9 +609,11 @@ class AbuseIPDB:
                 return data.get("data", {})
             except URLError as e:
                 import time
+                if hasattr(e, 'close'):
+                    e.close()
                 if hasattr(e, 'code') and e.code == 429:
                     LOGGER.warning("AbuseIPDB Rate limit hit (429). Backing off (Attempt %d/%d).", attempt+1, max_retries)
-                    time.sleep((2 ** attempt) * 2)
+                    time.sleep(15)
                     continue
                 elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
                     LOGGER.warning("AbuseIPDB Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
@@ -823,9 +825,11 @@ class VirusTotalClient:
                     "reputation": attrs.get("reputation", 0)
                 }
             except URLError as e:
+                if hasattr(e, 'close'):
+                    e.close()
                 if hasattr(e, 'code') and e.code == 429:
                     LOGGER.warning("VT Rate limit hit (429). Backing off (Attempt %d/%d).", attempt+1, max_retries)
-                    time.sleep((2 ** attempt) * 2)
+                    time.sleep(15) # VT Free API is 4 per min, so back off significantly
                     continue
                 elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
                     LOGGER.warning("VT Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
