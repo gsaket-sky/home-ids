@@ -30,8 +30,8 @@ class GeoIPEngine:
             self.reader = geoip2.database.Reader(db_path)
             LOGGER.info("GeoIP City database successfully loaded from %s", db_path)
         except Exception as exc:
-            LOGGER.error("Failed to load primary GeoIP City DB at %s: %s", db_path, exc)
-            raise
+            LOGGER.warning("Failed to load primary GeoIP City DB at %s: %s. GeoIP features will be disabled.", db_path, exc)
+            self.reader = None
 
         self.asn_reader = None
         if asn_db_path:
@@ -45,6 +45,8 @@ class GeoIPEngine:
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="rev-dns")
 
     def lookup(self, ip):
+        if not self.reader:
+            return None
         try:
             res = self.reader.city(ip)
             LOGGER.debug("GeoIP City lookup successful for IP: %s", ip)
