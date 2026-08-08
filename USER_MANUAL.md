@@ -157,9 +157,9 @@ When a threat is confirmed, Home-IDS deploys **Defense-in-Depth containment** ba
 
 ```mermaid
 graph LR
-    A[🚨 Threat Severity Level] --> B[Level 1: Low Threat\nRisk 6.0 - 8.4]
-    A --> C[Level 2: High Threat\nRisk 8.5 - 11.9]
-    A --> D[Level 3: Critical Breach\nRisk >= 12.0]
+    A[🚨 Threat Severity Level] --> B[Level 1: Low Threat\nConfidence 0.4 - 0.7]
+    A --> C[Level 2: High Threat\nConfidence 0.75 - 0.9]
+    A --> D[Level 3: Critical Breach\nConfidence >= 0.9]
 
     B --> E[🛑 Pi-hole DNS Sinkhole\nBlocks malicious domain name]
     C --> E
@@ -311,7 +311,7 @@ If a smart refrigerator suddenly starts uploading gigabytes of data or making th
 - **Probationary Volume Breach**: Devices in their first 24 hours (probation) generating abnormally high query volumes.
 
 #### 🛡️ Automated Action Taken
-- Risk score increases. If score exceeds `6.0`, CL-AFPE evaluates the feature matrix.
+- Threat confidence increases. If confidence is high, CL-AFPE & Ollama evaluate the evidence graph.
 
 #### 📋 Analyst Playbook (What To Do Next)
 1. **Check Device Behavior**: Determine if a new software update or background backup caused the activity.
@@ -329,7 +329,7 @@ Connecting to high-risk IP addresses or server hosts located in regions known fo
 - **OSINT Threat Feeds**: Real-time integration with **AbuseIPDB**, **VirusTotal**, and **AlienVault OTX**.
 
 #### 🛡️ Automated Action Taken
-- Adds OSINT risk points (+3.0 to +6.0) to composite threat confidence.
+- Submits critical Tier-5 malicious reputation evidence into the HEE graph.
 
 #### 📋 Analyst Playbook (What To Do Next)
 1. **Inspect Country Heatmap**: Check the Grafana **GeoIP & OSINT Dashboard** to see destination countries.
@@ -355,7 +355,7 @@ flowchart TD
 | **Tier 1: Master Triage Hub** | Main incident response hub | 🚨 Master Threat Ledger, 📜 High-Priority Loki Logs, 🛑 Pi-hole Active Blocks |
 | **Tier 2: DNS & ML Diagnostics** | Analyze DGA bursts and ML scores | IsolationForest Anomaly Score, Markov Transition Score, Entropy Matrix |
 | **Tier 2: Zeek NDR** | Network security & lateral movement | JA4+ TLS Fingerprints, Port Scans ($S0/REJ$), Beaconing C2 Periodicity |
-| **Tier 2: GeoIP & OSINT** | World traffic & OSINT risk | 🌍 World Geolocation Threat Heatmap, Country Threat Density, ASN Risk Ledger |
+| **Tier 2: GeoIP & OSINT** | World traffic & OSINT risk | 🌍 World Geolocation Threat Heatmap, Country Threat Density, ASN Reputation Ledger |
 | **Tier 2: System Health** | System resources & pipeline lag | CPU/RAM Usage, Pipeline Processing Lag, Alert Queue Size, Scapy Traps |
 
 ---
@@ -366,7 +366,7 @@ When a threat is confirmed, Home-IDS sends an interactive alert directly to your
 
 ```text
 🚨 [ALERT] user_laptop_fritz_box (192.168.1.12)
-📊 Risk: 9.63 (Threshold: 6.00)
+📊 Confidence: 0.96 (Threshold: 0.60)
 🏷️ Primary Trigger: ML absolute structural outlier (Probationary)
 
 🌐 DNS Activity (Pi-hole Context)
