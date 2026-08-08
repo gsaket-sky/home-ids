@@ -38,7 +38,6 @@
     "startup_lookback_seconds": 300,
     "alert_threshold": 6.0,
     "threshold_std_dev": 3.0,
-    "per_device_thresholds": {},
     "ml_warmup_samples": 5000,
     "baseline_alpha": 0.05,
     "decay_factor": 0.995,

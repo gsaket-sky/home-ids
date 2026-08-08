@@ -43,7 +43,7 @@ _STATIC_KEYS = {
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key", 
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password", 
     "pihole_api_url", "router_webhook_url", "fritz_ip", "fritz_user", 
-    "fritz_password", "fritz_api_token"
+    "fritz_password", "fritz_api_token", "fastapi_port"
 }
 
 def apply_env_overrides(config: dict) -> None:
@@ -89,6 +89,7 @@ DEFAULT_CONFIG = {
     "ollama_model": "llama3", 
     "decay_factor": 0.995,    
     "device_type_overrides": {},
+    "ips_enabled": True,           # Master switch for IPS
     "ips_pihole_enabled": True,    # Controls DNS Sinkholing
     "ips_router_enabled": False,   # Controls FastAPI Fritz!Box Hardware drop
     "ips_tarpit_enabled": True,    # Controls Layer-2 Scapy ARP Spoofing

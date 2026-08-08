@@ -21,12 +21,12 @@ import joblib
 import threading
 from typing import Optional, Any
 import time
-
+from config import CONFIG
 LOGGER = logging.getLogger("home_ids.ml_engine")
 
 _MAXLEN_DEVICE = 20000
 _MAXLEN_GLOBAL = 100000
-_WARMUP_DEVICE = 500    # samples before first device fit (~17 min at 2s poll)
+
 _WARMUP_GLOBAL = 1000  # samples before first global fit
 _RETRAIN_N = 500       # retrain every 500 new samples (~17 min) for faster adaptation
 
@@ -70,7 +70,7 @@ class DeviceMLEngine:
         vec = self._extract_vector(features)
         self.training.append(vec)
 
-        if not self.warmed_up and len(self.training) >= _WARMUP_DEVICE:
+        if not self.warmed_up and len(self.training) >= CONFIG.get("ml_warmup_samples", 5000):
             LOGGER.info("Device %s reached warmup phase (%d samples). Initiating background fit.", self.device_id, len(self.training))
             self._fit_background()
         elif self.warmed_up:
