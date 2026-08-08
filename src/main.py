@@ -1,5 +1,5 @@
 """
-main.py – Turnkey Home IDS Entry Point.
+main.py – Turnkey Home IDS Entry Point (Version 5.0.0-HEE).
 
 This file serves as the primary launcher for the enterprise-grade Network Detection 
 and Response (NDR) platform. It initializes all independent background engines 

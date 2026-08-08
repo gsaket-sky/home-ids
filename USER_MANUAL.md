@@ -417,4 +417,4 @@ sudo systemctl start soc.service
 
 ---
 
-*Home-IDS Documentation & SecOps Playbook — Engine Version 4.0.27*
+*Home-IDS Documentation & SecOps Playbook — Engine Version 5.0.27*

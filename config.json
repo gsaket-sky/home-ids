@@ -44,8 +44,8 @@
     "decay_factor": 0.995,
     "home_subnet": "192.168.1.0/24",
     "ti_refresh_interval": 3600,
-    "ollama_url": "",
-    "ollama_model": "",
+    "ollama_url": "http://127.0.0.1:11434",
+    "ollama_model": "llama3.1",
     "safe_ips": [
       "127.0.0.1"
     ],

@@ -44,7 +44,7 @@
           "type": "prometheus",
           "uid": "${PROMETHEUS_DS}"
         },
-        "query": "label_values(home_ids_risk_score, hostname)",
+        "query": "label_values(home_ids_query_rate, hostname)",
         "refresh": 1,
         "includeAll": true,
         "allValue": ".*",
@@ -692,7 +692,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_risk_score{hostname=~\"$device\"}",
+          "expr": "(home_ids_threat_confidence * 10){hostname=~\"$device\"}",
           "format": "table",
           "instant": true,
           "refId": "A"

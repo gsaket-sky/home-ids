@@ -140,7 +140,7 @@ class DeviceState:
         
         self.last_baseline_update = 0.0
         self.last_alert_time = 0.0
-        self.last_alert_risk = 0.0
+        self.last_alert_confidence = 0.0
         self.last_alert_signature = ""
         self.killchain_history = deque(maxlen=5)
         
@@ -173,7 +173,7 @@ class DeviceState:
             "geo_exported_ips": self.geo_exported_ips.to_list(),
             "last_baseline_update": self.last_baseline_update,
             "last_alert_time": self.last_alert_time,
-            "last_alert_risk": self.last_alert_risk,
+            "last_alert_confidence": self.last_alert_confidence,
             "last_alert_signature": self.last_alert_signature,
             "killchain_history": list(self.killchain_history),
             "has_validated_threat": self.has_validated_threat,
@@ -205,7 +205,7 @@ class DeviceState:
         
         obj.last_baseline_update = data.get("last_baseline_update", 0.0)
         obj.last_alert_time = data.get("last_alert_time", 0.0)
-        obj.last_alert_risk = data.get("last_alert_risk", 0.0)
+        obj.last_alert_confidence = data.get("last_alert_confidence", 0.0)
         obj.last_alert_signature = data.get("last_alert_signature", "")
         obj.killchain_history = deque(data.get("killchain_history", []), maxlen=5)
         

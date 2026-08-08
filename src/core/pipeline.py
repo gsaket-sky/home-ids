@@ -24,7 +24,11 @@ from core.identity import DeviceIdentityManager
 from core.metrics_sync import MetricsExporter
 from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
-from mitigation.scoring import RiskScorer
+from intelligence.hypotheses.evidence import EvidenceStore, Evidence
+from intelligence.reputation.classifier import ReputationClassifier
+from intelligence.detectors.dns_behavior import DNSBehaviorDetector
+from intelligence.detectors.zeek_network import ZeekNetworkDetector
+from core.decision_engine import DecisionEngine, DecisionState
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
@@ -126,7 +130,11 @@ class EnginePipeline:
         self.zeek_collector = ZeekCollector(log_dir=self.config.get("zeek_log_dir", "/opt/zeek/logs/current"), poll_interval=float(self.config.get("poll_interval", 2.0)), state_dir=state_dir)
         self.pihole_collector = pihole_collector or PiHoleCollector(db_path=self.config.get("pihole_db", "/etc/pihole/pihole-FTL.db"), lookback_seconds=int(self.config.get("startup_lookback_seconds", 300)), excluded_ips=safe_ips, excluded_patterns=safe_patterns)
 
-        self.risk_scorer = RiskScorer()
+        self.evidence_store = EvidenceStore()
+        self.rep_classifier = ReputationClassifier()
+        self.dns_detector = DNSBehaviorDetector()
+        self.zeek_detector = ZeekNetworkDetector()
+        self.decision_engine = DecisionEngine()
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(token=self.config.get("telegram_token", ""), chat_id=self.config.get("telegram_chat_id", ""), enabled=bool(self.config.get("telegram_enabled", False)), ollama_url=self.config.get("ollama_url", ""), ollama_model=self.config.get("ollama_model", "llama3"))
         if self.config.get("telegram_token") and bool(self.config.get("telegram_enabled", False)):
@@ -297,7 +305,7 @@ class EnginePipeline:
                 _bl_bl      = state.blocked_baseline
                 _dga_bl     = state.dga_baseline
                 _ob_bl      = state.outbound_bytes_baseline
-                _last_alert_risk = getattr(state, "last_alert_risk", 0.0)
+                _last_alert_confidence = getattr(state, "last_alert_confidence", 0.0)
                 _last_alert_time = getattr(state, "last_alert_time", 0.0)
                 _last_alert_sig  = getattr(state, "last_alert_signature", "")
                 _last_bl_update  = getattr(state, "last_baseline_update", 0.0)
@@ -391,15 +399,29 @@ class EnginePipeline:
                 if self.ml_registry:
                     ml_score = self.ml_registry.score(dev_id, features)
 
-                risk_details = self.risk_scorer.explain(features, state, ml_score, zeek_alerts=self.zeek_fx.get_alerts(client_ip))
-                risk = risk_details["risk"]
-                factors = risk_details["factors"]
-
-                LOGGER.debug("Scoring completed for device %s. Risk: %.2f", hostname, risk)
-
-                # AUDIT FIX #1: Compute is_poisoned BEFORE calling ml_registry.learn()
-                # Previously is_poisoned was used on line 309 but defined on line 338,
-                # causing NameError on first device and stale-value poisoning on subsequent ones.
+                # --- HEE Version 5 Integration ---
+                # 1. Run Detectors
+                dns_ev = self.dns_detector.detect(dev_id, features)
+                for ev in dns_ev: self.evidence_store.add(ev)
+                
+                zeek_ev = self.zeek_detector.detect(dev_id, self.zeek_fx.get_alerts(client_ip))
+                for ev in zeek_ev: self.evidence_store.add(ev)
+                
+                if ml_score > 0.90:
+                    self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
+                
+                # 2. Get Reputation
+                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0)
+                
+                # 3. Decision Engine
+                active_evidence = self.evidence_store.get_for_device(dev_id)
+                decision = self.decision_engine.evaluate(active_evidence, rep_vector)
+                
+                risk = decision["threat_confidence"] * 10.0 # Map to old 0-10 scale temporarily for metrics
+                factors = [{"name": decision["explanation"], "score": risk}]
+                
+                LOGGER.debug("HEE Decision for %s: %s (Confidence: %.2f)", hostname, decision["state"], decision["threat_confidence"])
+                
                 is_poisoned = state.is_poisoned(risk)
 
                 # H2 FIX: Only train on non-poisoned (benign) observations.
@@ -429,14 +451,14 @@ class EnginePipeline:
                     self.state_manager.update_baselines(state, features, now, window_seconds, current_risk=risk)
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
-                risk_delta = abs(risk - getattr(state, "last_alert_risk", 0.0))
+                risk_delta = abs(risk - getattr(state, "last_alert_confidence", 0.0))
                 time_elapsed = now - getattr(state, "last_alert_time", 0.0)
 
-                if risk >= alert_threshold and not is_safe:
+                if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL) and not is_safe:
                     if time_elapsed > 300 or (time_elapsed > 60 and (risk_delta >= 1.0 or primary_sig != getattr(state, "last_alert_signature", ""))):
                         LOGGER.warning("Alert Triggered for %s! Risk: %.2f, Signature: %s", hostname, risk, primary_sig)
                         state.last_alert_time = now
-                        state.last_alert_risk = risk
+                        state.last_alert_confidence = risk
                         state.last_alert_signature = primary_sig
 
                         outbound_bytes = features.get("zeek_outbound_bytes", 0)
@@ -579,8 +601,16 @@ class EnginePipeline:
                                 f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n\n"
                             )
 
-                            alert_msg += "*Top Factors:*\n"
-                            for f in factors[:4]: alert_msg += f"- {f['name']}: +{f['score']}\n"
+                            alert_msg += "🧠 *BEST EXPLANATION:* " + decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat") + "\n"
+                            alert_msg += f"⚖️ *Threat Confidence:* {int(decision.get('threat_confidence', 0) * 100)}%\n\n"
+                            alert_msg += "*EVIDENCE GRAPH:*\n"
+                            
+                            seen_groups = set()
+                            for ev in active_evidence:
+                                if ev.independence_group not in seen_groups:
+                                    seen_groups.add(ev.independence_group)
+                                    alert_msg += f"✓ {ev.independence_group}: {ev.type} ({ev.value:.1f})\n"
+                            
                             alert_msg += f"\n{rec_badge}"
 
 
@@ -600,9 +630,9 @@ class EnginePipeline:
 
                             self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
-                elif getattr(state, "last_alert_risk", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
+                elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
                     LOGGER.debug("Device %s risk subsided below threshold.", hostname)
-                    state.last_alert_risk = 0.0
+                    state.last_alert_confidence = 0.0
 
                 # Hardware IPS containment is handled exclusively inside the alert gate above
                 # (lines ~404-414), which is already gated on risk >= alert_threshold.
@@ -615,7 +645,7 @@ class EnginePipeline:
                 self.metrics_exporter.export_device_telemetry(
                     state=state, features=features, risk_score=risk, ml_score=ml_score, ti_risk=ti_risk,
                     ti_match=ti_match, abuse_risk=abuse_risk, vt_risk=vt_risk, is_safe=is_safe,
-                    is_poisoned=is_poisoned, current_threshold_limit=threshold_limit
+                    is_poisoned=is_poisoned, current_threshold_limit=threshold_limit, decision=decision
                 )
 
                 for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):
@@ -635,6 +665,7 @@ class EnginePipeline:
             pruned_list = self.state_manager.prune_stale_devices(now)
             for e_dev_id, e_hostname, e_dev_type in pruned_list:
                 self.metrics_exporter.remove_device_metric_labels(e_dev_id, e_hostname, e_dev_type)
+                if hasattr(self, 'evidence_store'): self.evidence_store.clear_device(e_dev_id)
             self._last_prune = now
 
         if now - self._last_flush > 60.0:

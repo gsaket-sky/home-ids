@@ -174,13 +174,22 @@ class AlertManager:
     def _summarize_with_ollama(self, payload: Dict[str, Any]) -> Optional[str]:
         """Queries local Ollama instance for a brief contextual threat explanation."""
         try:
-            prompt = (
-                f"Analyze this Home IDS security alert and provide a 1-sentence executive summary "
-                f"explaining the potential risk:\n{json.dumps(payload, indent=2)}"
+            system_prompt = (
+                "You are an autonomous Tier 2 SOC Analyst for a Home Intrusion Detection System. "
+                "Analyze the provided JSON alert payload. "
+                "Provide a 1-sentence executive summary explaining the potential risk to the user. "
+                "Do not include markdown or formatting, just the plain text sentence."
             )
+            prompt = f"Alert Payload:\n{json.dumps(payload, indent=2)}"
+            
             resp = self.session.post(
                 f"{self.ollama_url}/api/generate",
-                json={"model": self.ollama_model, "prompt": prompt, "stream": False},
+                json={
+                    "model": self.ollama_model, 
+                    "system": system_prompt,
+                    "prompt": prompt, 
+                    "stream": False
+                },
                 timeout=30.0
             )
             if resp.status_code == 200:

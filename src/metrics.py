@@ -12,7 +12,10 @@ from prometheus_client import Gauge, Counter
 
 _DEV_LABELS = ["device", "hostname", "device_type"]
 
-risk_metric = Gauge("home_ids_risk_score", "Overall IDS risk score", _DEV_LABELS)
+risk_metric = Gauge("home_ids_risk_score", "DEPRECATED: Overall IDS risk score", _DEV_LABELS)
+threat_confidence_metric = Gauge("home_ids_threat_confidence", "Threat Confidence (0.0 to 1.0)", _DEV_LABELS)
+anomaly_confidence_metric = Gauge("home_ids_anomaly_confidence", "Anomaly Confidence (0.0 to 1.0)", _DEV_LABELS)
+decision_state_metric = Gauge("home_ids_decision_state", "HEE State (0=BENIGN, 1=ANOMALOUS, 2=SUSPICIOUS, 3=HIGH, 4=CRITICAL)", _DEV_LABELS)
 query_rate_metric = Gauge("home_ids_query_rate", "DNS queries per minute", _DEV_LABELS)
 unique_domains_metric = Gauge("home_ids_unique_domains", "Unique domains queried", _DEV_LABELS)
 entropy_metric = Gauge("home_ids_entropy_avg", "Average DNS entropy", _DEV_LABELS)

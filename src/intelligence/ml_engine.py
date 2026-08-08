@@ -43,6 +43,11 @@ class DeviceMLEngine:
         LOGGER.debug("Initialized DeviceMLEngine for device: %s", device_id)
 
     def _extract_vector(self, features: dict) -> list:
+        now = time.localtime()
+        minutes_since_midnight = now.tm_hour * 60 + now.tm_min
+        time_sin = np.sin(2 * np.pi * minutes_since_midnight / 1440.0)
+        time_cos = np.cos(2 * np.pi * minutes_since_midnight / 1440.0)
+        
         return [
             float(features.get("query_rate", 0) or 0), 
             float(features.get("entropy_avg", 0) or 0), 
@@ -52,7 +57,9 @@ class DeviceMLEngine:
             min(float(features.get("zeek_outbound_bytes", 0) or 0) / 100000.0, 1.0),
             min(float(features.get("zeek_lateral_moves", 0) or 0) / 10.0, 1.0),
             min(float(features.get("zeek_s0_rej_count", 0) or 0) / 50.0, 1.0),
-            float(features.get("zeek_app_protocol_weight", 0.2) or 0.2)
+            float(features.get("zeek_app_protocol_weight", 0.2) or 0.2),
+            time_sin,
+            time_cos
         ]
 
     def learn(self, features: dict):
@@ -149,6 +156,11 @@ class GlobalMLEngine:
         LOGGER.debug("Initialized GlobalMLEngine.")
 
     def _extract_vector(self, features: dict) -> list:
+        now = time.localtime()
+        minutes_since_midnight = now.tm_hour * 60 + now.tm_min
+        time_sin = np.sin(2 * np.pi * minutes_since_midnight / 1440.0)
+        time_cos = np.cos(2 * np.pi * minutes_since_midnight / 1440.0)
+        
         return [
             float(features.get("query_rate", 0) or 0), 
             float(features.get("entropy_avg", 0) or 0), 
@@ -158,7 +170,9 @@ class GlobalMLEngine:
             min(float(features.get("zeek_outbound_bytes", 0) or 0) / 100000.0, 1.0),
             min(float(features.get("zeek_lateral_moves", 0) or 0) / 10.0, 1.0),
             min(float(features.get("zeek_s0_rej_count", 0) or 0) / 50.0, 1.0),
-            float(features.get("zeek_app_protocol_weight", 0.2) or 0.2)
+            float(features.get("zeek_app_protocol_weight", 0.2) or 0.2),
+            time_sin,
+            time_cos
         ]
 
     def learn(self, features: dict):

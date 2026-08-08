@@ -2,6 +2,23 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v5.0.0] - 2026-08-08
+
+### 🚀 Major Architecture Overhaul: Hypothesis & Evidence Engine (HEE)
+- **Completely Rebuilt Decision Engine** (`pipeline.py`, `ai_soc.py`): Transitioned from a flat arithmetic risk score to a deterministic, graph-based Evidence Store. The system now collects behavioral facts (e.g. `repeated_parent_domain`, `high_entropy`, `dns_tunneling`) and evaluates them against strict hypotheses (e.g. `DNS_TUNNELING`, `BEACONING`, `EXFIL`).
+- **Local AI SOC Analyst (Ollama Integration)**: Integrated `llama3.1` running natively on `localhost:11434`. The LLM receives full JSON context for each alert and operates as an autonomous Tier 2 SOC Analyst to evaluate the evidence graph.
+- **Deterministic AI Validator Guardrail**: Introduced a deterministic reputation guardrail. If an IP or domain holds a known Tier 5 malicious reputation from Threat Intel, the system will aggressively reject the LLM's opinion if it hallucinates a "BENIGN" verdict.
+- **Telegram AI Summarization**: The Telegram alert dispatcher now offloads alert payloads to Ollama in a background thread to generate 1-sentence executive summaries of the threat, appended directly to Telegram messages.
+- **Grafana Triage Hub Upgrades**: Overhauled the Grafana dashboards to replace the deprecated 0-10 Risk Score with the new `home_ids_threat_confidence` emitted by the HEE engine.
+
+### 🧠 Machine Learning & Temporal Context
+- **Temporal/Diurnal Awareness**: Injected `time_sin` and `time_cos` features into the `LightGBM` / `IsolationForest` ML pipelines to give the models contextual awareness of the time of day, vastly reducing false positive anomalies during non-standard hours.
+- **Graceful Dimensionality Upgrades**: Upgraded the device state schemas to dynamically invalidate legacy 9-feature models and rebuild the new 11-feature temporal baselines without crashing.
+
+### 🔧 Bug Fixes & Optimizations
+- **Fixed StateManager Evidence Leak**: Ensured `self.evidence_store.clear_device(dev_id)` is explicitly called when stale devices are pruned from the pipeline, permanently fixing memory accumulation.
+- **Hardened System Polling Loop**: Hardcoded strict `time.sleep()` blocking across all internal `while True` polling loops (Zeek, API requests, Alert Managers) to prevent catastrophic infinite-loop log spam that could previously overwhelm `rsyslogd`.
+
 ## [v4.0.8] - 2026-08-06
 
 ### 🔴 Critical Bug Fixes
