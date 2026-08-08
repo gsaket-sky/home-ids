@@ -410,6 +410,9 @@ class EnginePipeline:
                 if ml_score > 0.90:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
                 
+                if features.get("zeek_honeypot_hits", 0) > 0:
+                    self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot"))
+                
                 # 2. Get Reputation
                 rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0)
                 

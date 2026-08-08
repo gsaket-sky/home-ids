@@ -30,7 +30,13 @@ class DecisionEngine:
         explanation = hyp_results["benign"]["name"]
         threat_confidence = 0.0
 
-        if rep.tier == 5:
+        if any(e.type == "honeypot_access" for e in ev_store):
+            state = DecisionState.CRITICAL
+            action = "block"
+            explanation = "Internal Honeypot Accessed"
+            threat_confidence = 1.0
+            
+        elif rep.tier == 5:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Confirmed Malicious IOC"
