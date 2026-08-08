@@ -524,7 +524,7 @@ class EnginePipeline:
                                     risk_score=risk,
                                     c2_hits=1 if risk >= 8.0 else 0,
                                     dga_burst=(features.get("suspicious_domains_z", 0.0) > 2.0),
-                                    lateral_threat=(features.get("zeek_lateral_moves", 0) > 0),
+                                    lateral_threat=(features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0),
                                     is_safe=is_safe,
                                     ti_engine=self.ti_engine,
                                     reason=primary_sig,
