@@ -2,6 +2,15 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [Unreleased] - 2026-08-09
+
+### 🔎 Operator Visibility & Mitigation Hardening
+- Added explicit evidence-verification indicators to threat alerts and Telegram notifications for partially supported detections.
+- Hardened Layer-2 tarpit handling so existing targets are refreshed with later MAC identification and unknown-MAC cases are logged clearly.
+- Persisted Pi-hole block state across restarts with explicit active status metadata for better recovery and operator visibility.
+- Preserved IP-first device identity while continuing to update MAC and hostname information from newer Zeek and ARP telemetry.
+- Improved resilience around Pi-hole API failures so mitigation continues to proceed for router isolation and tarpit containment even when the Pi-hole endpoint is temporarily unreachable.
+
 ## [v5.0.0] - 2026-08-08
 
 ### 🚀 Major Architecture Overhaul: Hypothesis & Evidence Engine (HEE)
