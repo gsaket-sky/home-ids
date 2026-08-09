@@ -154,6 +154,9 @@ class AlertManager:
 
             self._updates_thread = threading.Thread(target=self._bot_updates_worker, daemon=True, name="telegram-bot-updates")
             self._updates_thread.start()
+        else:
+            self._worker_thread = None
+            self._updates_thread = None
 
     def send(self, message: str, raw_payload: Optional[Dict[str, Any]] = None, reply_markup: Optional[Dict[str, Any]] = None) -> None:
         """Enqueues an alert message for asynchronous Telegram delivery with optional inline buttons.

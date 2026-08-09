@@ -335,7 +335,7 @@ class MultiDeviceMLEngine:
         except Exception as exc:
             LOGGER.error("Failed to save ML models: %s", exc)
 
-    def _verify_model_shape(self, model, expected_features: int = 9) -> bool:
+    def _verify_model_shape(self, model, expected_features: int = 11) -> bool:
         if hasattr(model, "n_features_in_"):
             return model.n_features_in_ == expected_features
         return hasattr(model, "decision_function")
@@ -348,7 +348,7 @@ class MultiDeviceMLEngine:
                 loaded = joblib.load(self.global_model_path)
                 target_model = loaded[0] if isinstance(loaded, tuple) else loaded
                 
-                if self._verify_model_shape(target_model, expected_features=9):
+                if self._verify_model_shape(target_model, expected_features=11):
                     self.global_engine.model = target_model
                     self.global_engine.warmed_up = True
                     LOGGER.info("Loaded Global ML Model from disk.")
@@ -367,7 +367,7 @@ class MultiDeviceMLEngine:
                 loaded = joblib.load(dev_path)
                 target_model = loaded[0] if isinstance(loaded, tuple) else loaded
                 
-                if self._verify_model_shape(target_model, expected_features=9):
+                if self._verify_model_shape(target_model, expected_features=11):
                     engine.model = target_model
                     engine.warmed_up = True
                     loaded_devs += 1

@@ -43,6 +43,40 @@ class DNSTunnelingHypothesis(Hypothesis):
 
         return score
 
+
+class NetworkIntrusionHypothesis(Hypothesis):
+    def __init__(self):
+        super().__init__("NETWORK_INTRUSION")
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        # Check requirements: Zeek evidence
+        has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
+        has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
+        
+        self.required_satisfied = has_lateral_scan or has_malicious_tls
+        if not self.required_satisfied:
+            return 0.0
+
+        # Strong
+        if has_lateral_scan and has_malicious_tls:
+            self.strong_score += 1.0
+
+        # Contradicting
+        if rep_vector.tier in (1, 2):
+            self.contradicting_score += 1.0
+
+        score = 2.0 # Suspicious
+        if self.strong_score > 0 and self.contradicting_score == 0:
+            score = 3.0 # Probable
+        if self.strong_score > 0.5 and self.contradicting_score == 0 and rep_vector.tier in (3, 4, 5):
+            score = 4.0 # High
+            
+        # Hard escalate for lateral scans (very rarely benign on a home network)
+        if has_lateral_scan and self.contradicting_score == 0:
+            score = 4.0
+
+        return score
+
 class AdvertisingBurstHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("ADVERTISING_BURST")
@@ -62,7 +96,7 @@ class AdvertisingBurstHypothesis(Hypothesis):
 
 class HypothesisEngine:
     def __init__(self):
-        self.attack_hypotheses = [DNSTunnelingHypothesis()]
+        self.attack_hypotheses = [DNSTunnelingHypothesis(), NetworkIntrusionHypothesis()]
         self.benign_hypotheses = [AdvertisingBurstHypothesis()]
 
     def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector) -> Dict[str, Any]:

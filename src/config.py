@@ -97,14 +97,20 @@ DEFAULT_CONFIG = {
     "operator_release_cooldown_seconds": 3600.0, # 1-Hour Cooldown Period
     "pihole_api_url": "http://pihole",
     "pihole_api_password": "",
+    "pihole_api_timeout_seconds": 5.0,
     "pihole_api_path": "/api/v2/domains",  # AUDIT FIX #9: configurable Pi-hole API path
-    "router_webhook_url": "",
+    "router_webhook_url": "http://127.0.0.1:8010/isolate",
+    "router_webhook_timeout_seconds": 5.0,
     "fritz_ip": "192.168.1.1",
     "fritz_user": "admin",
     "fritz_password": "",
     "fritz_api_token": "",
     "fastapi_port": 8010,          # AUDIT FIX #13: document fastapi_port in defaults
     "telegram_allowed_chat_ids": [], # AUDIT FIX #10: allowlist for Telegram command senders (empty = allow all, for backward compat)
+    "router_hosts_url": "http://127.0.0.1:8010/hosts",
+    "router_hosts_timeout_seconds": 5.0,
+    "ml_warmup_samples": 5000,
+    "simulation_mode": False,
 }
 
 class LiveConfig:

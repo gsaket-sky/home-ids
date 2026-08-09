@@ -19,10 +19,25 @@ class DecisionEngine:
         
         attack_score = hyp_results["attack"]["score"]
         benign_score = hyp_results["benign"]["score"]
+        evidence_verification_required = False
+        hypothesis_weight = 0.0
+
+        partial_support = [e for e in ev_store if e.independence_group in {"dns_behavior", "zeek_network", "reputation", "honeypot"}]
+        if partial_support:
+            hypothesis_weight = sum(min(1.0, max(0.0, e.confidence)) for e in partial_support) / max(1, len(partial_support))
+            has_meaningful_partial_signal = any(
+                e.confidence >= 0.5 and abs(float(e.value or 0.0)) > 0.0 for e in partial_support
+            )
+            evidence_verification_required = hypothesis_weight >= 0.5 and (
+                attack_score >= 2.0 or has_meaningful_partial_signal
+            )
         
-        # Calculate independence groups
-        attack_evidence = [e for e in ev_store if e.type.startswith("dns") or e.type == "reputation"]
-        independence_groups = set(e.independence_group for e in attack_evidence)
+        # Calculate independence groups from the evidence that materially contributes to attack scoring.
+        attack_evidence = [
+            e for e in ev_store
+            if e.type.startswith("dns") or e.type == "reputation" or e.type.startswith("zeek") or e.independence_group in {"reputation", "zeek_network", "honeypot"}
+        ]
+        independence_groups = {e.independence_group for e in attack_evidence if e.independence_group}
         num_independent_sources = len(independence_groups)
         
         state = DecisionState.BENIGN
@@ -65,5 +80,7 @@ class DecisionEngine:
             "explanation": explanation,
             "threat_confidence": threat_confidence,
             "independent_sources": num_independent_sources,
-            "hypotheses": hyp_results
+            "hypotheses": hyp_results,
+            "evidence_verification_required": evidence_verification_required,
+            "hypothesis_weight": hypothesis_weight,
         }

@@ -100,37 +100,40 @@ class ThreatIntel:
         preventing malicious subdomains on shared platforms (*.github.io, *.herokuapp.com)
         from bypassing IPS blocking.
         """
-        if not domain:
-            return False
-        domain = domain.lower().strip(".")
-        
-        # 1. Exact match check against static allowlist OR Tranco top 10k
-        if domain in self._static_allowlist or domain in self._tranco_top10k:
-            LOGGER.debug("Allowlist match (Exact): %s", domain)
-            return True
+        try:
+            if not domain:
+                return False
+            domain = domain.lower().strip(".")
+            parts = domain.split(".")
             
-        # 2. Parent domain match check against curated _static_allowlist OR dynamic trust cache
-        parts = domain.split(".")
-        if len(parts) >= 2:
-            parent = ".".join(parts[-2:])
-            if parent in self._static_allowlist:
-                LOGGER.debug("Allowlist match (Parent): %s", parent)
+            # 1. Exact match check against static allowlist OR Tranco top 10k
+            if domain in self._static_allowlist or domain in self._tranco_top10k:
+                LOGGER.debug("Allowlist match (Exact): %s", domain)
                 return True
                 
-        # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains)
-        if self.fp_engine:
-            try:
-                trust_cache = self.fp_engine.get_dynamic_trust_cache()
-                base_dom = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-                if base_dom in trust_cache or domain in trust_cache:
-                    LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", base_dom)
+            # 2. Parent domain match check against curated _static_allowlist OR dynamic trust cache
+            if len(parts) >= 2:
+                parent = ".".join(parts[-2:])
+                if parent in self._static_allowlist:
+                    LOGGER.debug("Allowlist match (Parent): %s", parent)
                     return True
-            except Exception:
-                pass
-                LOGGER.debug("Allowlist match (Parent %s): %s", parent, domain)
-                return True
-                
-        return False
+                    
+            # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains)
+            if self.fp_engine:
+                try:
+                    trust_cache = self.fp_engine.get_dynamic_trust_cache()
+                    base_dom = ".".join(parts[-2:]) if len(parts) >= 2 else domain
+                    if base_dom in trust_cache or domain in trust_cache:
+                        LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", base_dom)
+                        return True
+                except Exception as e:
+                    LOGGER.error("Error reading dynamic trust cache for %s: %s", domain, e)
+                    return False
+                    
+            return False
+        except Exception as exc:
+            LOGGER.warning("Allowlist evaluation failed for %s: %s", domain, exc)
+            return False
 
     def lookup_ip(self, ip: str) -> Optional[dict]:
         if not ip or ip == "unknown": 

@@ -219,6 +219,29 @@ class IPSMitigator:
             ips_state["operator_released_devices"] = self._operator_released_devices
             self.state_manager.save_ips_state(ips_state)
 
+    def _ensure_tarpit_target(self, client_ip: str, mac_addr: str, hostname: str, dev_id: str) -> None:
+        """Create or refresh a tarpit target using the latest MAC if it becomes known later."""
+        if not client_ip or client_ip == "unknown":
+            return
+
+        with self._lock:
+            target = self._tarpit_active_targets.get(client_ip)
+            if target is None:
+                self._tarpit_active_targets[client_ip] = {"mac": mac_addr or "unknown", "hostname": hostname, "dev_id": dev_id}
+                ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr or "unknown").set(1.0)
+                LOGGER.info("🛡️ Registered tarpit target for %s using MAC %s", client_ip, mac_addr or "unknown")
+            else:
+                if mac_addr and mac_addr != "unknown" and target.get("mac") != mac_addr:
+                    target["mac"] = mac_addr
+                    target["hostname"] = hostname
+                    target["dev_id"] = dev_id
+                    ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
+                    LOGGER.info("🛡️ Updated tarpit target %s with latest MAC %s", client_ip, mac_addr)
+                else:
+                    target["hostname"] = hostname or target.get("hostname", "unknown")
+                    target["dev_id"] = dev_id or target.get("dev_id", dev_id)
+            self._save_queues()
+
     def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "") -> str:
         """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, DOMAIN BLOCKED, or UNBLOCKED)."""
         with self._lock:
@@ -337,15 +360,21 @@ class IPSMitigator:
             elif interactive_mode and not lateral_threat:
                 LOGGER.info("🛡️ [INTERACTIVE MODE] Layer-2 Tarpit for %s queued for Telegram approval.", client_ip)
             else:
-                with self._lock:
-                    if client_ip not in self._tarpit_active_targets:
-                        if is_operator_released and lateral_threat:
-                            LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
-                        LOGGER.warning("High risk detected. Activating Scapy Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
-                        self._tarpit_active_targets[client_ip] = {"mac": mac_addr, "hostname": hostname, "dev_id": dev_id}
-                        self._save_queues()
-                        ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
-                        LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, client_ip)
+                if not mac_addr or mac_addr == "unknown":
+                    ips_errors_metric.labels(target_type="mac_unknown_tarpit").inc()
+                    LOGGER.warning("⚠️ MAC address unknown for %s; tarpit activation deferred until a later Zeek/ARP identification update.", client_ip)
+                else:
+                    with self._lock:
+                        if client_ip not in self._tarpit_active_targets:
+                            if is_operator_released and lateral_threat:
+                                LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
+                            LOGGER.warning("High risk detected. Activating Scapy Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
+                            self._tarpit_active_targets[client_ip] = {"mac": mac_addr, "hostname": hostname, "dev_id": dev_id}
+                            self._save_queues()
+                            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
+                            LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, client_ip)
+                        else:
+                            self._ensure_tarpit_target(client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id)
 
     def _arp_tarpit_loop(self) -> None:
         while True:
@@ -390,11 +419,15 @@ class IPSMitigator:
             LOGGER.warning("⚠️ Pi-hole API URL is not configured. Cannot enforce network block for domain %s.", domain)
             return False
 
+        timeout_seconds = float(self.config.get("pihole_api_timeout_seconds", 5.0))
+        if timeout_seconds <= 0:
+            timeout_seconds = 5.0
+
         try:
             resp = self.session.post(
                 f"{api_url}{api_path}",
                 json={"domain": domain, "type": "black", "comment": comment},
-                timeout=5.0
+                timeout=timeout_seconds
             )
             if resp.status_code in (200, 201, 204):
                 self._finalize_block(domain, hostname, device_ip, dev_id)
@@ -424,21 +457,52 @@ class IPSMitigator:
                 ips_queue_status_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(meta["attempts"])
             self._save_queues()
 
+    def _prune_dead_letter_entries(self, now=None, max_items=500, max_age_seconds=30 * 24 * 3600):
+        if now is None:
+            now = time.time()
+
+        with self._lock:
+            if max_age_seconds is not None:
+                stale_dead = [
+                    dom for dom, meta in list(self._dead_letter.items())
+                    if now - float(meta.get("ts", 0.0)) > max_age_seconds
+                ]
+                for dom in stale_dead:
+                    meta = self._dead_letter.pop(dom, {})
+                    try:
+                        ips_dead_letter_gauge.remove(meta.get("device_id", ""), meta.get("hostname", ""), dom)
+                    except Exception:
+                        pass
+
+            while len(self._dead_letter) > max_items:
+                oldest = min(self._dead_letter.items(), key=lambda item: item[1].get("ts", 0.0))
+                meta = self._dead_letter.pop(oldest[0], {})
+                try:
+                    ips_dead_letter_gauge.remove(meta.get("device_id", ""), meta.get("hostname", ""), oldest[0])
+                except Exception:
+                    pass
+
     def _add_to_dead_letter(self, domain, hostname, dev_id, error_msg):
         with self._lock:
-            self._dead_letter[domain] = {"hostname": hostname, "device_id": dev_id, "error": error_msg}
+            self._dead_letter[domain] = {"hostname": hostname, "device_id": dev_id, "error": error_msg, "ts": time.time()}
+            self._prune_dead_letter_entries(now=time.time())
             ips_dead_letter_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(1.0)
             self._save_queues()
 
     def _finalize_block(self, domain, hostname, device_ip, dev_id):
         timestamp = time.time()
-        # C3 FIX: Do NOT call flush_to_disk() under the state manager lock.
-        # Snapshot and update IPS state under the lock, then flush outside the lock.
+        # Snapshot and update IPS state while holding the state-manager lock, then flush outside the lock.
         with self.state_manager._global_lock:
             ips_state = self.state_manager.get_ips_state()
-            ips_state["blocked_domains"][domain] = {"device_id": dev_id, "hostname": hostname, "device_ip": device_ip, "timestamp": timestamp}
+            ips_state["blocked_domains"][domain] = {
+                "device_id": dev_id,
+                "hostname": hostname,
+                "device_ip": device_ip,
+                "timestamp": timestamp,
+                "status": "active",
+                "persisted": True,
+            }
             self.state_manager.save_ips_state(ips_state)
-        # Flush state snapshot to disk outside the global lock so pipeline is not stalled
         self.state_manager.flush_to_disk()
 
         with self._lock:
@@ -463,6 +527,7 @@ class IPSMitigator:
             pass
             
         LOGGER.warning("🛑 [PI-HOLE IPS] Blocked malicious domain %s (Device: %s)", domain, hostname)
+        return True
 
     def _retry_worker(self):
         """H4 FIX: Background retry worker with exponential backoff per-domain attempt count."""
@@ -472,6 +537,7 @@ class IPSMitigator:
                 continue
             with self._lock:
                 items_to_retry = list(self._retry_queue.items())
+                self._prune_dead_letter_entries(now=time.time())
             for domain, meta in items_to_retry:
                 # Exponential backoff: wait 30s × 2^attempts before each retry
                 # attempt 1 → 60s, attempt 2 → 120s, attempt 3 → 240s, attempt 4 → 480s
@@ -490,7 +556,10 @@ class IPSMitigator:
         
         if api_url and self.config.get("ips_pihole_enabled", True):
             try:
-                self.session.delete(f"{api_url}/api/v2/domains", json={"domain": domain, "type": "black"}, timeout=5.0)
+                timeout_seconds = float(self.config.get("pihole_api_timeout_seconds", 5.0))
+                if timeout_seconds <= 0:
+                    timeout_seconds = 5.0
+                self.session.delete(f"{api_url}/api/v2/domains", json={"domain": domain, "type": "black"}, timeout=timeout_seconds)
             except Exception as e:
                 ips_errors_metric.labels(target_type="pihole_unblock_api").inc()
 
@@ -510,11 +579,14 @@ class IPSMitigator:
         return True
 
     def _isolate_device_router(self, mac: str, ip: str, hostname: str, dev_id: str, reason: str) -> bool:
-        webhook_url = self.config.get("router_webhook_url", "http://127.0.0.1:8010/isolate")
+        webhook_url = self.config.get("router_webhook_url") or "http://127.0.0.1:8010/isolate"
         api_token = self.config.get("fritz_api_token", "")
         try:
             headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
-            resp = self.session.post(webhook_url, json={"action": "isolate", "ip": ip, "mac": mac, "reason": reason}, headers=headers, timeout=5.0)
+            timeout_seconds = float(self.config.get("router_webhook_timeout_seconds", 5.0))
+            if timeout_seconds <= 0:
+                timeout_seconds = 5.0
+            resp = self.session.post(webhook_url, json={"action": "isolate", "ip": ip, "mac": mac, "reason": reason}, headers=headers, timeout=timeout_seconds)
             if resp.status_code == 202:
                 ips_isolations_metric.labels(device=dev_id, hostname=hostname, mac=mac).inc()
                 LOGGER.critical("✅ [ROUTER IPS] Hardware isolation request accepted for %s (%s)", hostname, mac)
@@ -525,11 +597,14 @@ class IPSMitigator:
         return False
 
     def _unisolate_device_router(self, mac: str, ip: str, hostname: str, dev_id: str) -> bool:
-        webhook_url = self.config.get("router_webhook_url", "http://127.0.0.1:8010/isolate")
+        webhook_url = self.config.get("router_webhook_url") or "http://127.0.0.1:8010/isolate"
         api_token = self.config.get("fritz_api_token", "")
         try:
             headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
-            resp = self.session.post(webhook_url, json={"action": "unisolate", "ip": ip, "mac": mac, "reason": "Risk subsided"}, headers=headers, timeout=5.0)
+            timeout_seconds = float(self.config.get("router_webhook_timeout_seconds", 5.0))
+            if timeout_seconds <= 0:
+                timeout_seconds = 5.0
+            resp = self.session.post(webhook_url, json={"action": "unisolate", "ip": ip, "mac": mac, "reason": "Risk subsided"}, headers=headers, timeout=timeout_seconds)
             if resp.status_code == 202:
                 with self._lock:
                     if mac in self._router_isolated_devices:

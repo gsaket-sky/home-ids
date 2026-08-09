@@ -121,10 +121,13 @@ class EnginePipeline:
         safe_ips = set(self.config.get("safe_ips", []))
         safe_patterns = set(self.config.get("safe_host_patterns", []))
 
+        honeypot_ips = set(self.config.get("honeypot_ips", []))
+        if bool(self.config.get("ips_enabled", True)) and not honeypot_ips and bool(self.config.get("ips_router_enabled", False)):
+            LOGGER.warning("⚠️ IPS router isolation is enabled but no honeypot IPs are configured. Router isolation will remain inert until honeypot_ips is populated.")
         self.zeek_fx = ZeekFeatureExtractor(
             home_subnets=[self.config.get("home_subnet", "192.168.1.0/24")],
             ti_engine=self.ti_engine, geoip_engine=self.geoip_engine,
-            safe_ips=safe_ips, honeypot_ips=set(self.config.get("honeypot_ips", [])), safe_patterns=safe_patterns,
+            safe_ips=safe_ips, honeypot_ips=honeypot_ips, safe_patterns=safe_patterns,
         )
 
         self.zeek_collector = ZeekCollector(log_dir=self.config.get("zeek_log_dir", "/opt/zeek/logs/current"), poll_interval=float(self.config.get("poll_interval", 2.0)), state_dir=state_dir)
@@ -285,6 +288,11 @@ class EnginePipeline:
                         state.rolling.domains.pop(dom, None)
                         del state.rolling.domain_timestamps[dom]
 
+                    if len(state.rolling.domain_timestamps) > 10000:
+                        for dom in list(state.rolling.domain_timestamps.keys())[:2000]:
+                            state.rolling.domains.pop(dom, None)
+                            state.rolling.domain_timestamps.pop(dom, None)
+
                     # Re-derive blocked/nxdomain counts from the bounded events deque
                     # so they stay accurate as old events age out.
                     state.rolling.blocked = sum(1 for _, _, sc in state.rolling.events if sc in BLOCKED_STATUSES)
@@ -319,7 +327,7 @@ class EnginePipeline:
             # since it needs live state (rolling window, EWMA baselines).
             _zeek_features = {**self.zeek_fx.get_features(client_ip), **self.zeek_fx.get_last_connection_meta(client_ip)}
 
-            # ─── PHASE 4: ML scoring + risk computation (re-acquire lock) ──────────
+            # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
             with self.state_manager.lock_device(dev_id) as state:
                 features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
                 features["sigma_shift"] = self.fp_engine.get_sigma_shift(dev_id)
@@ -347,7 +355,7 @@ class EnginePipeline:
                 top_domain = target_malicious_domain
                 dest_ip = features.get("last_dest_ip", "unknown")
 
-            # ─── PHASE 3: Expensive I/O outside the lock ────────────────────────────
+            # ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
             ti_risk, ti_match = 0.0, 0
             if self.ti_engine:
                 for domain in _rolling_domain_keys:
@@ -393,7 +401,7 @@ class EnginePipeline:
                 ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
             features["vt_risk"] = vt_risk
 
-            # ─── PHASE 4: ML scoring + risk computation (re-acquire lock) ──────────
+            # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
             with self.state_manager.lock_device(dev_id) as state:
                 ml_score = 0.0
                 if self.ml_registry:
@@ -413,8 +421,24 @@ class EnginePipeline:
                 if features.get("zeek_honeypot_hits", 0) > 0:
                     self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot"))
                 
+                if features.get("zeek_lateral_moves", 0) > 0:
+                    self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan"))
+                
+                reputation_value = max(ti_risk, abuse_risk, vt_risk)
+                if ti_match or abuse_risk > 0.0 or vt_risk > 0.0:
+                    self.evidence_store.add(Evidence(
+                        type="reputation",
+                        source="threat_intel",
+                        timestamp=now,
+                        device=dev_id,
+                        value=reputation_value,
+                        confidence=0.95 if reputation_value >= 4.0 else 0.8,
+                        independence_group="reputation",
+                        provenance="detector:reputation"
+                    ))
+                
                 # 2. Get Reputation
-                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0)
+                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk)
                 
                 # 3. Decision Engine
                 active_evidence = self.evidence_store.get_for_device(dev_id)
@@ -486,7 +510,13 @@ class EnginePipeline:
                                 "data_type": dest_proto, "payload_size_bytes": outbound_bytes, "payload_classification": data_classification,
                                 "queried_domain": target_malicious_domain,
                             },
-                            "risk": risk, "signature": primary_sig, "factors": factors, "features": features, "schema": "home_ids_alerts_v3"
+                            "risk": risk,
+                            "signature": primary_sig,
+                            "factors": factors,
+                            "features": features,
+                            "schema": "home_ids_alerts_v3",
+                            "evidence_verification_required": decision.get("evidence_verification_required", False),
+                            "hypothesis_weight": decision.get("hypothesis_weight", 0.0),
                         }
 
                         # =============================================================
@@ -601,8 +631,13 @@ class EnginePipeline:
                             alert_msg += (
                                 f"🛡️ *Mitigation & Confidence*\n"
                                 f"- Containment: `{containment_status}`\n"
-                                f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n\n"
+                                f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n"
                             )
+                            if decision.get("evidence_verification_required", False):
+                                alert_msg += "- Verification: `Required` (partial hypothesis support)\n"
+                            else:
+                                alert_msg += "- Verification: `Not required`\n"
+                            alert_msg += "\n"
 
                             alert_msg += "🧠 *BEST EXPLANATION:* " + decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat") + "\n"
                             alert_msg += f"⚖️ *Threat Confidence:* {int(decision.get('threat_confidence', 0) * 100)}%\n\n"
@@ -671,16 +706,10 @@ class EnginePipeline:
                 if hasattr(self, 'evidence_store'): self.evidence_store.clear_device(e_dev_id)
             self._last_prune = now
 
-        if now - self._last_flush > 60.0:
-            LOGGER.debug("Triggering periodic state/model flush to disk.")
-            self.state_manager.flush_to_disk()
-            if self.ml_registry: self.ml_registry.save_models()
-            self._last_flush = now
-
         # IPC Split-Brain Reconciliation: detect if the Uvicorn IPC endpoints wrote
         # a sentinel file after modifying state from the separate process. If so, pull
         # the updated IPS state (tarpit_targets, router_isolated_devices, blocked_domains) back into live memory
-        # so the pipeline doesn't revert state changes made by the Telegram operator.
+        # before the periodic flush so the latest operator action is not overwritten.
         _sentinel = self.state_manager.state_path.parent / ".ipc_sync_signal"
         if _sentinel.exists():
             try:
@@ -696,6 +725,12 @@ class EnginePipeline:
                     LOGGER.info("✅ [IPC SYNC] IPSMitigator in-memory state reconciled after Telegram release.")
             except Exception as _ipc_exc:
                 LOGGER.warning("IPC sentinel reconciliation failed: %s", _ipc_exc)
+
+        if now - self._last_flush > 60.0:
+            LOGGER.debug("Triggering periodic state/model flush to disk.")
+            self.state_manager.flush_to_disk()
+            if self.ml_registry: self.ml_registry.save_models()
+            self._last_flush = now
 
         LOGGER.debug("Pipeline step finished.")
 
@@ -738,7 +773,6 @@ class EnginePipeline:
         best_susp_domain = None
         max_susp_score = 0.0
 
-        from utils import is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy
 
         for dom in domains_dict.keys():
             if not dom or dom == "unknown":

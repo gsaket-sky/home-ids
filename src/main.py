@@ -76,6 +76,9 @@ def main():
     webhook_log_file = None  # AUDIT FIX #2: Always initialize to None to prevent UnboundLocalError
     if CONFIG.get("ips_router_enabled", False):
         fastapi_port = int(CONFIG.get("fastapi_port", 8010))
+        if fastapi_port <= 0:
+            LOGGER.warning("Configured fastapi_port %s is invalid; falling back to 8010.", fastapi_port)
+            fastapi_port = 8010
         LOGGER.info("🔌 Starting internal FastAPI Router Webhook daemon on port %d...", fastapi_port)
         try:
             # ARCHITECTURAL FIX: Pipe Uvicorn stdout/stderr to a dedicated log file 

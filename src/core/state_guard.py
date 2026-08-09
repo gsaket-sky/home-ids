@@ -35,6 +35,7 @@ class StateManager:
             "tarpit_targets": {},
             "router_isolated_devices": {},
             "operator_released_devices": {},
+            "last_sync_timestamp": 0.0,
         }
         self._global_lock = threading.RLock()
         # AUDIT FIX #7: Reverse IP → device_id index for O(1) update_device_mac()
@@ -115,7 +116,8 @@ class StateManager:
 
     def register_existing_state(self, state: DeviceState) -> None:
         with self._global_lock:
-            self._states[device_id := state.device_id] = state
+            device_id = state.device_id
+            self._states[device_id] = state
             self._states.move_to_end(device_id)
             # Keep reverse index in sync
             self._ip_to_device_id[state.client_ip] = device_id
@@ -169,7 +171,16 @@ class StateManager:
 
     def save_ips_state(self, ips_data: Dict[str, Any]) -> None:
         with self._global_lock:
-            self._ips_state = ips_data
+            if not isinstance(ips_data, dict):
+                raise TypeError("ips_data must be a dictionary")
+            self._ips_state = dict(ips_data)
+            self._ips_state.setdefault("blocked_domains", {})
+            self._ips_state.setdefault("retry_queue", {})
+            self._ips_state.setdefault("dead_letter", {})
+            self._ips_state.setdefault("tarpit_targets", {})
+            self._ips_state.setdefault("router_isolated_devices", {})
+            self._ips_state.setdefault("operator_released_devices", {})
+            self._ips_state.setdefault("last_sync_timestamp", 0.0)
 
     def load_historical_ledger(self) -> int:
         ledger_path = self.state_path.parent / "ips_historical_ledger.jsonl"
@@ -237,6 +248,9 @@ class StateManager:
                 last_active = max(getattr(state, "last_alert_time", 0.0), getattr(state, "last_baseline_update", 0.0))
                 if last_active > 0 and (now - last_active) > max_idle_seconds:
                     pruned_devices.append((dev_id, state.hostname, state.device_type))
+                    client_ip = getattr(state, "client_ip", "")
+                    if client_ip in self._ip_to_device_id:
+                        del self._ip_to_device_id[client_ip]
                     del self._states[dev_id]
 
         if pruned_devices:
@@ -245,7 +259,10 @@ class StateManager:
 
     def _prune_lru_capacity(self) -> None:
         while len(self._states) > self.max_devices:
-            evicted_id, _ = self._states.popitem(last=False)
+            evicted_id, state = self._states.popitem(last=False)
+            client_ip = getattr(state, "client_ip", "")
+            if client_ip and self._ip_to_device_id.get(client_ip) == evicted_id:
+                del self._ip_to_device_id[client_ip]
             LOGGER.warning("StateManager reached max capacity (%d). Evicted LRU device: %s", self.max_devices, evicted_id)
 
     def load_from_disk(self, alpha: float = 0.05) -> int:

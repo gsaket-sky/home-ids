@@ -130,15 +130,17 @@ class ZeekCollector:
         self._tailers = {}
         self._events = []
         self._lock = threading.Lock()
+        self._tailers_lock = threading.Lock()
         self._available = False
         self._last_init_attempt = 0.0
         self._init_tailers()
 
     def update_log_dir(self, new_dir: str) -> None:
-        self.log_dir = Path(new_dir)
-        self._available = False
-        self._tailers.clear()
-        LOGGER.info("Log directory dynamically updated to: %s", new_dir)
+        with self._tailers_lock:
+            self.log_dir = Path(new_dir)
+            self._available = False
+            self._tailers.clear()
+            LOGGER.info("Log directory dynamically updated to: %s", new_dir)
         self._init_tailers()
 
     def _init_tailers(self) -> None:
@@ -149,12 +151,13 @@ class ZeekCollector:
                 self._available = False
                 return
 
-            if not self._tailers:
-                for filename, etype in _LOG_FILES.items():
-                    self._tailers[filename] = ZeekLogTailer(self.log_dir / filename, etype, self._on_event, self.state_dir)
+            with self._tailers_lock:
+                if not self._tailers:
+                    for filename, etype in _LOG_FILES.items():
+                        self._tailers[filename] = ZeekLogTailer(self.log_dir / filename, etype, self._on_event, self.state_dir)
 
-            self._available = True
-            LOGGER.info("✅ Zeek Collector initialized successfully on directory: %s", self.log_dir)
+                self._available = True
+                LOGGER.info("✅ Zeek Collector initialized successfully on directory: %s", self.log_dir)
         except Exception as exc:
             LOGGER.error("Failed to initialize Zeek tailers on %s: %s", self.log_dir, exc)
             self._available = False
@@ -171,6 +174,8 @@ class ZeekCollector:
         with self._lock:
             if len(self._events) < 100000:
                 self._events.append(event)
+            else:
+                LOGGER.warning("Zeek event buffer overflow; dropping event from %s", event.get("id.orig_h", "unknown"))
 
     def poll(self) -> list[dict]:
         if not self._available:
@@ -179,7 +184,9 @@ class ZeekCollector:
             if not self._available:
                 return []
 
-        for t in self._tailers.values(): 
+        with self._tailers_lock:
+            tailers = list(self._tailers.values())
+        for t in tailers:
             t.poll()
 
         with self._lock:

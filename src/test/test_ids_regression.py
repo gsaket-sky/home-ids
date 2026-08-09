@@ -339,6 +339,52 @@ class TestComprehensiveRegression(unittest.TestCase):
         m30, v30, init30, n30 = baseline.get_stats_interpolated(hour=10, minute=30)
         self.assertAlmostEqual(m30, 15.0, delta=1.5)
 
+    def test_16_tarpit_target_updates_mac_when_later_identified(self):
+        """Verifies that an existing tarpit target is refreshed with the latest MAC once Zeek identifies it."""
+        manager = StateManager(state_path=str(self.state_path), max_devices=100)
+        ips = IPSMitigator(config=self.config, state_manager=manager)
+
+        ips._ensure_tarpit_target(client_ip="192.168.1.99", mac_addr="00:11:22:33:44:55", hostname="mobile-device", dev_id="dev-99")
+        self.assertEqual(ips._tarpit_active_targets["192.168.1.99"]["mac"], "00:11:22:33:44:55")
+
+        ips._ensure_tarpit_target(client_ip="192.168.1.99", mac_addr="aa:bb:cc:dd:ee:ff", hostname="mobile-device", dev_id="dev-99")
+        self.assertEqual(ips._tarpit_active_targets["192.168.1.99"]["mac"], "aa:bb:cc:dd:ee:ff")
+
+    def test_17_pihole_block_persists_status_and_survives_restart(self):
+        """Verifies Pi-hole block state is persisted with an explicit status so it survives reloads."""
+        manager = StateManager(state_path=str(self.state_path), max_devices=100)
+        ips = IPSMitigator(config=self.config, state_manager=manager)
+
+        success = ips._finalize_block("evil.example", "test-host", "192.168.1.50", "dev-50")
+        self.assertTrue(success)
+
+        ips_state = manager.get_ips_state()
+        meta = ips_state["blocked_domains"]["evil.example"]
+        self.assertEqual(meta.get("status"), "active")
+        self.assertTrue(meta.get("persisted", False))
+
+        reloaded = StateManager(state_path=str(self.state_path), max_devices=100)
+        reloaded.load_from_disk()
+        reloaded_state = reloaded.get_ips_state()
+        self.assertEqual(reloaded_state["blocked_domains"]["evil.example"].get("status"), "active")
+
+    def test_18_evidence_verification_is_triggered_for_partial_hypothesis_support(self):
+        """Verifies that weak but relevant evidence contributes to the hypothesis score and triggers verification."""
+        from core.decision_engine import DecisionEngine
+        from intelligence.hypotheses.evidence import Evidence
+        from intelligence.reputation.classifier import ReputationClassifier
+
+        engine = DecisionEngine()
+        rep = ReputationClassifier().classify("example.com", ti_score=0.0, abuse_score=0.0, vt_score=0.0)
+        ev_store = [
+            Evidence(type="dns_rate", source="pihole", timestamp=1.0, device="dev", value=70.0, confidence=0.6, independence_group="dns_behavior", provenance="detector:dns"),
+            Evidence(type="dns_entropy", source="pihole", timestamp=1.0, device="dev", value=4.2, confidence=0.6, independence_group="dns_behavior", provenance="detector:dns")
+        ]
+
+        decision = engine.evaluate(ev_store, rep)
+        self.assertTrue(decision.get("evidence_verification_required", False))
+        self.assertGreaterEqual(decision.get("hypothesis_weight", 0.0), 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

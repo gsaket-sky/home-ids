@@ -71,6 +71,13 @@ class MetricsExporter:
     pipeline performance, and GeoIP traffic analysis.
     """
 
+    def _get_metric_keys(self, metric) -> list:
+        keys = []
+        for mf in metric.collect():
+            for sample in mf.samples:
+                keys.append(tuple(sample.labels[l] for l in metric._labelnames))
+        return set(keys)
+
     def remove_device_metric_labels(self, dev_id: str, hostname: str, device_type: str, keep_safe_flag: bool = False) -> None:
         if not dev_id:
             return
@@ -81,8 +88,7 @@ class MetricsExporter:
             if keep_safe_flag and metric is safe_device_metric:
                 continue
             try:
-                with metric._lock:
-                    keys_to_remove = [k for k in metric._metrics.keys() if k[0] == str_id]
+                keys_to_remove = [k for k in self._get_metric_keys(metric) if k[0] == str_id]
                 for k in keys_to_remove:
                     try:
                         metric.remove(*k)
@@ -97,8 +103,7 @@ class MetricsExporter:
             
         for metric in _DEVICE_GAUGES:
             try:
-                with metric._lock:
-                    stale_keys = [k for k in metric._metrics.keys() if k[0] == str_dev_id and k[1] != current_host]
+                stale_keys = [k for k in self._get_metric_keys(metric) if k[0] == str_dev_id and k[1] != current_host]
                 for k in stale_keys:
                     try:
                         metric.remove(*k)
@@ -110,29 +115,25 @@ class MetricsExporter:
     def garbage_collect_ips_metrics(self, ips_state: dict) -> None:
         try:
             valid_blocks = set(ips_state.get("blocked_domains", {}).keys())
-            with ips_active_blocks_gauge._lock:
-                stale_blocks = [k for k in ips_active_blocks_gauge._metrics.keys() if k[2] not in valid_blocks]
+            stale_blocks = [k for k in self._get_metric_keys(ips_active_blocks_gauge) if k[2] not in valid_blocks]
             for k in stale_blocks:
                 try: ips_active_blocks_gauge.remove(*k)
                 except KeyError: pass
 
             valid_retries = set(ips_state.get("retry_queue", {}).keys())
-            with ips_queue_status_gauge._lock:
-                stale_retries = [k for k in ips_queue_status_gauge._metrics.keys() if k[2] not in valid_retries]
+            stale_retries = [k for k in self._get_metric_keys(ips_queue_status_gauge) if k[2] not in valid_retries]
             for k in stale_retries:
                 try: ips_queue_status_gauge.remove(*k)
                 except KeyError: pass
 
             valid_dead = set(ips_state.get("dead_letter", {}).keys())
-            with ips_dead_letter_gauge._lock:
-                stale_dead = [k for k in ips_dead_letter_gauge._metrics.keys() if k[2] not in valid_dead]
+            stale_dead = [k for k in self._get_metric_keys(ips_dead_letter_gauge) if k[2] not in valid_dead]
             for k in stale_dead:
                 try: ips_dead_letter_gauge.remove(*k)
                 except KeyError: pass
                 
             valid_tarpit_macs = {meta.get("mac") for meta in ips_state.get("tarpit_targets", {}).values()}
-            with ips_tarpit_active._lock:
-                stale_tarpits = [k for k in ips_tarpit_active._metrics.keys() if k[2] not in valid_tarpit_macs]
+            stale_tarpits = [k for k in self._get_metric_keys(ips_tarpit_active) if k[2] not in valid_tarpit_macs]
             for k in stale_tarpits:
                 try:
                     ips_tarpit_active.labels(*k).set(0.0)
@@ -140,8 +141,7 @@ class MetricsExporter:
                 except KeyError: pass
 
             valid_router_macs = set(ips_state.get("router_isolated_devices", {}).keys())
-            with ips_router_isolated_active._lock:
-                stale_routers = [k for k in ips_router_isolated_active._metrics.keys() if k[2] not in valid_router_macs]
+            stale_routers = [k for k in self._get_metric_keys(ips_router_isolated_active) if k[2] not in valid_router_macs]
             for k in stale_routers:
                 try:
                     ips_router_isolated_active.labels(*k).set(0.0)

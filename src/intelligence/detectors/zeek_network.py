@@ -8,27 +8,26 @@ class ZeekNetworkDetector:
         now = time.time()
         
         for evt in zeek_events:
-            # Check for lateral movement (port scans, etc)
-            if evt.get("type") == "lateral_movement":
+            evt_type = evt.get("type")
+            if evt_type in ("malicious_ja3", "malicious_ja4"):
                 ev_list.append(Evidence(
-                    type="zeek_lateral_scan",
+                    type=evt_type,
                     source="zeek",
                     timestamp=now,
                     device=device,
                     value=1.0,
-                    confidence=0.9,
+                    confidence=evt.get("confidence", 0.95),
                     independence_group="zeek_network",
-                    provenance="detector:zeek:lateral_scan"
+                    provenance=f"detector:zeek:{evt_type}"
                 ))
-            # Check for general zeek notices
-            elif evt.get("type") == "notice":
+            elif evt_type == "zeek_notice":
                 ev_list.append(Evidence(
                     type="zeek_notice",
                     source="zeek",
                     timestamp=now,
                     device=device,
                     value=1.0,
-                    confidence=0.5,
+                    confidence=evt.get("confidence", 0.75),
                     independence_group="zeek_network",
                     provenance="detector:zeek:notice"
                 ))

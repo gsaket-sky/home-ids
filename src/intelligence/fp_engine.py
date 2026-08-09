@@ -245,8 +245,9 @@ class AutonomousFPEngine:
         LOGGER.info("  Trust cache TTL       : %d days", TRUST_CACHE_TTL_SECONDS // 86400)
         LOGGER.info("="*70)
 
-        # Load persisted trust cache from previous session
+        # Load persisted trust cache and sigma-shifts from previous session
         self._load_trust_cache()
+        self._load_sigma_shifts()
 
         # Set model status Prometheus gauges to 0 until models are ready
         fp_engine_lgbm_model_status.set(0.0)
@@ -923,9 +924,38 @@ class AutonomousFPEngine:
             p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
         except Exception: pass
 
+    def _load_sigma_shifts(self):
+        path = self._state_dir / "fp_sigma_shifts.json"
+        if not path.exists():
+            LOGGER.info("No existing sigma-shift state at %s. Starting fresh.", path)
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            now = time.time()
+            pruned = 0
+            with self._lock:
+                for device_id, shift in list(raw.items()):
+                    if isinstance(shift, (int, float)):
+                        self._sigma_shifts[device_id] = float(shift)
+                    else:
+                        pruned += 1
+                self._prune_expired_fp_state(now)
+            LOGGER.info("✅ Sigma shift state loaded: %d entries, %d pruned.", len(self._sigma_shifts), pruned)
+        except Exception as exc:
+            LOGGER.error("Failed to load sigma shifts: %s", exc, exc_info=True)
+
     # ==========================================================================
     # TRUST CACHE PERSISTENCE
     # ==========================================================================
+
+    def _prune_expired_fp_state(self, now: Optional[float] = None) -> None:
+        if now is None:
+            now = time.time()
+        if self._trust_cache:
+            expired_domains = [domain for domain, added_at in self._trust_cache.items() if (now - float(added_at)) >= TRUST_CACHE_TTL_SECONDS]
+            for domain in expired_domains:
+                self._trust_cache.pop(domain, None)
+        self._sigma_shifts = {k: v for k, v in self._sigma_shifts.items() if isinstance(v, (int, float))}
 
     def _load_trust_cache(self):
         """

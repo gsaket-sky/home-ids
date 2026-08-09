@@ -93,8 +93,12 @@ def execute_fritzbox_isolation(action: str, mac_address: str, ip_address: str, r
         LOGGER.error("❌ [CONFIG ERROR] Fritz!Box password is empty in configuration.")
         return
 
+    timeout_seconds = float(CONFIG.get("router_webhook_timeout_seconds", 5.0))
+    if timeout_seconds <= 0:
+        timeout_seconds = 5.0
+
     try:
-        fc = FritzConnection(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=5.0)
+        fc = FritzConnection(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
         try:
             fc.call_action(
                 "X_AVM-DE_HostFilter:1", 
@@ -143,8 +147,12 @@ async def get_dhcp_hosts(token: str = Depends(verify_token)):
     if not fritz_pass:
         raise HTTPException(status_code=500, detail="FritzBox credentials not configured.")
 
+    timeout_seconds = float(CONFIG.get("router_hosts_timeout_seconds", 5.0))
+    if timeout_seconds <= 0:
+        timeout_seconds = 5.0
+
     try:
-        fh = FritzHosts(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=5.0)
+        fh = FritzHosts(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
         hosts_info = fh.get_hosts_info()
         parsed_hosts = []
         for host in hosts_info:
