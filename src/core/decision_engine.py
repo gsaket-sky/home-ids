@@ -3,6 +3,12 @@ from intelligence.hypotheses.evidence import Evidence
 from intelligence.hypotheses.engine import HypothesisEngine
 from intelligence.reputation.classifier import ReputationVector
 
+def _safe_float(val: Any) -> float:
+        try:
+            return float(val) if val is not None else 0.0
+        except (ValueError, TypeError):
+            return 0.0
+
 class DecisionState:
     BENIGN = "BENIGN"
     ANOMALOUS = "ANOMALOUS"
@@ -26,7 +32,7 @@ class DecisionEngine:
         if partial_support:
             hypothesis_weight = sum(min(1.0, max(0.0, e.confidence)) for e in partial_support) / max(1, len(partial_support))
             has_meaningful_partial_signal = any(
-                e.confidence >= 0.5 and abs(float(e.value or 0.0)) > 0.0 for e in partial_support
+                e.confidence >= 0.5 and abs(_safe_float(e.value)) > 0.0 for e in partial_support
             )
             evidence_verification_required = hypothesis_weight >= 0.5 and (
                 attack_score >= 2.0 or has_meaningful_partial_signal

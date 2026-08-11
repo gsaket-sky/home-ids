@@ -11,6 +11,7 @@ RECENT FIXES:
 import json
 import logging
 import threading
+import copy
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
@@ -159,7 +160,7 @@ class StateManager:
         mutable references — callers must not mutate them directly without the global lock.
         """
         with self._global_lock:
-            return dict(self._ips_state)
+            return copy.deepcopy(self._ips_state)
 
     def update_ips_state_atomic(self, updates: Dict[str, Any]) -> None:
         """C2 FIX: Atomically merge `updates` into the IPS state under the global lock.

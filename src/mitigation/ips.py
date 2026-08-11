@@ -12,6 +12,8 @@ RECENT FIXES:
   Protocol (NDP) requests. Dynamically intercepts ICMPv6ND_NS (Neighbor Solicitation) packets and injects 
   spoofed ICMPv6ND_NA (Neighbor Advertisement) packets to blackhole IPv6 routing.
 - FIXED (HARDWARE MITIGATION BYPASS): Added dynamic MAC address reconstruction from `device_id`. 
+- ADDED (SECURE AUTHENTICATION): Implemented Pi-hole v6 session ID ('sid') header authentication, dynamically 
+  pulling from the configuration engine (which supports environment variable overrides).
 """
 
 import json
@@ -392,8 +394,9 @@ class IPSMitigator:
 
     def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "") -> bool:
         ips_state = self.state_manager.get_ips_state()
+        
+        # Self-healing desync check: Clear queues if block is already confirmed active
         if domain in ips_state.get("blocked_domains", {}):
-            # Already blocked: clean up retry and dead letter queues if present
             with self._lock:
                 modified = False
                 if domain in self._retry_queue:
@@ -423,10 +426,15 @@ class IPSMitigator:
         if timeout_seconds <= 0:
             timeout_seconds = 5.0
 
+        # Inject the authentication token from config (populated automatically from ENV by config.py)
+        api_password = self.config.get("pihole_api_password", "")
+        headers = {"sid": api_password} if api_password else {}
+
         try:
             resp = self.session.post(
                 f"{api_url}{api_path}",
                 json={"domain": domain, "type": "black", "comment": comment},
+                headers=headers,
                 timeout=timeout_seconds
             )
             if resp.status_code in (200, 201, 204):
@@ -555,11 +563,20 @@ class IPSMitigator:
         api_url = self.config.get("pihole_api_url", "")
         
         if api_url and self.config.get("ips_pihole_enabled", True):
+            # Inject the authentication token from config 
+            api_password = self.config.get("pihole_api_password", "")
+            headers = {"sid": api_password} if api_password else {}
+            
             try:
                 timeout_seconds = float(self.config.get("pihole_api_timeout_seconds", 5.0))
                 if timeout_seconds <= 0:
                     timeout_seconds = 5.0
-                self.session.delete(f"{api_url}/api/v2/domains", json={"domain": domain, "type": "black"}, timeout=timeout_seconds)
+                self.session.delete(
+                    f"{api_url}/api/v2/domains", 
+                    json={"domain": domain, "type": "black"}, 
+                    headers=headers,
+                    timeout=timeout_seconds
+                )
             except Exception as e:
                 ips_errors_metric.labels(target_type="pihole_unblock_api").inc()
 

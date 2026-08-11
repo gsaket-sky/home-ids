@@ -374,7 +374,7 @@ class ZeekFeatureExtractor:
             if isinstance(entry, dict) and entry.get("ts", 0) < ttl_cutoff:
                 del self._reverse_dns_cache[ip]
                 
-        if len(self._wire_dns_resolutions) > 50000:
+        if len(self._wire_dns_resolutions) > 20000:
             self._wire_dns_resolutions.clear()
             LOGGER.debug("Pruned zeek _wire_dns_resolutions capacity.")
             

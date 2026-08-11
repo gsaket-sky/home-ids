@@ -250,6 +250,7 @@ class GlobalMLEngine:
 
 class MultiDeviceMLEngine:
     def __init__(self, model_dir: Optional[Any] = None, global_model_path: Optional[Any] = None, **kwargs):
+        self._lock = threading.RLock()
         self.global_engine = GlobalMLEngine()
         self.devices = OrderedDict()
         self.max_active_devices = 200
@@ -262,17 +263,18 @@ class MultiDeviceMLEngine:
         LOGGER.info("Initialized MultiDeviceMLEngine with model persistence dir: %s", self.model_dir)
 
     def _get_or_create_device(self, device_id: str) -> DeviceMLEngine:
-        if device_id in self.devices:
-            self.devices.move_to_end(device_id)
-            return self.devices[device_id]
+        with self._lock:
+            if device_id in self.devices:
+                self.devices.move_to_end(device_id)
+                return self.devices[device_id]
         
-        engine = DeviceMLEngine(device_id)
-        if len(self.devices) >= self.max_active_devices:
-            evicted_id, evicted_engine = self.devices.popitem(last=False)
-            LOGGER.debug("Evicted oldest LRU ML engine for device: %s", evicted_id)
+            engine = DeviceMLEngine(device_id)
+            if len(self.devices) >= self.max_active_devices:
+                evicted_id, evicted_engine = self.devices.popitem(last=False)
+                LOGGER.debug("Evicted oldest LRU ML engine for device: %s", evicted_id)
         
-        self.devices[device_id] = engine
-        return engine
+            self.devices[device_id] = engine
+            return engine
 
     def learn(self, device_id: str, features: dict):
         self.learn_normal(device_id, features)

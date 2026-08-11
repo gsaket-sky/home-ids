@@ -75,12 +75,18 @@ class GeoIPEngine:
     @lru_cache(maxsize=2048)
     def _timed_reverse_dns(self, ip: str) -> Optional[str]:
         def _resolve():
-            host, _, _ = socket.gethostbyaddr(ip)
-            return host.lower().rstrip('.')
+            # Set socket timeout for the thread worker
+            old_timeout = socket.getdefaulttimeout()
+            try:
+                socket.setdefaulttimeout(1.0)
+                host, _, _ = socket.gethostbyaddr(ip)
+                return host.lower().rstrip('.')
+            finally:
+                socket.setdefaulttimeout(old_timeout)
 
         future = self._executor.submit(_resolve)
         try:
-            return future.result(timeout=1.0)
+            return future.result(timeout=1.05)
         except concurrent.futures.TimeoutError:
             LOGGER.debug("Reverse DNS timeout (>1.0s) for IP: %s", ip)
             return None

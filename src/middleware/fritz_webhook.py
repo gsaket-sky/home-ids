@@ -257,24 +257,25 @@ def ipc_block(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         
         # Locate the device by IP in the state_manager to get its MAC and DevID
         dev_id = sm.resolve_device_id(payload.target, "unknown")
-        state = sm.get_device_state(dev_id)
-        if state:
+
+        # FIX: Acquire or create state safely under lock
+        with sm.lock_device(dev_id) as state:
             state.has_validated_threat = True
             state.confirmed_threat_count = getattr(state, "confirmed_threat_count", 0) + 1
         
-        # Explicit mitigation bypasses interactive mode checks
-        # Interactive mode logic only runs when checking to SEND an alert.
-        # This explicit mitigate call forces the hardware isolation.
-        ips.mitigate(
-            st=state,
-            target_domain="-",
-            risk_score=10.0,
-            c2_hits=0,
-            dga_burst=False,
-            lateral_threat=False,
-            is_safe=False,
-            reason="Operator explicitly approved hardware isolation."
-        )
+            # Explicit mitigation bypasses interactive mode checks
+            # Interactive mode logic only runs when checking to SEND an alert.
+            # This explicit mitigate call forces the hardware isolation.
+            ips.mitigate(
+                st=state,
+                target_domain="-",
+                risk_score=10.0,
+                c2_hits=0,
+                dga_burst=False,
+                lateral_threat=False,
+                is_safe=False,
+                reason="Operator explicitly approved hardware isolation."
+            )
         
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
