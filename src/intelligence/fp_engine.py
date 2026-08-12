@@ -389,7 +389,7 @@ class AutonomousFPEngine:
             LOGGER.info(
                 "📊 [FP ENGINE » Stage 2] %s: P(FP)=%.3f (threshold=%.2f) %s",
                 hostname, lgbm_prob, LGBM_FP_THRESHOLD,
-                "→ proceeding to Stage 3" if lgbm_prob >= LGBM_FP_THRESHOLD else "→ LOW FP probability"
+                "→ proceeding to Stage 3" if lgbm_prob >= LGBM_FP_THRESHOLD else "→ LOW FP probability (continuing to Stage 3 for corroboration)"
             )
             if lgbm_prob < LGBM_FP_THRESHOLD:
                 # LightGBM is fairly confident this is a real threat
@@ -704,7 +704,7 @@ class AutonomousFPEngine:
             # Multi-Threat Features 6, 7, 8: Lateral Moves, Port Scans, Application Protocol Weight
             f6_lateral = min(float(features.get("zeek_lateral_moves", 0) or 0) / 10.0, 1.0)
             f7_port_scans = min(float(features.get("zeek_s0_rej_count", 0) or 0) / 50.0, 1.0)
-            f8_app_proto = float(features.get("zeek_app_protocol_weight", 0.2) or 0.2)
+            f8_app_proto = min(max(float(features.get("zeek_app_protocol_weight", 0.2) or 0.2), 0.0), 1.0)
 
             # Check ONNX model expected input shape (6-feature legacy vs 9-feature multi-threat)
             input_spec = self._lgbm_session.get_inputs()[0]

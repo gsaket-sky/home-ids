@@ -42,10 +42,16 @@ def load_historical_domains(log_path: Path, days_back: int) -> set:
             for line in f:
                 try:
                     record = json.loads(line)
-                    if record.get("timestamp", 0) >= cutoff_time:
-                        domain = record.get("domain")
-                        if domain:
-                            unique_domains.add(domain)
+                    ts = float(record.get("timestamp", 0) or 0)
+                    if ts < cutoff_time:
+                        continue
+                    domain = (
+                        record.get("domain")
+                        or record.get("network_context", {}).get("queried_domain")
+                        or record.get("target_domain")
+                    )
+                    if domain:
+                        unique_domains.add(str(domain).lower().strip("."))
                 except json.JSONDecodeError:
                     continue
     except Exception as e:
@@ -69,7 +75,8 @@ def main():
     # FIXED: Replaced targeted refresh with global refresh payload
     ti._refresh_all() 
     
-    log_path = Path(CONFIG.get("alert_json_path", "/app/state/alerts.json")).with_name("alerts_stream.jsonl")
+    alert_path_cfg = Path(CONFIG.get("alert_json_path", "/app/state/alerts_stream.jsonl"))
+    log_path = alert_path_cfg if alert_path_cfg.exists() else alert_path_cfg.with_name("alerts_stream.jsonl")
     historical_domains = load_historical_domains(log_path, args.days)
     
     if not historical_domains:

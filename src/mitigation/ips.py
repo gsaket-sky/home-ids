@@ -299,25 +299,29 @@ class IPSMitigator:
         # They are ONLY auto-released if the device is explicitly marked safe (is_safe=True via safe_ips/patterns)
         # or via an explicit operator un-isolation command.
         if is_safe:
+            should_unisolate_router = False
             with self._lock:
                 if client_ip in self._tarpit_active_targets:
                     LOGGER.info("Device %s marked safe. Releasing from ARP/NDP Tarpit.", client_ip)
                     del self._tarpit_active_targets[client_ip]
                     self._save_queues()
-            
-            with self._lock:
                 if mac_addr in self._router_isolated_devices:
-                    LOGGER.info("Device %s marked safe. Initiating router un-isolation restore.", hostname)
-                    self._unisolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id)
+                    should_unisolate_router = True
+
+            if should_unisolate_router:
+                LOGGER.info("Device %s marked safe. Initiating router un-isolation restore.", hostname)
+                self._unisolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id)
             return
 
         # Check operator release cooldown status quietly
         now = time.time()
         cooldown_sec = float(self.config.get("operator_release_cooldown_seconds", 3600.0))
         is_operator_released = False
+        with self._lock:
+            released_snapshot = dict(self._operator_released_devices)
         for ident in (mac_addr, client_ip, hostname, dev_id):
-            if ident and ident != "unknown" and ident in self._operator_released_devices:
-                rel_time = self._operator_released_devices[ident]
+            if ident and ident != "unknown" and ident in released_snapshot:
+                rel_time = released_snapshot[ident]
                 if (now - rel_time) < cooldown_sec:
                     is_operator_released = True
                     break
@@ -561,9 +565,9 @@ class IPSMitigator:
     def unblock_domain(self, domain: str) -> bool:
         if not domain: return False
         api_url = self.config.get("pihole_api_url", "")
+        api_path = self.config.get("pihole_api_path", "/api/v2/domains")
         
         if api_url and self.config.get("ips_pihole_enabled", True):
-            # Inject the authentication token from config 
             api_password = self.config.get("pihole_api_password", "")
             headers = {"sid": api_password} if api_password else {}
             
@@ -572,8 +576,8 @@ class IPSMitigator:
                 if timeout_seconds <= 0:
                     timeout_seconds = 5.0
                 self.session.delete(
-                    f"{api_url}/api/v2/domains", 
-                    json={"domain": domain, "type": "black"}, 
+                    f"{api_url}{api_path}",
+                    json={"domain": domain, "type": "black"},
                     headers=headers,
                     timeout=timeout_seconds
                 )

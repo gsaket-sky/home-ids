@@ -48,9 +48,7 @@
     "safe_ips": [
       "127.0.0.1"
     ],
-    "honeypot_ips": [
-      "XXX.XXX.XXX.XXX"
-    ],
+    "honeypot_ips": [],
     "safe_domains": [],
     "safe_host_patterns": [
       "pihole",
@@ -58,7 +56,12 @@
       "pi_hole",
       "pi.hole"
     ],
-    "device_type_overrides": {}
+    "device_type_overrides": {},
+    "pihole_api_path": "/api/v2/domains",
+    "fp_lgbm_threshold": 0.75,
+    "fp_embed_similarity_threshold": 0.82,
+    "fp_combined_suppress_threshold": 0.8,
+    "fp_combined_uncertain_threshold": 0.55
   },
   "_changelog_1": [],
   "_bugfix_changelog": [],

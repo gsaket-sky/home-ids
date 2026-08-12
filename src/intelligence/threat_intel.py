@@ -22,7 +22,6 @@ import time
 import heapq
 import zipfile
 import io
-import socket
 from pathlib import Path
 from typing import Optional, Dict, Set
 from urllib.request import urlopen, Request
@@ -184,10 +183,12 @@ class ThreatIntel:
 
     def ioc_risk_score(self, domain: str = "", ip: str = "") -> float:
         score = 0.0
-        if domain and self.lookup_domain(domain): 
-            score += self.lookup_domain(domain).get("confidence", 0.8) * 4.0
-        if ip and self.lookup_ip(ip):             
-            score += self.lookup_ip(ip).get("confidence", 0.8) * 4.0
+        domain_match = self.lookup_domain(domain) if domain else None
+        ip_match = self.lookup_ip(ip) if ip else None
+        if domain_match:
+            score += domain_match.get("confidence", 0.8) * 4.0
+        if ip_match:
+            score += ip_match.get("confidence", 0.8) * 4.0
         final_score = min(score, 4.0)
         LOGGER.debug("IOC risk score evaluated for Domain: %s, IP: %s = %.2f", domain, ip, final_score)
         return final_score

@@ -8,7 +8,17 @@ RECENT FIXES:
   - `ips_dead_letter_gauge` (removed `reason` label).
   - `ips_tarpit_active` (removed raw IP label).
 """
-from prometheus_client import Gauge, Counter
+try:
+    from prometheus_client import Gauge, Counter
+except Exception:
+    class _NoopMetric:
+        def labels(self, *args, **kwargs): return self
+        def set(self, *args, **kwargs): return None
+        def inc(self, *args, **kwargs): return None
+        def remove(self, *args, **kwargs): return None
+
+    def Gauge(*args, **kwargs): return _NoopMetric()
+    def Counter(*args, **kwargs): return _NoopMetric()
 
 _DEV_LABELS = ["device", "hostname", "device_type"]
 
@@ -143,3 +153,8 @@ ips_router_isolated_active = Gauge(
     "Devices actively isolated at hardware router WAN level via Fritz!Box Webhook",
     ["device", "hostname", "mac"]
 )
+
+# Low-cardinality aggregate counters (audit-safe long-term storage)
+ips_pihole_blocks_total = Counter("home_ids_ips_pihole_blocks_aggregate_total", "Total automated domain blocks executed (aggregate)")
+ips_router_isolations_total = Counter("home_ids_ips_router_isolations_aggregate_total", "Total automated router isolations executed (aggregate)")
+ips_tarpit_activations_total = Counter("home_ids_ips_tarpit_activations_aggregate_total", "Total tarpit activations executed (aggregate)")

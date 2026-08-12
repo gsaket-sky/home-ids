@@ -426,6 +426,7 @@ class FeatureExtractor:
             "total": 0, "query_variance": 0.0, "events_per_second": 0.0,
             "top_domain_ratio": 0.0, "new_domains": 0, "deep_domains": 0,
             "max_label_length": 0, "dns_tunneling_domains": 0, "nxdomain_tld_conc": 0.0,
-            "beaconing_c2_count": 0, "min_jitter_cv": 0.0,
+            "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,
+            "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
             "killchain_phase": "NORMAL", "markov_anomaly": 0.0
         }

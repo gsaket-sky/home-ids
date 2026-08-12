@@ -24,6 +24,21 @@ import time
 from config import CONFIG
 LOGGER = logging.getLogger("home_ids.ml_engine")
 
+ML_FEATURE_KEYS = (
+    "query_rate",
+    "entropy_avg",
+    "unique_domains",
+    "nxdomain_ratio",
+    "blocked_ratio",
+    "zeek_outbound_bytes",
+    "zeek_lateral_moves",
+    "zeek_s0_rej_count",
+    "zeek_app_protocol_weight",
+    "time_sin",   # derived in-engine
+    "time_cos",   # derived in-engine
+)
+ML_FEATURE_DIM = 11
+
 _MAXLEN_DEVICE = 20000
 _MAXLEN_GLOBAL = 100000
 
@@ -40,9 +55,22 @@ class DeviceMLEngine:
         self._samples_since_retrain = 0
         self._fit_lock = threading.Lock()   # guards model swap during background fit
         self._fit_in_progress = False
+        self._last_missing_feature_log = 0.0
         LOGGER.debug("Initialized DeviceMLEngine for device: %s", device_id)
 
+    def _validate_feature_payload(self, features: dict) -> None:
+        missing = [k for k in ML_FEATURE_KEYS[:9] if k not in features]
+        if missing:
+            now = time.time()
+            if (now - self._last_missing_feature_log) > 60.0:
+                LOGGER.warning(
+                    "ML feature payload missing keys for device %s: %s (defaults will be used). Expected dim=%d",
+                    self.device_id, ",".join(missing), ML_FEATURE_DIM
+                )
+                self._last_missing_feature_log = now
+
     def _extract_vector(self, features: dict) -> list:
+        self._validate_feature_payload(features)
         now = time.localtime()
         minutes_since_midnight = now.tm_hour * 60 + now.tm_min
         time_sin = np.sin(2 * np.pi * minutes_since_midnight / 1440.0)
@@ -153,9 +181,22 @@ class GlobalMLEngine:
         self._samples_since_retrain = 0
         self._fit_lock = threading.Lock()
         self._fit_in_progress = False
+        self._last_missing_feature_log = 0.0
         LOGGER.debug("Initialized GlobalMLEngine.")
 
+    def _validate_feature_payload(self, features: dict) -> None:
+        missing = [k for k in ML_FEATURE_KEYS[:9] if k not in features]
+        if missing:
+            now = time.time()
+            if (now - self._last_missing_feature_log) > 60.0:
+                LOGGER.warning(
+                    "Global ML feature payload missing keys: %s (defaults will be used). Expected dim=%d",
+                    ",".join(missing), ML_FEATURE_DIM
+                )
+                self._last_missing_feature_log = now
+
     def _extract_vector(self, features: dict) -> list:
+        self._validate_feature_payload(features)
         now = time.localtime()
         minutes_since_midnight = now.tm_hour * 60 + now.tm_min
         time_sin = np.sin(2 * np.pi * minutes_since_midnight / 1440.0)
@@ -355,7 +396,7 @@ class MultiDeviceMLEngine:
                     self.global_engine.warmed_up = True
                     LOGGER.info("Loaded Global ML Model from disk.")
                 else:
-                    LOGGER.warning("Legacy 5-feature global ML model found. Discarding and resetting to 9 features.")
+                    LOGGER.warning("Legacy global ML model found. Discarding and resetting to current 11-feature schema.")
                     if self.global_model_path.exists():
                         self.global_model_path.unlink()
 
@@ -374,10 +415,10 @@ class MultiDeviceMLEngine:
                     engine.warmed_up = True
                     loaded_devs += 1
                 else:
-                    LOGGER.warning("Legacy 5-feature ML model for device %s. Discarding.", dev_id)
+                    LOGGER.warning("Legacy device ML model for %s found with incompatible feature shape. Discarding.", dev_id)
                     dev_path.unlink()
 
-            LOGGER.info("Successfully loaded %d compatible 9-feature Device ML models from disk.", loaded_devs)
+            LOGGER.info("Successfully loaded %d compatible 11-feature Device ML models from disk.", loaded_devs)
         except Exception as exc:
             LOGGER.error("Failed to load ML models (likely corrupted). Starting fresh: %s", exc)
 

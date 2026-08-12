@@ -479,8 +479,10 @@ class ZeekFeatureExtractor:
         if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
             
         if not self._is_safe_device(src):
-            if str(ev.get("server_name", "")).lower() in DOH_SNIS:
-                if len(self._doh_bypass_uids[src]) < 100: self._doh_bypass_uids[src][ev.get("uid", "")] = ts
+            sni = str(ev.get("server_name", "")).lower().strip(".")
+            if sni and any(sni == doh or sni.endswith(f".{doh}") for doh in DOH_SNIS):
+                if len(self._doh_bypass_uids[src]) < 100:
+                    self._doh_bypass_uids[src][ev.get("uid", "")] = ts
 
     def _process_http(self, src: str, ev: dict) -> None:
         ua, host, uri, ts = ev.get("user_agent", ""), ev.get("host", ""), ev.get("uri", ""), ev.get("ts", time.time())

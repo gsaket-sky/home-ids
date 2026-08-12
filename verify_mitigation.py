@@ -1,6 +1,4 @@
 import sys
-import tempfile
-import shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path('src').resolve()))
@@ -10,6 +8,7 @@ from mitigation.ips import IPSMitigator
 from core.decision_engine import DecisionEngine
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.reputation.classifier import ReputationClassifier
+from intelligence.ml_engine import DeviceMLEngine, ML_FEATURE_KEYS, ML_FEATURE_DIM
 
 root = Path('state_verify_out')
 root.mkdir(exist_ok=True)
@@ -50,8 +49,28 @@ ev_store = [
     Evidence(type='dns_entropy', source='pihole', timestamp=1.0, device='dev', value=4.2, confidence=0.6, independence_group='dns_behavior', provenance='detector:dns')
 ]
 decision = engine.evaluate(ev_store, rep)
+assert isinstance(decision.get('evidence_verification_required'), bool)
 assert decision['evidence_verification_required'] is True
 assert decision['hypothesis_weight'] >= 0.5
+
+# Verify anomaly-ML feature contract: 11 total dimensions (9 raw + 2 derived time features)
+ml_features = {
+    "query_rate": 42.0,
+    "entropy_avg": 2.8,
+    "unique_domains": 14.0,
+    "nxdomain_ratio": 0.05,
+    "blocked_ratio": 0.02,
+    "zeek_outbound_bytes": 2048.0,
+    "zeek_lateral_moves": 0.0,
+    "zeek_s0_rej_count": 0.0,
+    "zeek_app_protocol_weight": 0.2,
+}
+missing_raw = [k for k in ML_FEATURE_KEYS[:9] if k not in ml_features]
+assert not missing_raw, f"Missing required ML raw features: {missing_raw}"
+
+probe_engine = DeviceMLEngine("ml-contract-check")
+vec = probe_engine._extract_vector(ml_features)
+assert len(vec) == ML_FEATURE_DIM == 11, f"Unexpected ML feature dimension: {len(vec)}"
 
 Path('verify_mitigation.out').write_text('OK\n', encoding='utf-8')
 print('verify_mitigation: OK')

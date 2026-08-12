@@ -4,10 +4,13 @@ from intelligence.hypotheses.engine import HypothesisEngine
 from intelligence.reputation.classifier import ReputationVector
 
 def _safe_float(val: Any) -> float:
-        try:
-            return float(val) if val is not None else 0.0
-        except (ValueError, TypeError):
-            return 0.0
+    try:
+        return float(val) if val is not None else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+def _safe_confidence(val: Any) -> float:
+    return min(1.0, max(0.0, _safe_float(val)))
 
 class DecisionState:
     BENIGN = "BENIGN"
@@ -30,9 +33,9 @@ class DecisionEngine:
 
         partial_support = [e for e in ev_store if e.independence_group in {"dns_behavior", "zeek_network", "reputation", "honeypot"}]
         if partial_support:
-            hypothesis_weight = sum(min(1.0, max(0.0, e.confidence)) for e in partial_support) / max(1, len(partial_support))
+            hypothesis_weight = sum(_safe_confidence(e.confidence) for e in partial_support) / max(1, len(partial_support))
             has_meaningful_partial_signal = any(
-                e.confidence >= 0.5 and abs(_safe_float(e.value)) > 0.0 for e in partial_support
+                _safe_confidence(e.confidence) >= 0.5 and abs(_safe_float(e.value)) > 0.0 for e in partial_support
             )
             evidence_verification_required = hypothesis_weight >= 0.5 and (
                 attack_score >= 2.0 or has_meaningful_partial_signal

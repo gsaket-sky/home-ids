@@ -11,7 +11,7 @@ class DNSBehaviorDetector:
         now = time.time()
         
         # Rate evidence
-        rate = features.get("dns_rate_last_60s", 0)
+        rate = features.get("dns_rate_last_60s", features.get("query_rate", 0))
         if rate > 100:
             ev_list.append(Evidence(
                 type="dns_rate",
@@ -25,7 +25,7 @@ class DNSBehaviorDetector:
             ))
             
         # Entropy evidence
-        entropy = features.get("max_entropy", 0.0)
+        entropy = features.get("max_entropy", features.get("entropy_avg", 0.0))
         if entropy > 4.0:
             ev_list.append(Evidence(
                 type="dns_entropy",

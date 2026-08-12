@@ -9,32 +9,31 @@ logs to train a custom LightGBM / Gradient Boosting ONNX classifier specifically
 tuned to YOUR home network.
 
 INPUT DATA SOURCES:
-  1. state/alerts.json           → Real breach alerts (Label 0: Threat)
-  2. state/autonomous_muted.jsonl → Auto-suppressed alerts (Label 1: False Positive)
+  1. config.json -> static_requires_restart.alert_json_path (preferred; JSONL or JSON array)
+  2. state/alerts.json (legacy fallback)
+  3. state/autonomous_muted.jsonl (auto-suppressed false positives)
 
-FEATURE MATRIX EXTRACTED (6 normalized dimensions):
-  [0] Tranco global rank score   (0.0 = unknown, 1.0 = top 1M global domain)
-  [1] First label entropy score  (0.0 = readable, 1.0 = random string)
-  [2] Max subdomain label length (0.0 = short, 1.0 = >60 chars)
-  [3] Outbound bytes Z-score     (0.0 = normal upload, 1.0 = large upload spike)
-  [4] Device type weight         (laptop=0.5, phone=0.4, iot=0.1)
-  [5] Historical FP cache flag   (1.0 if base domain is in trust cache, else 0.0)
-
-OUTPUT MODEL:
-  state/models/fp_classifier.onnx
+FEATURE MATRIX EXTRACTED (9 normalized dimensions):
+  [0] Tranco global rank score
+  [1] First label entropy score
+  [2] Max subdomain label length
+  [3] Outbound bytes Z-score
+  [4] Device type weight
+  [5] Historical FP cache flag
+  [6] Lateral movement normalized
+  [7] Port scan intensity normalized
+  [8] Application protocol weight
 
 USAGE:
   Manual run:      python src/scripts/train_fp_classifier.py
-  Automated run:   Scheduled weekly by fp_engine.py at Sunday 00:00:00
+  Automated run:   Scheduled periodically by fp_engine.py (~7-day interval)
 ======================================================================================
 """
 
 import json
 import logging
 import sys
-import time
 from pathlib import Path
-import numpy as np
 
 # Ensure src/ directory is in Python path for standalone CLI execution
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -43,6 +42,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from utils import entropy as compute_entropy
+from config import CONFIG
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 LOGGER = logging.getLogger("home_ids.train_fp")
@@ -55,6 +55,21 @@ DEV_TYPE_WEIGHTS = {
     "iot": 0.1, "camera": 0.1,
     "unknown": 0.3,
 }
+
+FP_FEATURE_DIM = 9
+FP_FEATURE_NAMES = (
+    "tranco_rank_norm",
+    "label_entropy_norm",
+    "label_len_norm",
+    "outbound_z_norm",
+    "device_type_weight",
+    "historical_fp_flag",
+    "lateral_moves_norm",
+    "port_scans_norm",
+    "app_protocol_norm",
+)
+
+MAX_REAL_SAMPLES_PER_CLASS = 5000
 
 # Synthetic baseline samples used to seed training if historical dataset is small (9 features)
 SYNTHETIC_X = [
@@ -74,13 +89,65 @@ SYNTHETIC_X = [
 SYNTHETIC_Y = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
 
 
-def extract_features_from_alert(doc: dict) -> list:
-    """Extracts the 9 normalized feature dimensions from an alert payload."""
-    features = doc.get("features", {})
-    context = doc.get("network_context", {})
-    device = doc.get("device", {})
+def _safe_float(val, default=0.0) -> float:
+    try:
+        return float(val) if val is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
 
-    domain = context.get("queried_domain", "") or doc.get("domain", "")
+
+def _resolve_alert_input_paths(state_dir: Path) -> list[Path]:
+    repo_root = SRC_DIR.parent
+    configured = Path(str(CONFIG.get("alert_json_path", "state/alerts.json")))
+    if not configured.is_absolute():
+        configured = repo_root / configured
+    fallback = state_dir / "alerts.json"
+    return [configured] if configured == fallback else [configured, fallback]
+
+
+def _read_alert_docs(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    raw = path.read_text(encoding="utf-8", errors="ignore").strip()
+    if not raw:
+        return []
+
+    # Try JSON array first
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return [d for d in parsed if isinstance(d, dict)]
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback JSONL
+    docs = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            doc = json.loads(line)
+            if isinstance(doc, dict):
+                docs.append(doc)
+        except json.JSONDecodeError:
+            continue
+    return docs
+
+
+def _extract_payload(doc: dict) -> dict:
+    nested = doc.get("original_alert")
+    return nested if isinstance(nested, dict) else doc
+
+
+def extract_features_from_alert(doc: dict) -> list:
+    """Extracts the normalized 9 feature dimensions from an alert payload."""
+    src = _extract_payload(doc)
+    features = src.get("features", {})
+    context = src.get("network_context", {})
+    device = src.get("device", {})
+
+    domain = context.get("queried_domain", "") or src.get("domain", "")
 
     # Feature 0: Tranco rank
     tranco_rank = float(features.get("tranco_rank", 0) or 0)
@@ -105,54 +172,80 @@ def extract_features_from_alert(doc: dict) -> list:
     # Feature 5: Historical FP signal
     reasons = doc.get("reasons", [])
     f5_hist_fp = 1.0 if any("trust cache" in str(r).lower() for r in reasons) else 0.0
-
     # Features 6, 7, 8: Multi-Threat Lateral, Port Scans, App Protocol Weight
-    f6_lateral = min(float(features.get("zeek_lateral_moves", 0) or 0) / 10.0, 1.0)
-    f7_port_scans = min(float(features.get("zeek_s0_rej_count", 0) or 0) / 50.0, 1.0)
-    f8_app_proto = float(features.get("zeek_app_protocol_weight", 0.2) or 0.2)
 
-    return [f0_tranco, f1_entropy, f2_label_len, f3_out_z, f4_dev_type, f5_hist_fp, f6_lateral, f7_port_scans, f8_app_proto]
+    f6_lateral = min(_safe_float(features.get("zeek_lateral_moves", 0), 0.0) / 10.0, 1.0)
+    f7_port_scans = min(_safe_float(features.get("zeek_s0_rej_count", 0), 0.0) / 50.0, 1.0)
+    f8_app_proto = min(max(_safe_float(features.get("zeek_app_protocol_weight", 0.2), 0.2), 0.0), 1.0)
+
+    row = [f0_tranco, f1_entropy, f2_label_len, f3_out_z, f4_dev_type, f5_hist_fp, f6_lateral, f7_port_scans, f8_app_proto]
+    if len(row) != FP_FEATURE_DIM:
+        raise ValueError(f"Feature row dimension mismatch: got {len(row)}, expected {FP_FEATURE_DIM}")
+    return row
+
+
+def _append_sample(X: list, y: list, doc: dict, label: int, stats: dict, source: str) -> None:
+    try:
+        row = extract_features_from_alert(doc)
+        X.append(row)
+        y.append(label)
+        stats[f"{source}_accepted"] += 1
+    except Exception:
+        stats[f"{source}_rejected"] += 1
 
 
 def load_dataset(state_dir: Path) -> tuple:
-    """Loads labeled training samples from alerts.json and autonomous_muted.jsonl (max 10,000 recent samples)."""
+    """Loads labeled training samples from configured alerts stream + autonomous muted log."""
     X, y = [], []
+    stats = {
+        "threat_accepted": 0, "threat_rejected": 0,
+        "fp_accepted": 0, "fp_rejected": 0,
+    }
 
-    # 1. Load alerts.json (Threats -> Label 0)
-    alerts_path = state_dir / "alerts.json"
-    if alerts_path.exists():
-        try:
-            raw = alerts_path.read_text(encoding="utf-8")
-            docs = json.loads(raw)
-            if isinstance(docs, list):
-                for doc in docs[-5000:]:
-                    X.append(extract_features_from_alert(doc))
-                    y.append(0)
-        except Exception as exc:
-            LOGGER.warning("Could not read alerts.json: %s", exc)
+    # 1. Threat samples from configured alert stream path (fallback to state/alerts.json)
+    alert_docs = []
+    for path in _resolve_alert_input_paths(state_dir):
+        docs = _read_alert_docs(path)
+        if docs:
+            alert_docs = docs
+            LOGGER.info("Using threat training source: %s (%d docs)", path, len(docs))
+            break
 
-    # 2. Load autonomous_muted.jsonl (False Positives -> Label 1)
+    for doc in alert_docs[-MAX_REAL_SAMPLES_PER_CLASS:]:
+        _append_sample(X, y, doc, 0, stats, source="threat")
+
+    # 2. False positives from autonomous muted JSONL
     muted_path = state_dir / "autonomous_muted.jsonl"
     if muted_path.exists():
         try:
             with open(muted_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
-            for line in lines[-5000:]:
+            for line in lines[-MAX_REAL_SAMPLES_PER_CLASS:]:
                 line = line.strip()
-                if line:
+                if not line:
+                    continue
+                try:
                     doc = json.loads(line)
-                    X.append(extract_features_from_alert(doc))
-                    y.append(1)
+                except json.JSONDecodeError:
+                    stats["fp_rejected"] += 1
+                    continue
+                _append_sample(X, y, doc, 1, stats, source="fp")
         except Exception as exc:
             LOGGER.warning("Could not read autonomous_muted.jsonl: %s", exc)
 
-    return X, y
+    return X, y, stats
 
 
 def train_and_export_onnx(state_dir: Path) -> bool:
     """Trains GradientBoostingClassifier on 9 features and exports to state/models/fp_classifier.onnx."""
-    X, y = load_dataset(state_dir)
-    LOGGER.info("Dataset loaded: %d real samples from disk.", len(X))
+    X, y, stats = load_dataset(state_dir)
+    LOGGER.info(
+        "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d | fp accepted/rejected=%d/%d | dim=%d",
+        len(X),
+        stats["threat_accepted"], stats["threat_rejected"],
+        stats["fp_accepted"], stats["fp_rejected"],
+        FP_FEATURE_DIM
+    )
 
     if len(X) < 10:
         LOGGER.info("Dataset too small – augmenting with %d synthetic baseline samples.", len(SYNTHETIC_X))
@@ -178,7 +271,7 @@ def train_and_export_onnx(state_dir: Path) -> bool:
 
         onnx_model = convert_sklearn(
             pipeline,
-            initial_types=[("input", FloatTensorType([None, 9]))],
+            initial_types=[("input", FloatTensorType([None, FP_FEATURE_DIM]))],
             options={GradientBoostingClassifier: {"zipmap": False}}
         )
 

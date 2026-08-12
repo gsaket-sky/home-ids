@@ -20,6 +20,7 @@ class ReputationClassifier:
         self._TIER_2 = {"doubleclick.net", "cloudflare.com", "amazonaws.com", "azure.com", "akamaiedge.net", "googlesyndication.com"}
         
     def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0) -> ReputationVector:
+        domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
         
         # Check explicit tiers (simplified matching for prototype)

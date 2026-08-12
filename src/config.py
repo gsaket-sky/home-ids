@@ -66,7 +66,7 @@ DEFAULT_CONFIG = {
     "baseline_alpha": 0.05,
     "state_path": "state/ids_state.json",               
     "model_path": "state/ids_model.pkl",                
-    "alert_json_path": "state/alerts.json",             
+    "alert_json_path": "state/alerts_stream.jsonl",
     "alert_json_max_bytes": 1073741824,
     "pihole_db": "/etc/pihole/pihole-FTL.db",
     "zeek_log_dir": "/opt/zeek/logs/current",
@@ -111,6 +111,12 @@ DEFAULT_CONFIG = {
     "router_hosts_timeout_seconds": 5.0,
     "ml_warmup_samples": 5000,
     "simulation_mode": False,
+
+    # CL-AFPE tunables (audit)
+    "fp_lgbm_threshold": 0.75,
+    "fp_embed_similarity_threshold": 0.82,
+    "fp_combined_suppress_threshold": 0.80,
+    "fp_combined_uncertain_threshold": 0.55,
 }
 
 class LiveConfig:

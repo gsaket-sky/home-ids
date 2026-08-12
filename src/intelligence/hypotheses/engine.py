@@ -10,6 +10,12 @@ class Hypothesis:
         self.supporting_score = 0.0
         self.contradicting_score = 0.0
 
+    def _reset_eval_state(self) -> None:
+        self.required_satisfied = False
+        self.strong_score = 0.0
+        self.supporting_score = 0.0
+        self.contradicting_score = 0.0
+
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
         """Returns confidence score 0-4"""
         raise NotImplementedError
@@ -19,6 +25,7 @@ class DNSTunnelingHypothesis(Hypothesis):
         super().__init__("DNS_TUNNELING")
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        self._reset_eval_state()
         # Check requirements
         has_high_rate = any(e.type == "dns_rate" and e.value > 100 for e in ev_store)
         has_high_entropy = any(e.type == "dns_entropy" and e.value > 4.0 for e in ev_store)
@@ -49,6 +56,7 @@ class NetworkIntrusionHypothesis(Hypothesis):
         super().__init__("NETWORK_INTRUSION")
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        self._reset_eval_state()
         # Check requirements: Zeek evidence
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
         has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
@@ -82,6 +90,7 @@ class AdvertisingBurstHypothesis(Hypothesis):
         super().__init__("ADVERTISING_BURST")
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        self._reset_eval_state()
         has_high_rate = any(e.type == "dns_rate" and e.value > 50 for e in ev_store)
         
         self.required_satisfied = has_high_rate and (rep_vector.tier == 2)

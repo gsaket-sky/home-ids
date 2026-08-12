@@ -113,7 +113,9 @@ def register_dynamic_allowlist_domain(domain: str) -> None:
 
 def is_telemetry_domain(domain: str) -> bool:
     """True if domain matches known high-volume telemetry SDKs, reverse DNS (.arpa), local network boundaries, cloud telemetry infrastructure, or CL-AFPE dynamic trust cache."""
-    norm = domain.lower().strip(".")
+    if not domain:
+        return False
+    norm = str(domain).lower().strip(".")
     
     # Fast path: Reverse DNS and local network lookups are inherently safe telemetry
     if norm.endswith(".arpa") or norm.endswith(".local") or norm.endswith(".lan") or norm.endswith(".sky") or norm.endswith(".home") or norm.endswith(".fritz.box") or norm.endswith(".internal") or norm.endswith(".home.arpa"):
@@ -204,6 +206,8 @@ def suspicious_dga(domain):
     Evaluates entropy, digit ratios, and consonant cluster improbability.
     Bypasses CDNs, Cloud infrastructure, reverse DNS (.arpa), and local domains (.local, .lan).
     """
+    if not domain:
+        return False
     norm = normalize_domain(domain)
     
     # Bypass DGA logic for local discovery networks, CDNs, and Cloud infrastructure

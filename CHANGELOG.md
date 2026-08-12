@@ -2,6 +2,17 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [Unreleased] - 2026-08-11
+
+### 🧩 Stability & Security Hotfixes
+- Fixed webhook auth behavior to reject remote unauthenticated requests when `fritz_api_token` is unset (loopback IPC remains trusted).
+- Fixed hypothesis engine score carry-over by resetting per-evaluation state.
+- Fixed ML learning order in pipeline to avoid pre-verdict poisoning in alert paths.
+- Fixed retro hunter domain extraction for JSONL alert payload schema and config-resolved stream paths.
+- Added Prometheus no-op fallback in `metrics.py` for constrained/offline environments.
+- Fixed DNS zero-feature schema consistency (`dns_txt_null_ratio`, `suspicious_tld_ratio`, `beaconing_c2_1h`).
+- Fixed regression test compatibility for trainer/FP-engine API drift.
+
 ## [Unreleased] - 2026-08-09
 
 ### 🔎 Operator Visibility & Mitigation Hardening

@@ -10,7 +10,6 @@ Example:
   python src/release_device.py my-laptop-a1b2
 """
 import sys
-import os
 from pathlib import Path
 
 # Ensure src/ is in sys.path

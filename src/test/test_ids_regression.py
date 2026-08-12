@@ -383,7 +383,7 @@ class TestComprehensiveRegression(unittest.TestCase):
 
         decision = engine.evaluate(ev_store, rep)
         self.assertTrue(decision.get("evidence_verification_required", False))
-        self.assertGreaterEqual(decision.get("hypothesis_weight", 0.0), 0.0)
+        self.assertGreaterEqual(decision.get("hypothesis_weight", 0.0), 0.5)
 
 
 if __name__ == "__main__":

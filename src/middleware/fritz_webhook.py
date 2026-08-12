@@ -60,13 +60,13 @@ class IsolationRequest(BaseModel):
 def verify_token(request: Request, credentials: Optional[HTTPAuthorizationCredentials] = Security(security)):
     client_host = getattr(request.client, "host", "") if request.client else ""
     if client_host in ("127.0.0.1", "::1", "localhost"):
-        # Local loopback IPC (CLI release_device tool, Telegram worker) is trusted on localhost
         return "local_loopback_ipc"
 
     expected_token = CONFIG.get("fritz_api_token", "")
     if not expected_token:
-        return "unauthenticated_local"
-    
+        LOGGER.warning("Rejected remote request from %s: API token not configured.", client_host)
+        raise HTTPException(status_code=403, detail="API token required for remote access")
+
     if not credentials or not secrets.compare_digest(credentials.credentials, expected_token):
         LOGGER.warning("Unauthorized access attempt rejected from %s.", client_host)
         raise HTTPException(status_code=403, detail="Invalid or missing API Token")
