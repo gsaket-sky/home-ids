@@ -35,6 +35,7 @@ _ENV_OVERRIDES = {
     "IDS_IPS_PIHOLE_ENABLED": "ips_pihole_enabled",
     "IDS_IPS_ROUTER_ENABLED": "ips_router_enabled",
     "IDS_IPS_TARPIT_ENABLED": "ips_tarpit_enabled",
+    "OLLAMA_API_KEY":         "ollama_api_key",
 }
 
 _STATIC_KEYS = {
@@ -43,7 +44,7 @@ _STATIC_KEYS = {
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key", 
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password", 
     "pihole_api_url", "router_webhook_url", "fritz_ip", "fritz_user", 
-    "fritz_password", "fritz_api_token", "fastapi_port"
+    "fritz_password", "fritz_api_token", "fastapi_port", "ollama_api_key"
 }
 
 def apply_env_overrides(config: dict) -> None:
@@ -66,7 +67,7 @@ DEFAULT_CONFIG = {
     "baseline_alpha": 0.05,
     "state_path": "state/ids_state.json",               
     "model_path": "state/ids_model.pkl",                
-    "alert_json_path": "state/alerts_stream.jsonl",
+    "alert_json_path": "SOC/alerts_stream.jsonl",
     "alert_json_max_bytes": 1073741824,
     "pihole_db": "/etc/pihole/pihole-FTL.db",
     "zeek_log_dir": "/opt/zeek/logs/current",
@@ -81,12 +82,13 @@ DEFAULT_CONFIG = {
     "telegram_enabled": False,
     "telegram_token": "",
     "telegram_chat_id": "",
-    "safe_ips": ["127.0.0.1"],
+    "safe_ips": ["127.0.0.1", "192.168.1.1", "192.0.0.2"],
     "honeypot_ips": [],
     "safe_domains": [],       
-    "safe_host_patterns": [],
+    "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "paperless", "fritz", "repeater"],
     "ollama_url": "",         
     "ollama_model": "llama3", 
+    "ollama_api_key": "",
     "decay_factor": 0.995,    
     "device_type_overrides": {},
     "ips_enabled": True,           # Master switch for IPS

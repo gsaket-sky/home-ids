@@ -502,6 +502,7 @@ class AbuseIPDB:
         self._last_req = 0.0
         self._today_count = 0
         self._today_date = ""
+        self._quota_exhausted_until = 0.0
         self._lock = threading.RLock()
         
         LOGGER.debug("AbuseIPDB wrapper initialized.")
@@ -561,8 +562,12 @@ class AbuseIPDB:
     def _live_worker_loop(self) -> None:
         LOGGER.debug("AbuseIPDB live worker loop active.")
         while True:
-            item = None
             import time
+            if time.time() < self._quota_exhausted_until:
+                time.sleep(60)
+                continue
+                
+            item = None
             with self._lock:
                 t = time.strftime("%Y-%m-%d")
                 if t != self._today_date: 
@@ -586,7 +591,7 @@ class AbuseIPDB:
                 LOGGER.debug("Executing AbuseIPDB live API query for IP: %s", item)
                 res = self._live_query(item)
                 with self._lock:
-                    cache_ttl = 86400 if res else 60
+                    cache_ttl = 86400 if res else 3600
                     self._live_cache[item] = {"result": res, "expires": time.time() + cache_ttl}
                     if res is not None: 
                         self._today_count += 1
@@ -616,9 +621,10 @@ class AbuseIPDB:
                 if hasattr(e, 'close'):
                     e.close()
                 if hasattr(e, 'code') and e.code == 429:
-                    LOGGER.warning("AbuseIPDB Rate limit hit (429). Backing off (Attempt %d/%d).", attempt+1, max_retries)
-                    time.sleep(15)
-                    continue
+                    LOGGER.warning("AbuseIPDB Rate limit hit (429). Daily quota likely exhausted.")
+                    self._quota_exhausted_until = time.time() + 3600
+                    time.sleep(5)
+                    break
                 elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
                     LOGGER.warning("AbuseIPDB Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
                     time.sleep(2 ** attempt)
@@ -777,6 +783,10 @@ class VirusTotalClient:
     def _worker_loop(self) -> None:
         LOGGER.debug("VirusTotal worker loop active.")
         while True:
+            if time.time() < getattr(self, "_quota_exhausted_until", 0.0):
+                time.sleep(60)
+                continue
+                
             item = None
             with self._lock:
                 t = time.strftime("%Y-%m-%d")
@@ -802,7 +812,7 @@ class VirusTotalClient:
                 res = self._query(itype, val)
                 k = f"{itype}:{val}"
                 with self._lock:
-                    cache_ttl = 86400 if res else 60
+                    cache_ttl = 86400 if res else 3600
                     self._cache[k] = {"result": res, "expires": time.time() + cache_ttl}
                     if res: self._today_count += 1
                     if len(self._cache) > 2000: 
@@ -832,9 +842,10 @@ class VirusTotalClient:
                 if hasattr(e, 'close'):
                     e.close()
                 if hasattr(e, 'code') and e.code == 429:
-                    LOGGER.warning("VT Rate limit hit (429). Backing off (Attempt %d/%d).", attempt+1, max_retries)
-                    time.sleep(15) # VT Free API is 4 per min, so back off significantly
-                    continue
+                    LOGGER.warning("VT Rate limit hit (429). Daily quota likely exhausted.")
+                    self._quota_exhausted_until = time.time() + 3600
+                    time.sleep(5) # Give a small breather, but break immediately to rely on 1-hour negative cache
+                    break
                 elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
                     LOGGER.warning("VT Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
                     time.sleep(2 ** attempt)

@@ -58,76 +58,19 @@ from typing import Optional
 # ALL decisions made by this engine are visible in Grafana.
 # Every Prometheus metric below appears as a panel you can add to your dashboard.
 # ---------------------------------------------------------------------------
-from prometheus_client import Gauge, Counter
-
-# ---- Evaluation throughput counters ----------------------------------------
-# These counters increment every time the engine processes an alert.
-# In Grafana: rate(home_ids_fp_evaluations_total[5m]) shows alerts/minute.
-fp_engine_evaluations_total = Counter(
-    "home_ids_fp_evaluations_total",
-    "Total number of alerts evaluated by the Autonomous FP Engine"
-)
-fp_engine_suppressed_total = Counter(
-    "home_ids_fp_suppressed_total",
-    "Total alerts autonomously classified as False Positive and suppressed"
-)
-fp_engine_confirmed_threats_total = Counter(
-    "home_ids_fp_confirmed_threats_total",
-    "Total alerts that bypassed FP engine due to hard-stop threat signals"
-)
-
-# ---- Per-device FP confidence score ----------------------------------------
-# Grafana: shows how confident the engine is that the last alert was a FP.
-# 1.0 = definitely false positive, 0.0 = definitely a real threat.
-fp_engine_confidence_score = Gauge(
-    "home_ids_fp_confidence_score",
-    "FP Engine confidence score (0=threat, 1=false positive) for latest alert",
-    ["device", "hostname"]
-)
-
-# ---- Trust cache size -------------------------------------------------------
-# Grafana: shows how many domains have been autonomously immunized.
-# A growing number means the engine is learning your network's normal patterns.
-fp_engine_trust_cache_size = Gauge(
-    "home_ids_fp_trust_cache_size",
-    "Number of base domains currently in the autonomous dynamic trust cache"
-)
-
-# ---- ML model availability gauges ------------------------------------------
-# Grafana: shows whether ML models are loaded and ready (1) or still starting (0).
-fp_engine_lgbm_model_status = Gauge(
-    "home_ids_fp_lgbm_model_status",
-    "LightGBM ONNX classifier model status (1=loaded, 0=unavailable)"
-)
-fp_engine_embed_model_status = Gauge(
-    "home_ids_fp_embed_model_status",
-    "FastEmbed ONNX vector similarity model status (1=loaded, 0=unavailable)"
-)
-
-# ---- Stage-by-stage hit counters -------------------------------------------
-# Grafana: pie chart showing how many FPs were caught at each stage.
-fp_engine_stage1_hardstop_hits = Counter(
-    "home_ids_fp_stage1_hardstop_hits_total",
-    "Alerts blocked at Stage 1 (Hard Stop: ThreatIntel/JA3/Lateral/Honeypot)"
-)
-fp_engine_stage2_lgbm_hits = Counter(
-    "home_ids_fp_stage2_lgbm_hits_total",
-    "Alerts classified FP at Stage 2 (LightGBM probability >= threshold)"
-)
-fp_engine_stage3_embed_hits = Counter(
-    "home_ids_fp_stage3_embed_hits_total",
-    "Alerts classified FP at Stage 3 (FastEmbed vector similarity >= threshold)"
-)
-
-# ---- Self-healing action counters ------------------------------------------
-fp_engine_domains_immunized_total = Counter(
-    "home_ids_fp_domains_immunized_total",
-    "Total unique eTLD+1 base domains autonomously added to the trust cache"
-)
-fp_engine_sigma_shifts_total = Counter(
-    "home_ids_fp_sigma_shifts_total",
-    "Total automatic baseline sigma-widening adjustments applied to devices",
-    ["device", "hostname"]
+from metrics import (
+    fp_engine_evaluations_total,
+    fp_engine_suppressed_total,
+    fp_engine_confirmed_threats_total,
+    fp_engine_confidence_score,
+    fp_engine_trust_cache_size,
+    fp_engine_lgbm_model_status,
+    fp_engine_embed_model_status,
+    fp_engine_stage1_hardstop_hits,
+    fp_engine_stage2_lgbm_hits,
+    fp_engine_stage3_embed_hits,
+    fp_engine_domains_immunized_total,
+    fp_engine_sigma_shifts_total,
 )
 
 # ---------------------------------------------------------------------------

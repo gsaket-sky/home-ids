@@ -139,7 +139,14 @@ class EnginePipeline:
         self.zeek_detector = ZeekNetworkDetector()
         self.decision_engine = DecisionEngine()
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
-        self.alert_manager = AlertManager(token=self.config.get("telegram_token", ""), chat_id=self.config.get("telegram_chat_id", ""), enabled=bool(self.config.get("telegram_enabled", False)), ollama_url=self.config.get("ollama_url", ""), ollama_model=self.config.get("ollama_model", "llama3"))
+        self.alert_manager = AlertManager(
+            token=self.config.get("telegram_token", ""), 
+            chat_id=self.config.get("telegram_chat_id", ""), 
+            enabled=bool(self.config.get("telegram_enabled", False)), 
+            ollama_url=self.config.get("ollama_url", ""), 
+            ollama_model=self.config.get("ollama_model", "llama3"),
+            ollama_api_key=self.config.get("ollama_api_key", "")
+        )
         if self.config.get("telegram_token") and bool(self.config.get("telegram_enabled", False)):
             interactive = "ENABLED" if self.config.get("interactive_blocking_enabled", False) else "DISABLED"
             LOGGER.info(f"Telegram integration activated (Interactive Blocking: {interactive}).")
@@ -251,7 +258,8 @@ class EnginePipeline:
             dev_id = self.identity_manager.resolve_device_id(client_ip, mac_addr, hostname)
 
             if self.state_manager.has_device(dev_id):
-                with self.state_manager.lock_device(dev_id) as state:
+                mitigation_pending = None
+            with self.state_manager.lock_device(dev_id) as state:
                     status_code = int(row.get("status", 0))
                     qtype = row.get("reply_type", 0)
                     state.rolling.events.append((ts, domain, status_code))
@@ -269,6 +277,7 @@ class EnginePipeline:
 
         for dev_id in self.state_manager.get_all_device_ids():
             # ─── PHASE 1: Snapshot state data (short lock window) ───────────────────
+            mitigation_pending = None
             with self.state_manager.lock_device(dev_id) as state:
                 client_ip = state.client_ip
                 hostname = state.hostname
@@ -328,6 +337,7 @@ class EnginePipeline:
             _zeek_features = {**self.zeek_fx.get_features(client_ip), **self.zeek_fx.get_last_connection_meta(client_ip)}
 
             # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
+            mitigation_pending = None
             with self.state_manager.lock_device(dev_id) as state:
                 features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
                 features["sigma_shift"] = self.fp_engine.get_sigma_shift(dev_id)
@@ -402,6 +412,7 @@ class EnginePipeline:
             features["vt_risk"] = vt_risk
 
             # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
+            mitigation_pending = None
             with self.state_manager.lock_device(dev_id) as state:
                 ml_score = 0.0
                 if self.ml_registry:
@@ -442,6 +453,13 @@ class EnginePipeline:
                 
                 # 3. Decision Engine
                 active_evidence = self.evidence_store.get_for_device(dev_id)
+                
+                if is_safe:
+                    # Hybrid Approach: Exclude ML and DNS behavioral anomalies for infrastructure,
+                    # but retain Threat Intel and Honeypot evidence to alert on real threats.
+                    noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network"}
+                    active_evidence = [ev for ev in active_evidence if ev.type not in noisy_types and ev.independence_group not in noisy_types]
+
                 decision = self.decision_engine.evaluate(active_evidence, rep_vector)
                 
                 risk = decision["threat_confidence"] * 10.0 # Map to old 0-10 scale temporarily for metrics
@@ -481,7 +499,7 @@ class EnginePipeline:
                 risk_delta = abs(risk - getattr(state, "last_alert_confidence", 0.0))
                 time_elapsed = now - getattr(state, "last_alert_time", 0.0)
 
-                if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL) and not is_safe:
+                if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL):
                     if time_elapsed > 300 or (time_elapsed > 60 and (risk_delta >= 1.0 or primary_sig != getattr(state, "last_alert_signature", ""))):
                         LOGGER.warning("Alert Triggered for %s! Risk: %.2f, Signature: %s", hostname, risk, primary_sig)
                         state.last_alert_time = now
@@ -552,8 +570,6 @@ class EnginePipeline:
                                     st=state,
                                     target_domain=target_malicious_domain,
                                     risk_score=risk,
-                                    c2_hits=1 if risk >= 8.0 else 0,
-                                    dga_burst=(features.get("suspicious_domains_z", 0.0) > 2.0),
                                     lateral_threat=(features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0),
                                     is_safe=is_safe,
                                     ti_engine=self.ti_engine,
@@ -610,45 +626,47 @@ class EnginePipeline:
                             elif fp_verdict["confidence"] >= 0.55:
                                 rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
                             else:
-                                rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended (Inspect device / Run scan)."
+                                rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
+
+                            threat_name = decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat")
+                            threat_conf_pct = int(decision.get('threat_confidence', 0) * 100)
 
                             alert_msg = (
-                                f"🚨 *[ALERT] {hostname} ({client_ip})*\n"
-                                f"📊 *Risk:* `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n"
-                                f"🏷️ *Primary Trigger:* {primary_sig}\n\n"
-                                f"🌐 *DNS Activity (Pi-hole Context)*\n"
-                                f"- Target Domain: `{target_malicious_domain or 'None'}`\n"
-                                f"{threat_dns_header}\n{threat_dns_str}\n\n"
-                                f"🔌 *Network Activity (Zeek Context)*\n"
-                                f"- Dominant Outbound: `{service_name}` (Port `{dest_port}` / `{dest_proto}`)\n"
-                                f"- App / Process: `{app_name}`\n"
+                                f"🚨 *[ALERT] {hostname} ({client_ip})*\n\n"
+                                f"🧠 *THREAT:* {threat_name} ({threat_conf_pct}% Confidence)\n"
+                                f"↳ Trigger: `{primary_sig}`\n"
+                                f"↳ Risk Score: `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n\n"
+                                f"🔍 *CAUSE / EVIDENCE*\n"
                             )
+                            
+                            grouped_evidence = {}
+                            for ev in active_evidence:
+                                if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
+                                    grouped_evidence[ev.independence_group] = ev
+                                    
+                            for group, ev in grouped_evidence.items():
+                                alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
+                                
+                            alert_msg += (
+                                f"- Target: `{target_malicious_domain or 'unknown'}` ({service_name} / Port {dest_port})\n"
+                                f"- Application: `{app_name}`\n"
+                            )
+                            
                             if scanned_ports:
-                                alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}` [{len(scanned_ports)} ports]\n\n"
-                            else:
-                                alert_msg += f"- Lateral Scans: None\n\n"
+                                alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}`\n"
+
+                            if threat_dns_str and "No suspicious" not in threat_dns_str:
+                                alert_msg += f"\n{threat_dns_header}\n{threat_dns_str}\n"
 
                             alert_msg += (
-                                f"🛡️ *Mitigation & Confidence*\n"
-                                f"- Containment: `{containment_status}`\n"
-                                f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n"
+                                f"\n🛡️ *RESPONSE*\n"
+                                f"- Action: `{containment_status}`\n"
+                                f"- AI Analysis: `{fp_pct}% FP / {threat_pct}% Threat`\n"
                             )
+                            
                             if decision.get("evidence_verification_required", False):
                                 alert_msg += "- Verification: `Required` (partial hypothesis support)\n"
-                            else:
-                                alert_msg += "- Verification: `Not required`\n"
-                            alert_msg += "\n"
-
-                            alert_msg += "🧠 *BEST EXPLANATION:* " + decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat") + "\n"
-                            alert_msg += f"⚖️ *Threat Confidence:* {int(decision.get('threat_confidence', 0) * 100)}%\n\n"
-                            alert_msg += "*EVIDENCE GRAPH:*\n"
-                            
-                            seen_groups = set()
-                            for ev in active_evidence:
-                                if ev.independence_group not in seen_groups:
-                                    seen_groups.add(ev.independence_group)
-                                    alert_msg += f"✓ {ev.independence_group}: {ev.type} ({ev.value:.1f})\n"
-                            
+                                
                             alert_msg += f"\n{rec_badge}"
 
 
@@ -688,6 +706,119 @@ class EnginePipeline:
 
                 for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):
                     self.metrics_exporter.record_lateral_target(dev_id, hostname, client_ip, dst_ip, dst_port)
+                    
+            # --- OUTSIDE THE DEVICE LOCK ---
+            if mitigation_pending:
+                m = mitigation_pending
+                containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
+                
+                if self.ips_mitigator:
+                    self.ips_mitigator.mitigate(
+                        st=m["state"],
+                        target_domain=m["target_domain"],
+                        risk_score=m["risk"],
+                        c2_hits=1 if m["risk"] >= 8.0 else 0,
+                        dga_burst=(m["features"].get("suspicious_domains_z", 0.0) > 2.0),
+                        lateral_threat=(m["features"].get("zeek_lateral_moves", 0) > 0 or m["features"].get("zeek_honeypot_hits", 0) > 0),
+                        is_safe=m["is_safe"],
+                        ti_engine=self.ti_engine,
+                        reason=m["primary_sig"],
+                        fp_verdict=m["fp_verdict"]
+                    )
+                    containment_status = self.ips_mitigator.get_containment_status(
+                        client_ip=m["client_ip"],
+                        mac_addr=getattr(m["state"], "mac_address", "unknown"),
+                        domain=m["target_domain"]
+                    )
+                    
+                if bool(self.config.get("interactive_blocking_enabled", False)) and "UNBLOCKED" in containment_status:
+                    containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
+
+                self.alert_writer.write(m["alert_payload"])
+                alerts_total.inc()
+
+                app_name = self.zeek_fx.get_app_context(m["client_ip"]) if self.zeek_fx else "Network Socket"
+                scanned_ports = self.zeek_fx.get_scanned_ports(m["client_ip"]) if self.zeek_fx else []
+
+                threat_dns_lines = []
+                omitted_count = 0
+                if hasattr(m["state"], "rolling") and hasattr(m["state"].rolling, "events"):
+                    for ev_ts, ev_dom, ev_status in list(m["state"].rolling.events)[-25:]:
+                        safe_domains = set(self.config.get("safe_domains", []))
+                        is_trusted = (
+                            is_telemetry_domain(ev_dom) or 
+                            (ev_dom in safe_domains) or 
+                            (self.ti_engine and self.ti_engine.is_allowlisted(ev_dom))
+                        )
+                        if is_trusted and ev_status not in BLOCKED_STATUSES:
+                            omitted_count += 1
+                            continue
+                        
+                        status_tag = "🔴 BLOCKED" if ev_status in BLOCKED_STATUSES else "🟡 NXDOMAIN" if ev_status in NXDOMAIN_STATUSES else "🟢 ALLOWED"
+                        threat_dns_lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}")
+
+                threat_dns_str = "\n".join(threat_dns_lines[:10]) if threat_dns_lines else "  No suspicious DNS queries detected"
+                threat_dns_header = f"🕒 *Threat-Filtered DNS Sequence (Omitted {omitted_count} harmless queries):*" if omitted_count > 0 else "🕒 *Threat-Filtered DNS Sequence:*"
+
+                fp_pct = int(m["fp_verdict"].get("confidence", 0.0) * 100)
+                threat_pct = 100 - fp_pct
+
+                if m["fp_verdict"]["confidence"] >= 0.75:
+                    rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
+                elif m["fp_verdict"]["confidence"] >= 0.55:
+                    rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
+                else:
+                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
+
+                alert_msg = (
+                    f"🚨 *[ALERT] {m['hostname']} ({m['client_ip']})*\n"
+                    f"📊 *Risk:* `{m['risk']:.2f}` (Threshold: `{alert_threshold:.2f}`)\n"
+                    f"🏷️ *Primary Trigger:* {m['primary_sig']}\n\n"
+                    f"🌐 *DNS Activity (Pi-hole Context)*\n"
+                    f"- Target Domain: `{m['target_domain'] or 'None'}`\n"
+                    f"{threat_dns_header}\n{threat_dns_str}\n\n"
+                    f"🔌 *Network Activity (Zeek Context)*\n"
+                    f"- Dominant Outbound: `{m['service_name']}` (Port `{m['dest_port']}` / `{m['dest_proto']}`)\n"
+                    f"- App / Process: `{app_name}`\n"
+                )
+                if scanned_ports:
+                    alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}` [{len(scanned_ports)} ports]\n\n"
+                else:
+                    alert_msg += f"- Lateral Scans: None\n\n"
+
+                alert_msg += (
+                    f"🛡️ *Mitigation & Confidence*\n"
+                    f"- Containment: `{containment_status}`\n"
+                    f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n\n"
+                )
+
+                alert_msg += "🧠 *BEST EXPLANATION:* " + m["decision"].get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat") + "\n"
+                alert_msg += f"⚖️ *Threat Confidence:* {int(m['decision'].get('threat_confidence', 0) * 100)}%\n\n"
+                alert_msg += "*EVIDENCE GRAPH:*\n"
+                
+                seen_groups = set()
+                for ev in m["active_evidence"]:
+                    if ev.independence_group not in seen_groups:
+                        seen_groups.add(ev.independence_group)
+                        alert_msg += f"✓ {ev.independence_group}: {ev.type} ({ev.value:.1f})\n"
+                
+                alert_msg += f"\n{rec_badge}"
+
+                reply_markup = None
+                if bool(self.config.get("interactive_blocking_enabled", False)):
+                    reply_markup = {
+                        "inline_keyboard": [
+                            [
+                                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{m['client_ip']}"},
+                                {"text": "🔓 Release Device", "callback_data": f"unblock:{m['client_ip']}"}
+                            ],
+                            [
+                                {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{m['target_domain']}"}
+                            ]
+                        ]
+                    }
+
+                self.alert_manager.send(alert_msg, raw_payload=m["alert_payload"], reply_markup=reply_markup)
 
         self.zeek_fx.prune(now, window_seconds)
         

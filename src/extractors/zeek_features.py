@@ -128,7 +128,8 @@ class ZeekCollector:
         self.poll_interval = poll_interval
         self.state_dir = state_dir
         self._tailers = {}
-        self._events = []
+        self._tailers_lock = threading.Lock()
+        self._events = deque(maxlen=100000)
         self._lock = threading.Lock()
         self._tailers_lock = threading.Lock()
         self._available = False
@@ -191,7 +192,7 @@ class ZeekCollector:
 
         with self._lock:
             e = self._events
-            self._events = []
+            self._events = deque(maxlen=100000)
         return e
 
     @property

@@ -25,7 +25,11 @@ import logging
 import signal
 import sys
 import subprocess
+import warnings
 from pathlib import Path
+
+# Suppress benign scikit-learn parallelization warnings from polluting the journald logs
+warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed should be used with sklearn.utils.parallel.Parallel.*")
 
 from config import CONFIG
 from core.state_guard import StateManager

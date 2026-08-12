@@ -353,3 +353,24 @@ class StateManager:
         except Exception as exc:
             LOGGER.error("Failed to reconcile IPS state from disk: %s", exc)
             return False
+    def reset_device_state(self, device_id: str):
+        with self._global_lock:
+            if device_id in self._states:
+                state = self._states[device_id]
+                state.seen_domains = BoundedSet(max_size=10000)
+                state.geo_exported_ips = BoundedSet(max_size=5000)
+                state.killchain_history = deque(maxlen=5)
+                state.has_validated_threat = False
+                state.confirmed_threat_count = 0
+                state.fp_count = 0
+                state.rate_baseline = EWMABaseline(alpha=state.rate_baseline.alpha)
+                state.entropy_baseline = EWMABaseline(alpha=state.entropy_baseline.alpha)
+                state.unique_baseline = EWMABaseline(alpha=state.unique_baseline.alpha)
+                state.nxdomain_baseline = EWMABaseline(alpha=state.nxdomain_baseline.alpha)
+                state.blocked_baseline = EWMABaseline(alpha=state.blocked_baseline.alpha)
+                state.dga_baseline = EWMABaseline(alpha=state.dga_baseline.alpha)
+                state.outbound_bytes_baseline = EWMABaseline(alpha=state.outbound_bytes_baseline.alpha)
+                state.risk_baseline = EWMABaseline(alpha=state.risk_baseline.alpha)
+                state.last_alert_time = 0.0
+                state.last_alert_confidence = 0.0
+                LOGGER.info("🧹 Fully reset in-memory state baselines for %s", device_id)

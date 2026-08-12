@@ -264,8 +264,6 @@ class IPSMitigator:
         st: Any,
         target_domain: str,
         risk_score: float,
-        c2_hits: int,
-        dga_burst: bool,
         lateral_threat: bool,
         is_safe: bool,
         ti_engine: Optional[Any] = None,
@@ -328,16 +326,14 @@ class IPSMitigator:
 
         interactive_mode = bool(self.config.get("interactive_blocking_enabled", False))
         pihole_enabled = bool(self.config.get("ips_pihole_enabled", True)) and bool(self.config.get("ips_enabled", True))
-        alert_threshold = float(self.config.get("alert_threshold", 6.0))
 
         if pihole_enabled and target_domain and target_domain not in ("unknown", "-"):
             safe_domains = set(self.config.get("safe_domains", []))
             is_domain_safe = (target_domain in safe_domains) or (ti_engine and ti_engine.is_allowlisted(target_domain))
 
             if not is_domain_safe:
-                if risk_score >= alert_threshold or dga_burst or c2_hits > 0:
-                    LOGGER.debug("Risk threshold breached. Executing immediate Pi-hole block protocol for %s.", target_domain)
-                    self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id, reason=reason)
+                LOGGER.debug("Executing immediate Pi-hole block protocol for %s.", target_domain)
+                self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id, reason=reason)
             else:
                 LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
 
@@ -401,21 +397,48 @@ class IPSMitigator:
         
         # Self-healing desync check: Clear queues if block is already confirmed active
         if domain in ips_state.get("blocked_domains", {}):
-            with self._lock:
-                modified = False
-                if domain in self._retry_queue:
-                    self._retry_queue.pop(domain)
-                    try: ips_queue_status_gauge.remove(dev_id, hostname, domain)
-                    except: pass
-                    modified = True
-                if domain in self._dead_letter:
-                    self._dead_letter.pop(domain)
-                    try: ips_dead_letter_gauge.remove(dev_id, hostname, domain)
-                    except: pass
-                    modified = True
-                if modified:
-                    self._save_queues()
-            return True
+            api_url = self.config.get("pihole_api_url", "")
+            api_path = self.config.get("pihole_api_path", "/api/v2/domains")
+            api_password = self.config.get("pihole_api_password", "")
+            headers = {"sid": api_password} if api_password else {}
+            
+            is_actually_blocked = True
+            if api_url:
+                try:
+                    resp = self.session.get(f"{api_url}{api_path}", headers=headers, timeout=2.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        items = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                        actual_domains = {item.get("domain") for item in items if isinstance(item, dict) and item.get("type", "") in ("black", "regex_black", 1, 3)}
+                        if domain not in actual_domains:
+                            is_actually_blocked = False
+                            LOGGER.warning("Pi-hole desync: %s was unblocked externally. Resyncing internal state.", domain)
+                            with self.state_manager._global_lock:
+                                ips_state = self.state_manager.get_ips_state()
+                                ips_state.get("blocked_domains", {}).pop(domain, None)
+                                self.state_manager.save_ips_state(ips_state)
+                            # self.state_manager.flush_to_disk()  # Removed to prevent lock contention
+                            try: ips_active_blocks_gauge.remove(dev_id, hostname, domain)
+                            except: pass
+                except Exception as e:
+                    LOGGER.debug("Pi-hole sync check failed: %s", e)
+            
+            if is_actually_blocked:
+                with self._lock:
+                    modified = False
+                    if domain in self._retry_queue:
+                        self._retry_queue.pop(domain)
+                        try: ips_queue_status_gauge.remove(dev_id, hostname, domain)
+                        except: pass
+                        modified = True
+                    if domain in self._dead_letter:
+                        self._dead_letter.pop(domain)
+                        try: ips_dead_letter_gauge.remove(dev_id, hostname, domain)
+                        except: pass
+                        modified = True
+                    if modified:
+                        self._save_queues()
+                return True
             
         comment = f"Home-IDS Auto-Block | Device: {hostname} | Trigger: {reason}"
         api_url = self.config.get("pihole_api_url", "")
@@ -591,7 +614,7 @@ class IPSMitigator:
             if meta:
                 hostname, dev_id = meta.get("hostname", "unknown"), meta.get("device_id", "unknown")
             self.state_manager.save_ips_state(ips_state)
-            self.state_manager.flush_to_disk()
+            # self.state_manager.flush_to_disk()  # Removed to prevent lock contention
 
         try: 
             ips_active_blocks_gauge.remove(dev_id, hostname, domain)
@@ -764,3 +787,16 @@ class IPSMitigator:
                 released_count += 1
 
         return released_count
+    def unisolate_all(self, mac_addr: str, ip_addr: str):
+        """Completely un-isolates a device (Router + Tarpit) across MAC and IP changes."""
+        with self._lock:
+            if ip_addr in self._tarpit_active_targets:
+                del self._tarpit_active_targets[ip_addr]
+                LOGGER.info("🧹 Cleared Tarpit entry for reassigned IP %s", ip_addr)
+            if mac_addr in self._router_isolated_devices:
+                del self._router_isolated_devices[mac_addr]
+                LOGGER.info("🧹 Cleared Router Isolation entry for new MAC %s", mac_addr)
+        
+        # Trigger actual router unblock if enabled
+        if bool(self.config.get("ips_router_enabled", False)):
+            self._unisolate_device_router(ip_addr)

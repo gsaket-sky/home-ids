@@ -1,4 +1,4 @@
-# 🛡️ Home-IDS: Comprehensive Beginner User Manual & Threat Playbook
+# 🛡️ Home-IDS: Comprehensive Beginner User Manual & Threat Playbook (Version 6)
 
 Welcome to **Home-IDS** — an autonomous, enterprise-grade Intrusion Detection and Prevention System (IDS/IPS) specifically designed for smart homes, edge networks, and small office environments.
 

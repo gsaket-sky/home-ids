@@ -1,4 +1,4 @@
-# 🛡️ Home-IDS: Advanced Autonomous Threat Defense (Version 5)
+# 🛡️ Home-IDS: Advanced Autonomous Threat Defense (Version 6)
 
 Home-IDS is a professional-grade, autonomous Intrusion Detection and Prevention System (IDS/IPS) engineered for edge networks and smart home environments. Moving beyond static blocklists, Home-IDS utilizes machine learning, behavioral heuristics, and multi-layered hardware isolation to detect, analyze, and neutralize sophisticated threats in real-time.
 

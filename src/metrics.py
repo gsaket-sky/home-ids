@@ -158,3 +158,19 @@ ips_router_isolated_active = Gauge(
 ips_pihole_blocks_total = Counter("home_ids_ips_pihole_blocks_aggregate_total", "Total automated domain blocks executed (aggregate)")
 ips_router_isolations_total = Counter("home_ids_ips_router_isolations_aggregate_total", "Total automated router isolations executed (aggregate)")
 ips_tarpit_activations_total = Counter("home_ids_ips_tarpit_activations_aggregate_total", "Total tarpit activations executed (aggregate)")
+
+# ===========================================================================
+# Autonomous False-Positive Elimination Engine (CL-AFPE) Metrics
+# ===========================================================================
+fp_engine_evaluations_total = Counter("home_ids_fp_evaluations_total", "Total number of alerts evaluated by the Autonomous FP Engine")
+fp_engine_suppressed_total = Counter("home_ids_fp_suppressed_total", "Total alerts autonomously classified as False Positive and suppressed")
+fp_engine_confirmed_threats_total = Counter("home_ids_fp_confirmed_threats_total", "Total alerts that bypassed FP engine due to hard-stop threat signals")
+fp_engine_confidence_score = Gauge("home_ids_fp_confidence_score", "FP Engine confidence score (0=threat, 1=false positive) for latest alert", ["device", "hostname"])
+fp_engine_trust_cache_size = Gauge("home_ids_fp_trust_cache_size", "Number of base domains currently in the autonomous dynamic trust cache")
+fp_engine_lgbm_model_status = Gauge("home_ids_fp_lgbm_model_status", "LightGBM ONNX classifier model status (1=loaded, 0=unavailable)")
+fp_engine_embed_model_status = Gauge("home_ids_fp_embed_model_status", "FastEmbed ONNX vector similarity model status (1=loaded, 0=unavailable)")
+fp_engine_stage1_hardstop_hits = Counter("home_ids_fp_stage1_hardstop_hits_total", "Alerts blocked at Stage 1")
+fp_engine_stage2_lgbm_hits = Counter("home_ids_fp_stage2_lgbm_hits_total", "Alerts classified FP at Stage 2")
+fp_engine_stage3_embed_hits = Counter("home_ids_fp_stage3_embed_hits_total", "Alerts classified FP at Stage 3")
+fp_engine_domains_immunized_total = Counter("home_ids_fp_domains_immunized_total", "Total unique eTLD+1 base domains autonomously added to the trust cache")
+fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total automatic baseline sigma-widening adjustments applied to devices", ["device", "hostname"])

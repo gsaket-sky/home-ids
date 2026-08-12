@@ -125,12 +125,13 @@ class AlertJSONWriter:
 class AlertManager:
     """Asynchronous Telegram notification manager with optional Ollama AI summarization."""
     
-    def __init__(self, token: str, chat_id: str, enabled: bool = False, ollama_url: str = "", ollama_model: str = "llama3"):
+    def __init__(self, token: str, chat_id: str, enabled: bool = False, ollama_url: str = "", ollama_model: str = "llama3", ollama_api_key: str = ""):
         self.token = token.strip()
         self.chat_id = chat_id.strip()
         self.enabled = enabled
         self.ollama_url = ollama_url.strip().rstrip("/")
         self.ollama_model = ollama_model.strip()
+        self.ollama_api_key = ollama_api_key.strip()
         
         self.q = queue.Queue(maxsize=1000)
         self.running = True
@@ -185,6 +186,10 @@ class AlertManager:
             )
             prompt = f"Alert Payload:\n{json.dumps(payload, indent=2)}"
             
+            headers = {}
+            if self.ollama_api_key:
+                headers["Authorization"] = f"Bearer {self.ollama_api_key}"
+            
             resp = requests.post(
                 f"{self.ollama_url}/api/generate",
                 json={
@@ -193,6 +198,7 @@ class AlertManager:
                     "prompt": prompt, 
                     "stream": False
                 },
+                headers=headers,
                 timeout=5.0
             )
             if resp.status_code == 200:

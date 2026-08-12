@@ -1,4 +1,4 @@
-# Home-IDS Core Dependencies
+# Home-IDS Core Dependencies (Version 6)
 prometheus_client>=0.17.0
 scapy>=2.5.0
 lightgbm>=3.3.5

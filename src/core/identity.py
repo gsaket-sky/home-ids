@@ -29,7 +29,7 @@ _GENERIC_HOSTNAMES = frozenset({
     "imac", "apple-tv", "desktop", "laptop", "pc", "workstation", "unknown",
     "localhost", "galaxy", "samsung", "pixel", "amazon-device", "chromecast",
     "windows", "linux", "debian", "ubuntu", "raspberrypi", "router", "gateway",
-    "switch", "ap", "access-point", "wlan", "wifi", "host", "device"
+    "switch", "ap", "access-point", "wlan", "wifi", "host", "device", "none"
 })
 
 
