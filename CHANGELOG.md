@@ -2,6 +2,23 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [Unreleased] - 2026-08-13
+
+### 📊 Grafana Observability & UI Overhaul
+- Completely refactored and consolidated 5 legacy Grafana dashboards into 4 streamlined modules (`1_main_overview`, `2_threat_landscape`, `3_device_deep_dive`, `4_system_health`), backing up legacy dashboards to `dashboard_backup/`.
+- Fixed Loki log querying syntax and UID alignment across all Grafana panels for seamless drill-down alerting.
+- Added comprehensive Prometheus telemetry panels tracking CPU, Memory, Pipeline Latency, and Zeek processing metrics.
+
+### 🛡️ False Positive Engine & Telegram SecOps
+- Fixed critical `Trust Cache` poisoning bug where raw IP connections without a domain caused the Telegram bot to generate a broken `immunize:unknown` payload.
+- Added a hard guard clause in `fp_engine.py` rejecting `"unknown"`, `"null"`, and empty strings from being permanently immunized.
+- Increased the Ollama API timeout from 5.0 to 30.0 seconds to prevent LLaMA 3.1 AI summaries from silently failing in Telegram.
+
+### ⚙️ System Configuration & Performance
+- Silenced aggressive scikit-learn and joblib `UserWarning` Loky thread-worker spam in `journalctl` by enforcing a global `PYTHONWARNINGS="ignore"` policy.
+- Officially added integration support for internal Docker `Cowrie` Honeypots via `config.json`'s `honeypot_ips` array.
+- Updated `README.md` and `USER_MANUAL.md` with sections detailing the ultra-optimized, asynchronous, multi-threaded architecture explicitly designed for low-spec servers (e.g., Raspberry Pi).
+
 ## [Unreleased] - 2026-08-11
 
 ### 🧩 Stability & Security Hotfixes

@@ -199,12 +199,12 @@ class AlertManager:
                     "stream": False
                 },
                 headers=headers,
-                timeout=5.0
+                timeout=30.0
             )
             if resp.status_code == 200:
                 return resp.json().get("response", "").strip()
         except Exception as exc:
-            LOGGER.debug("Ollama summary generation failed: %s", exc)
+            LOGGER.warning("Ollama summary generation failed (Timeout or connection error): %s", exc)
         return None
 
     def _dispatch_worker(self) -> None:

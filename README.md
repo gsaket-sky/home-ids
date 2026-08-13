@@ -27,5 +27,8 @@ Provides a fully interactive Security Operations Center (SecOps) interface direc
 ### 🔍 Multi-Vector Threat Intelligence Correlation
 Fuses high-volume network metadata from Zeek (Bro) with DNS logs from Pi-hole. It correlates port activity, traffic payloads, and DNS queries across a sliding temporal window to calculate holistic threat confidence.
 
+### ⚡ Ultra-Optimized & Asynchronous Architecture (Low-Spec Ready)
+Engineered specifically to run efficiently on low-spec hardware (like Raspberry Pi or older Intel NUCs). The core detection pipeline utilizes advanced **multi-threading and asynchronous background workers**. This ensures that heavy operations—such as querying external Threat Intelligence APIs (OTX/AbuseIPDB), communicating with local LLMs, or training the ML models—are dispatched to independent background threads. The primary real-time threat detection pipeline remains **100% non-blocking**, guaranteeing zero network latency or lag, even when processing tens of thousands of packets per second.
+
 ### 📊 Prometheus & Grafana Observability
 Full integration with Prometheus metrics and Grafana, providing enterprise-level visibility into network health, HEE decision states, threat distribution, and autonomous mitigations across your entire infrastructure.

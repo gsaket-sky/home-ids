@@ -255,11 +255,48 @@ class AutonomousFPEngine:
         device_id = alert_payload.get("device", {}).get("id", "unknown")
         hostname  = alert_payload.get("device", {}).get("hostname", "unknown")
         domain    = alert_payload.get("network_context", {}).get("queried_domain", "") or ""
+        dest_ip   = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
 
         LOGGER.info(
-            "🔍 [FP ENGINE] Evaluating │ device=%-25s │ domain=%-40s │ risk=%.2f",
-            f"{hostname} ({device_id})", domain, risk_score
+            "🔍 [FP ENGINE] Evaluating │ device=%-25s │ target=%-40s │ risk=%.2f",
+            f"{hostname} ({device_id})", domain or dest_ip, risk_score
         )
+
+        # ==================================================================
+        # TRUST CACHE FAST PATH
+        # If this domain's base domain or destination IP was previously verified safe,
+        # skip ML inference and hard-stops entirely and suppress immediately.
+        # This handles recurring alerts for the same FP domain at zero CPU cost,
+        # and allows explicit admin immunization to bypass AbuseIPDB/TI false positives.
+        # ==================================================================
+        base_domain = self._extract_base_domain(domain)
+        
+        cached_target = None
+        if self._is_trust_cached(base_domain):
+            cached_target = base_domain
+        elif dest_ip and self._is_trust_cached(dest_ip):
+            cached_target = dest_ip
+            
+        if cached_target:
+            LOGGER.info(
+                "✅ [FP ENGINE » Trust Cache] %s: '%s' is immunized (trust cache hit) → suppressed.",
+                hostname, cached_target
+            )
+            fp_engine_suppressed_total.inc()
+            fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(1.0)
+            self._write_muted_log(
+                alert_payload,
+                "TRUST_CACHE_HIT",
+                [f"Target '{cached_target}' is in autonomous trust cache (14-day TTL)"],
+                1.0
+            )
+            return {
+                "verdict": "FALSE_POSITIVE",
+                "confidence": 1.0,
+                "stage": "TRUST_CACHE",
+                "reasons": [f"'{cached_target}' previously verified safe – dynamic trust cache hit"],
+                "suppress": True,
+            }
 
         # ==================================================================
         # STAGE 1: Hard-Stop Security Filter
@@ -291,34 +328,6 @@ class AutonomousFPEngine:
             }
 
         LOGGER.debug("[FP ENGINE » Stage 1] Passed – no hard-stop threat signals detected.")
-
-        # ==================================================================
-        # TRUST CACHE FAST PATH
-        # If this domain's base domain was previously verified safe (14-day TTL),
-        # skip ML inference entirely and suppress immediately.
-        # This handles recurring alerts for the same FP domain at zero CPU cost.
-        # ==================================================================
-        base_domain = self._extract_base_domain(domain)
-        if self._is_trust_cached(base_domain):
-            LOGGER.info(
-                "✅ [FP ENGINE » Trust Cache] %s: '%s' is immunized (trust cache hit) → suppressed.",
-                hostname, base_domain
-            )
-            fp_engine_suppressed_total.inc()
-            fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(1.0)
-            self._write_muted_log(
-                alert_payload,
-                "TRUST_CACHE_HIT",
-                [f"Base domain '{base_domain}' is in autonomous trust cache (14-day TTL)"],
-                1.0
-            )
-            return {
-                "verdict": "FALSE_POSITIVE",
-                "confidence": 1.0,
-                "stage": "TRUST_CACHE",
-                "reasons": [f"'{base_domain}' previously verified safe – dynamic trust cache hit"],
-                "suppress": True,
-            }
 
         # ==================================================================
         # STAGE 2: LightGBM ONNX Tabular Classifier
@@ -800,6 +809,10 @@ class AutonomousFPEngine:
         Example: immunizing 'sentry.io' means future alerts for
                  'xyz.ingest.us.sentry.io' are instantly suppressed.
         """
+        if not base_domain or str(base_domain).lower() in ("unknown", "null", "none"):
+            LOGGER.warning("❌ [FP ENGINE » IMMUNIZE] Rejected invalid domain immunization attempt: '%s'", base_domain)
+            return
+
         now = time.time()
         with self._lock:
             is_new = base_domain not in self._trust_cache

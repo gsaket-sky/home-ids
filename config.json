@@ -50,10 +50,11 @@
       "192.0.0.2",
       "127.0.0.1"
     ],
-    "honeypot_ips": [],
+    "honeypot_ips": [
+      "192.168.1.200"
+    ],
     "safe_domains": [],
     "safe_host_patterns": [
-      "fritz",
       "paperless",
       "repeater",
       "pi-hole",

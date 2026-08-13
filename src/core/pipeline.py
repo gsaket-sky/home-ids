@@ -257,20 +257,21 @@ class EnginePipeline:
             mac_addr = self.zeek_fx.get_mac(client_ip)
             dev_id = self.identity_manager.resolve_device_id(client_ip, mac_addr, hostname)
 
-            if self.state_manager.has_device(dev_id):
-                mitigation_pending = None
+            if not self.state_manager.has_device(dev_id):
+                self.state_manager.get_or_create(dev_id, client_ip, hostname, float(self.config.get("baseline_alpha", 0.05)))
+
             with self.state_manager.lock_device(dev_id) as state:
-                    status_code = int(row.get("status", 0))
-                    qtype = row.get("reply_type", 0)
-                    state.rolling.events.append((ts, domain, status_code))
-                    state.rolling.long_events.append((ts, domain, status_code, qtype))
-                    state.rolling.dns_qtypes[qtype] += 1
-                    if status_code in BLOCKED_STATUSES:
-                        state.rolling.blocked += 1
-                    if status_code in NXDOMAIN_STATUSES:
-                        state.rolling.nxdomain += 1
-                    state.rolling.domains[domain] += 1
-                    state.rolling.domain_timestamps[domain].append(ts)
+                status_code = int(row.get("status", 0))
+                qtype = row.get("reply_type", 0)
+                state.rolling.events.append((ts, domain, status_code))
+                state.rolling.long_events.append((ts, domain, status_code, qtype))
+                state.rolling.dns_qtypes[qtype] += 1
+                if status_code in BLOCKED_STATUSES:
+                    state.rolling.blocked += 1
+                if status_code in NXDOMAIN_STATUSES:
+                    state.rolling.nxdomain += 1
+                state.rolling.domains[domain] += 1
+                state.rolling.domain_timestamps[domain].append(ts)
 
         safe_ips = set(self.config.get("safe_ips", []))
         safe_patterns = {str(p).lower().strip() for p in self.config.get("safe_host_patterns", []) if str(p).strip()}
@@ -586,7 +587,7 @@ class EnginePipeline:
                                 containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
                             self.alert_writer.write(alert_payload)
-                            alerts_total.inc()
+                            alerts_total.labels(client_ip, getattr(state, "hostname", "unknown"), getattr(state, "device_type", "unknown")).inc()
 
                             # Extract Application / Process Name & Scanned Ports
                             app_name = self.zeek_fx.get_app_context(client_ip) if self.zeek_fx else "Network Socket"
@@ -647,8 +648,9 @@ class EnginePipeline:
                             for group, ev in grouped_evidence.items():
                                 alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
                                 
+                            target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
                             alert_msg += (
-                                f"- Target: `{target_malicious_domain or 'unknown'}` ({service_name} / Port {dest_port})\n"
+                                f"- Target: `{target_display}` ({service_name} / Port {dest_port})\n"
                                 f"- Application: `{app_name}`\n"
                             )
                             
@@ -672,17 +674,17 @@ class EnginePipeline:
 
                             reply_markup = None
                             if bool(self.config.get("interactive_blocking_enabled", False)):
-                                reply_markup = {
-                                    "inline_keyboard": [
-                                        [
-                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
-                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
-                                        ],
-                                        [
-                                            {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{target_malicious_domain}"}
-                                        ]
+                                inline_keyboard = [
+                                    [
+                                        {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
+                                        {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
                                     ]
-                                }
+                                ]
+                                if target_display and target_display != "unknown":
+                                    inline_keyboard.append([
+                                        {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{target_display}"}
+                                    ])
+                                reply_markup = {"inline_keyboard": inline_keyboard}
 
                             self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
@@ -735,7 +737,7 @@ class EnginePipeline:
                     containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
                 self.alert_writer.write(m["alert_payload"])
-                alerts_total.inc()
+                alerts_total.labels(m["client_ip"], getattr(m["state"], "hostname", "unknown"), getattr(m["state"], "device_type", "unknown")).inc()
 
                 app_name = self.zeek_fx.get_app_context(m["client_ip"]) if self.zeek_fx else "Network Socket"
                 scanned_ports = self.zeek_fx.get_scanned_ports(m["client_ip"]) if self.zeek_fx else []
@@ -806,17 +808,18 @@ class EnginePipeline:
 
                 reply_markup = None
                 if bool(self.config.get("interactive_blocking_enabled", False)):
-                    reply_markup = {
-                        "inline_keyboard": [
-                            [
-                                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{m['client_ip']}"},
-                                {"text": "🔓 Release Device", "callback_data": f"unblock:{m['client_ip']}"}
-                            ],
-                            [
-                                {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{m['target_domain']}"}
-                            ]
+                    target = m.get('target_domain') if m.get('target_domain') and m.get('target_domain') != 'unknown' else m.get('dest_ip')
+                    inline_keyboard = [
+                        [
+                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{m['client_ip']}"},
+                            {"text": "🔓 Release Device", "callback_data": f"unblock:{m['client_ip']}"}
                         ]
-                    }
+                    ]
+                    if target and target != "unknown":
+                        inline_keyboard.append([
+                            {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{target}"}
+                        ])
+                    reply_markup = {"inline_keyboard": inline_keyboard}
 
                 self.alert_manager.send(alert_msg, raw_payload=m["alert_payload"], reply_markup=reply_markup)
 

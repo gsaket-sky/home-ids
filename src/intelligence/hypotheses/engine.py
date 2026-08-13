@@ -110,7 +110,7 @@ class HypothesisEngine:
 
     def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector) -> Dict[str, Any]:
         best_attack = None
-        best_attack_score = -1.0
+        best_attack_score = 0.0
         
         for h in self.attack_hypotheses:
             score = h.evaluate(ev_store, rep)
@@ -119,7 +119,7 @@ class HypothesisEngine:
                 best_attack = h
 
         best_benign = None
-        best_benign_score = -1.0
+        best_benign_score = 0.0
         
         for h in self.benign_hypotheses:
             score = h.evaluate(ev_store, rep)
@@ -128,6 +128,6 @@ class HypothesisEngine:
                 best_benign = h
 
         return {
-            "attack": {"name": best_attack.name if best_attack else "None", "score": best_attack_score},
-            "benign": {"name": best_benign.name if best_benign else "None", "score": best_benign_score}
+            "attack": {"name": best_attack.name if best_attack else "DIRECT_IOC_HIT", "score": best_attack_score},
+            "benign": {"name": best_benign.name if best_benign else "UNKNOWN_BENIGN", "score": best_benign_score}
         }

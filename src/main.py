@@ -28,9 +28,12 @@ import subprocess
 import warnings
 from pathlib import Path
 
-# Suppress benign scikit-learn parallelization warnings from polluting the journald logs
-warnings.filterwarnings("ignore", message=".*sklearn.utils.parallel.delayed should be used with sklearn.utils.parallel.Parallel.*")
+import os
 
+# Completely suppress all warnings (including sklearn/joblib loky worker spam)
+# from polluting the systemd journald logs in production.
+os.environ["PYTHONWARNINGS"] = "ignore"
+warnings.simplefilter("ignore")
 from config import CONFIG
 from core.state_guard import StateManager
 from core.pipeline import EnginePipeline
