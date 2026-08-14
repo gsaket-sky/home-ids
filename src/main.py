@@ -34,6 +34,8 @@ import os
 # from polluting the systemd journald logs in production.
 os.environ["PYTHONWARNINGS"] = "ignore"
 warnings.simplefilter("ignore")
+def _no_warning(*args, **kwargs): pass
+warnings.showwarning = _no_warning
 from config import CONFIG
 from core.state_guard import StateManager
 from core.pipeline import EnginePipeline

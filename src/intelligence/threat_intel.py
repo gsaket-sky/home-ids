@@ -480,7 +480,12 @@ class ThreatIntel:
                 tmp_file.write_text(data, encoding="utf-8")
                 tmp_file.replace(cache_file)
             return data
-        except URLError as exc: 
+        except URLError as exc:
+            if hasattr(exc, "close"):
+                try:
+                    exc.close()
+                except Exception:
+                    pass 
             LOGGER.warning("HTTP fetch failed for %s. Error: %s", url, exc)
             return cache_file.read_text(encoding="utf-8", errors="ignore") if cache_file.exists() else None
 
@@ -616,7 +621,12 @@ class AbuseIPDB:
                     data = json.loads(r.read())
                 LOGGER.debug("AbuseIPDB API response success for %s", ip)
                 return data.get("data", {})
-            except URLError as e:
+            except URLError as exc:
+            if hasattr(exc, "close"):
+                try:
+                    exc.close()
+                except Exception:
+                    pass
                 import time
                 if hasattr(e, 'close'):
                     e.close()
@@ -663,7 +673,12 @@ class AbuseIPDB:
                 LOGGER.info("Successfully fetched and updated AbuseIPDB blacklist (%d IPs).", len(parsed_ips))
             else:
                 LOGGER.warning("AbuseIPDB response yielded no valid IPs; preserving prior cache.")
-        except URLError as exc: 
+        except URLError as exc:
+            if hasattr(exc, "close"):
+                try:
+                    exc.close()
+                except Exception:
+                    pass 
             LOGGER.warning("AbuseIPDB network fetch failed: %s", exc)
             self._load_cache()
             
@@ -838,7 +853,12 @@ class VirusTotalClient:
                     "last_analysis_stats": attrs.get("last_analysis_stats", {}), 
                     "reputation": attrs.get("reputation", 0)
                 }
-            except URLError as e:
+            except URLError as exc:
+            if hasattr(exc, "close"):
+                try:
+                    exc.close()
+                except Exception:
+                    pass
                 if hasattr(e, 'close'):
                     e.close()
                 if hasattr(e, 'code') and e.code == 429:
