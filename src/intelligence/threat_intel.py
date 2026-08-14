@@ -32,7 +32,7 @@ LOGGER = logging.getLogger("home_ids.ti")
 _FEEDS = {
     "feodo_ips": {
         "url": "https://feodotracker.abuse.ch/downloads/ipblocklist_aggressive.csv", 
-        "type": "csv_ips", "comment": "#", "ip_col": 0, "tags": ["c2", "botnet", "feodo"], 
+        "type": "csv_ips", "comment": "#", "ip_col": 1, "tags": ["c2", "botnet", "feodo"], 
         "confidence": 0.95, "ttl": 3600
     },
     "urlhaus_hosts": {
@@ -380,13 +380,16 @@ class ThreatIntel:
 
     def _parse_threatfox(self, data, meta, ips, domains, urls):
         from urllib.parse import urlparse
-        for row in csv.reader(data.splitlines()):
+        for row in csv.reader(data.splitlines(), skipinitialspace=True):
             if not row or row[0].startswith("#") or len(row) < 3: 
                 continue
             try:
-                ioc_type, ioc_value = row[2].strip().lower(), row[1].strip().strip('"')
-                conf = float(row[5]) / 100 if len(row) > 5 else 0.8
-                tags = [t.strip() for t in row[6].split(",")] if len(row) > 6 else []
+                ioc_type, ioc_value = row[3].strip().lower(), row[2].strip()
+                try:
+                    conf = float(row[9]) / 100 if len(row) > 9 and row[9].strip() else 0.8
+                except ValueError:
+                    conf = 0.8
+                tags = [t.strip() for t in row[12].split(",")] if len(row) > 12 and row[12].strip() else []
                 entry = {**meta, "confidence": conf, "tags": meta["tags"] + tags}
                 
                 if ioc_type in ("ip:port", "ip"):
@@ -482,10 +485,8 @@ class ThreatIntel:
             return data
         except URLError as exc:
             if hasattr(exc, "close"):
-                try:
-                    exc.close()
-                except Exception:
-                    pass 
+                try: exc.close()
+                except Exception: pass
             LOGGER.warning("HTTP fetch failed for %s. Error: %s", url, exc)
             return cache_file.read_text(encoding="utf-8", errors="ignore") if cache_file.exists() else None
 
@@ -621,12 +622,7 @@ class AbuseIPDB:
                     data = json.loads(r.read())
                 LOGGER.debug("AbuseIPDB API response success for %s", ip)
                 return data.get("data", {})
-            except URLError as exc:
-            if hasattr(exc, "close"):
-                try:
-                    exc.close()
-                except Exception:
-                    pass
+            except URLError as e:
                 import time
                 if hasattr(e, 'close'):
                     e.close()
@@ -673,12 +669,10 @@ class AbuseIPDB:
                 LOGGER.info("Successfully fetched and updated AbuseIPDB blacklist (%d IPs).", len(parsed_ips))
             else:
                 LOGGER.warning("AbuseIPDB response yielded no valid IPs; preserving prior cache.")
-        except URLError as exc:
+        except URLError as exc: 
             if hasattr(exc, "close"):
-                try:
-                    exc.close()
-                except Exception:
-                    pass 
+                try: exc.close()
+                except Exception: pass
             LOGGER.warning("AbuseIPDB network fetch failed: %s", exc)
             self._load_cache()
             
@@ -853,12 +847,7 @@ class VirusTotalClient:
                     "last_analysis_stats": attrs.get("last_analysis_stats", {}), 
                     "reputation": attrs.get("reputation", 0)
                 }
-            except URLError as exc:
-            if hasattr(exc, "close"):
-                try:
-                    exc.close()
-                except Exception:
-                    pass
+            except URLError as e:
                 if hasattr(e, 'close'):
                     e.close()
                 if hasattr(e, 'code') and e.code == 429:

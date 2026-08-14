@@ -365,6 +365,20 @@ class EnginePipeline:
                 target_malicious_domain = self._select_target_domain(state, self.ti_engine)
                 top_domain = target_malicious_domain
                 dest_ip = features.get("last_dest_ip", "unknown")
+                if not dest_ip or dest_ip == "unknown":
+                    if top_domain and top_domain != "unknown":
+                        try:
+                            import socket
+                            from concurrent.futures import ThreadPoolExecutor, TimeoutError
+                            # Use a temporary thread to enforce a 0.5s timeout on gethostbyname
+                            # without breaking global socket timeouts for other threads.
+                            with ThreadPoolExecutor(max_workers=1) as executor:
+                                future = executor.submit(socket.gethostbyname, top_domain)
+                                dest_ip = future.result(timeout=0.5)
+                        except Exception:
+                            dest_ip = "unknown"
+                    else:
+                        dest_ip = "unknown"
 
             # ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
             ti_risk, ti_match = 0.0, 0
@@ -387,29 +401,40 @@ class EnginePipeline:
             features["ti_match"] = ti_match
 
             abuse_risk = 0.0
+            honeypots = self.config.get("honeypot_ips", [])
+            
             if dest_ip and dest_ip != "unknown":
-                self.abuseipdb.enqueue_ip(dest_ip)
-                if self.abuseipdb.lookup(dest_ip):
+                if dest_ip in honeypots:
+                    # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                     abuse_risk = 4.0
-                    ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
                 else:
-                    live_risk = self.abuseipdb.get_live_risk(dest_ip)
-                    if live_risk > 0:
-                        abuse_risk = live_risk
+                    self.abuseipdb.enqueue_ip(dest_ip)
+                    if self.abuseipdb.lookup(dest_ip):
+                        abuse_risk = 4.0
                         ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
+                    else:
+                        live_risk = self.abuseipdb.get_live_risk(dest_ip)
+                        if live_risk > 0:
+                            abuse_risk = live_risk
+                            ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
                         
             features["abuseipdb_risk"] = abuse_risk
 
-            if dest_ip and dest_ip != "unknown":
-                self.virustotal.enqueue_ip(dest_ip)
-            if top_domain:
-                self.virustotal.enqueue_domain(top_domain)
-            vt_risk = max(
-                self.virustotal.risk_contribution("ip", dest_ip) if dest_ip else 0.0,
-                self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
-            )
-            if vt_risk > 0:
-                ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
+            vt_risk = 0.0
+            if dest_ip in honeypots:
+                # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
+                vt_risk = 4.0
+            else:
+                if dest_ip and dest_ip != "unknown":
+                    self.virustotal.enqueue_ip(dest_ip)
+                if top_domain:
+                    self.virustotal.enqueue_domain(top_domain)
+                vt_risk = max(
+                    self.virustotal.risk_contribution("ip", dest_ip) if dest_ip else 0.0,
+                    self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
+                )
+                if vt_risk > 0:
+                    ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
             features["vt_risk"] = vt_risk
 
             # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────

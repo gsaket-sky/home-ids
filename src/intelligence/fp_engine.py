@@ -932,6 +932,9 @@ class AutonomousFPEngine:
             for domain, added_at in raw.items():
                 age = now - float(added_at)
                 if age < TRUST_CACHE_TTL_SECONDS:
+                    if str(domain).lower() in ("unknown", "null", "none"):
+                        LOGGER.info("🧹 [FP ENGINE] Pruning legacy invalid domain '%s' from loaded trust cache.", domain)
+                        continue
                     self._trust_cache[domain] = float(added_at)
                     loaded += 1
                     try:
