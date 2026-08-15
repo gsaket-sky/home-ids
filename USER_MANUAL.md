@@ -79,10 +79,11 @@ sequenceDiagram
         B3->>B3: Write Daily Markdown Report (reports/)
     end
 
-    %% Configuration Live Reload
+    %% Configuration Live Reload (Brain 3 Training Brain 1 & 2)
     loop File Watcher
-        Cfg-->>B1: config.json modified!
+        Cfg-->>B1: config.json modified by Brain 3!
         B1->>B1: Dynamically reload safe_host_patterns (Zero Downtime)
+        B1-->>B2: Updates Trust Cache (Brain 2 is now smarter)
     end
 ```
 
