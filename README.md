@@ -6,9 +6,9 @@ Designed for uncompromising security, it acts as a self-healing immune system fo
 
 ---
 
-## 🌟 The Dual-Brain Architecture
+## 🌟 The Tri-Brain Architecture
 
-Version 7 introduces a revolutionary split-brain processing pipeline that combines raw speed with deep cognitive reasoning.
+Version 7 introduces a revolutionary tri-brain processing pipeline that combines raw speed, continuous machine learning, and deep cognitive reasoning.
 
 ### 🧠 Brain 1: The Statistical Engine (Real-Time Pipeline)
 The core detection loop operates entirely in-memory and asynchronously. It fuses high-volume network metadata from **Zeek (Bro)** with DNS logs from **Pi-hole**. 
@@ -16,8 +16,14 @@ The core detection loop operates entirely in-memory and asynchronously. It fuses
 - Uses a deterministic, graph-based **Hypothesis & Evidence Engine (HEE)**. Instead of a flat risk score, it collects structural network facts (e.g., `high_entropy`, `dns_tunneling`, `covert_beaconing`) and evaluates them against strict threat hypotheses (e.g., `EXFILTRATION`).
 - Employs a custom LightGBM classifier to evaluate baseline temporal context (`time_sin`, `time_cos`) and diurnal rhythms.
 
-### 🕵️ Brain 2: The Cognitive Analyst (Local LLM SOC)
-While Brain 1 reacts in milliseconds, Brain 2 thinks in seconds. Home-IDS natively integrates with **Ollama (LLaMA 3.1)** running locally on your hardware as a background daemon.
+### 🛡️ Brain 2: The Continuous Learning False-Positive Engine (CL-AFPE)
+Positioned between detection and containment, this ultra-fast Machine Learning brain prevents the system from blocking legitimate traffic.
+- **LightGBM & FastEmbed:** Uses a dedicated LightGBM model and structural vector embeddings (FastEmbed) to evaluate alerts before they are executed.
+- **Anti-Poisoning:** It compares the structural vector of an anomaly against known benign profiles. If your Smart TV starts acting strangely, Brain 2 instantly recognizes the structural similarity to benign telemetry and silently suppresses the alert.
+- **Dynamic Trust Cache:** Harmless behaviors are learned instantly and cached for 14 days without human intervention.
+
+### 🕵️ Brain 3: The Cognitive Analyst (Local LLM SOC)
+While Brain 1 & 2 react in milliseconds, Brain 3 thinks in seconds. Home-IDS natively integrates with **Ollama (LLaMA 3.1)** running locally on your hardware as a background daemon.
 - **Batch Analysis:** A dedicated background scheduler (`scheduler.py`) wakes up periodically to batch-process recent alerts.
 - **Deep Reasoning:** It acts as a Tier 2 SOC Analyst, ingesting JSON evidence graphs, identifying attack chains, and writing executive summaries.
 - **Hallucination Protection:** A deterministic guardrail system validates all AI decisions against actual OTX Threat Intelligence, physically preventing the LLM from hallucinating benign verdicts for known malicious IPs.
