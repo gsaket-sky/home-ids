@@ -168,6 +168,8 @@ while True:
     alerts_only = [a for a in alerts if a.get("type") != "ollama_transparency"]
     alert_map = {a.get("device", {}).get("ip", ""): a for a in alerts_only if a.get("device", {}).get("ip")}
     suppress_map = {a.get("device", {}).get("ip", ""): a for a in suppressed if a.get("device", {}).get("ip")}
+    transparency_alerts = [a for a in alerts if a.get("type") == "ollama_transparency"]
+    transparency_map = {a.get("device", {}).get("ip", ""): a for a in transparency_alerts if a.get("device", {}).get("ip")}
     
     # Check completion
     all_done = True
