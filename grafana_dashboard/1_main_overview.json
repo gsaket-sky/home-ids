@@ -41,7 +41,7 @@
       "title": "\ud83e\ude7a How is the system doing?",
       "gridPos": {
         "h": 7,
-        "w": 6,
+        "w": 4,
         "x": 0,
         "y": 0
       },
@@ -53,18 +53,18 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "**Are my shields online?**\n\nThese panels show if the underlying security engines are currently running and protecting you. \n\n* **Pi-hole IPS**: Blocks known bad domains.\n* **Zeek Network Monitor**: Watches device behavior.\n* **Threat Intel (TI)**: Checks IPs against global hacker databases.\n* **ML FP Engine**: The AI that learns what is safe so you don't get false alarms."
+        "content": "**Are my shields online?**\n\nThese panels show if the underlying security engines are currently running and protecting you."
       }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Pi-hole IPS",
-      "description": "1 = Active and protecting the network, 0 = Offline/Bypassed",
+      "description": "",
       "gridPos": {
         "h": 7,
         "w": 3,
-        "x": 6,
+        "x": 4,
         "y": 0
       },
       "datasource": {
@@ -118,11 +118,11 @@
       "id": 3,
       "type": "stat",
       "title": "Zeek Network Monitor",
-      "description": "1 = Zeek is successfully extracting lateral movement and TLS fingerprints",
+      "description": "",
       "gridPos": {
         "h": 7,
         "w": 3,
-        "x": 9,
+        "x": 7,
         "y": 0
       },
       "datasource": {
@@ -176,11 +176,11 @@
       "id": 4,
       "type": "stat",
       "title": "AI Model Loaded",
-      "description": "1 = LightGBM and FastEmbed models successfully booted into memory",
+      "description": "",
       "gridPos": {
         "h": 7,
         "w": 3,
-        "x": 12,
+        "x": 10,
         "y": 0
       },
       "datasource": {
@@ -234,11 +234,11 @@
       "id": 5,
       "type": "stat",
       "title": "Router Kill-Switch",
-      "description": "1 = Hardware-level WAN isolation is enabled",
+      "description": "",
       "gridPos": {
         "h": 7,
         "w": 3,
-        "x": 15,
+        "x": 13,
         "y": 0
       },
       "datasource": {
@@ -292,11 +292,11 @@
       "id": 6,
       "type": "stat",
       "title": "Layer-2 Tarpit",
-      "description": "1 = Scapy ARP/NDP Tarpit subsystem is armed and ready",
+      "description": "",
       "gridPos": {
         "h": 7,
         "w": 3,
-        "x": 18,
+        "x": 16,
         "y": 0
       },
       "datasource": {
@@ -350,11 +350,11 @@
       "id": 7,
       "type": "stat",
       "title": "API Integrations",
-      "description": "1 = All external APIs (Telegram, etc.) are successfully connected",
+      "description": "",
       "gridPos": {
         "h": 7,
-        "w": 3,
-        "x": 21,
+        "w": 2,
+        "x": 19,
         "y": 0
       },
       "datasource": {
@@ -396,6 +396,64 @@
               {
                 "color": "green",
                 "value": 1
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 71,
+      "type": "stat",
+      "title": "Alert Queue",
+      "description": "",
+      "gridPos": {
+        "h": 7,
+        "w": 3,
+        "x": 21,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_alert_queue_size",
+          "format": "time_series",
+          "instant": true,
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
               }
             ]
           },
@@ -2143,6 +2201,29 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "hostname"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "\ud83d\udee1\ufe0f Isolate Device (Router & Tarpit)",
+                    "url": "http://127.0.0.1:8010/api/ipc/block_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN",
+                    "targetBlank": true
+                  },
+                  {
+                    "title": "\u2705 Release Device (Un-Block)",
+                    "url": "http://127.0.0.1:8010/api/ipc/release_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
           }
         ]
       },
@@ -2170,7 +2251,7 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way.\n\n* **Threat Confidence**: Overall chance this device is infected. (High = Bad)\n* **ML Outlier**: Is this device acting completely different from yesterday?\n* **Kill-chain**: Has the attack progressed to data theft? \n* **Probation**: Devices recently joined to the network that the AI is still learning."
+        "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way."
       }
     },
     {
@@ -2191,14 +2272,14 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "When the AI is 100% confident, it will automatically isolate the device or sinkhole its DNS traffic. This saves you from having to manually unplug things.\n\nCheck the counters below to see how many threats were neutralized today."
+        "content": "Check the counters below to see how many threats were neutralized today."
       }
     },
     {
       "id": 10,
       "type": "stat",
       "title": "Total Active Isolations",
-      "description": "Number of devices/domains currently being actively blocked in real-time.",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -2256,7 +2337,7 @@
       "id": 11,
       "type": "stat",
       "title": "Lifetime Threats Blocked",
-      "description": "Historical counter of all automated mitigations executed since installation.",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -2310,7 +2391,7 @@
       "id": 12,
       "type": "stat",
       "title": "Total Alerts Triaged",
-      "description": "Total number of network alerts the system has processed and triaged.",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 6,
@@ -2361,128 +2442,14 @@
       }
     },
     {
-      "id": 13,
-      "type": "text",
-      "title": "\ud83c\udf0d Global OSINT Map",
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 37
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**Where is your network talking to?**\n\nThis massive map plots every external IP address your devices connect to. Dots are colored by their **Risk Score**.\n\nA smart lightbulb shouldn't be connecting to random servers in high-risk countries. If you see bright red dots in unusual places, click on the **Device Deep Dive** dashboard to investigate."
-      }
-    },
-    {
-      "id": 14,
-      "type": "geomap",
-      "title": "Network Geographic Footprint",
-      "description": "Shows real-time connections. Size/Color indicates threat risk.",
-      "gridPos": {
-        "h": 18,
-        "w": 24,
-        "x": 0,
-        "y": 42
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_geo_risk",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "view": {
-          "id": "zero",
-          "lat": 0,
-          "lon": 0,
-          "zoom": 1
-        },
-        "controls": {
-          "showZoom": true,
-          "showAttribution": true,
-          "showScale": true,
-          "showMeasure": false,
-          "showDebug": false,
-          "mouseWheelZoom": true
-        },
-        "basemap": {
-          "type": "default",
-          "name": "Layer 0",
-          "config": {}
-        },
-        "layers": [
-          {
-            "type": "markers",
-            "name": "Layer 1",
-            "config": {
-              "showLegend": true
-            },
-            "location": {
-              "mode": "auto"
-            },
-            "color": {
-              "fixed": "dark-red",
-              "field": "Value"
-            },
-            "size": {
-              "fixed": 5,
-              "field": "Value",
-              "min": 2,
-              "max": 15
-            }
-          }
-        ],
-        "tooltip": {
-          "mode": "details"
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 9
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
       "id": 1001,
-      "type": "logs",
+      "type": "table",
       "title": "\ud83d\udcdc High-Priority Security Alerts (Live Timeline)",
       "gridPos": {
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 60
+        "y": 37
       },
       "datasource": {
         "type": "loki",
@@ -2490,97 +2457,39 @@
       },
       "targets": [
         {
-          "expr": "{job=\"home-ids\"} |= \"CONFIRMED THREAT\"",
-          "refId": "A"
+          "expr": "{job=\"home_ids_alerts\"} |= \"CONFIRMED THREAT\" | json",
+          "refId": "A",
+          "format": "table",
+          "instant": false
         }
       ],
       "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "signature",
-        "sortOrder": "Descending"
-      }
-    },
-    {
-      "id": 1002,
-      "type": "timeseries",
-      "title": "\ud83d\udea8 Alerts Triggered Over Time",
-      "description": "Timeline mapping exactly when alerts spiked on the network, categorized by device.",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 72
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (hostname) (increase(home_ids_alerts_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
+        "showHeader": true,
+        "footer": {
+          "show": false
         },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
+        "frameIndex": 0,
+        "sortBy": [
+          {
+            "displayName": "Time",
+            "desc": true
+          }
+        ]
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 15,
-            "gradientMode": "opacity",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
+            "steps": []
+          }
         },
         "overrides": []
       }
@@ -2663,7 +2572,7 @@
   "timezone": "",
   "title": "1. \ud83c\udfe0 Home-IDS Main Overview",
   "description": "Novice SOC Hub - Bird's eye view",
-  "uid": "home_ids_v2_main",
+  "uid": "home_ids_v3_main",
   "id": null,
   "version": 1
 }

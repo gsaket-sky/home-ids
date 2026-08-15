@@ -38,10 +38,10 @@
     {
       "id": 1,
       "type": "text",
-      "title": "\ud83e\udda0 Category A: Command & Control (C2)",
+      "title": "\ud83c\udf0d Global OSINT Map",
       "gridPos": {
         "h": 6,
-        "w": 8,
+        "w": 24,
         "x": 0,
         "y": 0
       },
@@ -53,19 +53,19 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "**What is C2 Beaconing?**\nWhen a device gets infected with malware, it 'phones home' to the hacker's server (the Command & Control server) to ask for instructions. This looks like a steady, rhythmic heartbeat of network traffic.\n\n*If you see high numbers here, a device is likely fully infected and waiting for orders.*"
+        "content": "**Where is your network talking to?**"
       }
     },
     {
-      "id": 2,
-      "type": "timeseries",
-      "title": "C2 Beacons Detected",
-      "description": "Number of suspected rhythmic beaconing connections detected.",
+      "id": 14,
+      "type": "geomap",
+      "title": "Network Geographic Footprint",
+      "description": "",
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 0
+        "h": 18,
+        "w": 24,
+        "x": 0,
+        "y": 6
       },
       "datasource": {
         "type": "prometheus",
@@ -73,54 +73,60 @@
       },
       "targets": [
         {
-          "expr": "home_ids_beaconing_c2_count{hostname=~\"$device\"}",
+          "expr": "home_ids_geo_risk",
+          "format": "table",
+          "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
+        "view": {
+          "id": "zero",
+          "lat": 0,
+          "lon": 0,
+          "zoom": 1
         },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
+        "controls": {
+          "showZoom": true,
+          "showAttribution": true,
+          "showScale": true,
+          "showMeasure": false,
+          "showDebug": false,
+          "mouseWheelZoom": true
+        },
+        "basemap": {
+          "type": "default",
+          "name": "Layer 0",
+          "config": {}
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "Layer 1",
+            "config": {
+              "showLegend": true
+            },
+            "location": {
+              "mode": "auto"
+            },
+            "color": {
+              "fixed": "dark-red",
+              "field": "Value"
+            },
+            "size": {
+              "fixed": 5,
+              "field": "Value",
+              "min": 2,
+              "max": 15
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "details"
         }
       },
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 1,
-            "gradientMode": "none",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -128,24 +134,52 @@
               {
                 "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 5
+              },
+              {
+                "color": "red",
+                "value": 9
               }
             ]
-          },
-          "unit": "none"
+          }
         },
         "overrides": []
       }
     },
     {
-      "id": 3,
-      "type": "timeseries",
-      "title": "Known Hacker IPs Contacted",
-      "description": "Connections to IP addresses explicitly listed in global threat intelligence feeds.",
+      "id": 2,
+      "type": "text",
+      "title": "\ud83e\udda0 Command & Control (C2) & Intel",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 16,
-        "y": 0
+        "x": 0,
+        "y": 24
+      },
+      "transparent": false,
+      "options": {
+        "mode": "markdown",
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "Metrics tracking external C2 and known threat intel hits."
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Threat Intel IOC Hits",
+      "description": "",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 24
       },
       "datasource": {
         "type": "prometheus",
@@ -218,35 +252,14 @@
     },
     {
       "id": 4,
-      "type": "text",
-      "title": "\ud83d\udce4 Category B: Data Exfiltration",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 6
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**What is Data Exfiltration?**\nHackers try to steal your passwords or files. Sometimes they sneak it out through massive uploads, and sometimes they chop the files into tiny pieces and hide them inside DNS requests (DNS Tunneling).\n\n*If you see huge outbound bytes or long DNS labels, your data might be leaving the network!*"
-      }
-    },
-    {
-      "id": 5,
       "type": "timeseries",
-      "title": "Massive Outbound Uploads (Bytes)",
-      "description": "Volume of outbound data. Spikes indicate potential data theft or large uploads.",
+      "title": "C2 Beacons",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 8,
-        "y": 6
+        "x": 16,
+        "y": 24
       },
       "datasource": {
         "type": "prometheus",
@@ -254,7 +267,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_outbound_bytes_window{hostname=~\"$device\"}",
+          "expr": "home_ids_beaconing_c2_count",
           "refId": "A"
         }
       ],
@@ -312,21 +325,42 @@
               }
             ]
           },
-          "unit": "bytes"
+          "unit": "none"
         },
         "overrides": []
       }
     },
     {
-      "id": 6,
-      "type": "timeseries",
-      "title": "DNS Tunneling (Long Labels)",
-      "description": "Maximum length of DNS query strings. Unusually long names often disguise stolen data.",
+      "id": 5,
+      "type": "text",
+      "title": "\ud83d\udce1 Internal Network Scanning & Probes",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 16,
-        "y": 6
+        "x": 0,
+        "y": 30
+      },
+      "transparent": false,
+      "options": {
+        "mode": "markdown",
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "Lateral movement, honeypots, and port scans."
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Lateral Movement Events",
+      "description": "",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -334,7 +368,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_max_label_length{hostname=~\"$device\"}",
+          "expr": "home_ids_zeek_lateral_events_total",
           "refId": "A"
         }
       ],
@@ -399,35 +433,14 @@
     },
     {
       "id": 7,
-      "type": "text",
-      "title": "\ud83d\udce1 Category C: Internal Network Scanning",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 0,
-        "y": 12
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**What is Lateral Movement?**\nOnce a hacker gets into a weak device (like a smart camera), they try to scan your entire home network to find computers or servers to attack next.\n\n*A device rapidly connecting to hundreds of other internal IP addresses is extremely suspicious!*"
-      }
-    },
-    {
-      "id": 8,
       "type": "timeseries",
-      "title": "Lateral Movement Events",
-      "description": "Number of internal IP addresses this device attempted to scan.",
+      "title": "Honeypot Probes",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 8,
-        "y": 12
+        "x": 16,
+        "y": 30
       },
       "datasource": {
         "type": "prometheus",
@@ -435,7 +448,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_zeek_lateral_events_total{hostname=~\"$device\"}",
+          "expr": "home_ids_honeypot_probes_total",
           "refId": "A"
         }
       ],
@@ -499,15 +512,36 @@
       }
     },
     {
-      "id": 9,
-      "type": "timeseries",
-      "title": "Connection Rejections (Port Scans)",
-      "description": "Number of failed connections (Connection Refused). Spikes indicate blind port scanning.",
+      "id": 8,
+      "type": "text",
+      "title": "\ud83d\udd12 Encryption & TLS Anomalies",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 16,
-        "y": 12
+        "x": 0,
+        "y": 36
+      },
+      "transparent": false,
+      "options": {
+        "mode": "markdown",
+        "code": {
+          "language": "plaintext",
+          "showLineNumbers": false,
+          "showMiniMap": false
+        },
+        "content": "Tracking malicious JA3/JA4 fingerprints."
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Malicious JA3 Hits",
+      "description": "",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 36
       },
       "datasource": {
         "type": "prometheus",
@@ -515,7 +549,7 @@
       },
       "targets": [
         {
-          "expr": "home_ids_zeek_s0_rej_count{hostname=~\"$device\"}",
+          "expr": "home_ids_zeek_ja3_malicious",
           "refId": "A"
         }
       ],
@@ -580,451 +614,93 @@
     },
     {
       "id": 10,
-      "type": "text",
-      "title": "\ud83c\udfb0 Category D: Spam & DGA",
+      "type": "timeseries",
+      "title": "Malicious JA4 Hits",
+      "description": "",
       "gridPos": {
         "h": 6,
         "w": 8,
-        "x": 0,
-        "y": 18
+        "x": 16,
+        "y": 36
       },
-      "transparent": false,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_zeek_ja4_malicious",
+          "refId": "A"
+        }
+      ],
       "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
         },
-        "content": "**What is DGA?**\nDomain Generation Algorithms (DGA) are used by botnets to randomly generate thousands of weird website names (like `xkqj19zx.com`) so they can't be easily blocked.\n\n*High suspicious domains mean a device is likely part of a spam botnet.*"
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
       }
     },
     {
       "id": 11,
-      "type": "timeseries",
-      "title": "Suspicious/DGA Domains",
-      "description": "Count of machine-generated or highly chaotic domain names queried.",
+      "type": "table",
+      "title": "\ud83d\udcdc Global Threat Events (Live Stream)",
       "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 8,
-        "y": 18
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_suspicious_domains{hostname=~\"$device\"}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 1,
-            "gradientMode": "none",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 12,
-      "type": "timeseries",
-      "title": "Failed Queries (NXDOMAIN Ratio)",
-      "description": "Percentage of DNS queries that didn't exist. High failure rates suggest botnet activity.",
-      "gridPos": {
-        "h": 6,
-        "w": 8,
-        "x": 16,
-        "y": 18
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_nxdomain_ratio{hostname=~\"$device\"}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 1,
-            "gradientMode": "none",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 13,
-      "type": "text",
-      "title": "\ud83d\udee1\ufe0f Active Mitigations State",
-      "gridPos": {
-        "h": 6,
+        "h": 12,
         "w": 24,
         "x": 0,
-        "y": 24
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**Real-Time Intervention Audit**\nThese tables show the live, exact state of the Intrusion Prevention System (IPS). When the AI detects a verified threat, it triggers mitigations here.\n\n* **\u2705 Successfully Blocked**: Domains currently sinkholed for a specific device.\n* **\u274c Failed Blocks**: Domains the system tried to block, but the Pi-hole API failed or rejected.\n* **\ud83d\udd12 Isolated Devices**: Devices currently completely cut off from the network via Router Kill-Switch or Layer-2 Tarpit."
-      }
-    },
-    {
-      "id": 14,
-      "type": "table",
-      "title": "\u2705 Successfully Blocked Domains (Active)",
-      "description": "List of malicious domains actively sinkholed by the Pi-Hole for the offending device.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 30
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_active_blocks > 0",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ],
-          "countRows": false,
-          "fields": ""
-        },
-        "frameIndex": 0,
-        "sortBy": []
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 15,
-      "type": "table",
-      "title": "\u274c Failed Blocks (Retry Queue)",
-      "description": "Domains the system is currently trying to block but encountering Pi-hole API errors.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 30
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_queue_status > 0",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ],
-          "countRows": false,
-          "fields": ""
-        },
-        "frameIndex": 0,
-        "sortBy": []
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 16,
-      "type": "table",
-      "title": "\u274c Failed Blocks (Permanently Abandoned)",
-      "description": "Domains the system gave up trying to block after maximum retries.",
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 38
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_dead_letter > 0",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ],
-          "countRows": false,
-          "fields": ""
-        },
-        "frameIndex": 0,
-        "sortBy": []
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 17,
-      "type": "table",
-      "title": "\ud83d\udd12 Hardware Router Isolations (Active)",
-      "description": "Devices currently banned at the physical router level (WAN Kill-Switch).",
-      "gridPos": {
-        "h": 16,
-        "w": 8,
-        "x": 16,
-        "y": 30
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_router_isolated_active > 0",
-          "format": "table",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false,
-          "reducer": [
-            "sum"
-          ],
-          "countRows": false,
-          "fields": ""
-        },
-        "frameIndex": 0,
-        "sortBy": []
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 1002,
-      "type": "logs",
-      "title": "\ud83e\udde0 AI & Threat Intel Decision Log",
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 46
+        "y": 42
       },
       "datasource": {
         "type": "loki",
@@ -1032,177 +708,39 @@
       },
       "targets": [
         {
-          "expr": "{job=\"home-ids\"} |= \"[FP ENGINE]\" or |= \"ThreatIntel\" or |= \"ML Registry\"",
-          "refId": "A"
+          "expr": "{job=\"home-ids\"} |= \"drop\" or \"blocked\" | json",
+          "refId": "A",
+          "format": "table",
+          "instant": false
         }
       ],
       "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "signature",
-        "sortOrder": "Descending"
-      }
-    },
-    {
-      "id": 2002,
-      "type": "timeseries",
-      "title": "\ud83d\udee1\ufe0f IPS Pi-hole Blocks Over Time",
-      "description": "Timeline mapping exactly when automated Pi-Hole blocks occurred, categorized by device.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 56
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (hostname) (increase(home_ids_ips_pihole_blocks_aggregate_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
+        "showHeader": true,
+        "footer": {
+          "show": false
         },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
+        "frameIndex": 0,
+        "sortBy": [
+          {
+            "displayName": "Time",
+            "desc": true
+          }
+        ]
       },
       "fieldConfig": {
         "defaults": {
           "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 15,
-            "gradientMode": "opacity",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 2003,
-      "type": "timeseries",
-      "title": "\ud83d\udee1\ufe0f IPS Router Isolations Over Time",
-      "description": "Timeline mapping exactly when a device was isolated from the WAN due to extreme risk.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 56
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum by (hostname) (increase(home_ids_ips_router_isolations_aggregate_total[5m]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 15,
-            "gradientMode": "opacity",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
+            "steps": []
+          }
         },
         "overrides": []
       }
@@ -1283,9 +821,9 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "2. \ud83d\udee1\ufe0f Threat Landscape",
-  "description": "Categorized by attack vector",
-  "uid": "home_ids_v2_threats",
+  "title": "2. \ud83c\udf10 Threat Landscape",
+  "description": "Global Network Analysis",
+  "uid": "home_ids_v3_landscape",
   "id": null,
   "version": 1
 }

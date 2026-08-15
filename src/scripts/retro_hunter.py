@@ -59,11 +59,8 @@ def load_historical_domains(log_path: Path, days_back: int) -> set:
         
     return unique_domains
 
-def main():
-    parser = argparse.ArgumentParser(description="Retroactive Zero-Day Threat Hunter")
-    parser.add_argument("--days", type=int, default=14, help="Number of days of history to scan.")
-    args = parser.parse_args()
-
+def run_retro_hunt(days: int = 14) -> None:
+    """Executes the retroactive threat hunt for a given number of days."""
     # Load Active Intelligence Engine (Updated for Modular Architecture)
     ti = ThreatIntel(
         cache_dir        = str(Path(CONFIG.get("state_path", "/app/state/ids_state.json")).parent / "ti_cache"),
@@ -77,7 +74,7 @@ def main():
     
     alert_path_cfg = Path(CONFIG.get("alert_json_path", "/app/state/alerts_stream.jsonl"))
     log_path = alert_path_cfg if alert_path_cfg.exists() else alert_path_cfg.with_name("alerts_stream.jsonl")
-    historical_domains = load_historical_domains(log_path, args.days)
+    historical_domains = load_historical_domains(log_path, days)
     
     if not historical_domains:
         LOGGER.info("No historical domains found to scan. Exiting.")
@@ -98,12 +95,19 @@ def main():
             
     if matches:
         LOGGER.critical("🚨 RETROACTIVE THREATS DISCOVERED 🚨")
-        LOGGER.critical("The following domains were accessed in the past %d days and have recently been classified as malicious:", args.days)
+        LOGGER.critical("The following domains were accessed in the past %d days and have recently been classified as malicious:", days)
         for match in sorted(matches, key=lambda x: x["confidence"], reverse=True):
             LOGGER.critical(" -> [MATCH] Domain: %s | Source: %s | Confidence: %.2f | Tags: %s", 
                             match["domain"], match["source"], match["confidence"], match["tags"])
     else:
         LOGGER.info("✅ Retroactive hunt complete. Zero historical compromises detected against fresh intel.")
+
+def main():
+    parser = argparse.ArgumentParser(description="Retroactive Zero-Day Threat Hunter")
+    parser.add_argument("--days", type=int, default=14, help="Number of days of history to scan.")
+    args = parser.parse_args()
+    
+    run_retro_hunt(days=args.days)
 
 if __name__ == "__main__":
     main()

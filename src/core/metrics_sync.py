@@ -16,7 +16,7 @@ import math
 from typing import Dict, Any
 
 from metrics import (
-    threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
+    top_domain_risk_metric, threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
     blocked_ratio_metric, nxdomain_ratio_metric, suspicious_domains_metric,
     markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
     zscore_unique_metric, new_domains_metric, deep_domains_metric,
@@ -112,6 +112,20 @@ class MetricsExporter:
             except Exception:
                 pass
 
+    def _purge_stale_domain_labels(self, str_dev_id: str, current_host: str, active_domains: list) -> None:
+        if not str_dev_id:
+            return
+        try:
+            # top_domain_risk_metric has labels: device, hostname, device_type, domain
+            stale_keys = [k for k in self._get_metric_keys(top_domain_risk_metric) if k[0] == str_dev_id and (k[1] != current_host or k[3] not in active_domains)]
+            for k in stale_keys:
+                try:
+                    top_domain_risk_metric.remove(*k)
+                except KeyError:
+                    pass
+        except Exception:
+            pass
+
     def garbage_collect_ips_metrics(self, ips_state: dict) -> None:
         try:
             valid_blocks = set(ips_state.get("blocked_domains", {}).keys())
@@ -181,7 +195,16 @@ class MetricsExporter:
             else:
                 str_host = raw_host
 
+            # Process top domains for this device
+            top_domains = []
+            if hasattr(state, "rolling") and hasattr(state.rolling, "domains"):
+                top_domains = [domain for domain, count in state.rolling.domains.most_common(3)]
+                
             self._purge_stale_device_labels(str_dev_id, str_host)
+            self._purge_stale_domain_labels(str_dev_id, str_host, top_domains)
+            
+            for dom in top_domains:
+                top_domain_risk_metric.labels(str_dev_id, str_host, str_type, dom).set(ml_score)
 
             safe_device_metric.labels(str_dev_id, str_host, str_type).set(1.0 if is_safe else 0.0)
             baseline_poisoned_metric.labels(str_dev_id, str_host, str_type).set(1.0 if is_poisoned else 0.0)

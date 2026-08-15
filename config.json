@@ -7,7 +7,7 @@
     "geoip_asn_db": "../geoiop/GeoLite2-ASN.mmdb",
     "pihole_db": "/etc/pihole/pihole-FTL.db",
     "zeek_log_dir": "/opt/zeek/logs/current",
-    "alert_json_path": "SOC/alerts_stream.jsonl",
+    "alert_json_path": "state/alerts.json",
     "alert_json_max_bytes": 1073741824,
     "max_device_states": 5000,
     "telegram_token": "",
@@ -67,7 +67,20 @@
     "fp_lgbm_threshold": 0.75,
     "fp_embed_similarity_threshold": 0.82,
     "fp_combined_suppress_threshold": 0.8,
-    "fp_combined_uncertain_threshold": 0.55
+    "fp_combined_uncertain_threshold": 0.55,
+    "autotune_enabled": true,
+    "autotune_schedule_cron": "0 3 * * *",
+    "autotune_min_risk_threshold": 4.0,
+    "layer2_spoofing_detection_enabled": true,
+    "geofencing_enabled": true,
+    "geofencing_mode": "blocklist",
+    "geofencing_countries": ["RU", "CN", "KP", "IR"],
+    "geofencing_time_policies": [],
+    "scheduler": {
+      "ollama_soc": { "enabled": true, "cron": "0 */4 * * *" },
+      "retrohunter": { "enabled": true, "cron": "0 2 * * *" },
+      "top_domains_report": { "enabled": true, "cron": "0 6 * * *" }
+    }
   },
   "_changelog_1": [],
   "_bugfix_changelog": [],

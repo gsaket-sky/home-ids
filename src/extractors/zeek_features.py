@@ -387,7 +387,22 @@ class ZeekFeatureExtractor:
         if etype == "dhcp":
             mac, ip = event.get("mac"), event.get("client_addr")
             if mac and ip:
-                self._mac_bindings[ip] = mac.lower()
+                mac = mac.lower()
+                existing_mac = self._mac_bindings.get(ip)
+                
+                # Feature 4: Layer-2 Spoofing Detection (ARP Telemetry)
+                if existing_mac and existing_mac != mac:
+                    ts = event.get("ts", time.time())
+                    last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
+                    # If MAC flipped within 10 minutes, it's highly suspicious (not a normal DHCP timeout)
+                    if (ts - last_seen) < 600:
+                        LOGGER.critical(f"🚨 LAYER-2 ARP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s")
+                        if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
+                        self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
+                        
+                self._mac_bindings[ip] = mac
+                if not hasattr(self, "_mac_last_seen"): self._mac_last_seen = {}
+                self._mac_last_seen[ip] = event.get("ts", time.time())
                 self._enrich_ptr(ip)
             return
             
@@ -569,3 +584,8 @@ class ZeekFeatureExtractor:
     def reset_all(self) -> None:
         for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
+
+    def reset_client(self, client_ip: str) -> None:
+        for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta):
+            if client_ip in d:
+                del d[client_ip]

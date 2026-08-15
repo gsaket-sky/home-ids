@@ -209,7 +209,8 @@ class DeviceIdentityManager:
         alpha = float(self.config.get("baseline_alpha", 0.05))
 
         for event in zeek_events:
-            src_ip = event.get("id.orig_h", event.get("orig_h", ""))
+            # handle both conn/dns "id.orig_h" and dhcp "client_addr"
+            src_ip = event.get("id.orig_h", event.get("orig_h", event.get("client_addr", "")))
             if not src_ip or not _is_trackable_local_ip(src_ip):
                 continue
 

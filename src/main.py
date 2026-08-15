@@ -1,5 +1,5 @@
 """
-main.py – Turnkey Home IDS Entry Point (Version 5.0.0-HEE).
+main.py – Turnkey Home IDS Entry Point (Version 7.0.0).
 
 This file serves as the primary launcher for the enterprise-grade Network Detection 
 and Response (NDR) platform. It initializes all independent background engines 
@@ -27,7 +27,6 @@ import sys
 import subprocess
 import warnings
 from pathlib import Path
-
 import os
 
 # Completely suppress all warnings (including sklearn/joblib loky worker spam)
@@ -63,6 +62,7 @@ def main():
     """
     Bootstraps the IDS components and initiates the main processing loop.
     """
+    scheduler_proc = None
     setup_logging()
     LOGGER.info("🚀 Booting Home IDS Network Detection & Response Platform...")
 
@@ -175,6 +175,18 @@ def main():
         pihole_collector=pihole_collector
     )
 
+    LOGGER.debug("Booting Centralized Background Scheduler (subprocess)...")
+    try:
+        scheduler_path = Path(__file__).resolve().parent / "scripts" / "scheduler.py"
+        scheduler_proc = subprocess.Popen(
+            [sys.executable, str(scheduler_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        LOGGER.debug(f"Scheduler daemon started (PID: {scheduler_proc.pid})")
+    except Exception as e:
+        LOGGER.error("⚠️ Failed to start scheduler daemon: %s", e)
+
     # =====================================================================
     # 5. SIGNAL HANDLING (Graceful Shutdown)
     # =====================================================================
@@ -198,6 +210,14 @@ def main():
                 webhook_log_file.close()
             except Exception:
                 pass
+                
+        if scheduler_proc and scheduler_proc.poll() is None:
+            LOGGER.info("🛑 Terminating scheduler daemon...")
+            scheduler_proc.terminate()
+            try:
+                scheduler_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                scheduler_proc.kill()
         pipeline.stop()
         LOGGER.info("Engine termination complete. Exiting.")
         sys.exit(0)
@@ -205,6 +225,71 @@ def main():
     LOGGER.debug("Registering OS signal handlers...")
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
+
+    # =====================================================================
+    # 6. SEND STARTUP TELEGRAM ALERT
+    # =====================================================================
+    def async_telegram_alert():
+        import time
+        import threading
+        
+        LOGGER.info("⏳ Delaying Telegram boot alert until all background models load...")
+        wait_start = time.time()
+        while time.time() - wait_start < 120:
+            ti_ready = (ti_engine._stats["last_refresh"] != "never") if getattr(ti_engine, "_stats", None) else True
+            fp_ready = True
+            if pipeline and getattr(pipeline, "fp_engine", None):
+                fp_ready = pipeline.fp_engine._lgbm_session is not None and pipeline.fp_engine._embed_model is not None
+            
+            if ti_ready and fp_ready:
+                break
+            time.sleep(2)
+            
+        telegram_token = CONFIG.get("telegram_token", "")
+        telegram_chat_id = CONFIG.get("telegram_chat_id", "")
+        if telegram_token and telegram_chat_id:
+            geoip_status = "✅ Online" if geoip_engine else "❌ Failed/Disabled"
+            webhook_enabled = CONFIG.get("ips_router_enabled", False)
+            webhook_status = "✅ Online" if webhook_enabled and fastapi_proc and fastapi_proc.poll() is None else ("❌ Failed" if webhook_enabled else "⚠️ Disabled")
+            
+            ti_status = "✅ Online" if (getattr(ti_engine, "_stats", None) and ti_engine._stats["last_refresh"] != "never") else "⚠️ Sync Failed/Timeout"
+            
+            fp_status = "⚠️ Partial/Timeout"
+            if pipeline and getattr(pipeline, "fp_engine", None):
+                if pipeline.fp_engine._lgbm_session and pipeline.fp_engine._embed_model:
+                    fp_status = "✅ Online"
+            else:
+                fp_status = "❌ Disabled"
+                
+            msg_lines = [
+                "🚀 <b>Home-IDS NDR Platform Boot Complete</b>",
+                "",
+                "<b>Subsystem Status:</b>",
+                "• Master StateManager: ✅ Online",
+                f"• Threat Intelligence: {ti_status}",
+                "• ML/Anomaly Registry: ✅ Online",
+                f"• FP Validation Engine: {fp_status}",
+                f"• GeoIP Engine: {geoip_status}",
+                "• IPS Mitigator: ✅ Online",
+                "• Zeek/PiHole Collectors: ✅ Online",
+                f"• FastAPI Webhook: {webhook_status}",
+                "• Master Pipeline: ✅ Online"
+            ]
+            
+            try:
+                import json
+                import urllib.request
+                msg_text = "\n".join(msg_lines)
+                data = json.dumps({"chat_id": telegram_chat_id, "text": msg_text, "parse_mode": "HTML"}).encode('utf-8')
+                req = urllib.request.Request(f"https://api.telegram.org/bot{telegram_token}/sendMessage", data=data, headers={'Content-Type': 'application/json'}, method='POST')
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    pass
+                LOGGER.info("📲 Startup Telegram alert sent successfully.")
+            except Exception as e:
+                LOGGER.error("⚠️ Failed to send startup Telegram alert: %s", e)
+
+    import threading
+    threading.Thread(target=async_telegram_alert, daemon=True, name="boot_alert_thread").start()
 
     # Hand over main thread execution to the pipeline
     LOGGER.debug("Handoff to EnginePipeline main loop.")

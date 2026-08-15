@@ -60,6 +60,18 @@ class DecisionEngine:
             explanation = "Internal Honeypot Accessed"
             threat_confidence = 1.0
             
+        elif any(e.type == "arp_spoofing" for e in ev_store):
+            state = DecisionState.CRITICAL
+            action = "block"
+            explanation = "Layer-2 ARP Spoofing Detected"
+            threat_confidence = 1.0
+            
+        elif any(e.type == "geofencing_violation" for e in ev_store):
+            state = DecisionState.CRITICAL
+            action = "block"
+            explanation = "Geofencing Policy Violation"
+            threat_confidence = 1.0
+            
         elif rep.tier == 5:
             state = DecisionState.CRITICAL
             action = "block"

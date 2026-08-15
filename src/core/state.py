@@ -115,6 +115,15 @@ class RollingWindow:
         self.nxdomain = 0
         self.dns_qtypes = Counter()         # Tracks DNS qtypes (A, AAAA, TXT, NULL, ANY, MX)
 
+    def reset(self):
+        self.events.clear()
+        self.long_events.clear()
+        self.domains.clear()
+        self.domain_timestamps.clear()
+        self.blocked = 0
+        self.nxdomain = 0
+        self.dns_qtypes.clear()
+
 class DeviceState:
     """Consolidated state tracking profile for a single physical network device."""
     def __init__(self, device_id: str, client_ip: str, hostname: str = "unknown", alpha: float = 0.05):

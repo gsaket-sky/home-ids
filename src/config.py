@@ -43,8 +43,8 @@ _STATIC_KEYS = {
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key", 
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password", 
-    "pihole_api_url", "router_webhook_url", "fritz_ip", "fritz_user", 
-    "fritz_password", "fritz_api_token", "fastapi_port", "ollama_api_key"
+    "fritz_password", "fritz_api_token", "fastapi_port", "ollama_api_key",
+    "scheduled_tasks"
 }
 
 def apply_env_overrides(config: dict) -> None:
@@ -89,6 +89,11 @@ DEFAULT_CONFIG = {
     "ollama_url": "",         
     "ollama_model": "llama3", 
     "ollama_api_key": "",
+    "scheduled_tasks": {
+        "retrohunter": {"enabled": True, "time": "02:00"},
+        "autotune": {"enabled": True, "time": "03:00"},
+        "top_domains_report": {"enabled": True, "time": "06:00"}
+    },
     "decay_factor": 0.995,    
     "device_type_overrides": {},
     "ips_enabled": True,           # Master switch for IPS

@@ -13,6 +13,8 @@ fp_trust_cache.json
 fp_sigma_shifts.json
 models/*.pkl
 models/*.onnx
+models/fastembed_cache/
+models/devices/
 !config.json
 
 # Environment Secrets

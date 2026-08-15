@@ -123,15 +123,12 @@ class AlertJSONWriter:
 
 
 class AlertManager:
-    """Asynchronous Telegram notification manager with optional Ollama AI summarization."""
+    """Asynchronous Telegram notification manager."""
     
-    def __init__(self, token: str, chat_id: str, enabled: bool = False, ollama_url: str = "", ollama_model: str = "llama3", ollama_api_key: str = ""):
+    def __init__(self, token: str, chat_id: str, enabled: bool = False):
         self.token = token.strip()
-        self.chat_id = chat_id.strip()
+        self.chat_id = str(chat_id).strip()
         self.enabled = enabled
-        self.ollama_url = ollama_url.strip().rstrip("/")
-        self.ollama_model = ollama_model.strip()
-        self.ollama_api_key = ollama_api_key.strip()
         
         self.q = queue.Queue(maxsize=1000)
         self.running = True
@@ -175,37 +172,7 @@ class AlertManager:
         except queue.Full:
             LOGGER.error("Telegram alert queue is FULL (maxsize reached). Dropping alert to prevent RAM exhaustion.")
 
-    def _summarize_with_ollama(self, payload: Dict[str, Any]) -> Optional[str]:
-        """Queries local Ollama instance for a brief contextual threat explanation."""
-        try:
-            system_prompt = (
-                "You are an autonomous Tier 2 SOC Analyst for a Home Intrusion Detection System. "
-                "Analyze the provided JSON alert payload. "
-                "Provide a 1-sentence executive summary explaining the potential risk to the user. "
-                "Do not include markdown or formatting, just the plain text sentence."
-            )
-            prompt = f"Alert Payload:\n{json.dumps(payload, indent=2)}"
-            
-            headers = {}
-            if self.ollama_api_key:
-                headers["Authorization"] = f"Bearer {self.ollama_api_key}"
-            
-            resp = requests.post(
-                f"{self.ollama_url}/api/generate",
-                json={
-                    "model": self.ollama_model, 
-                    "system": system_prompt,
-                    "prompt": prompt, 
-                    "stream": False
-                },
-                headers=headers,
-                timeout=30.0
-            )
-            if resp.status_code == 200:
-                return resp.json().get("response", "").strip()
-        except Exception as exc:
-            LOGGER.warning("Ollama summary generation failed (Timeout or connection error): %s", exc)
-        return None
+
 
     def _dispatch_worker(self) -> None:
         """Background worker thread that flushes the alert delivery queue to Telegram.
@@ -227,12 +194,7 @@ class AlertManager:
                 else:
                     raw_msg, raw_payload, reply_markup = item, None, None
 
-                # Ollama enrichment happens here in the worker, never in send()
                 final_msg = raw_msg
-                if self.ollama_url and raw_payload:
-                    summary = self._summarize_with_ollama(raw_payload)
-                    if summary:
-                        final_msg += f"\n🤖 *AI Security Analysis:*\n{summary}"
 
                 payload = {
                     "chat_id": self.chat_id,

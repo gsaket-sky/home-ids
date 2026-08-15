@@ -30,13 +30,14 @@ from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from core.decision_engine import DecisionEngine, DecisionState
 from mitigation.alerts import AlertManager, AlertJSONWriter
+from intelligence.ollama_analyzer import OllamaAnalyzer
 from mitigation.ips import IPSMitigator
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 
-from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric
+from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
@@ -142,11 +143,9 @@ class EnginePipeline:
         self.alert_manager = AlertManager(
             token=self.config.get("telegram_token", ""), 
             chat_id=self.config.get("telegram_chat_id", ""), 
-            enabled=bool(self.config.get("telegram_enabled", False)), 
-            ollama_url=self.config.get("ollama_url", ""), 
-            ollama_model=self.config.get("ollama_model", "llama3"),
-            ollama_api_key=self.config.get("ollama_api_key", "")
+            enabled=bool(self.config.get("telegram_enabled", False))
         )
+
         if self.config.get("telegram_token") and bool(self.config.get("telegram_enabled", False)):
             interactive = "ENABLED" if self.config.get("interactive_blocking_enabled", False) else "DISABLED"
             LOGGER.info(f"Telegram integration activated (Interactive Blocking: {interactive}).")
@@ -158,6 +157,14 @@ class EnginePipeline:
         self.ips_mitigator.state_manager = self.state_manager
         
         self.metrics_exporter = MetricsExporter()
+
+        self.ollama_analyzer = OllamaAnalyzer(
+            ollama_url=self.config.get("ollama_url", ""),
+            ollama_model=self.config.get("ollama_model", "llama3"),
+            ollama_api_key=self.config.get("ollama_api_key", ""),
+            alert_file_logger=self.alert_writer,
+            metrics=self.metrics_exporter
+        )
 
         # -----------------------------------------------------------------------
         # Closed-Loop Autonomous FP Engine (CL-AFPE)
@@ -187,8 +194,8 @@ class EnginePipeline:
                 self.pihole_collector.excluded_patterns = new_patterns
                 self.zeek_fx.safe_patterns = new_patterns
             if "ollama_url" in changed_keys or "ollama_model" in changed_keys:
-                self.alert_manager.ollama_url = str(self.config.get("ollama_url", "")).strip().rstrip("/")
-                self.alert_manager.ollama_model = str(self.config.get("ollama_model", "llama3")).strip()
+                self.ollama_analyzer.ollama_url = str(self.config.get("ollama_url", "")).strip().rstrip("/")
+                self.ollama_analyzer.ollama_model = str(self.config.get("ollama_model", "llama3")).strip()
             if "telegram_enabled" in changed_keys:
                 self.alert_manager.enabled = bool(self.config.get("telegram_enabled", False))
             if "home_subnet" in changed_keys:
@@ -407,6 +414,7 @@ class EnginePipeline:
                 if dest_ip in honeypots:
                     # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                     abuse_risk = 4.0
+                    honeypot_probes_total.labels(attacker_ip=dev_id, dest_port=features.get("last_dest_port", 0), protocol=features.get("dominant_protocol", "TCP")).inc()
                 else:
                     self.abuseipdb.enqueue_ip(dest_ip)
                     if self.abuseipdb.lookup(dest_ip):
@@ -438,13 +446,21 @@ class EnginePipeline:
             features["vt_risk"] = vt_risk
 
             # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
+            # --- Version 7 Integration ---
+            # 1. Check for Layer-2 ARP Spoofing
+            if hasattr(self.zeek_fx, "layer2_spoofs") and client_ip in self.zeek_fx.layer2_spoofs:
+                spoof_info = self.zeek_fx.layer2_spoofs[client_ip]
+                LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing on {client_ip}")
+                self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}"))
+                del self.zeek_fx.layer2_spoofs[client_ip]
+
             mitigation_pending = None
             with self.state_manager.lock_device(dev_id) as state:
                 ml_score = 0.0
                 if self.ml_registry:
                     ml_score = self.ml_registry.score(dev_id, features)
 
-                # --- HEE Version 5 Integration ---
+                # --- Version 7 Integration ---
                 # 1. Run Detectors
                 dns_ev = self.dns_detector.detect(dev_id, features)
                 for ev in dns_ev: self.evidence_store.add(ev)
@@ -515,7 +531,19 @@ class EnginePipeline:
                             if geo_info:
                                 if isinstance(geo_info, dict): country_code = geo_info.get("country")
                                 elif hasattr(geo_info, "country") and geo_info.country: country_code = getattr(geo_info.country, "iso_code", None)
+                            
                             if country_code:
+                                # Feature 3: Geofencing Policy Enforcement
+                                if self.config.get("geofencing_enabled", False):
+                                    if country_code in self.config.get("geofencing_countries", []):
+                                        LOGGER.warning(f"🚫 GEOFENCE VIOLATION: {dev_id} connected to {d_ip} ({country_code})")
+                                        # Inject hard-stop evidence into the current active evidence set
+                                        active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}"))
+                                        # Force re-evaluate decision
+                                        decision = self.decision_engine.evaluate(active_evidence, rep_vector)
+                                        risk = decision["threat_confidence"] * 10.0
+                                        factors = [{"name": decision["explanation"], "score": risk}]
+                                
                                 self.metrics_exporter.export_geoip_telemetry(geo_info, asn_info, risk=risk, features=features, alert_threshold=alert_threshold)
 
                 if not is_poisoned:
@@ -547,6 +575,7 @@ class EnginePipeline:
                         dns_seq_str = "\n".join(dns_seq_lines) if dns_seq_lines else "  No recent DNS events"
 
                         alert_payload = {
+                            "type": "ids_alert",
                             "timestamp": now,
                             "device": {"id": dev_id, "ip": client_ip, "hostname": hostname, "type": state.device_type},
                             "network_context": {
@@ -665,6 +694,10 @@ class EnginePipeline:
                                 f"🔍 *CAUSE / EVIDENCE*\n"
                             )
                             
+                            self.zeek_fx.reset_client(client_ip)
+                            state.rolling.reset()
+                            state.last_alert_time = now
+                            
                             grouped_evidence = {}
                             for ev in active_evidence:
                                 if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
@@ -672,6 +705,8 @@ class EnginePipeline:
                                     
                             for group, ev in grouped_evidence.items():
                                 alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
+                                
+                            active_evidence.clear()
                                 
                             target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
                             alert_msg += (
@@ -711,6 +746,7 @@ class EnginePipeline:
                                     ])
                                 reply_markup = {"inline_keyboard": inline_keyboard}
 
+                            # self.ollama_analyzer.analyze(alert_payload)
                             self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
                 elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
@@ -846,6 +882,7 @@ class EnginePipeline:
                         ])
                     reply_markup = {"inline_keyboard": inline_keyboard}
 
+                # self.ollama_analyzer.analyze(m["alert_payload"])
                 self.alert_manager.send(alert_msg, raw_payload=m["alert_payload"], reply_markup=reply_markup)
 
         self.zeek_fx.prune(now, window_seconds)
@@ -895,6 +932,8 @@ class EnginePipeline:
 
 
     def stop(self) -> None:
+        if hasattr(self, "ollama_analyzer"):
+            self.ollama_analyzer.stop()
         LOGGER.info("Stopping Engine Pipeline...")
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()

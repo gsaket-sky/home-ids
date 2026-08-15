@@ -38,9 +38,9 @@
     {
       "id": 1,
       "type": "text",
-      "title": "\ud83d\udd0d Device Investigation Profile",
+      "title": "\ud83d\udd0d Select a Device to Investigate",
       "gridPos": {
-        "h": 7,
+        "h": 5,
         "w": 24,
         "x": 0,
         "y": 0
@@ -53,81 +53,19 @@
           "showLineNumbers": false,
           "showMiniMap": false
         },
-        "content": "**Select a single device from the dropdown above to investigate it.**\n\nThis page shows you exactly *why* the AI flagged the device. \n* **Threat Confidence**: 100% means the device is confirmed malicious.\n* **Anomaly Confidence**: 100% means the device is acting weird, but might just be a software update.\n* **FP Score**: If high, the AI thinks this alert is actually a False Positive and will suppress it."
+        "content": "Use the **device** dropdown at the top to filter these metrics."
       }
     },
     {
       "id": 2,
-      "type": "stat",
-      "title": "Threat Confidence",
-      "description": "Probability the device is compromised based on known threat heuristics.",
+      "type": "timeseries",
+      "title": "AI Anomaly Confidence",
+      "description": "",
       "gridPos": {
-        "h": 7,
-        "w": 6,
+        "h": 8,
+        "w": 12,
         "x": 0,
-        "y": 7
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_threat_confidence{hostname=~\"$device\"}",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.5
-              },
-              {
-                "color": "red",
-                "value": 0.8
-              }
-            ]
-          },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Anomaly Confidence",
-      "description": "Probability the device behavior deviates from its historical baseline.",
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 6,
-        "y": 7
+        "y": 5
       },
       "datasource": {
         "type": "prometheus",
@@ -136,89 +74,53 @@
       "targets": [
         {
           "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
-          "format": "time_series",
-          "instant": true,
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
       },
       "fieldConfig": {
         "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 0.5
-              },
-              {
-                "color": "red",
-                "value": 0.8
-              }
-            ]
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
           },
-          "unit": "percentunit"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "Current Decision State",
-      "description": "Internal AI state machine. 4 = CRITICAL, 3 = HIGH, 0 = BENIGN",
-      "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 12,
-        "y": 7
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_decision_state{hostname=~\"$device\"}",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
@@ -226,10 +128,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.5
               }
             ]
           },
@@ -239,15 +137,15 @@
       }
     },
     {
-      "id": 5,
-      "type": "stat",
-      "title": "False Positive Score",
-      "description": "LightGBM model's confidence that the alert is actually a false alarm.",
+      "id": 3,
+      "type": "timeseries",
+      "title": "Markov State Transition Anomaly",
+      "description": "",
       "gridPos": {
-        "h": 7,
-        "w": 6,
-        "x": 18,
-        "y": 7
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
       },
       "datasource": {
         "type": "prometheus",
@@ -255,78 +153,79 @@
       },
       "targets": [
         {
-          "expr": "home_ids_fp_confidence_score{hostname=~\"$device\"}",
-          "format": "time_series",
-          "instant": true,
+          "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
           "refId": "A"
         }
       ],
       "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
         },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
       },
       "fieldConfig": {
         "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
-                "value": null
-              },
-              {
                 "color": "green",
-                "value": 0.8
+                "value": null
               }
             ]
           },
-          "unit": "percentunit"
+          "unit": "none"
         },
         "overrides": []
       }
     },
     {
-      "id": 6,
-      "type": "text",
-      "title": "\ud83c\udf10 DNS Behavioral Footprint",
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 14
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "These graphs show how much the device is talking on the internet. Z-Scores show how much it deviates from its own normal baseline. A Z-Score above 3 is a major anomaly."
-      }
-    },
-    {
-      "id": 7,
+      "id": 4,
       "type": "timeseries",
-      "title": "Query Rate (Queries/min)",
-      "description": "Raw number of DNS lookups performed by the device.",
+      "title": "DNS Query Rate",
+      "description": "",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 18
+        "y": 13
       },
       "datasource": {
         "type": "prometheus",
@@ -398,15 +297,95 @@
       }
     },
     {
-      "id": 8,
+      "id": 5,
       "type": "timeseries",
-      "title": "Query Rate Z-Score",
-      "description": "Statistical deviation of query rate from this device's normal baseline.",
+      "title": "DNS Avg Entropy",
+      "description": "",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 18
+        "w": 8,
+        "x": 8,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_entropy_avg{hostname=~\"$device\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "DNS Z-Score Spikes",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 13
       },
       "datasource": {
         "type": "prometheus",
@@ -478,15 +457,15 @@
       }
     },
     {
-      "id": 9,
+      "id": 7,
       "type": "timeseries",
-      "title": "Unique Domains Queried",
-      "description": "Number of distinct hostnames the device requested.",
+      "title": "Beaconing Volume Score",
+      "description": "",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
-        "y": 26
+        "y": 21
       },
       "datasource": {
         "type": "prometheus",
@@ -494,7 +473,167 @@
       },
       "targets": [
         {
-          "expr": "home_ids_unique_domains{hostname=~\"$device\"}",
+          "expr": "home_ids_beaconing_volume_score{hostname=~\"$device\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Jitter Uniformity Score",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "barAlignment": 0,
+            "lineWidth": 1,
+            "fillOpacity": 1,
+            "gradientMode": "none",
+            "spanNulls": false,
+            "insertNulls": false,
+            "showPoints": "auto",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "axisColorMode": "text",
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "axisCenteredZero": false,
+            "hideFrom": {
+              "tooltip": false,
+              "viz": false,
+              "legend": false
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Cyber Kill-Chain Phase",
+      "description": "",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${PROMETHEUS_DS}"
+      },
+      "targets": [
+        {
+          "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
           "refId": "A"
         }
       ],
@@ -559,491 +698,55 @@
     },
     {
       "id": 10,
-      "type": "timeseries",
-      "title": "Unique Domains Z-Score",
-      "description": "Statistical deviation of unique domains from this device's normal baseline.",
+      "type": "table",
+      "title": "\ud83d\udcdc Device Specific Alert Log",
       "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 26
+        "h": 12,
+        "w": 24,
+        "x": 0,
+        "y": 29
       },
       "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
+        "type": "loki",
+        "uid": "${LOKI_DS}"
       },
       "targets": [
         {
-          "expr": "home_ids_zscore_unique_domains{hostname=~\"$device\"}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 1,
-            "gradientMode": "none",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 11,
-      "type": "text",
-      "title": "\ud83c\udf0d Per-Device GeoMap",
-      "gridPos": {
-        "h": 3,
-        "w": 24,
-        "x": 0,
-        "y": 34
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "Exactly where in the world is THIS specific device connecting to?"
-      }
-    },
-    {
-      "id": 12,
-      "type": "geomap",
-      "title": "Device Geographic Footprint",
-      "description": "Device specific IP connections",
-      "gridPos": {
-        "h": 14,
-        "w": 24,
-        "x": 0,
-        "y": 37
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_geo_risk",
+          "expr": "{job=\"home_ids_alerts\"} |= \"$device\" | json",
+          "refId": "A",
           "format": "table",
-          "instant": true,
-          "refId": "A"
+          "instant": false
         }
       ],
       "options": {
-        "view": {
-          "id": "zero",
-          "lat": 0,
-          "lon": 0,
-          "zoom": 1
+        "showHeader": true,
+        "footer": {
+          "show": false
         },
-        "controls": {
-          "showZoom": true,
-          "showAttribution": true,
-          "showScale": true,
-          "showMeasure": false,
-          "showDebug": false,
-          "mouseWheelZoom": true
-        },
-        "basemap": {
-          "type": "default",
-          "name": "Layer 0",
-          "config": {}
-        },
-        "layers": [
+        "frameIndex": 0,
+        "sortBy": [
           {
-            "type": "markers",
-            "name": "Layer 1",
-            "config": {
-              "showLegend": true
-            },
-            "location": {
-              "mode": "auto"
-            },
-            "color": {
-              "fixed": "dark-red",
-              "field": "Value"
-            },
-            "size": {
-              "fixed": 5,
-              "field": "Value",
-              "min": 2,
-              "max": 15
-            }
+            "displayName": "Time",
+            "desc": true
           }
-        ],
-        "tooltip": {
-          "mode": "details"
-        }
+        ]
       },
       "fieldConfig": {
         "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 5
-              },
-              {
-                "color": "red",
-                "value": 9
-              }
-            ]
+            "steps": []
           }
         },
         "overrides": []
-      }
-    },
-    {
-      "id": 1003,
-      "type": "logs",
-      "title": "\ud83d\udcf1 Device Event Timeline",
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 51
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${LOKI_DS}"
-      },
-      "targets": [
-        {
-          "expr": "{job=\"home_ids_alerts\"} | json | hostname=`$device`",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "signature",
-        "sortOrder": "Descending"
-      }
-    },
-    {
-      "id": 3002,
-      "type": "barchart",
-      "title": "\ud83c\udfaf Top Malicious Domains (24h Histogram)",
-      "description": "Histogram of the most frequently blocked domains for this specific device today.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 63
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum by(domain) (increase(home_ids_ips_pihole_blocks_total{hostname=~\"$device\"}[24h]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "orientation": "horizontal",
-        "showValue": "always"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 1,
-            "gradientMode": "none",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3003,
-      "type": "timeseries",
-      "title": "\ud83c\udfaf Malicious Domains Blocked Over Time",
-      "description": "Timeline tracking exactly when this device attempted to reach blacklisted domains.",
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 63
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum by(domain) (increase(home_ids_ips_pihole_blocks_total{hostname=~\"$device\"}[10m]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 15,
-            "gradientMode": "opacity",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3004,
-      "type": "timeseries",
-      "title": "\ud83d\udcc9 AI Sigma Sensitivity Tuning",
-      "description": "Tracks how the AI is dynamically adjusting its sensitivity baseline for this specific device to reduce false alarms.",
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 71
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "sum(increase(home_ids_fp_sigma_shifts_total{hostname=~\"$device\"}[1h]))",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        },
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "calcs": []
-        }
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "drawStyle": "line",
-            "lineInterpolation": "linear",
-            "barAlignment": 0,
-            "lineWidth": 1,
-            "fillOpacity": 15,
-            "gradientMode": "opacity",
-            "spanNulls": false,
-            "insertNulls": false,
-            "showPoints": "auto",
-            "pointSize": 5,
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            },
-            "axisPlacement": "auto",
-            "axisLabel": "",
-            "axisColorMode": "text",
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "axisCenteredZero": false,
-            "hideFrom": {
-              "tooltip": false,
-              "viz": false,
-              "legend": false
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3005,
-      "type": "logs",
-      "title": "\ud83d\udeab Live DNS Blocks & Failures (Audit Trail)",
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 79
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${LOKI_DS}"
-      },
-      "targets": [
-        {
-          "expr": "{job=\"home-ids\"} |= \"$device\" |~ \"(\\\\[PI-HOLE IPS\\\\] Blocked malicious domain)|(Pi-hole API connection error)|(Pi-hole API URL is not configured)\"",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "signature",
-        "sortOrder": "Descending"
       }
     }
   ],
@@ -1123,8 +826,8 @@
   "timepicker": {},
   "timezone": "",
   "title": "3. \ud83d\udd0d Device Deep Dive",
-  "description": "Investigate a single device",
-  "uid": "home_ids_v2_device",
+  "description": "Investigate a specific device",
+  "uid": "home_ids_v3_device",
   "id": null,
   "version": 1
 }

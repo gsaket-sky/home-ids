@@ -21,6 +21,9 @@ except Exception:
     def Counter(*args, **kwargs): return _NoopMetric()
 
 _DEV_LABELS = ["device", "hostname", "device_type"]
+_DEV_DOMAIN_LABELS = ["device", "hostname", "device_type", "domain"]
+
+top_domain_risk_metric = Gauge("home_ids_device_top_domain_risk", "Threat risk of the top domains for a device", _DEV_DOMAIN_LABELS)
 
 threat_confidence_metric = Gauge("home_ids_threat_confidence", "Threat Confidence (0.0 to 1.0)", _DEV_LABELS)
 anomaly_confidence_metric = Gauge("home_ids_anomaly_confidence", "Anomaly Confidence (0.0 to 1.0)", _DEV_LABELS)
@@ -114,6 +117,7 @@ jitter_cv_metric = Gauge("home_ids_jitter_cv_score", "Timing uniformity coeffici
 ndr_tcp_scan_metric = Gauge("home_ids_zeek_s0_rej_count", "Rejected or unanswered TCP connection attempts (Port Scans)", _DEV_LABELS)
 ndr_max_duration_metric = Gauge("home_ids_zeek_max_duration", "Maximum continuous connection session duration in seconds", _DEV_LABELS)
 ndr_honeypot_hits_metric = Gauge("home_ids_zeek_honeypot_hits", "Connections to internal deception honeypots", _DEV_LABELS)
+honeypot_probes_total = Counter("home_ids_honeypot_probes_total", "Total external probes hitting honeypot IPs", ["attacker_ip", "dest_port", "protocol"])
 
 # 🎓 Full Transparency & Novice Security Educational Metrics
 killchain_phase_metric = Gauge("home_ids_killchain_phase", "Cyber Kill-Chain phase (0=Normal, 1=Recon, 2=C2, 3=Lateral, 4=Exfil)", _DEV_LABELS)

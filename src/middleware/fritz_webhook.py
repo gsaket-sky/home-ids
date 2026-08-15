@@ -67,6 +67,10 @@ def verify_token(request: Request, credentials: Optional[HTTPAuthorizationCreden
         LOGGER.warning("Rejected remote request from %s: API token not configured.", client_host)
         raise HTTPException(status_code=403, detail="API token required for remote access")
 
+    query_token = request.query_params.get("token")
+    if query_token and secrets.compare_digest(query_token, expected_token):
+        return query_token
+
     if not credentials or not secrets.compare_digest(credentials.credentials, expected_token):
         LOGGER.warning("Unauthorized access attempt rejected from %s.", client_host)
         raise HTTPException(status_code=403, detail="Invalid or missing API Token")
@@ -176,6 +180,13 @@ class IPCReleaseRequest(BaseModel):
 
 @app.post("/api/ipc/release")
 def ipc_release(payload: IPCReleaseRequest, token: str = Depends(verify_token)):
+    return _ipc_release_logic(payload.target)
+
+@app.get("/api/ipc/release_get")
+def ipc_release_get(target: str, token: str = Depends(verify_token)):
+    return _ipc_release_logic(target)
+
+def _ipc_release_logic(target: str):
     """IPC endpoint for releasing isolated devices.
 
     ARCHITECTURE NOTE: This endpoint runs in the Uvicorn subprocess — a separate process from
@@ -184,7 +195,7 @@ def ipc_release(payload: IPCReleaseRequest, token: str = Depends(verify_token)):
     2. Execute release (modifies disk state).
     3. Write a sentinel file so the pipeline reconciles its in-memory IPS state on next cycle.
     """
-    LOGGER.info("Received IPC release request for target: %s", payload.target)
+    LOGGER.info("Received IPC release request for target: %s", target)
     try:
         from core.state_guard import StateManager
         from mitigation.ips import IPSMitigator
@@ -194,14 +205,14 @@ def ipc_release(payload: IPCReleaseRequest, token: str = Depends(verify_token)):
         sm.load_from_disk()
         ips = IPSMitigator(config=CONFIG, state_manager=sm)
         
-        if payload.target.lower() in ("all", "--all"):
+        if target.lower() in ("all", "--all"):
             count = ips.release_all_devices()
             sm.flush_to_disk()
             # Signal the live pipeline process to reconcile its in-memory IPS state from disk
             Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
             return {"status": "success", "released_count": count}
         else:
-            released = ips.release_device(payload.target)
+            released = ips.release_device(target)
             sm.flush_to_disk()
             # Signal the live pipeline process to reconcile its in-memory IPS state from disk
             Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
@@ -215,8 +226,15 @@ class IPCTargetRequest(BaseModel):
 
 @app.post("/api/ipc/immunize")
 def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
+    return _ipc_immunize_logic(payload.target)
+
+@app.get("/api/ipc/immunize_get")
+def ipc_immunize_get(target: str, token: str = Depends(verify_token)):
+    return _ipc_immunize_logic(target)
+
+def _ipc_immunize_logic(target: str):
     """IPC endpoint for immunizing a domain (False Positive cache)."""
-    LOGGER.info("Received IPC immunize request for domain: %s", payload.target)
+    LOGGER.info("Received IPC immunize request for domain: %s", target)
     try:
         from core.state_guard import StateManager
         from intelligence.fp_engine import AutonomousFPEngine
@@ -227,7 +245,7 @@ def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         
         # Load the trust cache and inject the domain
         fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
-        fp._immunize_domain(payload.target, "telegram_operator")
+        fp._immunize_domain(target, "telegram_operator")
         
         # Reset device validation flags and increment FP count
         for state in sm._states.values():
@@ -236,15 +254,45 @@ def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
-        return {"status": "success", "immunized": payload.target}
+        return {"status": "success", "immunized": target}
     except Exception as e:
         LOGGER.error("IPC immunize failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/ipc/block_domain_get")
+def ipc_block_domain_get(target: str, token: str = Depends(verify_token)):
+    LOGGER.info("Received IPC block domain request for: %s", target)
+    try:
+        from core.state_guard import StateManager
+        from mitigation.ips import IPSMitigator
+        state_path = CONFIG.get("state_path", "state/ids_state.json")
+        sm = StateManager(state_path=state_path)
+        sm.load_from_disk()
+        
+        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        # Block the domain specifically for pi-hole
+        success = ips._block_domain(domain=target, hostname="grafana_manual", device_ip="unknown", dev_id="manual", reason="Operator explicitly blocked via Grafana")
+        
+        if success:
+            sm.flush_to_disk()
+            return {"status": "success", "blocked_domain": target}
+        else:
+            raise HTTPException(status_code=500, detail="Pi-hole block failed")
+    except Exception as e:
+        LOGGER.error("IPC block domain failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/ipc/block")
 def ipc_block(payload: IPCTargetRequest, token: str = Depends(verify_token)):
+    return _ipc_block_logic(payload.target)
+
+@app.get("/api/ipc/block_get")
+def ipc_block_get(target: str, token: str = Depends(verify_token)):
+    return _ipc_block_logic(target)
+
+def _ipc_block_logic(target: str):
     """IPC endpoint for explicitly blocking a device via Telegram (interactive mode)."""
-    LOGGER.info("Received IPC block request for IP: %s", payload.target)
+    LOGGER.info("Received IPC block request for IP: %s", target)
     try:
         from core.state_guard import StateManager
         from mitigation.ips import IPSMitigator
@@ -256,7 +304,7 @@ def ipc_block(payload: IPCTargetRequest, token: str = Depends(verify_token)):
         ips = IPSMitigator(config=CONFIG, state_manager=sm)
         
         # Locate the device by IP in the state_manager to get its MAC and DevID
-        dev_id = sm.resolve_device_id(payload.target, "unknown")
+        dev_id = sm.resolve_device_id(target, "unknown")
 
         # FIX: Acquire or create state safely under lock
         with sm.lock_device(dev_id) as state:

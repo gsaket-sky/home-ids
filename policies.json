@@ -1,0 +1,11 @@
+{
+  "geofencing": {
+    "mode": "blocklist",
+    "countries": [
+      "RU",
+      "CN",
+      "KP",
+      "IR"
+    ]
+  }
+}
