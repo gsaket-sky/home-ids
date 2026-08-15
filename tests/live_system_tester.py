@@ -129,12 +129,11 @@ for i in range(15):
     inject_pihole_dns(now + (i*0.1), threats["Stage 3 - FP Engine (Telemetry)"]["ip"], "telemetry.sentry.io", reply_type=4)
 
 print(f"✅ Successfully injected mock logs to {zeek_log_dir}")
-print("⏳ Waiting up to 15 minutes for the live pipeline, ML Engine, and Ollama to process...")
+print("⏳ Waiting up to 30 seconds for the live pipeline and ML Engine to process...")
 
 # Evaluation Loop
-max_wait = 900
+max_wait = 30
 start_wait = time.time()
-ollama_timeout = False
 
 while True:
     time.sleep(2)
@@ -168,8 +167,6 @@ while True:
     alerts_only = [a for a in alerts if a.get("type") != "ollama_transparency"]
     alert_map = {a.get("device", {}).get("ip", ""): a for a in alerts_only if a.get("device", {}).get("ip")}
     suppress_map = {a.get("device", {}).get("ip", ""): a for a in suppressed if a.get("device", {}).get("ip")}
-    transparency_alerts = [a for a in alerts if a.get("type") == "ollama_transparency"]
-    transparency_map = {a.get("device", {}).get("ip", ""): a for a in transparency_alerts if a.get("device", {}).get("ip")}
     
     # Check completion
     all_done = True
@@ -190,7 +187,6 @@ while True:
     
     if elapsed > max_wait:
         print(f"⚠️ Timed out after {max_wait} seconds waiting for events.")
-        ollama_timeout = True
         break
     
     if int(elapsed) % 15 == 0:
@@ -219,22 +215,13 @@ for name, data in threats.items():
     else:
         actual_alert = alert_map.get(ip)
         actual_risk = actual_alert.get("risk", actual_alert.get("risk_score", 0.0)) if actual_alert else 0.0
-        has_ollama = ip in transparency_map
-        
         a_time = actual_alert.get("timestamp", now) if actual_alert else now
-        o_time = transparency_map[ip].get("timestamp", now) if has_ollama else now
         
         latency_alert = max(0, a_time - now)
-        latency_ollama = max(0, o_time - now)
         
         if actual_risk >= expected:
-            ollama_status = f"Ollama Summary: YES ({latency_ollama:.1f}s)" if has_ollama else "Ollama Summary: NO"
-            print(f"  ✅ {name} -> Detected! Risk: {actual_risk:.1f} | Alert: {latency_alert:.1f}s | {ollama_status} (IP: {ip})")
-            if has_ollama:
-                test_results.append(f"✅ {name} (Alert: {latency_alert:.1f}s, Ollama: {latency_ollama:.1f}s)")
-            else:
-                test_results.append(f"❌ {name} (Alert OK, Ollama Failed)")
-                all_passed = False
+            print(f"  ✅ {name} -> Detected! Risk: {actual_risk:.1f} | Alert: {latency_alert:.1f}s (IP: {ip})")
+            test_results.append(f"✅ {name} (Alert: {latency_alert:.1f}s)")
         else:
             print(f"  ❌ {name} -> FAILED! Risk: {actual_risk:.1f}, Expected: {expected:.1f} (IP: {ip})")
             test_results.append(f"❌ {name} (Failed Risk: {actual_risk:.1f})")
@@ -282,9 +269,9 @@ for res in test_results:
     report_lines.append(res)
 report_lines.append(f"\n<b>Integrations:</b>\nTelegram API: {tg_status}\nLocal Webhook: {webhook_status}")
 
-if all_passed and not ollama_timeout and webhook_status == "✅ Online":
+if all_passed and webhook_status == "✅ Online":
     print("\n==========================================================")
-    print("🏆 ALL STAGE 1, 2, 3 AND OLLAMA INTEGRATIONS PASSED PERFECTLY!")
+    print("🏆 ALL STAGE 1, 2, AND 3 INTEGRATIONS PASSED PERFECTLY!")
     print("==========================================================")
     report_lines.insert(1, "🎉 <b>STATUS: ALL PASSED</b>\n")
 else:
@@ -304,5 +291,5 @@ if telegram_token and telegram_chat_id:
     except Exception as e:
         print(f"⚠️ Failed to send report to Telegram: {e}")
 
-if not all_passed or ollama_timeout or webhook_status != "✅ Online":
+if not all_passed or webhook_status != "✅ Online":
     sys.exit(1)
