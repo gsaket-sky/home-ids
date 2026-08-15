@@ -7,7 +7,7 @@ This manual serves as your definitive guide to understanding the architecture, c
 ---
 
 ## 📋 Table of Contents
-1. [🌟 High-Level Architecture (The Dual-Brain System)](#-high-level-architecture-the-dual-brain-system)
+1. [🌟 High-Level Architecture (The Tri-Brain System)](#-high-level-architecture-the-tri-brain-system)
 2. [🌊 System Swimlane Diagram](#-system-swimlane-diagram)
 3. [⚙️ Comprehensive Configuration Reference (`config.json`)](#%EF%B8%8F-comprehensive-configuration-reference-configjson)
 4. [📁 Artifacts & Files Reference](#-artifacts--files-reference)
@@ -16,17 +16,22 @@ This manual serves as your definitive guide to understanding the architecture, c
 
 ---
 
-## 🌟 High-Level Architecture (The Dual-Brain System)
+## 🌟 High-Level Architecture (The Tri-Brain System)
 
-Version 7 introduces a split-brain processing pipeline that combines raw speed with deep cognitive reasoning.
+Version 7 introduces a split-brain processing pipeline that combines raw speed, continuous learning, and deep cognitive reasoning.
 
 ### 🧠 Brain 1: The Statistical Engine (Real-Time Pipeline)
 The core detection loop (`pipeline.py`) operates entirely in-memory and asynchronously. It fuses high-volume network metadata from Zeek with DNS logs from Pi-hole. 
 - Evaluates thousands of packets per second with **zero network latency**.
 - Uses a deterministic **Hypothesis & Evidence Engine (HEE)** to calculate Threat Confidence.
 
-### 🕵️ Brain 2: The Cognitive Analyst (Local LLM SOC)
-While Brain 1 reacts in milliseconds, Brain 2 thinks in seconds. Driven by `scheduler.py`, a background daemon periodically wakes up to analyze alerts using a local **Ollama (LLaMA 3.1)** instance. 
+### 🛡️ Brain 2: The Continuous Learning False-Positive Engine (CL-AFPE)
+Positioned between detection and containment, this ultra-fast Machine Learning brain prevents the system from blocking legitimate traffic.
+- Evaluates alerts using a dedicated LightGBM model and FastEmbed vector embeddings.
+- Instantly recognizes structural similarity to benign telemetry and silently suppresses false positives.
+
+### 🕵️ Brain 3: The Cognitive Analyst (Local LLM SOC)
+While Brain 1 & 2 react in milliseconds, Brain 3 thinks in seconds. Driven by `scheduler.py`, a background daemon periodically wakes up to analyze alerts using a local **Ollama (LLaMA 3.1)** instance. 
 - It acts as a Tier 2 SOC Analyst, writing executive summaries and **autonomously healing false positives** by dynamically updating your configuration.
 
 ---
@@ -39,33 +44,39 @@ Understanding *when* each system runs is critical. Home-IDS separates heavy anal
 sequenceDiagram
     participant Net as Network (Zeek/Pi-hole)
     participant B1 as Brain 1: Real-Time Pipeline
+    participant B2 as Brain 2: CL-AFPE
     participant Alert as state/alerts.json (Loki)
     participant Sched as Background Scheduler
-    participant B2 as Brain 2: Cognitive LLM Analyst
+    participant B3 as Brain 3: Cognitive LLM Analyst
     participant Cfg as config.json
 
     %% Real-time flow
     loop Every Millisecond
         Net->>B1: Ingest Packet/DNS Metadata
-        B1->>B1: Extract 40+ Features & Score (LightGBM)
+        B1->>B1: Extract 40+ Features & Score
         alt Threat Confidence > Threshold
-            B1->>Alert: Write Alert Event (For Grafana Loki)
-            B1->>Net: Issue Immediate Hardware Containment (Tarpit)
+            B1->>B2: Forward to False-Positive Engine
+            alt B2 Verdict == Benign
+                B2->>B2: Suppress Alert
+            else B2 Verdict == Malicious
+                B2->>Alert: Write Alert Event (For Grafana Loki)
+                B2->>Net: Issue Immediate Hardware Containment (Tarpit)
+            end
         end
     end
 
     %% Background Scheduled Flow
     loop Every 4 Hours (Cron)
-        Sched->>B2: Trigger Batch SOC Analysis
-        B2->>Alert: Read new alerts
-        B2->>B2: Query LLaMA 3.1 & Threat Intel
+        Sched->>B3: Trigger Batch SOC Analysis
+        B3->>Alert: Read new alerts
+        B3->>B3: Query LLaMA 3.1 & Threat Intel
         alt Verdict == Benign (False Positive)
-            B2->>B2: Extract Safe Domains
-            B2->>Cfg: Write domains to safe_host_patterns
+            B3->>B3: Extract Safe Domains
+            B3->>Cfg: Write domains to safe_host_patterns
         else Verdict == Malicious
-            B2->>B2: Generate Executive Summary
+            B3->>B3: Generate Executive Summary
         end
-        B2->>B2: Write Daily Markdown Report (reports/)
+        B3->>B3: Write Daily Markdown Report (reports/)
     end
 
     %% Configuration Live Reload
@@ -104,7 +115,7 @@ Changing these values takes effect **instantly** without restarting the service.
 | `alert_threshold` | `6.0` | The minimum Threat Confidence required to trigger an alert. *Autotuned by default.* |
 | `window_seconds` | `300` | How far back in time the engine looks to correlate DNS with network traffic (5 mins). |
 | `safe_ips` | `["127.0.0.1"]` | Devices that are entirely exempt from all ML scoring and isolation. |
-| `safe_host_patterns` | `["pi-hole"]` | A list of domain strings that will NEVER trigger an alert. **Brain 2 autonomously adds to this list.** |
+| `safe_host_patterns` | `["pi-hole"]` | A list of domain strings that will NEVER trigger an alert. **Brain 3 autonomously adds to this list.** |
 | `ips_enabled` | `true` | Master killswitch for all automated containment actions. |
 | `ips_tarpit_enabled` | `true` | Allows Scapy to forge ARP packets to blackhole infected devices. |
 | `scheduler` | `{...}` | Defines the cron schedule for background tasks like `ollama_soc` and `retrohunter`. |
@@ -130,7 +141,7 @@ Home-IDS writes several files to the disk to maintain state across reboots and l
 - **`/devices/<IP>.pkl`**: Per-device IsolationForest models. Each device has a bespoke model that learns its unique sleep/wake cycles and traffic patterns.
 
 ### `/reports/` Directory
-- **`soc_daily_report_YYYYMMDD.md`**: Generated by the Cognitive Analyst (Brain 2). Contains the AI's investigation into your alerts, confidence scores, and a record of any autonomous self-healing actions taken.
+- **`soc_daily_report_YYYYMMDD.md`**: Generated by the Cognitive Analyst (Brain 3). Contains the AI's investigation into your alerts, confidence scores, and a record of any autonomous self-healing actions taken.
 - **`top_domains_YYYYMMDD.md`**: Generated daily at 06:00, listing the highest volume domains queried by each device on your network.
 
 ---
