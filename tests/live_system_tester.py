@@ -129,10 +129,10 @@ for i in range(15):
     inject_pihole_dns(now + (i*0.1), threats["Stage 3 - FP Engine (Telemetry)"]["ip"], "telemetry.sentry.io", reply_type=4)
 
 print(f"✅ Successfully injected mock logs to {zeek_log_dir}")
-print("⏳ Waiting up to 30 seconds for the live pipeline and ML Engine to process...")
+print("⏳ Waiting up to 60 seconds for the live pipeline and ML Engine to process...")
 
 # Evaluation Loop
-max_wait = 30
+max_wait = 60
 start_wait = time.time()
 
 while True:
