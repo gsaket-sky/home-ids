@@ -1,7 +1,10 @@
 # 🛡️ Home-IDS: Advanced Autonomous Threat Defense (Version 7)
 
-**Home-IDS Version 7** is a professional-grade, autonomous Intrusion Detection and Prevention System (IDS/IPS) engineered for edge networks and smart home environments. Moving far beyond static blocklists, Home-IDS utilizes a state-of-the-art **Dual-Brain Architecture** to detect, analyze, and neutralize sophisticated threats in real-time, while autonomously learning to ignore false positives.
+**Home-IDS Version 7** is a professional-grade, autonomous Intrusion Detection and Prevention System (IDS/IPS) engineered for edge networks and smart home environments. 
 
+Once configured, it provides a level of automated network security virtually unheard of in consumer deployments.
+
+Moving far beyond static blocklists, Home-IDS utilizes a state-of-the-art **Dual-Brain Architecture** to detect, analyze, and neutralize sophisticated threats in real-time, while autonomously learning to ignore false positives.
 Designed for uncompromising security, it acts as a self-healing immune system for your network—capable of identifying Zero-Day malware, Domain Generation Algorithms (DGAs), and lateral movement.
 
 ---
