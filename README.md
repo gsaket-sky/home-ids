@@ -79,14 +79,3 @@ Upon detecting a critical threat, Home-IDS executes a latched, multi-tier isolat
 - **Prometheus & Grafana:** Full integration with Prometheus metrics and Loki logs, providing enterprise-level visibility into HEE decision states, AI confidence intervals, and autonomous mitigations across your entire infrastructure.
 
 ---
-
-## 📚 Documentation Map
-
-| Document | What's in it |
-|---|---|
-| [USER_MANUAL.md](USER_MANUAL.md) | The exhaustive reference: every `config.yaml` key, the full file-system layout, service lifecycle, test suite, and Prometheus metric catalog. |
-| [INSTALL.md](INSTALL.md) | Step-by-step installation of Home-IDS and every subsystem it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, Ollama). |
-| [ENGINEERING_MANUAL.md](ENGINEERING_MANUAL.md) | The internal mathematics and architecture — for developers extending or debugging the engine. |
-| [CHANGELOG.md](CHANGELOG.md) | The full version history, including the complete 7.0 audit write-up. |
-
-For detailed configuration, architecture charts, and metric definitions, see the [USER_MANUAL.md](USER_MANUAL.md).
