@@ -85,19 +85,28 @@ LOGGER = logging.getLogger("home_ids.fp_engine")
 # These control the sensitivity of the FP suppression engine.
 # More aggressive (lower thresholds) = fewer alerts but more risk of missing real threats.
 # More conservative (higher thresholds) = more alerts but zero missed threats.
+#
+# 2026-08-17 FIX: the four Stage 2/3/combined thresholds below are now read live from
+# config.json (fp_lgbm_threshold / fp_embed_similarity_threshold /
+# fp_combined_suppress_threshold / fp_combined_uncertain_threshold) via the
+# lgbm_fp_threshold / embed_similarity_threshold / combined_suppress_threshold /
+# combined_uncertain_threshold properties defined right after __init__ below.
+# Previously these were hardcoded here and config.json's matching keys were silently
+# ignored no matter what they were set to. The constants below are now only the
+# fallback defaults used if the key is missing from config.json.
 # ---------------------------------------------------------------------------
 
 # Stage 2: minimum LightGBM P(FP) to proceed towards suppression
-LGBM_FP_THRESHOLD = 0.75
+_DEFAULT_LGBM_FP_THRESHOLD = 0.75
 
 # Stage 3: minimum cosine similarity to count as a safe vendor pattern match
-EMBED_SIMILARITY_THRESHOLD = 0.82
+_DEFAULT_EMBED_SIMILARITY_THRESHOLD = 0.82
 
 # Combined confidence required to autonomously suppress the alert
-COMBINED_SUPPRESS_THRESHOLD = 0.80
+_DEFAULT_COMBINED_SUPPRESS_THRESHOLD = 0.80
 
 # Combined confidence for "uncertain" (alert sent but marked low-confidence)
-COMBINED_UNCERTAIN_THRESHOLD = 0.55
+_DEFAULT_COMBINED_UNCERTAIN_THRESHOLD = 0.55
 
 # How long an immunized domain stays in the trust cache before re-evaluation
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600  # 14 days
@@ -182,9 +191,9 @@ class AutonomousFPEngine:
         LOGGER.info("  🤖 Autonomous FP Engine (CL-AFPE) initialising")
         LOGGER.info("  Muted alert audit log : %s", self._muted_log_path)
         LOGGER.info("  Dynamic trust cache   : %s", self._trust_cache_path)
-        LOGGER.info("  Stage 2 LGBM threshold: %.2f", LGBM_FP_THRESHOLD)
-        LOGGER.info("  Stage 3 embed threshold: %.2f", EMBED_SIMILARITY_THRESHOLD)
-        LOGGER.info("  Combined suppress threshold: %.2f", COMBINED_SUPPRESS_THRESHOLD)
+        LOGGER.info("  Stage 2 LGBM threshold: %.2f", self.lgbm_fp_threshold)
+        LOGGER.info("  Stage 3 embed threshold: %.2f", self.embed_similarity_threshold)
+        LOGGER.info("  Combined suppress threshold: %.2f", self.combined_suppress_threshold)
         LOGGER.info("  Trust cache TTL       : %d days", TRUST_CACHE_TTL_SECONDS // 86400)
         LOGGER.info("="*70)
 
@@ -217,6 +226,34 @@ class AutonomousFPEngine:
         LOGGER.info(
             "🤖 CL-AFPE boot complete. ML loaders & 7-day retrain daemon active."
         )
+
+    # ==========================================================================
+    # LIVE-TUNABLE THRESHOLDS
+    # Read from config.json on every access (self.config is the live CONFIG singleton,
+    # so a config.json edit + reload picks these up with no restart needed — same as
+    # every other dynamic_live_reload key). Falls back to the historically-shipped
+    # defaults above if the key is absent from config.json.
+    # ==========================================================================
+
+    @property
+    def lgbm_fp_threshold(self) -> float:
+        """Stage 2: minimum LightGBM P(FP) to proceed towards suppression."""
+        return float(self.config.get("fp_lgbm_threshold", _DEFAULT_LGBM_FP_THRESHOLD))
+
+    @property
+    def embed_similarity_threshold(self) -> float:
+        """Stage 3: minimum cosine similarity to count as a safe vendor pattern match."""
+        return float(self.config.get("fp_embed_similarity_threshold", _DEFAULT_EMBED_SIMILARITY_THRESHOLD))
+
+    @property
+    def combined_suppress_threshold(self) -> float:
+        """Combined confidence required to autonomously suppress the alert."""
+        return float(self.config.get("fp_combined_suppress_threshold", _DEFAULT_COMBINED_SUPPRESS_THRESHOLD))
+
+    @property
+    def combined_uncertain_threshold(self) -> float:
+        """Combined confidence for "uncertain" (alert sent but marked low-confidence)."""
+        return float(self.config.get("fp_combined_uncertain_threshold", _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD))
 
     # ==========================================================================
     # PUBLIC API – Main evaluation entry point
@@ -278,6 +315,36 @@ class AutonomousFPEngine:
             cached_target = dest_ip
             
         if cached_target:
+            # ==============================================================
+            # PHASE 3 FIX (non-negotiable): the trust-cache fast path used to suppress
+            # unconditionally on a cache hit, WITHOUT re-checking hard-stop evidence. That
+            # meant an already-immunized domain/IP could be reused for real attack traffic
+            # (e.g. domain-fronting through a previously-trusted CDN, or a device that's
+            # ALSO doing lateral movement or hitting the honeypot at the same time) and it
+            # would be silently suppressed forever, immunization never re-evaluated. Now
+            # every cache hit re-runs the same Stage 1 hard-stop filter Stage-2/3 alerts
+            # already get, every time, even for immunized domains. This closes audit
+            # Finding #2 outright.
+            # ==============================================================
+            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain)
+            if stage1_triggers:
+                fp_engine_confirmed_threats_total.inc()
+                fp_engine_stage1_hardstop_hits.inc()
+                fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
+                self._apply_sigma_shift(device_id, hostname, direction="TUNE_UP")
+                LOGGER.warning(
+                    "🚨 [FP ENGINE » Trust Cache OVERRIDDEN] %s: '%s' is immunized BUT hard-stop "
+                    "signal(s) fired: %s → CONFIRMED THREAT despite trust cache hit.",
+                    hostname, cached_target, " | ".join(stage1_triggers)
+                )
+                return {
+                    "verdict": "CONFIRMED_THREAT",
+                    "confidence": 0.0,
+                    "stage": "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
+                    "reasons": stage1_triggers,
+                    "suppress": False,
+                }
+
             LOGGER.info(
                 "✅ [FP ENGINE » Trust Cache] %s: '%s' is immunized (trust cache hit) → suppressed.",
                 hostname, cached_target
@@ -338,25 +405,28 @@ class AutonomousFPEngine:
         lgbm_prob = self._stage2_lgbm(features, domain, hostname, device_id)
 
         if lgbm_prob is not None:
+            # PHASE 6 FIX (Stage 2 early-return bug): this used to `return` right here
+            # whenever lgbm_prob < self.lgbm_fp_threshold, publishing the alert as UNCERTAIN
+            # WITHOUT ever running Stage 3 — directly contradicting the log line below,
+            # which has always claimed Stage 3 runs "for corroboration" in exactly this
+            # case. The practical effect: Stage 3 (semantic vendor-domain matching) could
+            # only ever CONFIRM an FP that LightGBM already leaned towards (P(FP)>=0.75,
+            # the untouched branch below that already falls through), never RESCUE a
+            # legitimate domain LightGBM scored low on its own — backwards from the point
+            # of running two independent, differently-failure-prone classifiers. This is
+            # mostly moot today since the shipped LightGBM model is a freshly-generated,
+            # untrained placeholder, but once it retrains on real alert history (see
+            # train_fp_classifier.py / mark_false_positive() below) this would have started
+            # silently skipping semantic corroboration for every alert LightGBM felt
+            # confident about — including the exact aiv-delivery.net-shaped case (a CDN
+            # domain with numerically anomalous features that Stage 3's vendor-pattern
+            # matching is specifically built to catch). Both branches now fall through
+            # identically to Stage 3 and the weighted combined score below.
             LOGGER.info(
                 "📊 [FP ENGINE » Stage 2] %s: P(FP)=%.3f (threshold=%.2f) %s",
-                hostname, lgbm_prob, LGBM_FP_THRESHOLD,
-                "→ proceeding to Stage 3" if lgbm_prob >= LGBM_FP_THRESHOLD else "→ LOW FP probability (continuing to Stage 3 for corroboration)"
+                hostname, lgbm_prob, self.lgbm_fp_threshold,
+                "→ proceeding to Stage 3" if lgbm_prob >= self.lgbm_fp_threshold else "→ LOW FP probability (continuing to Stage 3 for corroboration)"
             )
-            if lgbm_prob < LGBM_FP_THRESHOLD:
-                # LightGBM is fairly confident this is a real threat
-                fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(lgbm_prob)
-                LOGGER.info(
-                    "⚠️ [FP ENGINE » Stage 2] %s: Alert remains ACTIVE (LightGBM P(FP)=%.3f).",
-                    hostname, lgbm_prob
-                )
-                return {
-                    "verdict": "UNCERTAIN",
-                    "confidence": lgbm_prob,
-                    "stage": "STAGE_2_LGBM",
-                    "reasons": [f"LightGBM P(FP)={lgbm_prob:.3f} below suppression threshold ({LGBM_FP_THRESHOLD})"],
-                    "suppress": False,
-                }
         else:
             LOGGER.debug("[FP ENGINE » Stage 2] Model not ready yet – using neutral fallback (0.50).")
             lgbm_prob = 0.50  # neutral – let Stage 3 decide
@@ -391,7 +461,7 @@ class AutonomousFPEngine:
         #   FastEmbed (0.55): Better at understanding vendor domain name patterns
         #                     but slower and needs model warm-up.
         # ==================================================================
-        if lgbm_prob == 0.50 and embed_sim >= EMBED_SIMILARITY_THRESHOLD:
+        if lgbm_prob == 0.50 and embed_sim >= self.embed_similarity_threshold:
             combined = embed_sim
         else:
             combined = (lgbm_prob * 0.45) + (embed_sim * 0.55)
@@ -402,7 +472,7 @@ class AutonomousFPEngine:
         )
         fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(combined)
 
-        if combined >= COMBINED_SUPPRESS_THRESHOLD:
+        if combined >= self.combined_suppress_threshold:
             # ---------------------------------------------------------------
             # HIGH CONFIDENCE FALSE POSITIVE → auto-suppress + self-heal
             # ---------------------------------------------------------------
@@ -412,13 +482,13 @@ class AutonomousFPEngine:
                 hostname, combined, domain, embed_match
             )
             fp_engine_suppressed_total.inc()
-            if embed_sim >= EMBED_SIMILARITY_THRESHOLD:
+            if embed_sim >= self.embed_similarity_threshold:
                 fp_engine_stage3_embed_hits.inc()
-            elif lgbm_prob >= LGBM_FP_THRESHOLD:
+            elif lgbm_prob >= self.lgbm_fp_threshold:
                 fp_engine_stage2_lgbm_hits.inc()
 
             # Self-healing Action 1: Add base domain to 14-day trust cache
-            self._immunize_domain(base_domain, hostname)
+            is_new_immunization = self._immunize_domain(base_domain, hostname)
 
             # Self-healing Action 2: Widen device's EWMA sigma by +0.25
             self._apply_sigma_shift(device_id, hostname)
@@ -427,7 +497,7 @@ class AutonomousFPEngine:
             reasons = [
                 f"LightGBM P(FP)={lgbm_prob:.3f} (Stage 2)",
                 f"FastEmbed cosine similarity={embed_sim:.3f} → best match: '{embed_match}' (Stage 3)",
-                f"Combined confidence={combined:.3f} >= {COMBINED_SUPPRESS_THRESHOLD} (suppress threshold)",
+                f"Combined confidence={combined:.3f} >= {self.combined_suppress_threshold} (suppress threshold)",
             ]
             self._write_muted_log(alert_payload, "AUTONOMOUS_FP_SUPPRESSED", reasons, combined)
 
@@ -437,9 +507,16 @@ class AutonomousFPEngine:
                 "stage": "STAGE_3_COMBINED",
                 "reasons": reasons,
                 "suppress": True,
+                # PHASE 3 (closed-loop): pipeline.py uses this to decide whether to record
+                # a revocable action + send a non-blocking "🔔 Auto-action" Telegram
+                # notification with a one-tap [Revoke] button. Only on a genuinely NEW
+                # immunization — a repeat suppression of an already-known-safe domain
+                # doesn't need a fresh revoke prompt every time it recurs.
+                "action": {"type": "immunize_domain", "target": base_domain, "is_new": is_new_immunization}
+                          if base_domain and is_new_immunization else None,
             }
 
-        elif combined >= COMBINED_UNCERTAIN_THRESHOLD:
+        elif combined >= self.combined_uncertain_threshold:
             # ---------------------------------------------------------------
             # UNCERTAIN – alert is published but marked as low-confidence
             # The pipeline will add an '⚠️ Low Confidence Alert' tag to Telegram
@@ -456,7 +533,7 @@ class AutonomousFPEngine:
                 "reasons": [
                     f"LightGBM P(FP)={lgbm_prob:.3f}",
                     f"FastEmbed similarity={embed_sim:.3f} for domain '{domain}'",
-                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={COMBINED_SUPPRESS_THRESHOLD})",
+                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={self.combined_suppress_threshold})",
                 ],
                 "suppress": False,
             }
@@ -796,7 +873,7 @@ class AutonomousFPEngine:
     # SELF-HEALING ACTIONS
     # ==========================================================================
 
-    def _immunize_domain(self, base_domain: str, hostname: str):
+    def _immunize_domain(self, base_domain: str, hostname: str) -> bool:
         """
         Add a base domain to the persistent dynamic trust cache (14-day TTL).
 
@@ -808,10 +885,15 @@ class AutonomousFPEngine:
 
         Example: immunizing 'sentry.io' means future alerts for
                  'xyz.ingest.us.sentry.io' are instantly suppressed.
+
+        Returns:
+            True if this was a NEW immunization (not previously cached), False if it was
+            invalid or just a TTL refresh of an already-immunized domain. PHASE 3: the
+            caller uses this to decide whether to offer a fresh [Revoke] prompt.
         """
         if not base_domain or str(base_domain).lower() in ("unknown", "null", "none"):
             LOGGER.warning("❌ [FP ENGINE » IMMUNIZE] Rejected invalid domain immunization attempt: '%s'", base_domain)
-            return
+            return False
 
         now = time.time()
         with self._lock:
@@ -840,6 +922,94 @@ class AutonomousFPEngine:
 
         fp_engine_trust_cache_size.set(cache_size)
         self._save_trust_cache()
+        return is_new
+
+    def revoke_immunization(self, base_domain: str) -> bool:
+        """PHASE 3 (closed-loop): reverses _immunize_domain() — removes a base domain from
+        the trust cache. Called when an operator taps [Revoke] on a Telegram '🔔
+        Auto-action' notification, i.e. the human-in-the-loop half of the closed loop.
+
+        Known limitation: this does not remove the domain from utils.py's separate
+        `_DYNAMIC_TELEMETRY_ALLOWLIST` (register_dynamic_allowlist_domain has no
+        unregister counterpart), so is_telemetry_domain() may still treat the domain as
+        safe for DGA/tunneling-signal dampening purposes after a revoke. The trust cache
+        itself — which is what actually suppresses alerts and what
+        ThreatIntel.is_allowlisted() checks — is fully reversed.
+        """
+        with self._lock:
+            existed = base_domain in self._trust_cache
+            if existed:
+                del self._trust_cache[base_domain]
+                cache_size = len(self._trust_cache)
+        if existed:
+            fp_engine_trust_cache_size.set(cache_size)
+            self._save_trust_cache()
+            LOGGER.warning("🔙 [FP ENGINE » REVOKE] '%s' removed from trust cache by operator revoke.", base_domain)
+        else:
+            LOGGER.debug("[FP ENGINE » REVOKE] '%s' was not in trust cache (already expired or never cached).", base_domain)
+        return existed
+
+    def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "") -> dict:
+        """PHASE 6 (operator-driven self-healing): the human-in-the-loop half of the FP
+        closed loop — called when an operator taps "🛡️ Mark False Positive" on a PUBLISHED
+        alert's Telegram message (i.e. one fp_engine did NOT autonomously suppress; see
+        AUTONOMOUS_FP_SUPPRESSED for the fully-autonomous path via evaluate()).
+
+        Why this matters beyond just immunizing the domain: without this, an operator
+        correction only ever silences the ONE alert in front of them. The alert itself
+        stays sitting in the alert stream (state/alerts.json) labeled as a confirmed
+        threat (label=0) forever, and train_fp_classifier.py's weekly retrain would keep
+        reinforcing it as "this pattern = threat" on every future run — actively teaching
+        the model the WRONG lesson from a correction the operator already made. This
+        method closes that gap the same way the fully-autonomous path already does: by
+        writing the correction to autonomous_muted.jsonl (label=1/FP) via the exact same
+        _write_muted_log() used by AUTONOMOUS_FP_SUPPRESSED, so load_dataset() picks it up
+        as a false-positive training sample without any special-casing on the training
+        side. train_fp_classifier.py's load_dataset() additionally cross-references this
+        log to drop the matching pre-correction entry from the alerts.json "threat" set,
+        so the SAME event doesn't end up labeled both ways in one training run.
+
+        Returns a dict with `base_domain` (the eTLD+1 that got immunized, or "" if the
+        domain couldn't be safely extracted) and `is_new_immunization` for the caller to
+        report back to the operator / decide whether an unblock is even necessary.
+        """
+        domain = target_domain or alert_payload.get("network_context", {}).get("queried_domain", "") or ""
+        base_domain = self._extract_base_domain(domain)
+        device_id = alert_payload.get("device", {}).get("id", "unknown")
+
+        is_new_immunization = False
+        if base_domain:
+            is_new_immunization = self._immunize_domain(base_domain, hostname)
+        else:
+            LOGGER.warning(
+                "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
+                "skipping trust-cache immunization, but still recording the training "
+                "correction and sigma widening below.",
+                hostname, domain
+            )
+
+        # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
+        # the autonomous path applies, scoped to the one device the operator corrected.
+        self._apply_sigma_shift(device_id, hostname)
+
+        reasons = [
+            f"Operator manually marked alert for '{domain or 'unknown'}' as a false positive via Telegram.",
+            f"Base domain '{base_domain}' added to trust cache." if base_domain else
+            "Base domain could not be extracted — trust cache NOT updated for this domain.",
+        ]
+        self._write_muted_log(alert_payload, "OPERATOR_MARKED_FALSE_POSITIVE", reasons, 1.0)
+
+        LOGGER.warning(
+            "🛡️  [FP ENGINE » MARK FP] %s: operator-corrected alert for '%s' — training "
+            "correction logged, sigma widened, domain %s.",
+            hostname, domain, f"immunized ('{base_domain}')" if base_domain else "NOT immunized (extraction failed)"
+        )
+
+        return {
+            "base_domain": base_domain,
+            "is_new_immunization": is_new_immunization,
+            "domain": domain,
+        }
 
     def _apply_sigma_shift(self, device_id: str, hostname: str, direction: str = "TUNE_DOWN"):
         """
@@ -1018,13 +1188,35 @@ class AutonomousFPEngine:
     # ==========================================================================
 
     def _extract_base_domain(self, domain: str) -> str:
-        """Extract eTLD+1 base domain for trust cache key. E.g. 'o1234.ingest.sentry.io' → 'sentry.io'"""
+        """Extract eTLD+1 base domain for trust cache key. E.g. 'o1234.ingest.sentry.io' -> 'sentry.io'.
+
+        PHASE 0 FIX: fails closed (returns "") instead of falling back to a naive
+        last-two-labels split when tldextract-backed suffix parsing isn't available. That
+        naive fallback breaks on multi-part public suffixes (e.g. 'mail.example.co.uk' ->
+        'co.uk'), which would then immunize every '.co.uk' domain on the network — far
+        broader than intended, and a real domain-immunization-hijack surface. An empty
+        return is safe: _immunize_domain() already rejects empty/invalid base domains, so
+        failing closed here means "no auto-immunization for this domain" rather than
+        "auto-immunize something dangerously broad."
+        """
+        if not domain:
+            return ""
         try:
-            from utils import etld1
-            return etld1(domain) if domain else ""
-        except Exception:
-            parts = (domain or "").rsplit(".", 2)
-            return ".".join(parts[-2:]) if len(parts) >= 2 else domain
+            from utils import etld1, tldextract as _te
+        except Exception as exc:
+            LOGGER.warning("[FP ENGINE] utils.etld1 unavailable (%s) — failing closed, no domain immunization for '%s'.", exc, domain)
+            return ""
+        if _te is None:
+            LOGGER.warning(
+                "[FP ENGINE] tldextract not installed — failing closed (no domain immunization) for '%s'. "
+                "Install with: pip install tldextract", domain
+            )
+            return ""
+        try:
+            return etld1(domain)
+        except Exception as exc:
+            LOGGER.warning("[FP ENGINE] etld1() raised for '%s' (%s) — failing closed, no domain immunization.", domain, exc)
+            return ""
 
     def _is_trust_cached(self, base_domain: str) -> bool:
         """True if base_domain is in the dynamic trust cache and its TTL has not expired."""

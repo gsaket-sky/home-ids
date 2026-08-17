@@ -1,0 +1,440 @@
+# =============================================================================
+# Home-IDS configuration — config.yaml
+# =============================================================================
+# Every setting below is grouped by what it actually controls, not by whether it
+# needs a restart. Restart-vs-live behavior is called out on each key instead:
+#
+#   [LIVE]    — edit this file and save; scripts/scheduler.py's watcher (or the
+#               app's own file-mtime check) picks it up within a few seconds,
+#               no restart needed.
+#   [RESTART] — the app reads this once at boot. Editing it here is saved and
+#               will NOT be silently overwritten, but it has no effect on the
+#               running process until you restart the service. This is a
+#               deliberate safety rail (config.py's _STATIC_KEYS protection) for
+#               settings where changing them underneath a running process would
+#               corrupt state — e.g. swapping the model file path mid-run.
+#
+# Secrets are NOT in this file at all — see the "secrets" note near the bottom.
+# They live in .env (path set by env_file below) and are pulled in as
+# environment variables at every reload.
+#
+# This file replaces config.json. See CONFIG_AUDIT_REPORT.md for the full
+# audit history of every key: what reads it, what was dead and removed, what
+# was silently defaulting and is now explicit.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# service_ports — network ports this process listens on
+# -----------------------------------------------------------------------------
+service_ports:
+  # Prometheus /metrics scrape port (Grafana dashboards read from here).
+  # [RESTART]
+  metrics_port: 9105
+
+  # Local-only IPC/webhook port: receives Telegram bot webhooks and serves the
+  # Fritz!Box isolate/hosts endpoints used by mitigation/ips.py. Not meant to
+  # be internet-exposed. [RESTART]
+  fastapi_port: 8010
+
+
+# -----------------------------------------------------------------------------
+# paths — every file/directory this process reads from or writes to.
+# All relative paths resolve against the directory you LAUNCH the process
+# from (your repo root — the same directory this config.yaml lives in), NOT
+# against src/. Absolute paths (starting with /) are used as-is.
+# -----------------------------------------------------------------------------
+paths:
+  # Where per-device baselines + IPS mitigation state are persisted between
+  # restarts. [RESTART]
+  state_path: state/ids_state.json
+
+  # Where the trained per-device/global ML anomaly model is loaded from and
+  # (on retrain) saved to. [RESTART]
+  model_path: models/ids_model.pkl
+
+  # MaxMind GeoLite2 City database (.mmdb) for country/city IP lookups — used
+  # by GeoIP telemetry AND by geofencing below (geofencing can't fire at all
+  # if this file fails to load — check your startup logs for "GeoIP features
+  # will be disabled" if geofencing ever seems inactive). ASSUMPTION: this
+  # path assumes you'll place/symlink your .mmdb files under <repo_root>/models/
+  # — correct it if yours live somewhere else. [RESTART]
+  geoip_db: models/GeoLite2-City.mmdb
+
+  # Optional MaxMind GeoLite2 ASN database — enables ASN/org name in GeoIP
+  # telemetry. Leave pointing at a missing file to keep ASN/org fields as
+  # "unknown" (same as leaving this blank). [RESTART]
+  geoip_asn_db: models/GeoLite2-ASN.mmdb
+
+  # Pi-hole's own SQLite FTL database, read directly for DNS query telemetry.
+  # This is Pi-hole's system path, not something you control — leave as-is
+  # unless your Pi-hole installation is nonstandard. [RESTART]
+  pihole_db: /etc/pihole/pihole-FTL.db
+
+  # Directory Zeek writes its live logs (conn.log, dns.log, etc.) into. Zeek's
+  # system path — leave as-is unless your Zeek deployment is nonstandard.
+  # [RESTART]
+  zeek_log_dir: /opt/zeek/logs/current
+
+  # Every evaluated alert is appended here (also the training data source for
+  # the weekly false-positive classifier retrain). [RESTART]
+  alert_json_path: alerts.json
+
+  # Once alert_json_path exceeds this many bytes, older entries are pruned
+  # (currently 1 GiB). [RESTART]
+  alert_json_max_bytes: 1073741824
+
+  # Path (relative to this file's own directory) to your .env secrets file.
+  # ".env" is correct for the standard layout (.env sitting next to this
+  # config.yaml at the repo root) — change only if you keep secrets somewhere
+  # else. [RESTART]
+  env_file: .env
+
+
+# -----------------------------------------------------------------------------
+# network_and_devices — your LAN topology and per-device classification
+# -----------------------------------------------------------------------------
+network_and_devices:
+  # Your home LAN in CIDR form. Legacy single-subnet key — still used as the
+  # fallback whenever home_subnets (below) is empty. [LIVE]
+  home_subnet: 192.168.1.0/24
+
+  # Preferred multi-subnet form: a list of CIDR ranges, e.g.
+  # ["192.168.1.0/24", "192.168.50.0/24"]. Populate this once you have more
+  # than one home subnet to track; while empty, home_subnet (above) is used
+  # instead — currently a no-op. [LIVE]
+  home_subnets: [192.168.1.0/24]
+
+  # Safety cap on how many distinct devices get their own tracked baseline
+  # state at once (memory/disk bound). [RESTART]
+  max_device_states: 5000
+
+  # IPs that are NEVER treated as suspicious destinations even if flagged
+  # elsewhere (your own infra: Pi-hole DNS server, router, this host, etc.).
+  # [LIVE]
+  safe_ips:
+    - 127.0.0.1
+    - 192.168.1.94
+    - 192.168.1.1
+    - 192.168.1.15
+    - 192.168.1.31
+    - 192.0.0.2
+
+  # Decoy IP(s) on your LAN. Any device that contacts one gets an instant
+  # 10.0 (max) risk score — deploy an unused IP running a fake SSH/SMB
+  # listener at this address for it to mean anything. [LIVE]
+  honeypot_ips:
+    - 192.168.1.200
+
+  # Domains never treated as suspicious (like safe_ips, but for DNS queries).
+  # [LIVE]
+  safe_domains: []
+
+  # Hostname substrings that mark a device as "safe infrastructure" (Pi-hole,
+  # your repeater, etc.) — dampens noisy behavioral evidence for these
+  # devices without excluding real threat signals (reputation/honeypot
+  # evidence is never dampened). [LIVE]
+  safe_host_patterns:
+    - paperless
+    - repeater
+    - pi-hole
+    - pihole
+    - pi.hole
+    - pi_hole
+
+  # Manual device-type overrides by hostname or IP, where auto-classification
+  # gets it wrong or you want to lock it down. Values: laptop, desktop,
+  # phone, tablet, smart_tv, gaming_console, printer, nas, iot, camera,
+  # server, unknown. [LIVE]
+  device_type_overrides:
+    MY-LAPTOP-A1B2: laptop
+    lghometheater: smart_tv
+    DIR355BT: iot
+    Family-PC: laptop
+    dreame: iot
+    Chromecast: iot
+    Watch: phone
+    Samsung: smart_tv
+    linux-server: server
+    Kindle: tablet
+    "192.168.1.28": nas
+    android_4: smart_tv
+
+
+# -----------------------------------------------------------------------------
+# detection_engine — core scoring loop timing and sensitivity
+# -----------------------------------------------------------------------------
+detection_engine:
+  # Python logging level (DEBUG/INFO/WARNING/ERROR). [LIVE]
+  log_level: INFO
+
+  # How often (seconds) the main loop polls Pi-hole's DB for new queries.
+  # 2s is optimal here — Pi-hole's DB is event-driven, not time-driven, so
+  # lower doesn't meaningfully help. [LIVE]
+  poll_interval: 2
+
+  # Sliding window (seconds) used for rate/entropy/uniqueness baselines.
+  # 300s (5 min) — faster DGA detection than the old 600s. [LIVE]
+  window_seconds: 300
+
+  # On startup, how far back (seconds) to backfill from existing logs before
+  # going live. [LIVE]
+  startup_lookback_seconds: 300
+
+  # Risk score (0-10 scale) at which an evaluation becomes an alert.
+  # 6.0 — well-calibrated after false-positive sensitivity fixes. [LIVE]
+  alert_threshold: 6.0
+
+  # Standard-deviation multiplier for statistical anomaly thresholds. [LIVE]
+  threshold_std_dev: 3.0
+
+  # How many samples a device's per-device ML model needs before it starts
+  # actively scoring (vs. staying in warmup). 5000 → activates in ~2.8h
+  # instead of the old 10000's ~5.5h. [LIVE]
+  ml_warmup_samples: 5000
+
+  # EWMA smoothing factor for rate/entropy/unique-domain baselines. 0.05 is
+  # the correct speed for this signal — don't change without reason. [LIVE]
+  baseline_alpha: 0.05
+
+  # Decay factor for domain-count baselines — 0.995 gives a ~4.6 minute
+  # half-life. [LIVE]
+  decay_factor: 0.995
+
+  # How long (seconds) a SUSPICIOUS state must persist uninterrupted with the
+  # same signature before it's escalated to HIGH. [LIVE]
+  suspicious_escalation_seconds: 600.0
+
+
+# -----------------------------------------------------------------------------
+# false_positive_engine — CL-AFPE (autonomous false-positive suppression)
+# 3-stage pipeline: hard-stop security filter → LightGBM tabular classifier →
+# FastEmbed semantic domain-similarity matcher. The four thresholds below
+# directly retune Stage 2/3 sensitivity, live, no restart (verified: reading
+# these is a fresh self.config.get() call on every alert evaluation).
+# -----------------------------------------------------------------------------
+false_positive_engine:
+  # Stage 2: minimum LightGBM P(false positive) to lean towards suppression.
+  # Lower = engine trusts the tabular model more readily. [LIVE]
+  fp_lgbm_threshold: 0.75
+
+  # Stage 3: minimum cosine similarity to a known-safe vendor domain pattern
+  # to count as a match. Lower = more domains get matched as "looks like a
+  # known vendor". [LIVE]
+  fp_embed_similarity_threshold: 0.82
+
+  # Combined (Stage2×0.45 + Stage3×0.55) confidence required to AUTO-SUPPRESS
+  # an alert as a false positive. Lower = fewer Telegram pings but higher risk
+  # of quietly swallowing a real threat. Higher = noisier but safer. [LIVE]
+  fp_combined_suppress_threshold: 0.8
+
+  # Combined confidence above which an alert that DIDN'T clear the suppress
+  # threshold still gets tagged "⚠️ Low Confidence" instead of a normal alert.
+  # [LIVE]
+  fp_combined_uncertain_threshold: 0.55
+
+  # Send a non-blocking "🔔 Auto-action" Telegram notification (with a
+  # one-tap Revoke button) whenever the engine autonomously immunizes a NEW
+  # domain. [LIVE]
+  fp_revoke_notifications_enabled: true
+
+  # How long (seconds) the one-tap Revoke option stays available after an
+  # autonomous immunization. Default 86400 = 24h. [LIVE]
+  fp_revoke_action_ttl_seconds: 86400.0
+
+  # How long (seconds) an operator's "Mark False Positive" correction stays
+  # active as training-correction signal for the weekly retrain. Default
+  # 2592000 = 30 days. [LIVE]
+  fp_operator_feedback_ttl_seconds: 2592000.0
+
+
+# -----------------------------------------------------------------------------
+# device_identity — MAC-rotation / re-identification resilience
+# -----------------------------------------------------------------------------
+device_identity:
+  # Whether a device that rotates its MAC/IP can be automatically re-linked
+  # to its prior identity (keeping threat history) instead of starting a
+  # fresh cold-start profile. [LIVE]
+  identity_reidentify_enabled: true
+
+  # Minimum match-confidence score (0-1, from DHCP fingerprint + JA3/JA4
+  # overlap) required to auto-merge two identities. [LIVE]
+  identity_reidentify_min_confidence: 0.75
+
+  # How long (seconds) a candidate stays eligible for re-identification
+  # merging after last being seen. Default 1800 = 30 min. [LIVE]
+  identity_reidentify_window_seconds: 1800.0
+
+
+# -----------------------------------------------------------------------------
+# geofencing — block traffic to specific countries by GeoIP
+# NOTE: this can only ever fire if paths.geoip_db above successfully loads —
+# see the comment on that key. If geofencing seems to never trigger, check
+# your startup logs for a GeoIP load failure first.
+# -----------------------------------------------------------------------------
+geofencing:
+  # Master on/off switch. When true, any device that contacts an IP whose
+  # GeoIP country is in geofencing_countries gets an instant CRITICAL/block
+  # verdict (same severity as a confirmed malicious IOC). [LIVE]
+  geofencing_enabled: true
+
+  # ISO country codes to block. Currently a blocklist ONLY — there is no
+  # allowlist mode and no time-of-day policy support in the code today,
+  # despite those having been planned at some point (see
+  # CONFIG_AUDIT_REPORT.md's dead-key section for the removed
+  # geofencing_mode / geofencing_time_policies keys). [LIVE]
+  geofencing_countries:
+    - RU
+    - KP
+    - IR
+
+
+# -----------------------------------------------------------------------------
+# threat_intel_and_ai — external threat-intel refresh + local Ollama LLM
+# -----------------------------------------------------------------------------
+threat_intel_and_ai:
+  # How often (seconds) OTX/AbuseIPDB/VirusTotal feeds refresh. Default 3600
+  # = hourly. (API keys themselves come from .env, not this file.) [LIVE]
+  ti_refresh_interval: 3600
+
+  # Base URL of your local Ollama server, used by ollama_soc.py / ollama_analyzer.py
+  # / ai_soc.py for LLM-based alert triage and summaries. [LIVE]
+  ollama_url: http://192.168.1.94:11434
+
+  # Ollama model name to use for those requests. [LIVE]
+  ollama_model: llama3.1
+
+
+# -----------------------------------------------------------------------------
+# ips_mitigation — active response master switches
+# Per-mechanism toggles (Pi-hole sinkhole / router hardware isolation /
+# ARP tarpit) are NOT here — they come from .env (see the "secrets" note
+# below), since they're treated the same as other sensitive infrastructure
+# controls. This section is the master switches + response POLICY only.
+# -----------------------------------------------------------------------------
+ips_mitigation:
+  # Global kill switch for all active response (Pi-hole sinkhole, router
+  # isolation, ARP tarpit). false = detection-only, nothing gets blocked.
+  # [LIVE]
+  ips_enabled: true
+
+  # true = a human must tap "Approve" in Telegram before a hardware isolation
+  # action executes. false = fully autonomous auto-block. [LIVE]
+  interactive_blocking_enabled: true
+
+  # Cooldown (seconds) after an operator manually releases a device before
+  # it can be auto-isolated again. Default 3600 = 1h. [LIVE]
+  operator_release_cooldown_seconds: 3600.0
+
+  # true = IPS actions are logged as if they executed but nothing actually
+  # happens on the network (dry-run / testing mode). [LIVE]
+  simulation_mode: false
+
+
+# -----------------------------------------------------------------------------
+# pihole_integration — Pi-hole API behavior (URL/password come from .env)
+# -----------------------------------------------------------------------------
+pihole_integration:
+  # Pi-hole v6 API path used for domain sinkholing calls. [LIVE]
+  pihole_api_path: /api/v2/domains
+
+  # HTTP timeout (seconds) for Pi-hole API calls. [LIVE]
+  pihole_api_timeout_seconds: 5.0
+
+
+# -----------------------------------------------------------------------------
+# fritzbox_router — Fritz!Box hardware isolation integration
+# (user/password/API token come from .env)
+# -----------------------------------------------------------------------------
+fritzbox_router:
+  # Your Fritz!Box's LAN IP — the target for TR-064 isolation calls. [LIVE]
+  fritz_ip: 192.168.1.1
+
+  # HTTP timeout (seconds) for the isolate-device webhook call. [LIVE]
+  router_webhook_timeout_seconds: 5.0
+
+  # URL this process's own FastAPI server polls to keep the router's
+  # connected-hosts list in sync (used by core/identity.py). [LIVE]
+  router_hosts_url: http://127.0.0.1:8010/hosts
+
+  # HTTP timeout (seconds) for that hosts-list poll. [LIVE]
+  router_hosts_timeout_seconds: 5.0
+
+
+# -----------------------------------------------------------------------------
+# telegram — bot notification behavior (token/chat ID come from .env)
+# -----------------------------------------------------------------------------
+telegram:
+  # Master switch for Telegram alerting. [LIVE]
+  telegram_enabled: true
+
+  # Allowlist of chat IDs permitted to send bot COMMANDS (approve/release/
+  # revoke buttons). Empty = allow commands from any chat that has the bot
+  # (backward-compatible default) — populate this if you ever add the bot to
+  # a shared/group chat and want to restrict who can act on alerts. [LIVE]
+  telegram_allowed_chat_ids: []
+
+
+# -----------------------------------------------------------------------------
+# scheduled_jobs — background jobs, polled every 60s by scripts/scheduler.py
+# Cron fields are minute/hour/day/month/day-of-week. Only "*", "*/N", and an
+# exact integer are supported per field (no comma-lists, no ranges).
+# Verified: no two jobs below fire in the same hour as each other.
+# -----------------------------------------------------------------------------
+scheduled_jobs:
+  # Weekly/nightly retrain of the false-positive LightGBM classifier
+  # (scripts/train_fp_classifier.py) — this one is NOT in the `scheduler`
+  # dict below, it has its own dedicated enable/cron pair. Fires at 3am.
+  # [LIVE]
+  autotune_enabled: true
+  autotune_schedule_cron: "0 3 * * *"
+
+  # Everything else scheduler.py launches. Each job: enabled (bool), cron
+  # (string), and an optional "script" override if the job's key doesn't
+  # match its own filename (needed for retro_hunter — see
+  # CONFIG_AUDIT_REPORT.md's Phase 7 note on why that override exists).
+  scheduler:
+    # LLM-based alert triage summaries, every 4 hours starting at midnight.
+    ollama_soc:
+      enabled: true
+      cron: "0 */4 * * *"
+
+    # Retroactive threat-intel re-scan of recent history. 2am.
+    retro_hunter:
+      enabled: true
+      cron: "0 2 * * *"
+      script: retro_hunter.py
+
+    # Daily "top domains per device" Markdown + Telegram summary report. 6am.
+    top_domains_report:
+      enabled: true
+      cron: "0 6 * * *"
+
+
+# =============================================================================
+# Secrets — NOT in this file
+# =============================================================================
+# These come from .env (path set by paths.env_file above) as environment
+# variables, applied on every reload via config.py's apply_env_overrides():
+#
+#   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID           → Telegram bot credentials
+#   OTX_API_KEY                                → AlienVault OTX
+#   ABUSEIPDB_KEY (or ABUSEIPDB_API_KEY)       → AbuseIPDB
+#   VIRUSTOTAL_KEY (or VIRUSTOTAL_API_KEY)     → VirusTotal
+#   PIHOLE_API_PASSWORD, PIHOLE_API_URL        → Pi-hole admin API
+#   FRITZ_USER, FRITZ_PASS                     → Fritz!Box TR-064 login
+#   API_SECRET_TOKEN                           → this app's own webhook auth token
+#   ROUTER_WEBHOOK_URL                         → isolate-device webhook URL
+#   IDS_IPS_PIHOLE_ENABLED                     → per-mechanism IPS toggle: DNS sinkhole
+#   IDS_IPS_ROUTER_ENABLED                     → per-mechanism IPS toggle: hardware isolation
+#   IDS_IPS_TARPIT_ENABLED                     → per-mechanism IPS toggle: ARP tarpit
+#   OLLAMA_API_KEY                             → only if your Ollama server requires auth
+#
+# Setting any of these in THIS file too would work (it'd just get silently
+# overwritten by .env on the next reload) but would be misleading, so don't.
+#
+# Two .env variables are NOT read by this app at all — ZEEK_INTERFACE and
+# HOME_SUBNET are consumed by your Zeek deployment scripting only. In
+# particular, .env's HOME_SUBNET does NOT override this file's
+# network_and_devices.home_subnet, despite the similar name — to change your
+# tracked LAN subnet, edit THIS file, not .env.

@@ -1,17 +1,36 @@
 import os
 import sys
-import json
 import time
 import logging
 import subprocess
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 # Ensures the script can resolve modules from the src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
+
+
+def _flatten_config_categories(raw: dict) -> dict:
+    """Mirror config.py's LiveConfig._load() flattening rule: merge every top-level
+    mapping whose name doesn't start with "_"/"#" into one flat key->value namespace.
+    Category names (network_and_devices, scheduled_jobs, ...) are purely organizational
+    in config.yaml -- this scheduler reads the same flat keys regardless of which
+    category they're grouped under, so renaming/reorganizing categories in config.yaml
+    never requires a code change here."""
+    flattened = {}
+    for section_name, section_val in (raw or {}).items():
+        if str(section_name).startswith("_") or str(section_name).startswith("#"):
+            continue
+        if isinstance(section_val, dict):
+            flattened.update(section_val)
+        else:
+            flattened[section_name] = section_val
+    return flattened
 
 def check_cron(cron_str: str, current_time: datetime) -> bool:
     parts = cron_str.split()
@@ -37,10 +56,14 @@ def check_cron(cron_str: str, current_time: datetime) -> bool:
             match(python_dow, parts[4]))
 
 def load_config():
-    config_path = Path(__file__).resolve().parent.parent.parent / "config.json"
+    """Returns the FLAT config namespace (already merged across every category), same
+    as config.py's CONFIG.get(). Reads config.yaml directly (not through config.py's
+    LiveConfig) so this standalone daemon doesn't need to boot the full engine."""
+    config_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
     try:
-        with open(config_path, "r") as f:
-            return json.load(f)
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return _flatten_config_categories(raw)
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}
@@ -56,30 +79,45 @@ def main():
         now = datetime.now()
         now_str = now.strftime("%Y-%m-%d %H:%M")
         
-        config = load_config()
-        dynamic = config.get("dynamic_live_reload", {})
-        
+        config = load_config()  # already flat -- merged across every config.yaml category
+
         # 1. Check legacy autotune
-        if dynamic.get("autotune_enabled", False):
-            cron = dynamic.get("autotune_schedule_cron", "0 3 * * *")
+        if config.get("autotune_enabled", False):
+            cron = config.get("autotune_schedule_cron", "0 3 * * *")
             if check_cron(cron, now) and last_run.get("autotune") != now_str:
                 LOGGER.info("Triggering legacy autotune (train_fp_classifier.py)...")
                 script_path = scripts_dir / "train_fp_classifier.py"
                 subprocess.Popen([sys.executable, str(script_path)])
                 last_run["autotune"] = now_str
-                
+
         # 2. Check new granular scheduler
-        scheduler_cfg = dynamic.get("scheduler", {})
+        scheduler_cfg = config.get("scheduler", {})
         for script_name, cfg in scheduler_cfg.items():
             if cfg.get("enabled", False):
                 cron = cfg.get("cron", "0 0 * * *")
                 if check_cron(cron, now) and last_run.get(script_name) != now_str:
-                    LOGGER.info(f"Triggering scheduled script: {script_name}.py ...")
-                    script_path = scripts_dir / f"{script_name}.py"
+                    # BUGFIX: this used to always assume the job's config key IS the
+                    # script's filename stem (f"{script_name}.py"). The "retrohunter" job
+                    # key never matched the actual file (scripts/retro_hunter.py, with an
+                    # underscore) — silently logging "not found" every day and never
+                    # actually running, with nothing surfacing that failure beyond a
+                    # daemon log line nobody was watching. An explicit "script" override
+                    # is now supported per job so a config-key/filename mismatch like this
+                    # can be corrected in config.json without needing a code change, and
+                    # can't silently recur for a future script the same way.
+                    script_filename = cfg.get("script", f"{script_name}.py")
+                    LOGGER.info(f"Triggering scheduled script: {script_filename} (job='{script_name}') ...")
+                    script_path = scripts_dir / script_filename
                     if script_path.exists():
                         subprocess.Popen([sys.executable, str(script_path)])
                     else:
-                        LOGGER.error(f"Script {script_path} not found!")
+                        LOGGER.error(
+                            f"Scheduled job '{script_name}' is enabled but its script "
+                            f"{script_path} does not exist — it will NOT run until this "
+                            f"is fixed (either rename the job key/add a \"script\" "
+                            f"override in config.yaml's scheduled_jobs.scheduler.{script_name}, "
+                            f"or create the missing file)."
+                        )
                     last_run[script_name] = now_str
                     
         # Sleep until the next minute begins

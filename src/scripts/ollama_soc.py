@@ -4,16 +4,37 @@ import json
 import time
 import logging
 import requests
+import yaml
 from pathlib import Path
 from datetime import datetime, timedelta
 
 # Ensures the script can resolve modules from the src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+
+def _flatten_config_categories(raw: dict) -> dict:
+    """Mirror config.py's LiveConfig._load() flattening rule: merge every top-level
+    mapping whose name doesn't start with "_"/"#" into one flat key->value namespace.
+    Category names in config.yaml are purely organizational -- this script reads the
+    same flat keys regardless of which category they're grouped under."""
+    flattened = {}
+    for section_name, section_val in (raw or {}).items():
+        if str(section_name).startswith("_") or str(section_name).startswith("#"):
+            continue
+        if isinstance(section_val, dict):
+            flattened.update(section_val)
+        else:
+            flattened[section_name] = section_val
+    return flattened
+
+
 def load_config():
-    config_path = Path(__file__).resolve().parent.parent.parent / "config.json"
+    """Returns the FLAT config namespace (already merged across every category)."""
+    config_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
     try:
-        with open(config_path, "r") as f:
-            return json.load(f)
+        with open(config_path, "r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return _flatten_config_categories(raw)
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}
@@ -23,28 +44,76 @@ from intelligence.hypotheses.evidence import Evidence
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [OLLAMA-SOC] %(message)s")
 LOGGER = logging.getLogger("ollama_soc")
 
-def save_config(config, config_path):
+def save_config_key(config_path: Path, key: str, value) -> None:
+    """Surgically update ONE key's value in config.yaml, preserving every existing
+    comment, category grouping, and formatting -- unlike a plain yaml.safe_dump()
+    (or the old json.dump() this replaces), which would silently blow away all of
+    config.yaml's hand-written documentation the first time this ran. Uses
+    ruamel.yaml's round-trip mode specifically for this. Locates whichever top-level
+    category currently contains `key` and updates it there, so this keeps working
+    even if you reorganize/rename categories later; falls back to a top-level write
+    if the key isn't found under any category (shouldn't normally happen).
+
+    KNOWN RUAMEL QUIRK, HANDLED: when a config.yaml key's comment describes the NEXT
+    key (this file's style -- a blank line + comment sits between the end of one
+    key's value and the start of the next), and that PRECEDING value is a list,
+    ruamel attaches that comment internally to the list's *last item index*, not to
+    the key itself. Naively replacing the list (`section_val[key] = new_list`) or
+    even slice-assigning into it therefore silently drops that trailing comment the
+    moment the new list's length changes the "last index" — verified empirically
+    (adding a 7th item to safe_host_patterns dropped the entire device_type_overrides
+    doc-comment on a naive implementation). Fixed below by explicitly relocating the
+    comment from the old last-index to the new one before dumping, instead of relying
+    on ruamel to carry it over automatically."""
+    from ruamel.yaml import YAML
+    yaml_rt = YAML()
+    yaml_rt.preserve_quotes = True
+    yaml_rt.width = 4096
+    yaml_rt.indent(mapping=2, sequence=4, offset=2)
     try:
-        with open(config_path, "w") as f:
-            json.dump(config, f, indent=2)
-        LOGGER.info(f"Updated {config_path}")
+        with open(config_path, "r", encoding="utf-8") as f:
+            doc = yaml_rt.load(f)
+        updated = False
+        for section_val in doc.values():
+            if isinstance(section_val, dict) and key in section_val:
+                old_val = section_val[key]
+                trailing_comment = None
+                if isinstance(value, list) and hasattr(old_val, "ca") and old_val.ca and old_val.ca.items:
+                    old_last_idx = len(old_val) - 1
+                    trailing_comment = old_val.ca.items.pop(old_last_idx, None)
+                if isinstance(value, list) and hasattr(old_val, "ca"):
+                    # Mutate the SAME sequence object in place (not a rebind to a
+                    # plain new list) so its .ca comment-attachment structure, and
+                    # thus any comments NOT on the last index, survive untouched.
+                    old_val[:] = value
+                    if trailing_comment is not None:
+                        new_last_idx = len(old_val) - 1
+                        if new_last_idx >= 0:
+                            old_val.ca.items[new_last_idx] = trailing_comment
+                else:
+                    section_val[key] = value
+                updated = True
+                break
+        if not updated:
+            doc[key] = value
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml_rt.dump(doc, f)
+        LOGGER.info(f"Updated {key} in {config_path}")
     except Exception as e:
-        LOGGER.error(f"Failed to update config.json: {e}")
+        LOGGER.error(f"Failed to update {config_path}: {e}")
 
 def main():
     LOGGER.info("Starting Daily Ollama SOC Batch Analysis...")
-    
+
     root_dir = Path(__file__).resolve().parent.parent.parent
-    config_path = root_dir / "config.json"
-    
-    config = load_config()
-    static_cfg = config.get("static_requires_restart", {})
-    dyn_cfg = config.get("dynamic_live_reload", {})
-    
-    ollama_url = dyn_cfg.get("ollama_url", "http://127.0.0.1:11434").rstrip("/")
-    ollama_model = dyn_cfg.get("ollama_model", "llama3.1")
-    
-    alerts_path = root_dir / static_cfg.get("alert_json_path", "state/alerts.json")
+    config_path = root_dir / "config.yaml"
+
+    config = load_config()  # already flat -- merged across every config.yaml category
+
+    ollama_url = config.get("ollama_url", "http://127.0.0.1:11434").rstrip("/")
+    ollama_model = config.get("ollama_model", "llama3.1")
+
+    alerts_path = root_dir / config.get("alert_json_path", "state/alerts.json")
     if not alerts_path.exists():
         alerts_path = root_dir / "alerts.json"
     
@@ -89,7 +158,7 @@ def main():
         ""
     ]
     
-    safe_host_patterns = dyn_cfg.get("safe_host_patterns", [])
+    safe_host_patterns = config.get("safe_host_patterns", [])
     config_modified = False
     
     for payload in alerts_to_analyze:
@@ -194,8 +263,7 @@ def main():
             
     # 4. Save Config if modified
     if config_modified:
-        dyn_cfg["safe_host_patterns"] = safe_host_patterns
-        save_config(config, config_path)
+        save_config_key(config_path, "safe_host_patterns", safe_host_patterns)
         
     # 5. Write Markdown Report
     reports_dir = root_dir / "reports"

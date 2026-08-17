@@ -81,7 +81,7 @@ def vowel_ratio(text):
     return vowels / max(len(text), 1)
 
 _CDN_PARENT_ALLOWLIST = frozenset({
-    "cloudfront.net", "amazonaws.com", "awsstatic.com", "amazonvideo.com", "aiv-cdn.net", "media-amazon.com",
+    "cloudfront.net", "amazonaws.com", "awsstatic.com", "amazonvideo.com", "aiv-cdn.net", "aiv-delivery.net", "media-amazon.com",
     "akamaized.net", "akamai.net", "akamaihd.net", "akamaiedge.net", "akadns.net", "edgesuite.net", "edgekey.net",
     "googlevideo.com", "ggpht.com", "gstatic.com", "googleusercontent.com", "googlesyndication.com", "doubleclick.net",
     "fastly.net", "fastlylb.net", "fastly-edge.com", "cloudflare.net", "cdn.ampproject.org", "fbcdn.net", "azureedge.net", "msecnd.net",
@@ -148,7 +148,7 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     # Amazon & Alexa Ecosystem
     "amazon.com", "amazonaws.com", "a2z.com", "amazon.dev", "amazonalexa.com",
     "amazonvideo.com", "media-amazon.com", "cloudfront.net", "awsstatic.com",
-    "aiv-cdn.net", "amazon-adsystem.com", "ssl-images-amazon.com",
+    "aiv-cdn.net", "aiv-delivery.net", "amazon-adsystem.com", "ssl-images-amazon.com",
     "firetvcaptiveportal.com", "mmechocaptiveportal.com", "kindle.com",
     
     # Google & Android Ecosystem
@@ -238,8 +238,10 @@ def suspicious_dga(domain):
 
 @functools.lru_cache(maxsize=10000)
 def resolve_domain(domain):
-    """Attempts to do a physical socket check on a domain to find its true endpoint."""
+    """Attempts to do a physical socket check on a domain to find its true endpoint[cite: 3]."""
+    old_timeout = socket.getdefaulttimeout()
     try:
+        socket.setdefaulttimeout(1.0)
         infos = socket.getaddrinfo(domain, None)
         for info in infos:
             ip = info[4][0]
@@ -248,6 +250,8 @@ def resolve_domain(domain):
                 return ip
     except Exception:
         return None
+    finally:
+        socket.setdefaulttimeout(old_timeout)
     return None
 
 def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "") -> str:

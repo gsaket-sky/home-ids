@@ -100,7 +100,7 @@ def main():
             fastapi_proc = subprocess.Popen(
                 [
                     sys.executable, "-m", "uvicorn",
-                    "middleware.fritz_webhook:app",
+                    "middleware.main_api:app",
                     "--host", "127.0.0.1",
                     "--port", str(fastapi_port),
                     "--app-dir", src_dir,

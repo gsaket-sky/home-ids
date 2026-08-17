@@ -15,8 +15,10 @@ models/*.pkl
 models/*.onnx
 models/fastembed_cache/
 models/devices/
+models/*.mmdb
+reports/
 !config.json
-
+context/
 # Environment Secrets
 .env
 .env.*

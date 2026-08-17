@@ -44,7 +44,7 @@ class DecisionEngine:
         # Calculate independence groups from the evidence that materially contributes to attack scoring.
         attack_evidence = [
             e for e in ev_store
-            if e.type.startswith("dns") or e.type == "reputation" or e.type.startswith("zeek") or e.independence_group in {"reputation", "zeek_network", "honeypot"}
+            if e.type.startswith("dns") or e.type == "reputation" or e.type.startswith("zeek") or e.type == "ml_anomaly" or e.independence_group in {"reputation", "zeek_network", "honeypot", "ml_anomaly"}
         ]
         independence_groups = {e.independence_group for e in attack_evidence if e.independence_group}
         num_independent_sources = len(independence_groups)

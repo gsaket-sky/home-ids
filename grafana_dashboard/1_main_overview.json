@@ -1,2578 +1,3313 @@
 {
-  "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & Alerts",
-        "type": "dashboard"
-      }
-    ]
-  },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 0,
-  "links": [
-    {
-      "asDropdown": false,
-      "icon": "apps",
-      "includeVars": true,
-      "keepTime": true,
-      "tags": [
-        "home-ids-v2"
-      ],
-      "targetBlank": false,
-      "title": "Navigation",
-      "tooltip": "Switch Dashboards",
-      "type": "dashboards"
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "home_ids_v3_main",
+    "namespace": "default",
+    "uid": "41383d25-297c-417d-b70e-51544da44612",
+    "resourceVersion": "1786787630387990",
+    "generation": 2,
+    "creationTimestamp": "2026-08-14T18:35:46Z",
+    "labels": {
+      "grafana.app/deprecatedInternalID": "3167151363923968"
+    },
+    "annotations": {
+      "grafana.app/createdBy": "user:afm28i0ltxcsga",
+      "grafana.app/folder": "",
+      "grafana.app/saved-from-ui": "Grafana v13.1.1 (a9cee6e172)",
+      "grafana.app/updatedBy": "user:afm28i0ltxcsga",
+      "grafana.app/updatedTimestamp": "2026-08-15T09:53:50Z"
     }
-  ],
-  "liveNow": true,
-  "panels": [
-    {
-      "id": 1,
-      "type": "text",
-      "title": "\ud83e\ude7a How is the system doing?",
-      "gridPos": {
-        "h": 7,
-        "w": 4,
-        "x": 0,
-        "y": 0
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**Are my shields online?**\n\nThese panels show if the underlying security engines are currently running and protecting you."
-      }
-    },
-    {
-      "id": 2,
-      "type": "stat",
-      "title": "Pi-hole IPS",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 4,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_pihole_status",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 3,
-      "type": "stat",
-      "title": "Zeek Network Monitor",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 7,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_zeek_status",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 4,
-      "type": "stat",
-      "title": "AI Model Loaded",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 10,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ml_model_loaded",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 5,
-      "type": "stat",
-      "title": "Router Kill-Switch",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 13,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_router_status",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 6,
-      "type": "stat",
-      "title": "Layer-2 Tarpit",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 16,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_tarpit_status",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 7,
-      "type": "stat",
-      "title": "API Integrations",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 2,
-        "x": 19,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "min(home_ids_integration_status)",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 71,
-      "type": "stat",
-      "title": "Alert Queue",
-      "description": "",
-      "gridPos": {
-        "h": 7,
-        "w": 3,
-        "x": 21,
-        "y": 0
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_alert_queue_size",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 10
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 9023,
-      "title": "\ud83d\udea8 Master Threat Ledger (Complete Multi-Vector Device Matrix)",
-      "description": "",
-      "links": [],
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 7
-      },
-      "targets": [
-        {
-          "editorMode": "builder",
-          "expr": "home_ids_threat_confidence  {hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "A",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_ips_router_isolated_active{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "RB",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_ips_tarpit_active{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "TP",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "KC",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_dns_txt_null_ratio{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "TN",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "B",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "C",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_risk_velocity{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "D",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "E",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "F",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "G",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_zeek_ja4_malicious{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "H",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_zeek_honeypot_hits{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "I",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_zeek_lateral_events_total{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "J",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_zeek_doh_bypass{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "K",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_zeek_s0_rej_count{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "L",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_outbound_bytes_window{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "M",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_probation_status{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "N",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_baseline_poisoned{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "O",
-          "hide": false
-        },
-        {
-          "expr": "home_ids_safe_device{hostname=~\"$device\"}",
-          "format": "table",
-          "instant": true,
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${PROMETHEUS_DS}"
-          },
-          "refId": "P",
-          "hide": false
-        }
-      ],
-      "transformations": [
-        {
-          "kind": "Transformation",
-          "spec": {},
-          "id": "joinByField",
-          "options": {
-            "byField": "hostname",
-            "mode": "outer"
-          }
-        },
-        {
-          "kind": "Transformation",
-          "spec": {},
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "Time 1": true,
-              "Time 10": true,
-              "Time 11": true,
-              "Time 12": true,
-              "Time 13": true,
-              "Time 14": true,
-              "Time 15": true,
-              "Time 16": true,
-              "Time 17": true,
-              "Time 18": true,
-              "Time 19": true,
-              "Time 2": true,
-              "Time 3": true,
-              "Time 4": true,
-              "Time 5": true,
-              "Time 6": true,
-              "Time 7": true,
-              "Time 8": true,
-              "Time 9": true,
-              "__name__": true,
-              "device": true,
-              "device_type": true,
-              "instance": true,
-              "job": true,
-              "mac": true
+  },
+  "spec": {
+    "annotations": [
+      {
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "datasource": {
+              "name": "-- Grafana --"
             },
-            "renameByName": {
-              "Value #A": "Threat Confidence",
-              "Value #B": "ML Outlier",
-              "Value #C": "Markov Score",
-              "Value #D": "Risk Velocity",
-              "Value #E": "TI Risk",
-              "Value #F": "AbuseIPDB",
-              "Value #G": "VirusTotal",
-              "Value #H": "JA4+ Hits",
-              "Value #I": "Honeypot",
-              "Value #J": "Lateral Moves",
-              "Value #K": "DoH Intercepts",
-              "Value #KC": "Kill-Chain Phase",
-              "Value #L": "Port Scans",
-              "Value #M": "Outbound Bytes",
-              "Value #N": "Probation",
-              "Value #O": "Baseline Frozen",
-              "Value #P": "Safe Listed",
-              "Value #RB": "Fritz! Router Block",
-              "Value #TN": "TXT/NULL Abuse",
-              "Value #TP": "Layer-2 Tarpit Trapped",
-              "hostname": "Hostname"
+            "spec": {}
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "builtIn": true
+        }
+      }
+    ],
+    "cursorSync": "Off",
+    "description": "Novice SOC Hub - Bird's eye view",
+    "editable": true,
+    "elements": {
+      "panel-1": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1,
+          "title": "🩺 How is the system doing?",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "**Are my shields online?**\n\nThese panels show if the underlying security engines are currently running and protecting you.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
             }
           }
-        },
-        {
-          "kind": "Transformation",
-          "spec": {},
-          "id": "sortBy",
-          "options": {
-            "fields": [
-              {
-                "desc": true,
-                "displayName": "Threat Confidence"
+        }
+      },
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "id": 10,
+          "title": "Total Active Isolations",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_active_blocks",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
               }
-            ]
+            }
           }
         }
-      ],
-      "options": {
-        "cellHeight": "sm",
-        "showHeader": true,
-        "sortBy": [
+      },
+      "panel-1001": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1001,
+          "title": "📜 High-Priority Security Alerts (Live Timeline)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${LOKI_DS}"
+                      },
+                      "spec": {
+                        "expr": "{job=\"home_ids_alerts\"} |= \"CONFIRMED THREAT\" | json",
+                        "format": "table",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "frameIndex": 0,
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": true,
+                    "displayName": "Time"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": []
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-11": {
+        "kind": "Panel",
+        "spec": {
+          "id": 11,
+          "title": "Lifetime Threats Blocked",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_pihole_blocks_aggregate_total",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "text"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-12": {
+        "kind": "Panel",
+        "spec": {
+          "id": 12,
+          "title": "Total Alerts Triaged",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_alerts_total",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "text"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-2": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "Pi-hole IPS",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_pihole_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3,
+          "title": "Zeek Network Monitor",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "AI Model Loaded",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ml_model_loaded",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "id": 5,
+          "title": "Router Kill-Switch",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_router_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-6": {
+        "kind": "Panel",
+        "spec": {
+          "id": 6,
+          "title": "Layer-2 Tarpit",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_tarpit_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-7": {
+        "kind": "Panel",
+        "spec": {
+          "id": 7,
+          "title": "API Integrations",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "min(home_ids_integration_status)",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-71": {
+        "kind": "Panel",
+        "spec": {
+          "id": 71,
+          "title": "Alert Queue",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_alert_queue_size",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 10,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-8": {
+        "kind": "Panel",
+        "spec": {
+          "id": 8,
+          "title": "📖 How to read the Master Ledger",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-9": {
+        "kind": "Panel",
+        "spec": {
+          "id": 9,
+          "title": "🛡️ What did the system block for me?",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "Check the counters below to see how many threats were neutralized today.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-9023": {
+        "kind": "Panel",
+        "spec": {
+          "id": 9023,
+          "title": "🚨 Master Threat Ledger (Complete Multi-Vector Device Matrix)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "editorMode": "builder",
+                        "expr": "home_ids_threat_confidence  {hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_router_isolated_active{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "RB",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_tarpit_active{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "TP",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "KC",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_dns_txt_null_ratio{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "TN",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_risk_velocity{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "E",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "F",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "G",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_ja4_malicious{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "H",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_honeypot_hits{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "I",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_lateral_events_total{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "J",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_doh_bypass{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "K",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_s0_rej_count{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "L",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_outbound_bytes_window{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "M",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_probation_status{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "N",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_baseline_poisoned{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "O",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_safe_device{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "P",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "Time 1": true,
+                        "Time 10": true,
+                        "Time 11": true,
+                        "Time 12": true,
+                        "Time 13": true,
+                        "Time 14": true,
+                        "Time 15": true,
+                        "Time 16": true,
+                        "Time 17": true,
+                        "Time 18": true,
+                        "Time 19": true,
+                        "Time 2": true,
+                        "Time 3": true,
+                        "Time 4": true,
+                        "Time 5": true,
+                        "Time 6": true,
+                        "Time 7": true,
+                        "Time 8": true,
+                        "Time 9": true,
+                        "__name__": true,
+                        "device": true,
+                        "device_type": true,
+                        "instance": true,
+                        "job": true,
+                        "mac": true
+                      },
+                      "renameByName": {
+                        "Value #A": "Threat Confidence",
+                        "Value #B": "ML Outlier",
+                        "Value #C": "Markov Score",
+                        "Value #D": "Risk Velocity",
+                        "Value #E": "TI Risk",
+                        "Value #F": "AbuseIPDB",
+                        "Value #G": "VirusTotal",
+                        "Value #H": "JA4+ Hits",
+                        "Value #I": "Honeypot",
+                        "Value #J": "Lateral Moves",
+                        "Value #K": "DoH Intercepts",
+                        "Value #KC": "Kill-Chain Phase",
+                        "Value #L": "Port Scans",
+                        "Value #M": "Outbound Bytes",
+                        "Value #N": "Probation",
+                        "Value #O": "Baseline Frozen",
+                        "Value #P": "Safe Listed",
+                        "Value #RB": "Fritz! Router Block",
+                        "Value #TN": "TXT/NULL Abuse",
+                        "Value #TP": "Layer-2 Tarpit Trapped",
+                        "hostname": "Hostname"
+                      }
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "sortBy",
+                  "spec": {
+                    "options": {
+                      "fields": [
+                        {
+                          "desc": true,
+                          "displayName": "Threat Confidence"
+                        }
+                      ]
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "sortBy": [
+                  {
+                    "desc": false,
+                    "displayName": "Threat Confidence"
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 80,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "custom": {
+                    "align": "center",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Hostname"
+                    },
+                    "properties": [
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": false,
+                            "title": "🔍 Investigate Device Profile",
+                            "url": "/d/home_ids_v2_device?var-device=${__data.fields.Hostname}"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 311
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Threat Confidence"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Safe"
+                              },
+                              "to": 3.99
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 4,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Monitoring"
+                              },
+                              "to": 5.99
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 6,
+                              "result": {
+                                "color": "orange",
+                                "index": 2,
+                                "text": "🟠 Suspicious"
+                              },
+                              "to": 7.99
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 8,
+                              "result": {
+                                "color": "red",
+                                "index": 3,
+                                "text": "🔴 Critical Threat"
+                              },
+                              "to": 100
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 4
+                            },
+                            {
+                              "color": "orange",
+                              "value": 6
+                            },
+                            {
+                              "color": "red",
+                              "value": 8
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Fritz! Router Block"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "✅ Clear"
+                              },
+                              "1": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🛑 ISOLATED"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "red",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Layer-2 Tarpit Trapped"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "✅ Clear"
+                              },
+                              "1": {
+                                "color": "orange",
+                                "index": 1,
+                                "text": "🕸️ TRAPPED"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "orange",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Kill-Chain Phase"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 NORMAL"
+                              },
+                              "1": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 RECON"
+                              },
+                              "2": {
+                                "color": "orange",
+                                "index": 2,
+                                "text": "🟠 LATERAL"
+                              },
+                              "3": {
+                                "color": "red",
+                                "index": 3,
+                                "text": "🔴 C2"
+                              },
+                              "4": {
+                                "color": "purple",
+                                "index": 4,
+                                "text": "🟪 EXFIL"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "orange",
+                              "value": 2
+                            },
+                            {
+                              "color": "red",
+                              "value": 3
+                            },
+                            {
+                              "color": "purple",
+                              "value": 4
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Probation"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Monitored"
+                              },
+                              "1": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "⏳ Learning"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Baseline Frozen"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "✅ Adapting"
+                              },
+                              "1": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "❄️ Frozen"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "red",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Safe Listed"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ No"
+                              },
+                              "1": {
+                                "color": "blue",
+                                "index": 1,
+                                "text": "🛡️ Exempt"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "blue",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "TXT/NULL Abuse"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Normal"
+                              },
+                              "to": 0.049
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.05,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 High Volume"
+                              },
+                              "to": 0.149
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.15,
+                              "result": {
+                                "color": "red",
+                                "index": 2,
+                                "text": "🔴 Exfil Risk"
+                              },
+                              "to": 1
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 0.05
+                            },
+                            {
+                              "color": "red",
+                              "value": 0.15
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "ML Outlier"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Normal"
+                              },
+                              "to": 0.019
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.02,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Warning"
+                              },
+                              "to": 0.049
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.05,
+                              "result": {
+                                "color": "red",
+                                "index": 2,
+                                "text": "🔴 Outlier"
+                              },
+                              "to": 1
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 0.02
+                            },
+                            {
+                              "color": "red",
+                              "value": 0.05
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Markov Score"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Expected"
+                              },
+                              "to": 0.49
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.5,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Elevated"
+                              },
+                              "to": 0.89
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 0.9,
+                              "result": {
+                                "color": "red",
+                                "index": 2,
+                                "text": "🔴 Anomalous"
+                              },
+                              "to": 1
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 0.5
+                            },
+                            {
+                              "color": "red",
+                              "value": 0.9
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Risk Velocity"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Stable"
+                              },
+                              "to": 1.09
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 1.1,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Rising"
+                              },
+                              "to": 3.99
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 4,
+                              "result": {
+                                "color": "red",
+                                "index": 2,
+                                "text": "🔴 Spiking"
+                              },
+                              "to": 100
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1.1
+                            },
+                            {
+                              "color": "red",
+                              "value": 4
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "TI Risk"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Clean"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 0.1,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🔴 Flagged"
+                              },
+                              "to": 100
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "red",
+                              "value": 3.2
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "AbuseIPDB"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Clean"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 0.1,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🔴 Flagged"
+                              },
+                              "to": 100
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "red",
+                              "value": 3
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "VirusTotal"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Clean"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 0.1,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🔴 Flagged"
+                              },
+                              "to": 100
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "red",
+                              "value": 3
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "JA4+ Hits"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ None"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 1,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🚨 Malicious TLS"
+                              },
+                              "to": 999999
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "red",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Honeypot"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ None"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 1,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🚨 Detected"
+                              },
+                              "to": 100000
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "red",
+                              "value": 1
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Lateral Moves"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ None"
+                              }
+                            },
+                            "type": "value"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "red",
+                              "value": 5
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "DoH Intercepts"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ None"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 1,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Occasional Bypass"
+                              },
+                              "to": 4
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 5,
+                              "result": {
+                                "color": "red",
+                                "index": 2,
+                                "text": "🔴 Active Evasion"
+                              },
+                              "to": 999999
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "red",
+                              "value": 5
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Port Scans"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "0": {
+                                "color": "transparent",
+                                "index": 0,
+                                "text": "⚪ None"
+                              }
+                            },
+                            "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 1,
+                              "result": {
+                                "color": "green",
+                                "index": 1,
+                                "text": "🟢 Isolated Drops"
+                              },
+                              "to": 4
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 5,
+                              "result": {
+                                "color": "yellow",
+                                "index": 2,
+                                "text": "🟡 Light Probe"
+                              },
+                              "to": 19
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 20,
+                              "result": {
+                                "color": "orange",
+                                "index": 3,
+                                "text": "🟠 Active Port Scan"
+                              },
+                              "to": 49
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 50,
+                              "result": {
+                                "color": "red",
+                                "index": 4,
+                                "text": "🔴 Aggressive Sweep"
+                              },
+                              "to": 999999
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "transparent",
+                              "value": 0
+                            },
+                            {
+                              "color": "green",
+                              "value": 1
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 5
+                            },
+                            {
+                              "color": "orange",
+                              "value": 20
+                            },
+                            {
+                              "color": "red",
+                              "value": 50
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Outbound Bytes"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "options": {
+                              "from": 0,
+                              "result": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 Ping / Control"
+                              },
+                              "to": 127
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 128,
+                              "result": {
+                                "color": "green",
+                                "index": 1,
+                                "text": "🟢 Small / API"
+                              },
+                              "to": 1023
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 1024,
+                              "result": {
+                                "color": "yellow",
+                                "index": 2,
+                                "text": "🟡 Medium Transfer"
+                              },
+                              "to": 1048575
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 1048576,
+                              "result": {
+                                "color": "orange",
+                                "index": 3,
+                                "text": "🟠 Large Payload"
+                              },
+                              "to": 1073741823
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 1073741824,
+                              "result": {
+                                "color": "red",
+                                "index": 4,
+                                "text": "🔴 Massive Exfiltration"
+                              },
+                              "to": 999999999999
+                            },
+                            "type": "range"
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1024
+                            },
+                            {
+                              "color": "orange",
+                              "value": 1048576
+                            },
+                            {
+                              "color": "red",
+                              "value": 1073741824
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "hostname"
+                    },
+                    "properties": [
+                      {
+                        "id": "links",
+                        "value": [
+                          {
+                            "targetBlank": true,
+                            "title": "🛡️ Isolate Device (Router & Tarpit)",
+                            "url": "http://127.0.0.1:8010/api/ipc/block_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN"
+                          },
+                          {
+                            "targetBlank": true,
+                            "title": "✅ Release Device (Un-Block)",
+                            "url": "http://127.0.0.1:8010/api/ipc/release_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "GridLayout",
+      "spec": {
+        "items": [
           {
-            "desc": true,
-            "displayName": "DoH Intercepts"
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 0,
+              "width": 4,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-1"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 4,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-2"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 7,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 10,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 13,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-5"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 16,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-6"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 19,
+              "y": 0,
+              "width": 2,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-7"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 21,
+              "y": 0,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-71"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 7,
+              "width": 24,
+              "height": 24,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-9023"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 31,
+              "width": 24,
+              "height": 4,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-8"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 35,
+              "width": 6,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-9"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 6,
+              "y": 35,
+              "width": 6,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-10"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 35,
+              "width": 6,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-11"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 18,
+              "y": 35,
+              "width": 6,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-12"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 41,
+              "width": 24,
+              "height": 12,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-1001"
+              }
+            }
           }
         ]
-      },
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "value": 0,
-                "color": "green"
-              },
-              {
-                "value": 80,
-                "color": "red"
-              }
-            ]
-          },
-          "custom": {
-            "align": "center",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "footer": {
-              "reducers": []
-            },
-            "inspect": false
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Hostname"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "targetBlank": false,
-                    "title": "\ud83d\udd0d Investigate Device Profile",
-                    "url": "/d/home_ids_v2_device?var-device=${__data.fields.Hostname}"
-                  }
-                ]
-              },
-              {
-                "id": "custom.align",
-                "value": "left"
-              },
-              {
-                "id": "custom.width",
-                "value": 311
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Threat Confidence"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Safe"
-                      },
-                      "to": 3.99
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 4,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 Monitoring"
-                      },
-                      "to": 5.99
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 6,
-                      "result": {
-                        "color": "orange",
-                        "index": 2,
-                        "text": "\ud83d\udfe0 Suspicious"
-                      },
-                      "to": 7.99
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 8,
-                      "result": {
-                        "color": "red",
-                        "index": 3,
-                        "text": "\ud83d\udd34 Critical Threat"
-                      },
-                      "to": 100
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 4
-                    },
-                    {
-                      "color": "orange",
-                      "value": 6
-                    },
-                    {
-                      "color": "red",
-                      "value": 8
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Fritz! Router Block"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\u2705 Clear"
-                      },
-                      "1": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\uded1 ISOLATED"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Layer-2 Tarpit Trapped"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\u2705 Clear"
-                      },
-                      "1": {
-                        "color": "orange",
-                        "index": 1,
-                        "text": "\ud83d\udd78\ufe0f TRAPPED"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Kill-Chain Phase"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 NORMAL"
-                      },
-                      "1": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 RECON"
-                      },
-                      "2": {
-                        "color": "orange",
-                        "index": 2,
-                        "text": "\ud83d\udfe0 LATERAL"
-                      },
-                      "3": {
-                        "color": "red",
-                        "index": 3,
-                        "text": "\ud83d\udd34 C2"
-                      },
-                      "4": {
-                        "color": "purple",
-                        "index": 4,
-                        "text": "\ud83d\udfea EXFIL"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    },
-                    {
-                      "color": "orange",
-                      "value": 2
-                    },
-                    {
-                      "color": "red",
-                      "value": 3
-                    },
-                    {
-                      "color": "purple",
-                      "value": 4
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Probation"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Monitored"
-                      },
-                      "1": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\u23f3 Learning"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Baseline Frozen"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\u2705 Adapting"
-                      },
-                      "1": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\u2744\ufe0f Frozen"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Safe Listed"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa No"
-                      },
-                      "1": {
-                        "color": "blue",
-                        "index": 1,
-                        "text": "\ud83d\udee1\ufe0f Exempt"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "blue",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "TXT/NULL Abuse"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Normal"
-                      },
-                      "to": 0.049
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.05,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 High Volume"
-                      },
-                      "to": 0.149
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.15,
-                      "result": {
-                        "color": "red",
-                        "index": 2,
-                        "text": "\ud83d\udd34 Exfil Risk"
-                      },
-                      "to": 1
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 0.05
-                    },
-                    {
-                      "color": "red",
-                      "value": 0.15
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "ML Outlier"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Normal"
-                      },
-                      "to": 0.019
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.02,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 Warning"
-                      },
-                      "to": 0.049
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.05,
-                      "result": {
-                        "color": "red",
-                        "index": 2,
-                        "text": "\ud83d\udd34 Outlier"
-                      },
-                      "to": 1
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 0.02
-                    },
-                    {
-                      "color": "red",
-                      "value": 0.05
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Markov Score"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Expected"
-                      },
-                      "to": 0.49
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.5,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 Elevated"
-                      },
-                      "to": 0.89
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 0.9,
-                      "result": {
-                        "color": "red",
-                        "index": 2,
-                        "text": "\ud83d\udd34 Anomalous"
-                      },
-                      "to": 1
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 0.5
-                    },
-                    {
-                      "color": "red",
-                      "value": 0.9
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Risk Velocity"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Stable"
-                      },
-                      "to": 1.09
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 1.1,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 Rising"
-                      },
-                      "to": 3.99
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 4,
-                      "result": {
-                        "color": "red",
-                        "index": 2,
-                        "text": "\ud83d\udd34 Spiking"
-                      },
-                      "to": 100
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1.1
-                    },
-                    {
-                      "color": "red",
-                      "value": 4
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "TI Risk"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Clean"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 0.1,
-                      "result": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\udd34 Flagged"
-                      },
-                      "to": 100
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    },
-                    {
-                      "color": "red",
-                      "value": 3.2
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "AbuseIPDB"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Clean"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 0.1,
-                      "result": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\udd34 Flagged"
-                      },
-                      "to": 100
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "red",
-                      "value": 3
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "VirusTotal"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Clean"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 0.1,
-                      "result": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\udd34 Flagged"
-                      },
-                      "to": 100
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    },
-                    {
-                      "color": "red",
-                      "value": 3
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "JA4+ Hits"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa None"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 1,
-                      "result": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\udea8 Malicious TLS"
-                      },
-                      "to": 999999
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Honeypot"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa None"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 1,
-                      "result": {
-                        "color": "red",
-                        "index": 1,
-                        "text": "\ud83d\udea8 Detected"
-                      },
-                      "to": 100000
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "red",
-                      "value": 1
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Lateral Moves"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa None"
-                      }
-                    },
-                    "type": "value"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    },
-                    {
-                      "color": "red",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "DoH Intercepts"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa None"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 1,
-                      "result": {
-                        "color": "yellow",
-                        "index": 1,
-                        "text": "\ud83d\udfe1 Occasional Bypass"
-                      },
-                      "to": 4
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 5,
-                      "result": {
-                        "color": "red",
-                        "index": 2,
-                        "text": "\ud83d\udd34 Active Evasion"
-                      },
-                      "to": 999999
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1
-                    },
-                    {
-                      "color": "red",
-                      "value": 5
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Port Scans"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "0": {
-                        "color": "transparent",
-                        "index": 0,
-                        "text": "\u26aa None"
-                      }
-                    },
-                    "type": "value"
-                  },
-                  {
-                    "options": {
-                      "from": 1,
-                      "result": {
-                        "color": "green",
-                        "index": 1,
-                        "text": "\ud83d\udfe2 Isolated Drops"
-                      },
-                      "to": 4
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 5,
-                      "result": {
-                        "color": "yellow",
-                        "index": 2,
-                        "text": "\ud83d\udfe1 Light Probe"
-                      },
-                      "to": 19
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 20,
-                      "result": {
-                        "color": "orange",
-                        "index": 3,
-                        "text": "\ud83d\udfe0 Active Port Scan"
-                      },
-                      "to": 49
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 50,
-                      "result": {
-                        "color": "red",
-                        "index": 4,
-                        "text": "\ud83d\udd34 Aggressive Sweep"
-                      },
-                      "to": 999999
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "transparent",
-                      "value": 0
-                    },
-                    {
-                      "color": "green",
-                      "value": 1
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 5
-                    },
-                    {
-                      "color": "orange",
-                      "value": 20
-                    },
-                    {
-                      "color": "red",
-                      "value": 50
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Outbound Bytes"
-            },
-            "properties": [
-              {
-                "id": "mappings",
-                "value": [
-                  {
-                    "options": {
-                      "from": 0,
-                      "result": {
-                        "color": "green",
-                        "index": 0,
-                        "text": "\ud83d\udfe2 Ping / Control"
-                      },
-                      "to": 127
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 128,
-                      "result": {
-                        "color": "green",
-                        "index": 1,
-                        "text": "\ud83d\udfe2 Small / API"
-                      },
-                      "to": 1023
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 1024,
-                      "result": {
-                        "color": "yellow",
-                        "index": 2,
-                        "text": "\ud83d\udfe1 Medium Transfer"
-                      },
-                      "to": 1048575
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 1048576,
-                      "result": {
-                        "color": "orange",
-                        "index": 3,
-                        "text": "\ud83d\udfe0 Large Payload"
-                      },
-                      "to": 1073741823
-                    },
-                    "type": "range"
-                  },
-                  {
-                    "options": {
-                      "from": 1073741824,
-                      "result": {
-                        "color": "red",
-                        "index": 4,
-                        "text": "\ud83d\udd34 Massive Exfiltration"
-                      },
-                      "to": 999999999999
-                    },
-                    "type": "range"
-                  }
-                ]
-              },
-              {
-                "id": "color",
-                "value": {
-                  "mode": "thresholds",
-                  "steps": [
-                    {
-                      "color": "green",
-                      "value": 0
-                    },
-                    {
-                      "color": "yellow",
-                      "value": 1024
-                    },
-                    {
-                      "color": "orange",
-                      "value": 1048576
-                    },
-                    {
-                      "color": "red",
-                      "value": 1073741824
-                    }
-                  ]
-                }
-              },
-              {
-                "id": "custom.cellOptions",
-                "value": {
-                  "mode": "gradient",
-                  "type": "color-background"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "hostname"
-            },
-            "properties": [
-              {
-                "id": "links",
-                "value": [
-                  {
-                    "title": "\ud83d\udee1\ufe0f Isolate Device (Router & Tarpit)",
-                    "url": "http://127.0.0.1:8010/api/ipc/block_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN",
-                    "targetBlank": true
-                  },
-                  {
-                    "title": "\u2705 Release Device (Un-Block)",
-                    "url": "http://127.0.0.1:8010/api/ipc/release_get?target=${__data.fields.hostname}&token=REDACTED_API_SECRET_TOKEN",
-                    "targetBlank": true
-                  }
-                ]
-              }
-            ]
-          }
-        ]
-      },
-      "type": "table",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
       }
     },
-    {
-      "id": 8,
-      "type": "text",
-      "title": "\ud83d\udcd6 How to read the Master Ledger",
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 19
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way."
-      }
-    },
-    {
-      "id": 9,
-      "type": "text",
-      "title": "\ud83d\udee1\ufe0f What did the system block for me?",
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 31
-      },
-      "transparent": false,
-      "options": {
-        "mode": "markdown",
-        "code": {
-          "language": "plaintext",
-          "showLineNumbers": false,
-          "showMiniMap": false
-        },
-        "content": "Check the counters below to see how many threats were neutralized today."
-      }
-    },
-    {
-      "id": 10,
-      "type": "stat",
-      "title": "Total Active Isolations",
-      "description": "",
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 31
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_active_blocks",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 11,
-      "type": "stat",
-      "title": "Lifetime Threats Blocked",
-      "description": "",
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 12,
-        "y": 31
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_ips_pihole_blocks_aggregate_total",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 12,
-      "type": "stat",
-      "title": "Total Alerts Triaged",
-      "description": "",
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 18,
-        "y": 31
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${PROMETHEUS_DS}"
-      },
-      "targets": [
-        {
-          "expr": "home_ids_alerts_total",
-          "format": "time_series",
-          "instant": true,
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": {
-          "values": false,
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": ""
-        },
-        "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "value",
-        "graphMode": "area",
-        "justifyMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "none"
-        },
-        "overrides": []
-      }
-    },
-    {
-      "id": 1001,
-      "type": "table",
-      "title": "\ud83d\udcdc High-Priority Security Alerts (Live Timeline)",
-      "gridPos": {
-        "h": 12,
-        "w": 24,
-        "x": 0,
-        "y": 37
-      },
-      "datasource": {
-        "type": "loki",
-        "uid": "${LOKI_DS}"
-      },
-      "targets": [
-        {
-          "expr": "{job=\"home_ids_alerts\"} |= \"CONFIRMED THREAT\" | json",
-          "refId": "A",
-          "format": "table",
-          "instant": false
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false
-        },
-        "frameIndex": 0,
-        "sortBy": [
-          {
-            "displayName": "Time",
-            "desc": true
-          }
-        ]
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": []
-          }
-        },
-        "overrides": []
-      }
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 39,
-  "tags": [
-    "home-ids-v2"
-  ],
-  "templating": {
-    "list": [
+    "links": [
       {
-        "current": {
-          "selected": false,
-          "text": "default",
-          "value": "default"
-        },
-        "hide": 0,
-        "includeAll": false,
-        "multi": false,
-        "name": "PROMETHEUS_DS",
-        "options": [],
-        "query": "prometheus",
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "type": "datasource"
+        "title": "Navigation",
+        "type": "dashboards",
+        "icon": "apps",
+        "tooltip": "Switch Dashboards",
+        "tags": [
+          "home-ids-v2"
+        ],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      }
+    ],
+    "liveNow": true,
+    "preload": false,
+    "tags": [
+      "home-ids-v2"
+    ],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-1h",
+      "to": "now",
+      "autoRefresh": "5s",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
+      ],
+      "hideTimepicker": false,
+      "fiscalYearStartMonth": 0
+    },
+    "title": "1. 🏠 Home-IDS Main Overview",
+    "variables": [
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "PROMETHEUS_DS",
+          "pluginId": "prometheus",
+          "refresh": "onDashboardLoad",
+          "regex": "",
+          "current": {
+            "text": "default",
+            "value": "default"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
       },
       {
-        "current": {
-          "selected": false,
-          "text": "default",
-          "value": "default"
-        },
-        "hide": 0,
-        "includeAll": false,
-        "multi": false,
-        "name": "LOKI_DS",
-        "options": [],
-        "query": "loki",
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "type": "datasource"
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "LOKI_DS",
+          "pluginId": "loki",
+          "refresh": "onDashboardLoad",
+          "regex": "",
+          "current": {
+            "text": "default",
+            "value": "default"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
       },
       {
-        "current": {
-          "selected": false,
-          "text": "All",
-          "value": "$__all"
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${PROMETHEUS_DS}"
-        },
-        "definition": "label_values(home_ids_threat_confidence, hostname)",
-        "hide": 0,
-        "includeAll": true,
-        "multi": true,
-        "name": "device",
-        "options": [],
-        "query": {
-          "query": "label_values(home_ids_threat_confidence, hostname)",
-          "refId": "StandardVariableQuery"
-        },
-        "refresh": 1,
-        "regex": "",
-        "skipUrlSync": false,
-        "sort": 1,
-        "type": "query"
+        "kind": "QueryVariable",
+        "spec": {
+          "name": "device",
+          "current": {
+            "text": "All",
+            "value": "$__all"
+          },
+          "hide": "dontHide",
+          "refresh": "onDashboardLoad",
+          "skipUrlSync": false,
+          "query": {
+            "kind": "DataQuery",
+            "group": "prometheus",
+            "version": "v0",
+            "datasource": {
+              "name": "${PROMETHEUS_DS}"
+            },
+            "spec": {
+              "query": "label_values(home_ids_threat_confidence, hostname)",
+              "refId": "StandardVariableQuery"
+            }
+          },
+          "regex": "",
+          "regexApplyTo": "value",
+          "sort": "alphabeticalAsc",
+          "definition": "label_values(home_ids_threat_confidence, hostname)",
+          "options": [],
+          "multi": true,
+          "includeAll": true,
+          "allowCustomValue": true
+        }
       }
     ]
-  },
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
-  "timepicker": {},
-  "timezone": "",
-  "title": "1. \ud83c\udfe0 Home-IDS Main Overview",
-  "description": "Novice SOC Hub - Bird's eye view",
-  "uid": "home_ids_v3_main",
-  "id": null,
-  "version": 1
+  }
 }

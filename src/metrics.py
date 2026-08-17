@@ -80,6 +80,14 @@ ips_pihole_status = Gauge("home_ids_ips_pihole_status", "Pi-hole Mitigation oper
 ips_router_status = Gauge("home_ids_ips_router_status", "Router WAN Kill-Switch operational state (1=active, 0=bypass)")
 ips_tarpit_status = Gauge("home_ids_ips_tarpit_status", "Layer-2 Scapy ARP Tarpit operational state (1=active, 0=bypass)")
 
+# PHASE 5 FIX (fail-open visibility): 1 once ThreatIntel has completed at least one
+# successful feed refresh, 0 while still cold-starting or if the refresh loop is failing.
+# Lookups already fail open (ti_risk=0.0) both when there's genuinely no IOC match AND
+# when the engine has no feed data yet loaded — those two cases were previously
+# indistinguishable on Grafana. This gauge makes "TI is degraded/not ready" visible
+# instead of silently reading as "checked, nothing found."
+ti_engine_ready_status = Gauge("home_ids_ti_engine_ready", "1 if ThreatIntel has completed at least one successful feed refresh, 0 if still cold-starting/degraded")
+
 ips_pihole_blocks_metric = Counter("home_ids_ips_pihole_blocks_total", "Total automated domain blocks executed", ["device", "hostname", "domain"])
 ips_isolations_metric = Counter("home_ids_ips_router_isolations_total", "Total automated network isolation commands triggered", ["device", "hostname", "mac"])
 ips_errors_metric = Counter("home_ids_ips_errors_total", "Total failure states encountered during active mitigation runs", ["target_type"])

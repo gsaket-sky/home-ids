@@ -1,6 +1,6 @@
 # ⚙️ Home-IDS: Engineering & Architecture Manual
 
-This manual is written for developers, security engineers, and data scientists. It deeply explores the internal mathematics, system architecture, and code-level orchestration of Home-IDS Version 7. 
+This manual is written for developers, security engineers, and data scientists. It deeply explores the internal mathematics, system architecture, and code-level orchestration of Home-IDS Version 7.
 
 Unlike the User Manual (which explains *how to use* the system), this document explains exactly **how the system is built** and **why the mathematics work**.
 
@@ -43,7 +43,7 @@ To prevent Thread Deadlocks while calculating math on thousands of devices concu
 Located in `src/core/decision_engine.py`, the HEE replaces traditional "If-This-Then-That" rule engines with a probabilistic evidence graph.
 
 ### 2.1 The Evidence Store
-Every anomaly detected by the feature extractors is normalized into an `Evidence` object. 
+Every anomaly detected by the feature extractors is normalized into an `Evidence` object.
 ```python
 Evidence(
     type="zeek_lateral_scan",
@@ -81,10 +81,11 @@ We use `scikit-learn`'s `IsolationForest` because it does not require labeled tr
 To prevent Brain 1 from blocking your smart TV when it downloads a firmware update, Brain 2 intercepts alerts before containment fires.
 - **LightGBM ONNX Classifier**: A gradient-boosted decision tree optimized for tabular data. It calculates the raw probability $P(False Positive | Features)$.
 - **FastEmbed Vector Similarity**: The engine serializes the alert payload into a string and passes it through `bge-small-en-v1.5-onnx-q`. It generates a 384-dimensional dense vector. It then calculates the **Cosine Similarity** against vectors of known benign events in the `fp_trust_cache.json`. If Similarity > 0.82, the alert is suppressed.
+- **Live threshold tuning**: All four Stage 2/3 thresholds (`fp_lgbm_threshold`, `fp_embed_similarity_threshold`, `fp_combined_suppress_threshold`, `fp_combined_uncertain_threshold`) are read via a fresh `self.config.get(...)` call on every single evaluation — as of Version 7.0 there is no cached/construction-time copy anywhere in the evaluation path, so edits to `config.yaml` take effect on the very next alert with no restart.
 
 ### 3.3 Brain 3: `ollama_analyzer.py` (LLM Cognitive Core)
 Brain 3 takes the JSON output of Brain 2 and feeds it to a localized Large Language Model (LLaMA 3.1) with a strict system prompt.
-The LLM is given access to external context (AlienVault, device types). If the LLM deduces a benign telemetry pattern, a python regex extracts the domain from the LLM's Markdown output and dynamically injects it into `config.json`.
+The LLM is given access to external context (AlienVault, device types). If the LLM deduces a benign telemetry pattern, a python regex extracts the domain from the LLM's Markdown output and dynamically injects it into `config.yaml`'s `network_and_devices.safe_host_patterns` list. As of Version 7.0 this write goes through `ruamel.yaml`'s round-trip mode rather than plain `pyyaml`, specifically so the file's existing comments and category structure survive the edit — a plain `yaml.safe_dump()` would silently discard every comment in the file on the first automated write.
 
 ---
 

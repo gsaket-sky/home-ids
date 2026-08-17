@@ -154,9 +154,16 @@ class ZeekCollector:
 
             with self._tailers_lock:
                 if not self._tailers:
-                    for filename, etype in _LOG_FILES.items():
-                        self._tailers[filename] = ZeekLogTailer(self.log_dir / filename, etype, self._on_event, self.state_dir)
-
+                    self._tailers = {
+                        "conn": ZeekLogTailer(self.log_dir / "conn.log", "conn", self._on_event, self.state_dir),
+                        "dns": ZeekLogTailer(self.log_dir / "dns.log", "dns", self._on_event, self.state_dir),
+                        "http": ZeekLogTailer(self.log_dir / "http.log", "http", self._on_event, self.state_dir),
+                        "ssl": ZeekLogTailer(self.log_dir / "ssl.log", "ssl", self._on_event, self.state_dir),
+                        "notice": ZeekLogTailer(self.log_dir / "notice.log", "notice", self._on_event, self.state_dir),
+                        "dhcp": ZeekLogTailer(self.log_dir / "dhcp.log", "dhcp", self._on_event, self.state_dir),
+                        "test_conn": ZeekLogTailer(self.log_dir / "test_conn.log", "conn", self._on_event, self.state_dir),
+                        "test_dhcp": ZeekLogTailer(self.log_dir / "test_dhcp.log", "dhcp", self._on_event, self.state_dir),
+                    }
                 self._available = True
                 LOGGER.info("✅ Zeek Collector initialized successfully on directory: %s", self.log_dir)
         except Exception as exc:
@@ -228,6 +235,12 @@ class ZeekFeatureExtractor:
         self.honeypot_ips = honeypot_ips if honeypot_ips is not None else set()
         self._wire_dns_resolutions = {}
         self._mac_bindings = {}
+        # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
+        # recent DHCP transaction per IP/MAC, and a rolling per-device set of *all* JA3
+        # hashes seen (not just malicious ones) used as a benign behavioral fingerprint.
+        self._dhcp_fingerprints = {}          # ip -> {"vendor_class","param_list","user_class","ts"}
+        self._dhcp_fingerprints_by_mac = {}   # mac -> same dict, survives across an IP change
+        self._ja3_seen = defaultdict(set)     # ip -> set of ja3 hashes (capped per-device below)
         self.ti_engine = ti_engine
         self.geoip_engine = geoip_engine
         self._reverse_dns_cache = {}
@@ -382,28 +395,59 @@ class ZeekFeatureExtractor:
         if len(self._last_connection_meta) > 10000:
             self._last_connection_meta.clear()
 
+    def _bind_mac(self, ip: str, mac: str, ts: Optional[float] = None) -> None:
+        """Shared MAC<->IP binding + Layer-2 spoofing detection, used by BOTH the DHCPv4
+        ingestion path (ingest()'s "dhcp" branch, IPv4-only) and the PHASE 6 conn.log
+        orig_l2_addr path (_process_conn(), protocol-family-agnostic — this is what makes
+        IPv6 addresses correlatable at all). Factored out so both paths get identical
+        spoof-detection behavior instead of two copies drifting apart."""
+        if not ip or not mac:
+            return
+        ts = ts if ts is not None else time.time()
+        existing_mac = self._mac_bindings.get(ip)
+
+        # Feature 4: Layer-2 Spoofing Detection (ARP/NDP Telemetry)
+        if existing_mac and existing_mac != mac:
+            last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
+            # If MAC flipped within 10 minutes, it's highly suspicious (not a normal DHCP
+            # renewal or IPv6 privacy-address rotation, which don't change the underlying MAC).
+            if (ts - last_seen) < 600:
+                LOGGER.critical(f"🚨 LAYER-2 ARP/NDP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s")
+                if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
+                self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
+
+        self._mac_bindings[ip] = mac
+        if not hasattr(self, "_mac_last_seen"): self._mac_last_seen = {}
+        self._mac_last_seen[ip] = ts
+        self._enrich_ptr(ip)
+
     def ingest(self, event: dict) -> None:
         etype = event.get("_zeek_type", "")
         if etype == "dhcp":
             mac, ip = event.get("mac"), event.get("client_addr")
             if mac and ip:
                 mac = mac.lower()
-                existing_mac = self._mac_bindings.get(ip)
-                
-                # Feature 4: Layer-2 Spoofing Detection (ARP Telemetry)
-                if existing_mac and existing_mac != mac:
-                    ts = event.get("ts", time.time())
-                    last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
-                    # If MAC flipped within 10 minutes, it's highly suspicious (not a normal DHCP timeout)
-                    if (ts - last_seen) < 600:
-                        LOGGER.critical(f"🚨 LAYER-2 ARP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s")
-                        if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
-                        self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
-                        
-                self._mac_bindings[ip] = mac
-                if not hasattr(self, "_mac_last_seen"): self._mac_last_seen = {}
-                self._mac_last_seen[ip] = event.get("ts", time.time())
-                self._enrich_ptr(ip)
+                self._bind_mac(ip, mac, event.get("ts", time.time()))
+
+                # PHASE 4: capture the DHCP fingerprint fields added by the
+                # local-dhcp-fingerprint.zeek policy script (vendor_class / param_list /
+                # user_class from DHCP Options 60 / 55 / 77). Only stored when at least one
+                # is actually present, so devices/Zeek builds without the policy script
+                # simply never populate this (safe no-op degrade).
+                vendor_class = event.get("vendor_class")
+                param_list = event.get("param_list")
+                user_class = event.get("user_class")
+                if vendor_class or param_list or user_class:
+                    fp = {
+                        "vendor_class": vendor_class or "",
+                        "param_list": list(param_list) if param_list else [],
+                        "user_class": user_class or "",
+                        "ts": event.get("ts", time.time()),
+                    }
+                    self._dhcp_fingerprints[ip] = fp
+                    self._dhcp_fingerprints_by_mac[mac] = fp
+                    if len(self._dhcp_fingerprints) > 5000: self._dhcp_fingerprints.clear()
+                    if len(self._dhcp_fingerprints_by_mac) > 5000: self._dhcp_fingerprints_by_mac.clear()
             return
             
         src = event.get("id.orig_h", event.get("orig_h", ""))
@@ -423,8 +467,24 @@ class ZeekFeatureExtractor:
         proto = ev.get("proto", "tcp")
         orig_bytes = int(ev.get("orig_bytes", 0) or 0)
         uid, ts = ev.get("uid", ""), ev.get("ts", time.time())
-        
+
         self._conn_ts[src].append(ts)
+
+        # PHASE 6 (cross-address-family identity correlation): conn.log's orig_l2_addr is
+        # populated for EVERY connection, IPv4 or IPv6, when Zeek's built-in
+        # `policy/protocols/conn/mac-logging.zeek` is loaded — unlike the DHCP-derived MAC
+        # binding above (ingest()'s "dhcp" branch), which only ever fires for DHCPv4
+        # transactions and is therefore permanently blind to IPv6-only traffic (SLAAC/
+        # link-local addresses never get a DHCPv4 lease). Binding MAC from conn.log gives
+        # every address family the SAME correlation key, so core/identity.py can resolve
+        # an IPv6 flow to the SAME device_id as that device's IPv4 identity instead of
+        # cold-starting a second, permanently-separate tracking profile. Requires adding
+        # `@load policy/protocols/conn/mac-logging.zeek` to your Zeek config — see the
+        # Phase 6 README for the one-line deployment step. Safe no-op if that script isn't
+        # loaded (the field is simply absent from the event, exactly like today).
+        orig_mac = ev.get("orig_l2_addr")
+        if orig_mac and isinstance(orig_mac, str):
+            self._bind_mac(src, orig_mac.lower())
         
         conn_state = ev.get("conn_state")
         if conn_state: 
@@ -477,8 +537,14 @@ class ZeekFeatureExtractor:
 
     def get_wire_ip(self, domain: str) -> Optional[str]: return self._wire_dns_resolutions.get(str(domain).lower().strip("."))
     def get_mac(self, ip: str) -> Optional[str]: return self._mac_bindings.get(ip)
+    def get_dhcp_fingerprint(self, ip: str) -> Optional[dict]: return self._dhcp_fingerprints.get(ip)
+    def get_ja3_set(self, ip: str) -> set: return set(self._ja3_seen.get(ip, set()))
     def get_http_reqs(self, device_ip: str) -> set: return set(self._http_reqs.get(device_ip, {}).keys())
-    def get_dest_ips(self, device_ip: str) -> set: return set(self._new_ips.get(device_ip, {}).keys())
+    def get_dest_ips(self, device_ip) -> set:
+        out = set()
+        for ip in self._as_ip_list(device_ip):
+            out.update(self._new_ips.get(ip, {}).keys())
+        return out
 
     def _process_ssl(self, src: str, ev: dict) -> None:
         ja3, ja4, ts = ev.get("ja3", ""), ev.get("ja4", ""), ev.get("ts", time.time())
@@ -493,7 +559,14 @@ class ZeekFeatureExtractor:
                 
         if is_malicious_ja3: self._ja3_hits[src].append({"ja3": ja3, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
         if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
-            
+
+        # PHASE 4: track *every* JA3 seen (not just malicious ones) as a benign per-device
+        # behavioral fingerprint, used for MAC-rotation re-identification. Capped at 50
+        # distinct hashes per device — this is meant to capture "the small stable set of
+        # TLS stacks this device's apps use," not a full unbounded history.
+        if ja3 and len(self._ja3_seen[src]) < 50:
+            self._ja3_seen[src].add(ja3)
+
         if not self._is_safe_device(src):
             sni = str(ev.get("server_name", "")).lower().strip(".")
             if sni and any(sni == doh or sni.endswith(f".{doh}") for doh in DOH_SNIS):
@@ -547,45 +620,89 @@ class ZeekFeatureExtractor:
         if port == 445: return "SMB File Sharing"
         return f"{proto} Port {port}" if port else "Network Socket"
 
-    def get_features(self, device_ip: str) -> dict:
-        states = [s for t, s in self._conn_states.get(device_ip, [])]
-        durations = [d for t, d in self._conn_durations.get(device_ip, [])]
-        rejected_ips = {ip for t, ip in self._rejected_ips.get(device_ip, [])}
-        
-        meta = self._last_connection_meta.get(device_ip, {})
+    @staticmethod
+    def _as_ip_list(device_ip) -> list:
+        """PHASE 6: normalizes the historical single-IP call convention (a plain string)
+        alongside the new multi-address convention (any iterable of IPs — pass
+        `state.known_ips` for a device tracked across both IPv4 and IPv6). Every internal
+        `self._xxx[ip]` structure below is still keyed per-IP exactly as before; this just
+        lets callers aggregate across ALL of a device's known addresses instead of only
+        whichever single address happens to be `state.client_ip` at evaluation time — the
+        fix for a burst that's split across a device's IPv4 and IPv6 traffic silently
+        staying under threshold on each address individually."""
+        if isinstance(device_ip, str):
+            return [device_ip] if device_ip else []
+        try:
+            seen, out = set(), []
+            for ip in device_ip:
+                if ip and ip not in seen:
+                    seen.add(ip)
+                    out.append(ip)
+            return out
+        except TypeError:
+            return [device_ip] if device_ip else []
+
+    def get_features(self, device_ip) -> dict:
+        ips = self._as_ip_list(device_ip)
+        states, durations, rejected_ips = [], [], set()
+        for ip in ips:
+            states.extend(s for t, s in self._conn_states.get(ip, []))
+            durations.extend(d for t, d in self._conn_durations.get(ip, []))
+            rejected_ips.update(ip2 for t, ip2 in self._rejected_ips.get(ip, []))
+
+        # "Last" connection metadata: most recent write wins across all known addresses.
+        # _last_connection_meta doesn't carry its own timestamp, so — same simplification
+        # as before this change — whichever known IP was processed most recently in the
+        # ingest stream provides it; we just now also check the device's other addresses
+        # instead of only the single one the caller happened to pass.
+        meta = {}
+        for ip in ips:
+            m = self._last_connection_meta.get(ip)
+            if m:
+                meta = m
         port = meta.get("last_dest_port", 0)
         app_weight = 0.2 if port in (80, 443) else (0.6 if port in (22, 445, 3389) else 0.4)
 
         return {
-            "zeek_conn_count": len(self._conn_ts.get(device_ip, [])),
-            "zeek_new_ips": len(self._new_ips.get(device_ip, {})),
-            "zeek_ja3_malicious": len(self._ja3_hits.get(device_ip, [])),
-            "zeek_ja4_malicious": len(self._ja4_hits.get(device_ip, [])),
-            "zeek_notices": len(self._notices.get(device_ip, [])),
-            "zeek_susp_ports": len(self._susp_ports.get(device_ip, [])),
-            "zeek_http_ua_count": len(self._http_uas.get(device_ip, {})),
-            "zeek_outbound_bytes": sum(b for t, b in self._outbound_bytes.get(device_ip, [])),
-            "zeek_doh_bypass": len(self._doh_bypass_uids.get(device_ip, {})),
-            "zeek_lateral_moves": len(self._lateral_moves.get(device_ip, [])),
-            "zeek_s0_rej_count": sum(1 for s in states if s in ("S0", "REJ")),     
+            "zeek_conn_count": sum(len(self._conn_ts.get(ip, [])) for ip in ips),
+            "zeek_new_ips": sum(len(self._new_ips.get(ip, {})) for ip in ips),
+            "zeek_ja3_malicious": sum(len(self._ja3_hits.get(ip, [])) for ip in ips),
+            "zeek_ja4_malicious": sum(len(self._ja4_hits.get(ip, [])) for ip in ips),
+            "zeek_notices": sum(len(self._notices.get(ip, [])) for ip in ips),
+            "zeek_susp_ports": sum(len(self._susp_ports.get(ip, [])) for ip in ips),
+            "zeek_http_ua_count": sum(len(self._http_uas.get(ip, {})) for ip in ips),
+            "zeek_outbound_bytes": sum(b for ip in ips for t, b in self._outbound_bytes.get(ip, [])),
+            "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
+            "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),
+            "zeek_s0_rej_count": sum(1 for s in states if s in ("S0", "REJ")),
             "zeek_s0_rej_unique_ips": len(rejected_ips),
             "zeek_max_duration": max(durations) if durations else 0.0,
-            "zeek_honeypot_hits": len(self._honeypot_hits.get(device_ip, [])),
-            "zeek_app_protocol_weight": app_weight
+            "zeek_honeypot_hits": sum(len(self._honeypot_hits.get(ip, [])) for ip in ips),
+            "zeek_app_protocol_weight": app_weight,
+            "last_dest_ip": meta.get("last_dest_ip", "unknown"),
+            "last_dest_port": port,
+            "dominant_protocol": meta.get("dominant_protocol", "TCP")
         }
 
-    def get_alerts(self, device_ip: str) -> list[dict]:
+    def get_alerts(self, device_ip) -> list[dict]:
         alerts = []
-        for h in self._ja3_hits.get(device_ip, []): alerts.append({"type": "malicious_ja3", "ja3": h["ja3"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
-        for h in self._ja4_hits.get(device_ip, []): alerts.append({"type": "malicious_ja4", "ja4": h["ja4"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
-        for n in self._notices.get(device_ip, []): alerts.append({"type": "zeek_notice", "note": n["note"], "msg": n["msg"], "dest_port": n.get("dest_port", 0), "confidence": 0.75})
+        for ip in self._as_ip_list(device_ip):
+            for h in self._ja3_hits.get(ip, []): alerts.append({"type": "malicious_ja3", "ja3": h["ja3"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
+            for h in self._ja4_hits.get(ip, []): alerts.append({"type": "malicious_ja4", "ja4": h["ja4"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
+            for n in self._notices.get(ip, []): alerts.append({"type": "zeek_notice", "note": n["note"], "msg": n["msg"], "dest_port": n.get("dest_port", 0), "confidence": 0.75})
         return alerts
 
     def reset_all(self) -> None:
         for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
-    def reset_client(self, client_ip: str) -> None:
-        for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta):
-            if client_ip in d:
-                del d[client_ip]
+    def reset_client(self, client_ip) -> None:
+        """PHASE 6: accepts a single IP (unchanged) or an iterable of IPs (pass
+        `state.known_ips`) so post-alert resets clear a device's counters across ALL of
+        its known addresses — without this, whichever address wasn't `state.client_ip` at
+        alert time would keep its stale pre-alert counters and could immediately
+        re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
+        for ip in self._as_ip_list(client_ip):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja3_seen):
+                if ip in d:
+                    del d[ip]

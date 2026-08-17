@@ -12,7 +12,9 @@ RECENT FIXES (AUDIT CORRECTIONS):
 - FIXED: Lowered `is_poisoned` threshold from 7.0 to 4.0 to prevent slow-burn baseline poisoning by low-and-slow attackers[cite: 10].
 """
 import logging
+import time
 from collections import deque, Counter, defaultdict, OrderedDict
+from typing import Optional, Dict, Any
 
 LOGGER = logging.getLogger("home_ids.state")
 
@@ -133,6 +135,12 @@ class DeviceState:
         self.mac_address = "unknown"
         from utils import infer_device_type
         self.device_type = infer_device_type(hostname)
+        # PHASE 1 FIX (device-sensitivity source): True only when device_type was set via
+        # an operator-configured `device_type_overrides` entry (identity.py's
+        # apply_device_type), never when it came from hostname-substring inference. A
+        # device that merely self-reports a hostname like "my-router" must not get
+        # treated as verified infrastructure — see pipeline.py's is_verified_infra check.
+        self.device_type_is_override = False
         
         self.rate_baseline = EWMABaseline(alpha)
         self.entropy_baseline = EWMABaseline(alpha)
@@ -151,13 +159,39 @@ class DeviceState:
         self.last_alert_time = 0.0
         self.last_alert_confidence = 0.0
         self.last_alert_signature = ""
+        # PHASE 2 (cross-cycle escalation): tracks how long the SAME SUSPICIOUS signature
+        # has persisted uninterrupted. Deliberately in-memory only (not persisted to
+        # disk) — a service restart resetting this tracker just means escalation starts
+        # counting again from zero, which is a safe, low-consequence simplification.
+        self.suspicious_since = 0.0
+        self.suspicious_signature = ""
         self.killchain_history = deque(maxlen=5)
         
         # SecOps Operator Validation Tracking
         self.has_validated_threat = False
         self.confirmed_threat_count = 0
         self.fp_count = 0
-        
+
+        # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
+        # recent DHCP transaction seen for this device, a rolling set of benign JA3 TLS
+        # fingerprints observed over time, and a "still active" heartbeat used by
+        # StateManager to find recently-orphaned identity-migration candidates.
+        self.dhcp_fingerprint: Optional[Dict[str, Any]] = None
+        self.ja3_seen = BoundedSet(max_size=50)
+        self.last_seen = time.time()
+
+        # PHASE 6 (cross-address-family identity correlation): every IP address this
+        # device has been observed at, all families, small cap (a dual-stack device
+        # rarely has more than a handful of concurrent IPv4 + IPv6 SLAAC/link-local/
+        # privacy addresses at once). Populated by identity.py whenever traffic resolves
+        # to this device_id. `client_ip` stays a single "most recently active address"
+        # field for mitigation targeting (Pi-hole/tarpit/router-isolation all already key
+        # off domain or MAC, not client_ip, so this doesn't change mitigation behavior);
+        # `known_ips` is what feature aggregation and evidence collection iterate over so
+        # a burst split across a device's addresses isn't silently diluted below threshold
+        # on each address individually.
+        self.known_ips = BoundedSet(max_size=8)
+
         LOGGER.debug("DeviceState profile instantiated for ID: %s (IP: %s, Hostname: %s)", device_id, client_ip, hostname)
 
     def is_poisoned(self, risk_score: float) -> bool:
@@ -188,6 +222,11 @@ class DeviceState:
             "has_validated_threat": self.has_validated_threat,
             "confirmed_threat_count": self.confirmed_threat_count,
             "fp_count": self.fp_count,
+            "dhcp_fingerprint": self.dhcp_fingerprint,
+            "ja3_seen": self.ja3_seen.to_list(),
+            "last_seen": self.last_seen,
+            "device_type_is_override": self.device_type_is_override,
+            "known_ips": self.known_ips.to_list(),
             "rate_baseline": self.rate_baseline.to_dict(),
             "entropy_baseline": self.entropy_baseline.to_dict(),
             "unique_baseline": self.unique_baseline.to_dict(),
@@ -221,6 +260,13 @@ class DeviceState:
         obj.has_validated_threat = data.get("has_validated_threat", False)
         obj.confirmed_threat_count = data.get("confirmed_threat_count", 0)
         obj.fp_count = data.get("fp_count", 0)
+        obj.dhcp_fingerprint = data.get("dhcp_fingerprint")
+        obj.ja3_seen = BoundedSet(max_size=50, initial=data.get("ja3_seen", []))
+        obj.last_seen = data.get("last_seen", 0.0)
+        obj.device_type_is_override = data.get("device_type_is_override", False)
+        obj.known_ips = BoundedSet(max_size=8, initial=data.get("known_ips", []))
+        if obj.client_ip and obj.client_ip != "unknown":
+            obj.known_ips.add(obj.client_ip)
         
         if "rate_baseline" in data: obj.rate_baseline = EWMABaseline.from_dict(data["rate_baseline"], alpha)
         if "entropy_baseline" in data: obj.entropy_baseline = EWMABaseline.from_dict(data["entropy_baseline"], alpha)

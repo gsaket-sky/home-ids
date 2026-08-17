@@ -126,13 +126,16 @@ class RiskScorer:
         
         current_hour = int(features.get("current_hour", 12))
         sigma_shift = safe_float(features.get("sigma_shift", 0.0), 0.0)
-        rate_mean, var, init, n = state.rate_baseline.get_stats(current_hour)
-        if init and n > 50:
-            std_dev = math.sqrt(max(var, 1e-4))
-            threshold_limit = rate_mean + ((3.0 + sigma_shift) * std_dev)
-            query_rate = features.get("query_rate", 0.0)
-            if query_rate > threshold_limit and threshold_limit > 10:
-                add("Dynamic Query Threshold Exceeded", 2.5, round(query_rate, 2), f"Query rate {query_rate:.1f} exceeds dynamic threshold limit {threshold_limit:.1f} ({'+' if sigma_shift>=0 else ''}{sigma_shift:.2f}σ FP shift)")
+
+        # Wrap in hasattr to prevent AttributeError crashes
+        if hasattr(state, "rate_baseline"):
+            rate_mean, var, init, n = state.rate_baseline.get_stats(current_hour)
+            if init and n > 50:
+                std_dev = math.sqrt(max(var, 1e-4))
+                threshold_limit = rate_mean + ((3.0 + sigma_shift) * std_dev)
+                query_rate = features.get("query_rate", 0.0)
+                if query_rate > threshold_limit and threshold_limit > 10:
+                    add("Dynamic Query Threshold Exceeded", 2.5, round(query_rate, 2), f"Query rate {query_rate:.1f} exceeds dynamic threshold limit {threshold_limit:.1f} ({'+' if sigma_shift>=0 else ''}{sigma_shift:.2f}σ FP shift)")
 
         if sigma_shift < 0 and getattr(state, "has_validated_threat", False):
             boost = min(abs(sigma_shift) * 1.5, 2.0)

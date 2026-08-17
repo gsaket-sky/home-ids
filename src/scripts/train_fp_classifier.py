@@ -9,7 +9,7 @@ logs to train a custom LightGBM / Gradient Boosting ONNX classifier specifically
 tuned to YOUR home network.
 
 INPUT DATA SOURCES:
-  1. config.json -> static_requires_restart.alert_json_path (preferred; JSONL or JSON array)
+  1. config.yaml -> paths.alert_json_path (preferred; JSONL or JSON array)
   2. state/alerts.json (legacy fallback)
   3. state/autonomous_muted.jsonl (auto-suppressed false positives)
 
@@ -194,13 +194,71 @@ def _append_sample(X: list, y: list, doc: dict, label: int, stats: dict, source:
         stats[f"{source}_rejected"] += 1
 
 
+def _alert_dedup_key(payload: dict) -> str:
+    """PHASE 6: best-effort identity key for a single alert EVENT (not just a domain),
+    used to cross-reference an entry in the alerts.json "threat" stream against a later
+    correction of the SAME alert in autonomous_muted.jsonl (either autonomously
+    suppressed at publish time, or operator-marked afterward via the "Mark False
+    Positive" Telegram button). device_id + queried_domain + the alert's own `timestamp`
+    field is stable and specific enough in practice — two genuinely distinct alerts for
+    the same device+domain would have to land in the exact same evaluation cycle
+    (identical float timestamp) to collide, which the pipeline's alert-gate cooldown
+    already makes vanishingly rare."""
+    device_id = payload.get("device", {}).get("id", "?")
+    domain = payload.get("network_context", {}).get("queried_domain", "?")
+    ts = payload.get("timestamp", "?")
+    return f"{device_id}|{domain}|{ts}"
+
+
 def load_dataset(state_dir: Path) -> tuple:
-    """Loads labeled training samples from configured alerts stream + autonomous muted log."""
+    """Loads labeled training samples from configured alerts stream + autonomous muted log.
+
+    PHASE 6 FIX (critical mislabeling bug): this used to label EVERY entry from the
+    alerts.json stream as label=0 ("confirmed threat") unconditionally, with no mechanism
+    to correct an entry that was later determined to be a false positive. Two concrete
+    ways that happened:
+      1. pipeline.py writes EVERY evaluated alert to the alert stream unconditionally
+         (`self.alert_writer.write(alert_payload)`), including ones fp_engine itself
+         already autonomously suppressed as FALSE_POSITIVE that cycle (flagged via
+         `alert_payload["suppressed"] = True` right before the write). Those were being
+         trained as label=0 AND label=1 (from autonomous_muted.jsonl) in the same run —
+         directly contradictory signal for the exact same event.
+      2. An alert an OPERATOR later marks false positive via the "🛡️ Mark False Positive"
+         Telegram button (fp_engine.mark_false_positive()) writes a label=1 correction to
+         autonomous_muted.jsonl, but the original alerts.json entry stayed labeled
+         label=0 forever — so the weekly retrain kept reinforcing the exact pattern the
+         operator just corrected, meaning FP-reduction-through-operator-feedback couldn't
+         actually influence future predictions.
+    Both are now excluded from the label=0 threat set below.
+    """
     X, y = [], []
     stats = {
         "threat_accepted": 0, "threat_rejected": 0,
         "fp_accepted": 0, "fp_rejected": 0,
+        "threat_skipped_corrected": 0,
+        "threat_skipped_non_alert": 0,
     }
+
+    # Read autonomous_muted.jsonl FIRST so its dedup keys are available while filtering
+    # the alerts.json threat stream below.
+    muted_docs = []
+    muted_path = state_dir / "autonomous_muted.jsonl"
+    if muted_path.exists():
+        try:
+            with open(muted_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            for line in lines[-MAX_REAL_SAMPLES_PER_CLASS:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    muted_docs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    stats["fp_rejected"] += 1
+        except Exception as exc:
+            LOGGER.warning("Could not read autonomous_muted.jsonl: %s", exc)
+
+    corrected_keys = {_alert_dedup_key(_extract_payload(d)) for d in muted_docs}
 
     # 1. Threat samples from configured alert stream path (fallback to state/alerts.json)
     alert_docs = []
@@ -212,26 +270,36 @@ def load_dataset(state_dir: Path) -> tuple:
             break
 
     for doc in alert_docs[-MAX_REAL_SAMPLES_PER_CLASS:]:
+        payload = _extract_payload(doc)
+        # BUGFIX (non-alert stream contamination): alerts.json isn't exclusively real
+        # alert records — scripts/ollama_soc.py (and, if re-enabled, the real-time
+        # intelligence/ollama_analyzer.py) append `type="ollama_transparency"` entries to
+        # this SAME file for operator visibility. Those entries have no
+        # `network_context`/`features`/`device.type`, so extract_features_from_alert()
+        # was silently producing an all-near-zero feature row for them and training it as
+        # a confirmed-threat (label=0) sample — confirmed empirically: a single injected
+        # transparency-log doc produced the feature row [0,0,0,0,0.3,0,0,0,0.2] labeled
+        # threat. Every ollama_soc.py run (every few hours) adds more of these, so this
+        # was steadily diluting the model with synthetic noise. Real alerts always carry
+        # `type="ids_alert"` (set in pipeline.py); anything else recognizable as a
+        # non-alert transparency record is excluded here rather than trained on.
+        if payload.get("type") == "ollama_transparency":
+            stats["threat_skipped_non_alert"] += 1
+            continue
+        if payload.get("suppressed"):
+            # Already autonomously flagged FP at publish time — its label=1 sample lives
+            # in autonomous_muted.jsonl; do not ALSO train it as label=0 here.
+            stats["threat_skipped_corrected"] += 1
+            continue
+        if _alert_dedup_key(payload) in corrected_keys:
+            # Corrected after the fact (autonomous or operator) — same reasoning.
+            stats["threat_skipped_corrected"] += 1
+            continue
         _append_sample(X, y, doc, 0, stats, source="threat")
 
-    # 2. False positives from autonomous muted JSONL
-    muted_path = state_dir / "autonomous_muted.jsonl"
-    if muted_path.exists():
-        try:
-            with open(muted_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            for line in lines[-MAX_REAL_SAMPLES_PER_CLASS:]:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    doc = json.loads(line)
-                except json.JSONDecodeError:
-                    stats["fp_rejected"] += 1
-                    continue
-                _append_sample(X, y, doc, 1, stats, source="fp")
-        except Exception as exc:
-            LOGGER.warning("Could not read autonomous_muted.jsonl: %s", exc)
+    # 2. False positives from autonomous muted JSONL (parsed above, label=1)
+    for doc in muted_docs:
+        _append_sample(X, y, doc, 1, stats, source="fp")
 
     return X, y, stats
 
@@ -240,14 +308,17 @@ def train_and_export_onnx(state_dir: Path) -> bool:
     """Trains GradientBoostingClassifier on 9 features and exports to state/models/fp_classifier.onnx."""
     X, y, stats = load_dataset(state_dir)
     LOGGER.info(
-        "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d | fp accepted/rejected=%d/%d | dim=%d",
+        "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d "
+        "(skipped as corrected FPs=%d, skipped as non-alert transparency logs=%d) | "
+        "fp accepted/rejected=%d/%d | dim=%d",
         len(X),
         stats["threat_accepted"], stats["threat_rejected"],
+        stats["threat_skipped_corrected"], stats["threat_skipped_non_alert"],
         stats["fp_accepted"], stats["fp_rejected"],
         FP_FEATURE_DIM
     )
 
-    if len(X) < 10:
+    if len(X) < 10 or len(set(y)) < 2:
         LOGGER.info("Dataset too small – augmenting with %d synthetic baseline samples.", len(SYNTHETIC_X))
         X.extend(SYNTHETIC_X)
         y.extend(SYNTHETIC_Y)

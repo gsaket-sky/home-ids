@@ -46,6 +46,9 @@ _WARMUP_GLOBAL = 1000  # samples before first global fit
 _RETRAIN_N = 500       # retrain every 500 new samples (~17 min) for faster adaptation
 
 
+REJECT_THREAT_WINDOW_SECONDS = 120.0  # ~1 pipeline cycle worth of "don't learn from this" guard
+
+
 class DeviceMLEngine:
     def __init__(self, device_id: str):
         self.device_id = device_id
@@ -56,6 +59,12 @@ class DeviceMLEngine:
         self._fit_lock = threading.Lock()   # guards model swap during background fit
         self._fit_in_progress = False
         self._last_missing_feature_log = 0.0
+        # PHASE 0 FIX: reject_threat() used to be a pure log statement — it never actually
+        # stopped a confirmed-threat sample from being trained on. This tracks a short
+        # window after a confirmed threat during which learn_normal() calls for this
+        # device are skipped, so the anomaly model doesn't get poisoned into treating
+        # attack traffic as its new normal baseline.
+        self._reject_until = 0.0
         LOGGER.debug("Initialized DeviceMLEngine for device: %s", device_id)
 
     def _validate_feature_payload(self, features: dict) -> None:
@@ -95,6 +104,13 @@ class DeviceMLEngine:
 
     def learn_normal(self, features: dict):
         """Learns normal feature combination (reinforces benign lateral/port/app bounds)."""
+        if time.time() < self._reject_until:
+            LOGGER.debug(
+                "🛡️ [ML ANTI-POISONING] Device %s: skipping training sample (within post-threat rejection window, %.0fs remaining)",
+                self.device_id, self._reject_until - time.time()
+            )
+            return
+
         vec = self._extract_vector(features)
         self.training.append(vec)
 
@@ -108,8 +124,16 @@ class DeviceMLEngine:
                 self._fit_background()
 
     def reject_threat(self, features: dict):
-        """Excludes malicious threat features from IsolationForest baseline fitting (anti-poisoning)."""
-        LOGGER.debug("🛡️ [ML ANTI-POISONING] Device %s threat features rejected from baseline training", self.device_id)
+        """PHASE 0 FIX: actually excludes malicious threat features from IsolationForest
+        baseline fitting, instead of just logging. Opens a short rejection window so any
+        learn_normal() call for this device shortly after a confirmed threat is skipped —
+        preventing the anomaly model from being poisoned into treating attack traffic as
+        its own new baseline."""
+        self._reject_until = time.time() + REJECT_THREAT_WINDOW_SECONDS
+        LOGGER.debug(
+            "🛡️ [ML ANTI-POISONING] Device %s: threat features rejected from baseline training (guard window: %.0fs)",
+            self.device_id, REJECT_THREAT_WINDOW_SECONDS
+        )
 
     def _fit_background(self):
         """Schedules a background thread to fit the IsolationForest model without blocking the pipeline."""
@@ -182,6 +206,7 @@ class GlobalMLEngine:
         self._fit_lock = threading.Lock()
         self._fit_in_progress = False
         self._last_missing_feature_log = 0.0
+        self._reject_until = 0.0  # PHASE 0 FIX: see DeviceMLEngine._reject_until
         LOGGER.debug("Initialized GlobalMLEngine.")
 
     def _validate_feature_payload(self, features: dict) -> None:
@@ -220,6 +245,10 @@ class GlobalMLEngine:
         self.learn_normal(features)
 
     def learn_normal(self, features: dict):
+        if time.time() < self._reject_until:
+            LOGGER.debug("🛡️ [ML ANTI-POISONING] Global ML: skipping training sample (within post-threat rejection window)")
+            return
+
         vec = self._extract_vector(features)
         self.training.append(vec)
 
@@ -233,7 +262,10 @@ class GlobalMLEngine:
                 self.fit_and_update()
 
     def reject_threat(self, features: dict):
-        LOGGER.debug("🛡️ [ML ANTI-POISONING] Global ML threat features rejected from baseline training")
+        """PHASE 0 FIX: see DeviceMLEngine.reject_threat() — same real exclusion window,
+        applied to the shared global baseline model."""
+        self._reject_until = time.time() + REJECT_THREAT_WINDOW_SECONDS
+        LOGGER.debug("🛡️ [ML ANTI-POISONING] Global ML: threat features rejected from baseline training (guard window: %.0fs)", REJECT_THREAT_WINDOW_SECONDS)
 
     def fit_and_update(self):
         """Schedules a background thread to fit the global IsolationForest model."""
@@ -369,14 +401,19 @@ class MultiDeviceMLEngine:
             saved_devs = 0
             if self.global_model_path and self.global_engine.warmed_up:
                 joblib.dump(self.global_engine.model, self.global_model_path)
-            for dev_id, engine in self.devices.items():
+                
+            with self._lock:
+                devices_snapshot = list(self.devices.items())
+                
+            for dev_id, engine in devices_snapshot:
                 if engine.warmed_up:
                     dev_path = self.model_dir / f"{dev_id}.pkl"
                     joblib.dump(engine.model, dev_path)
                     saved_devs += 1
-            LOGGER.info("Successfully persisted Global Model and %d Device ML models to disk.", saved_devs)
+                    
+            LOGGER.info("Successfully persisted Global Model and %d Device ML models to disk[cite: 14, 22].", saved_devs)
         except Exception as exc:
-            LOGGER.error("Failed to save ML models: %s", exc)
+            LOGGER.error("Failed to save ML models: %s[cite: 14, 22]", exc)
 
     def _verify_model_shape(self, model, expected_features: int = 11) -> bool:
         if hasattr(model, "n_features_in_"):

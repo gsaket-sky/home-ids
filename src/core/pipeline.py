@@ -14,10 +14,12 @@ RECENT ARCHITECTURAL FIXES:
 import logging
 import math
 import time
+import uuid
 from pathlib import Path
 from prometheus_client import start_http_server
 
 from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy
+from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
 from core.identity import DeviceIdentityManager
@@ -28,6 +30,7 @@ from intelligence.hypotheses.evidence import EvidenceStore, Evidence
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
+from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 1
 from core.decision_engine import DecisionEngine, DecisionState
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from intelligence.ollama_analyzer import OllamaAnalyzer
@@ -37,7 +40,19 @@ from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 
-from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total
+from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status
+
+# PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
+# (and therefore have certain behavioral evidence dampened) when device_type came from an
+# operator-configured override — see core/identity.py's apply_device_type() and
+# core/state.py's device_type_is_override field.
+_INFRA_DEVICE_TYPES = frozenset({"dns_server", "router", "gateway"})
+# Evidence types stripped for verified infrastructure — same rationale as the existing
+# is_safe noisy_types stripping just below it: an operator-confirmed DNS server/router
+# naturally produces DNS/connection volume that would misfire these detectors, but
+# reputation/honeypot/lateral-movement/malicious-TLS evidence is NEVER stripped, so a
+# genuinely compromised router still alerts.
+_INFRA_NOISY_TYPES = {"dns_dga_burst", "dns_tunnel_v2", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn"}
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
@@ -126,7 +141,7 @@ class EnginePipeline:
         if bool(self.config.get("ips_enabled", True)) and not honeypot_ips and bool(self.config.get("ips_router_enabled", False)):
             LOGGER.warning("⚠️ IPS router isolation is enabled but no honeypot IPs are configured. Router isolation will remain inert until honeypot_ips is populated.")
         self.zeek_fx = ZeekFeatureExtractor(
-            home_subnets=[self.config.get("home_subnet", "192.168.1.0/24")],
+            home_subnets=resolve_home_subnets(self.config),  # PHASE 0 FIX: multi-subnet support
             ti_engine=self.ti_engine, geoip_engine=self.geoip_engine,
             safe_ips=safe_ips, honeypot_ips=honeypot_ips, safe_patterns=safe_patterns,
         )
@@ -138,6 +153,7 @@ class EnginePipeline:
         self.rep_classifier = ReputationClassifier()
         self.dns_detector = DNSBehaviorDetector()
         self.zeek_detector = ZeekNetworkDetector()
+        self.threat_signal_detector = ThreatSignalDetector()  # PHASE 1
         self.decision_engine = DecisionEngine()
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(
@@ -198,8 +214,8 @@ class EnginePipeline:
                 self.ollama_analyzer.ollama_model = str(self.config.get("ollama_model", "llama3")).strip()
             if "telegram_enabled" in changed_keys:
                 self.alert_manager.enabled = bool(self.config.get("telegram_enabled", False))
-            if "home_subnet" in changed_keys:
-                self.zeek_fx.set_home_subnets([self.config.get("home_subnet", "192.168.1.0/24")])
+            if "home_subnet" in changed_keys or "home_subnets" in changed_keys:
+                self.zeek_fx.set_home_subnets(resolve_home_subnets(self.config))  # PHASE 0 FIX
             if "honeypot_ips" in changed_keys:
                 self.zeek_fx.honeypot_ips = set(self.config.get("honeypot_ips", []))
             if "zeek_log_dir" in changed_keys:
@@ -236,6 +252,7 @@ class EnginePipeline:
         ips_pihole_status.set(1.0 if self.config.get("ips_pihole_enabled", True) else 0.0)
         ips_router_status.set(1.0 if self.config.get("ips_router_enabled", False) else 0.0)
         ips_tarpit_status.set(1.0 if self.config.get("ips_tarpit_enabled", True) else 0.0)
+        ti_engine_ready_status.set(1.0 if (self.ti_engine and self.ti_engine.is_ready()) else 0.0)  # PHASE 5 FIX
 
         dns_rows = self.pihole_collector.poll()
         zeek_events = self.zeek_collector.poll()
@@ -291,6 +308,16 @@ class EnginePipeline:
                 hostname = state.hostname
                 mac_addr = getattr(state, "mac_address", "unknown")
                 device_type = getattr(state, "device_type", "unknown")
+                # PHASE 6 (cross-address-family correlation): snapshot every address this
+                # device is known to answer to (e.g. both its IPv4 and IPv6 addresses once
+                # MAC-correlation has unified them under one device_id), so the Zeek feature
+                # aggregation below sums/merges activity across ALL of them instead of only
+                # whichever address happened to be "most recently active" (client_ip). Falls
+                # back to the single client_ip if known_ips is empty (shouldn't happen post
+                # Phase 6, but keeps this resilient to states loaded from an older snapshot).
+                known_ips_snapshot = state.known_ips.to_list() if getattr(state, "known_ips", None) else []
+                if not known_ips_snapshot:
+                    known_ips_snapshot = [client_ip] if client_ip else []
                 is_safe = (client_ip in safe_ips) or (bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat))
 
                 # AUDIT FIX #4: Prune rolling.domains to the current window using domain_timestamps.
@@ -342,7 +369,9 @@ class EnginePipeline:
             # Zeek feature fetching is a pure dict read (no lock needed for zeek_fx).
             # The full DNS feature compute still happens inside the Phase 4 lock below
             # since it needs live state (rolling window, EWMA baselines).
-            _zeek_features = {**self.zeek_fx.get_features(client_ip), **self.zeek_fx.get_last_connection_meta(client_ip)}
+            # PHASE 6: aggregate across every known address of this device, not just the
+            # single currently-active client_ip — see known_ips_snapshot comment above.
+            _zeek_features = {**self.zeek_fx.get_features(known_ips_snapshot), **self.zeek_fx.get_last_connection_meta(client_ip)}
 
             # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
             mitigation_pending = None
@@ -465,9 +494,16 @@ class EnginePipeline:
                 dns_ev = self.dns_detector.detect(dev_id, features)
                 for ev in dns_ev: self.evidence_store.add(ev)
                 
-                zeek_ev = self.zeek_detector.detect(dev_id, self.zeek_fx.get_alerts(client_ip))
+                # PHASE 6: merge JA3/JA4/notice alerts across every known address of this device.
+                zeek_ev = self.zeek_detector.detect(dev_id, self.zeek_fx.get_alerts(known_ips_snapshot))
                 for ev in zeek_ev: self.evidence_store.add(ev)
-                
+
+                # PHASE 1: DGA/exfiltration/beaconing/tunneling-v2/connection-abuse — the
+                # scoring.py-derived categories that previously had no path into the live
+                # evidence/hypothesis pipeline at all (scoring.py itself is dead code).
+                threat_signal_ev = self.threat_signal_detector.detect(dev_id, features, top_domain=top_domain)
+                for ev in threat_signal_ev: self.evidence_store.add(ev)
+
                 if ml_score > 0.90:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
                 
@@ -502,6 +538,21 @@ class EnginePipeline:
                     noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network"}
                     active_evidence = [ev for ev in active_evidence if ev.type not in noisy_types and ev.independence_group not in noisy_types]
 
+                # PHASE 1 FIX (device-sensitivity source): only dampen the new Phase-1
+                # behavioral evidence for devices whose infra classification came from an
+                # OPERATOR override (device_type_overrides), never from a self-reported
+                # hostname — closes the retracted-finding gap ("a device can't talk its
+                # way into infra-tier sensitivity by naming itself 'my-router'") in the
+                # one place it now actually matters, since these are the first hypotheses
+                # that use a sensitivity concept at all. Reputation/honeypot/lateral/TLS
+                # evidence is never touched here, same as the is_safe block above.
+                is_verified_infra = (
+                    getattr(state, "device_type", "unknown") in _INFRA_DEVICE_TYPES
+                    and getattr(state, "device_type_is_override", False)
+                )
+                if is_verified_infra:
+                    active_evidence = [ev for ev in active_evidence if ev.type not in _INFRA_NOISY_TYPES]
+
                 decision = self.decision_engine.evaluate(active_evidence, rep_vector)
                 
                 risk = decision["threat_confidence"] * 10.0 # Map to old 0-10 scale temporarily for metrics
@@ -519,7 +570,8 @@ class EnginePipeline:
                     for d in state.rolling.domains.keys():
                         state.seen_domains.add(d)
 
-                dest_ips = self.zeek_fx.get_dest_ips(client_ip)
+                # PHASE 6: union destination IPs contacted from every known address of this device.
+                dest_ips = self.zeek_fx.get_dest_ips(known_ips_snapshot)
                 if self.geoip_engine and dest_ips:
                     for d_ip in dest_ips:
                         should_export = (d_ip not in state.geo_exported_ips) or (risk >= alert_threshold)
@@ -550,10 +602,48 @@ class EnginePipeline:
                     self.state_manager.update_baselines(state, features, now, window_seconds, current_risk=risk)
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
+
+                # ═══════════════════════════════════════════════════════════════════
+                # PHASE 2: cross-cycle escalation. Widening the alert gate below to fire
+                # on SUSPICIOUS too gives "alert immediately on a single strong signal."
+                # This gives the other half: a SUSPICIOUS state with the SAME primary
+                # signature persisting continuously (not just repeating once and going
+                # quiet) escalates to HIGH after `suspicious_escalation_seconds` (default
+                # 10 min) — increasingly confident the longer it persists, not just a
+                # one-shot low-confidence alert every time it recurs.
+                # ═══════════════════════════════════════════════════════════════════
+                if decision["state"] == DecisionState.SUSPICIOUS:
+                    if getattr(state, "suspicious_signature", "") == primary_sig and getattr(state, "suspicious_since", 0.0) > 0:
+                        persisted_for = now - state.suspicious_since
+                        escalation_threshold = float(self.config.get("suspicious_escalation_seconds", 600.0))
+                        if persisted_for >= escalation_threshold:
+                            LOGGER.warning(
+                                "⬆️ [ESCALATION] %s: SUSPICIOUS signature '%s' persisted %.0fs (>= %.0fs) → escalating to HIGH",
+                                hostname, primary_sig, persisted_for, escalation_threshold
+                            )
+                            decision = dict(decision)
+                            decision["state"] = DecisionState.HIGH
+                            decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
+                            decision["threat_confidence"] = max(decision["threat_confidence"], 0.75)
+                            risk = decision["threat_confidence"] * 10.0
+                            factors = [{"name": decision["explanation"], "score": risk}]
+                            primary_sig = factors[0]["name"]
+                    else:
+                        state.suspicious_signature = primary_sig
+                        state.suspicious_since = now
+                else:
+                    state.suspicious_signature = ""
+                    state.suspicious_since = 0.0
+
                 risk_delta = abs(risk - getattr(state, "last_alert_confidence", 0.0))
                 time_elapsed = now - getattr(state, "last_alert_time", 0.0)
 
-                if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL):
+                # PHASE 2 FIX: alert on any single strong signal, not just HIGH/CRITICAL.
+                # SUSPICIOUS was previously capped at confidence 0.40 and NEVER alerted —
+                # per your explicit direction (detection over fewer alerts), a single
+                # strong signal now reaches the operator instead of going silent until a
+                # second independent source corroborates it.
+                if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL, DecisionState.SUSPICIOUS):
                     if time_elapsed > 300 or (time_elapsed > 60 and (risk_delta >= 1.0 or primary_sig != getattr(state, "last_alert_signature", ""))):
                         LOGGER.warning("Alert Triggered for %s! Risk: %.2f, Signature: %s", hostname, risk, primary_sig)
                         state.last_alert_time = now
@@ -617,6 +707,39 @@ class EnginePipeline:
                                 "(confidence=%.3f, stage=%s). Skipping Telegram & Hardware Isolation.",
                                 hostname, fp_verdict["confidence"], fp_verdict["stage"]
                             )
+                            # Flag it so downstream readers know it was suppressed
+                            alert_payload["suppressed"] = True
+
+                            # ═══════════════════════════════════════════════════════
+                            # PHASE 3 (closed-loop autonomous actions): the action already
+                            # executed (the domain is immunized, this and future alerts
+                            # for it are suppressed) — this does NOT block on approval.
+                            # It posts a non-blocking, one-tap-revoke notification so a
+                            # human can catch a bad auto-suppression without having been
+                            # in the loop for the action itself. Only fires on a genuinely
+                            # NEW immunization (fp_engine already dedupes repeat hits).
+                            # ═══════════════════════════════════════════════════════
+                            action_info = fp_verdict.get("action")
+                            if action_info and bool(self.config.get("fp_revoke_notifications_enabled", True)):
+                                action_id = uuid.uuid4().hex[:10]
+                                ttl_seconds = float(self.config.get("fp_revoke_action_ttl_seconds", 86400.0))
+                                self.state_manager.record_action(
+                                    action_id=action_id, action_type=action_info["type"],
+                                    target=action_info["target"], device_id=dev_id, hostname=hostname,
+                                    ttl_seconds=ttl_seconds,
+                                )
+                                revoke_hours = max(1, int(ttl_seconds / 3600))
+                                revoke_msg = (
+                                    f"🔔 *Auto-action:* immunized `{action_info['target']}` for *{hostname}* "
+                                    f"(FP confidence={fp_verdict.get('confidence', 0.0):.2f}).\n"
+                                    f"If this was actually a real threat, tap Revoke within {revoke_hours}h."
+                                )
+                                self.alert_manager.send(
+                                    revoke_msg,
+                                    reply_markup={"inline_keyboard": [[
+                                        {"text": "↩️ Revoke (this was a real threat)", "callback_data": f"revoke:{action_id}"}
+                                    ]]}
+                                )
                         else:
                             # Real threat or low-confidence alert -> execute IPS containment & publish Telegram
                             containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
@@ -640,114 +763,137 @@ class EnginePipeline:
                             if bool(self.config.get("interactive_blocking_enabled", False)) and "UNBLOCKED" in containment_status:
                                 containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
-                            self.alert_writer.write(alert_payload)
-                            alerts_total.labels(client_ip, getattr(state, "hostname", "unknown"), getattr(state, "device_type", "unknown")).inc()
+                        self.alert_writer.write(alert_payload)
+                        alerts_total.labels(client_ip, getattr(state, "hostname", "unknown"), getattr(state, "device_type", "unknown")).inc()
+                        
+                        if not fp_verdict["suppress"]:
 
-                            # Extract Application / Process Name & Scanned Ports
-                            app_name = self.zeek_fx.get_app_context(client_ip) if self.zeek_fx else "Network Socket"
-                            scanned_ports = self.zeek_fx.get_scanned_ports(client_ip) if self.zeek_fx else []
+                                # Extract Application / Process Name & Scanned Ports
+                                app_name = self.zeek_fx.get_app_context(client_ip) if self.zeek_fx else "Network Socket"
+                                scanned_ports = self.zeek_fx.get_scanned_ports(client_ip) if self.zeek_fx else []
 
-                            # Filter DNS sequence to show only threat-contributing / suspicious queries
-                            threat_dns_lines = []
-                            omitted_count = 0
-                            if hasattr(state, "rolling") and hasattr(state.rolling, "events"):
-                                for ev_ts, ev_dom, ev_status in list(state.rolling.events)[-25:]:
-                                    # Omit harmless background noise and known safe domains
-                                    safe_domains = set(self.config.get("safe_domains", []))
-                                    is_trusted = (
-                                        is_telemetry_domain(ev_dom) or 
-                                        (ev_dom in safe_domains) or 
-                                        (self.ti_engine and self.ti_engine.is_allowlisted(ev_dom))
-                                    )
-                                    if is_trusted and ev_status not in BLOCKED_STATUSES:
-                                        omitted_count += 1
-                                        continue
+                                # Filter DNS sequence to show only threat-contributing / suspicious queries
+                                threat_dns_lines = []
+                                omitted_count = 0
+                                if hasattr(state, "rolling") and hasattr(state.rolling, "events"):
+                                    for ev_ts, ev_dom, ev_status in list(state.rolling.events)[-25:]:
+                                        # Omit harmless background noise and known safe domains
+                                        safe_domains = set(self.config.get("safe_domains", []))
+                                        is_trusted = (
+                                            is_telemetry_domain(ev_dom) or 
+                                            (ev_dom in safe_domains) or 
+                                            (self.ti_engine and self.ti_engine.is_allowlisted(ev_dom))
+                                        )
+                                        if is_trusted and ev_status not in BLOCKED_STATUSES:
+                                            omitted_count += 1
+                                            continue
                                     
-                                    status_tag = "🔴 BLOCKED" if ev_status in BLOCKED_STATUSES else "🟡 NXDOMAIN" if ev_status in NXDOMAIN_STATUSES else "🟢 ALLOWED"
-                                    threat_dns_lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}")
+                                        status_tag = "🔴 BLOCKED" if ev_status in BLOCKED_STATUSES else "🟡 NXDOMAIN" if ev_status in NXDOMAIN_STATUSES else "🟢 ALLOWED"
+                                        threat_dns_lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}")
 
-                            threat_dns_str = "\n".join(threat_dns_lines[:10]) if threat_dns_lines else "  No suspicious DNS queries detected"
-                            if omitted_count > 0:
-                                threat_dns_header = f"🕒 *Threat-Filtered DNS Sequence (Omitted {omitted_count} harmless queries):*"
-                            else:
-                                threat_dns_header = "🕒 *Threat-Filtered DNS Sequence:*"
+                                threat_dns_str = "\n".join(threat_dns_lines[:10]) if threat_dns_lines else "  No suspicious DNS queries detected"
+                                if omitted_count > 0:
+                                    threat_dns_header = f"🕒 *Threat-Filtered DNS Sequence (Omitted {omitted_count} harmless queries):*"
+                                else:
+                                    threat_dns_header = "🕒 *Threat-Filtered DNS Sequence:*"
 
-                            # Format FP Confidence % and Operator Recommendation
-                            fp_pct = int(fp_verdict.get("confidence", 0.0) * 100)
-                            threat_pct = 100 - fp_pct
+                                # Format FP Confidence % and Operator Recommendation
+                                fp_pct = int(fp_verdict.get("confidence", 0.0) * 100)
+                                threat_pct = 100 - fp_pct
 
-                            if fp_verdict["confidence"] >= 0.75:
-                                rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
-                            elif fp_verdict["confidence"] >= 0.55:
-                                rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
-                            else:
-                                rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
+                                if fp_verdict["confidence"] >= 0.75:
+                                    rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
+                                elif fp_verdict["confidence"] >= 0.55:
+                                    rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
+                                else:
+                                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
 
-                            threat_name = decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat")
-                            threat_conf_pct = int(decision.get('threat_confidence', 0) * 100)
+                                threat_name = decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat")
+                                threat_conf_pct = int(decision.get('threat_confidence', 0) * 100)
 
-                            alert_msg = (
-                                f"🚨 *[ALERT] {hostname} ({client_ip})*\n\n"
-                                f"🧠 *THREAT:* {threat_name} ({threat_conf_pct}% Confidence)\n"
-                                f"↳ Trigger: `{primary_sig}`\n"
-                                f"↳ Risk Score: `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n\n"
-                                f"🔍 *CAUSE / EVIDENCE*\n"
-                            )
+                                alert_msg = (
+                                    f"🚨 *[ALERT] {hostname} ({client_ip})*\n\n"
+                                    f"🧠 *THREAT:* {threat_name} ({threat_conf_pct}% Confidence)\n"
+                                    f"↳ Trigger: `{primary_sig}`\n"
+                                    f"↳ Risk Score: `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n\n"
+                                    f"🔍 *CAUSE / EVIDENCE*\n"
+                                )
                             
-                            self.zeek_fx.reset_client(client_ip)
-                            state.rolling.reset()
-                            state.last_alert_time = now
+                                # PHASE 6: clear counters for every known address of this device — leaving
+                                # stale counters on the non-current address family would let it immediately
+                                # re-trigger from leftover state on its next cycle.
+                                self.zeek_fx.reset_client(known_ips_snapshot)
+                                state.rolling.reset()
+                                state.last_alert_time = now
                             
-                            grouped_evidence = {}
-                            for ev in active_evidence:
-                                if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
-                                    grouped_evidence[ev.independence_group] = ev
+                                grouped_evidence = {}
+                                for ev in active_evidence:
+                                    if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
+                                        grouped_evidence[ev.independence_group] = ev
                                     
-                            for group, ev in grouped_evidence.items():
-                                alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
+                                for group, ev in grouped_evidence.items():
+                                    alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
                                 
-                            active_evidence.clear()
+                                active_evidence.clear()
                                 
-                            target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
-                            alert_msg += (
-                                f"- Target: `{target_display}` ({service_name} / Port {dest_port})\n"
-                                f"- Application: `{app_name}`\n"
-                            )
+                                target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
+                                alert_msg += (
+                                    f"- Target: `{target_display}` ({service_name} / Port {dest_port})\n"
+                                    f"- Application: `{app_name}`\n"
+                                )
                             
-                            if scanned_ports:
-                                alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}`\n"
+                                if scanned_ports:
+                                    alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}`\n"
 
-                            if threat_dns_str and "No suspicious" not in threat_dns_str:
-                                alert_msg += f"\n{threat_dns_header}\n{threat_dns_str}\n"
+                                if threat_dns_str and "No suspicious" not in threat_dns_str:
+                                    alert_msg += f"\n{threat_dns_header}\n{threat_dns_str}\n"
 
-                            alert_msg += (
-                                f"\n🛡️ *RESPONSE*\n"
-                                f"- Action: `{containment_status}`\n"
-                                f"- AI Analysis: `{fp_pct}% FP / {threat_pct}% Threat`\n"
-                            )
+                                alert_msg += (
+                                    f"\n🛡️ *RESPONSE*\n"
+                                    f"- Action: `{containment_status}`\n"
+                                    f"- AI Analysis: `{fp_pct}% FP / {threat_pct}% Threat`\n"
+                                )
                             
-                            if decision.get("evidence_verification_required", False):
-                                alert_msg += "- Verification: `Required` (partial hypothesis support)\n"
+                                if decision.get("evidence_verification_required", False):
+                                    alert_msg += "- Verification: `Required` (partial hypothesis support)\n"
                                 
-                            alert_msg += f"\n{rec_badge}"
+                                alert_msg += f"\n{rec_badge}"
 
 
-                            reply_markup = None
-                            if bool(self.config.get("interactive_blocking_enabled", False)):
-                                inline_keyboard = [
-                                    [
+                                reply_markup = None
+                                inline_keyboard = []
+                                if bool(self.config.get("interactive_blocking_enabled", False)):
+                                    inline_keyboard.append([
                                         {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
                                         {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
-                                    ]
-                                ]
-                                if target_display and target_display != "unknown":
-                                    inline_keyboard.append([
-                                        {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{target_display}"}
                                     ])
-                                reply_markup = {"inline_keyboard": inline_keyboard}
 
-                            # self.ollama_analyzer.analyze(alert_payload)
-                            self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
+                                # PHASE 6 (operator-driven self-healing, closed loop): record a
+                                # "published_alert" action-ledger entry for EVERY published alert,
+                                # not just autonomous actions, carrying the full alert_payload in
+                                # `extra` so a later "Mark False Positive" tap can retrieve it without
+                                # re-deriving features. Deliberately NOT gated on
+                                # interactive_blocking_enabled — marking a false positive is operator
+                                # feedback for the FP-reduction training loop, not a hardware
+                                # containment decision, so it should be available whether or not
+                                # hardware isolation buttons are enabled.
+                                if target_display and target_display != "unknown":
+                                    publish_action_id = uuid.uuid4().hex[:10]
+                                    feedback_ttl = float(self.config.get("fp_operator_feedback_ttl_seconds", 30 * 86400.0))
+                                    self.state_manager.record_action(
+                                        action_id=publish_action_id, action_type="published_alert",
+                                        target=target_display, device_id=dev_id, hostname=hostname,
+                                        ttl_seconds=feedback_ttl, extra={"alert_payload": alert_payload},
+                                    )
+                                    inline_keyboard.append([
+                                        {"text": "🛡️ Mark False Positive", "callback_data": f"immunize:{publish_action_id}"}
+                                    ])
+
+                                if inline_keyboard:
+                                    reply_markup = {"inline_keyboard": inline_keyboard}
+
+                                # self.ollama_analyzer.analyze(alert_payload)
+                                self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
                 elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
                     LOGGER.debug("Device %s risk subsided below threshold.", hostname)
@@ -770,120 +916,7 @@ class EnginePipeline:
                 for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):
                     self.metrics_exporter.record_lateral_target(dev_id, hostname, client_ip, dst_ip, dst_port)
                     
-            # --- OUTSIDE THE DEVICE LOCK ---
-            if mitigation_pending:
-                m = mitigation_pending
-                containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
-                
-                if self.ips_mitigator:
-                    self.ips_mitigator.mitigate(
-                        st=m["state"],
-                        target_domain=m["target_domain"],
-                        risk_score=m["risk"],
-                        c2_hits=1 if m["risk"] >= 8.0 else 0,
-                        dga_burst=(m["features"].get("suspicious_domains_z", 0.0) > 2.0),
-                        lateral_threat=(m["features"].get("zeek_lateral_moves", 0) > 0 or m["features"].get("zeek_honeypot_hits", 0) > 0),
-                        is_safe=m["is_safe"],
-                        ti_engine=self.ti_engine,
-                        reason=m["primary_sig"],
-                        fp_verdict=m["fp_verdict"]
-                    )
-                    containment_status = self.ips_mitigator.get_containment_status(
-                        client_ip=m["client_ip"],
-                        mac_addr=getattr(m["state"], "mac_address", "unknown"),
-                        domain=m["target_domain"]
-                    )
-                    
-                if bool(self.config.get("interactive_blocking_enabled", False)) and "UNBLOCKED" in containment_status:
-                    containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
-
-                self.alert_writer.write(m["alert_payload"])
-                alerts_total.labels(m["client_ip"], getattr(m["state"], "hostname", "unknown"), getattr(m["state"], "device_type", "unknown")).inc()
-
-                app_name = self.zeek_fx.get_app_context(m["client_ip"]) if self.zeek_fx else "Network Socket"
-                scanned_ports = self.zeek_fx.get_scanned_ports(m["client_ip"]) if self.zeek_fx else []
-
-                threat_dns_lines = []
-                omitted_count = 0
-                if hasattr(m["state"], "rolling") and hasattr(m["state"].rolling, "events"):
-                    for ev_ts, ev_dom, ev_status in list(m["state"].rolling.events)[-25:]:
-                        safe_domains = set(self.config.get("safe_domains", []))
-                        is_trusted = (
-                            is_telemetry_domain(ev_dom) or 
-                            (ev_dom in safe_domains) or 
-                            (self.ti_engine and self.ti_engine.is_allowlisted(ev_dom))
-                        )
-                        if is_trusted and ev_status not in BLOCKED_STATUSES:
-                            omitted_count += 1
-                            continue
-                        
-                        status_tag = "🔴 BLOCKED" if ev_status in BLOCKED_STATUSES else "🟡 NXDOMAIN" if ev_status in NXDOMAIN_STATUSES else "🟢 ALLOWED"
-                        threat_dns_lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}")
-
-                threat_dns_str = "\n".join(threat_dns_lines[:10]) if threat_dns_lines else "  No suspicious DNS queries detected"
-                threat_dns_header = f"🕒 *Threat-Filtered DNS Sequence (Omitted {omitted_count} harmless queries):*" if omitted_count > 0 else "🕒 *Threat-Filtered DNS Sequence:*"
-
-                fp_pct = int(m["fp_verdict"].get("confidence", 0.0) * 100)
-                threat_pct = 100 - fp_pct
-
-                if m["fp_verdict"]["confidence"] >= 0.75:
-                    rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
-                elif m["fp_verdict"]["confidence"] >= 0.55:
-                    rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
-                else:
-                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
-
-                alert_msg = (
-                    f"🚨 *[ALERT] {m['hostname']} ({m['client_ip']})*\n"
-                    f"📊 *Risk:* `{m['risk']:.2f}` (Threshold: `{alert_threshold:.2f}`)\n"
-                    f"🏷️ *Primary Trigger:* {m['primary_sig']}\n\n"
-                    f"🌐 *DNS Activity (Pi-hole Context)*\n"
-                    f"- Target Domain: `{m['target_domain'] or 'None'}`\n"
-                    f"{threat_dns_header}\n{threat_dns_str}\n\n"
-                    f"🔌 *Network Activity (Zeek Context)*\n"
-                    f"- Dominant Outbound: `{m['service_name']}` (Port `{m['dest_port']}` / `{m['dest_proto']}`)\n"
-                    f"- App / Process: `{app_name}`\n"
-                )
-                if scanned_ports:
-                    alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}` [{len(scanned_ports)} ports]\n\n"
-                else:
-                    alert_msg += f"- Lateral Scans: None\n\n"
-
-                alert_msg += (
-                    f"🛡️ *Mitigation & Confidence*\n"
-                    f"- Containment: `{containment_status}`\n"
-                    f"- Confidence: `{fp_pct}% FP / {threat_pct}% Threat`\n\n"
-                )
-
-                alert_msg += "🧠 *BEST EXPLANATION:* " + m["decision"].get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat") + "\n"
-                alert_msg += f"⚖️ *Threat Confidence:* {int(m['decision'].get('threat_confidence', 0) * 100)}%\n\n"
-                alert_msg += "*EVIDENCE GRAPH:*\n"
-                
-                seen_groups = set()
-                for ev in m["active_evidence"]:
-                    if ev.independence_group not in seen_groups:
-                        seen_groups.add(ev.independence_group)
-                        alert_msg += f"✓ {ev.independence_group}: {ev.type} ({ev.value:.1f})\n"
-                
-                alert_msg += f"\n{rec_badge}"
-
-                reply_markup = None
-                if bool(self.config.get("interactive_blocking_enabled", False)):
-                    target = m.get('target_domain') if m.get('target_domain') and m.get('target_domain') != 'unknown' else m.get('dest_ip')
-                    inline_keyboard = [
-                        [
-                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{m['client_ip']}"},
-                            {"text": "🔓 Release Device", "callback_data": f"unblock:{m['client_ip']}"}
-                        ]
-                    ]
-                    if target and target != "unknown":
-                        inline_keyboard.append([
-                            {"text": "🛡️ Immunize FP Domain", "callback_data": f"immunize:{target}"}
-                        ])
-                    reply_markup = {"inline_keyboard": inline_keyboard}
-
-                # self.ollama_analyzer.analyze(m["alert_payload"])
-                self.alert_manager.send(alert_msg, raw_payload=m["alert_payload"], reply_markup=reply_markup)
+            # --- END DEVICE EVALUATION LOOP ---
 
         self.zeek_fx.prune(now, window_seconds)
         
@@ -895,11 +928,12 @@ class EnginePipeline:
         # Real-time Prometheus gauge cleanup for Grafana dashboard sync
         self.metrics_exporter.garbage_collect_ips_metrics(self.state_manager.get_ips_state())
         
-        if now - self._last_prune > 3600.0:  
+        if now - self._last_prune > 3600.0:
             pruned_list = self.state_manager.prune_stale_devices(now)
             for e_dev_id, e_hostname, e_dev_type in pruned_list:
                 self.metrics_exporter.remove_device_metric_labels(e_dev_id, e_hostname, e_dev_type)
                 if hasattr(self, 'evidence_store'): self.evidence_store.clear_device(e_dev_id)
+            self.state_manager.prune_expired_actions(now)  # PHASE 3: drop expired revoke-ledger entries
             self._last_prune = now
 
         # IPC Split-Brain Reconciliation: detect if the Uvicorn IPC endpoints wrote

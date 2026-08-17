@@ -218,14 +218,22 @@ class AlertManager:
                     
                 self.q.task_done()
             except Exception as exc:
-                LOGGER.error("Exception in Telegram dispatch worker: %s", exc)
-                # Ensure the item is not completely lost on transient hard exceptions
+                LOGGER.error("Exception in Telegram dispatch worker: %s[cite: 29]", exc)
                 if 'item' in locals() and item:
                     try:
-                        self.q.put(item)
+                        # Prevent infinite re-queuing of malformed payloads by checking structure
+                        if isinstance(item, tuple) and len(item) == 3:
+                            msg, payload, markup = item
+                            if not isinstance(payload, dict) or "retry_count" not in payload:
+                                payload = payload or {}
+                                payload["retry_count"] = payload.get("retry_count", 0) + 1
+                                if payload["retry_count"] <= 3:
+                                    self.q.put((msg, payload, markup))
+                                    time.sleep(2.0)
+                                    continue
                     except Exception:
                         pass
-                    time.sleep(2.0) # Backoff before retrying queue
+                time.sleep(2.0)
 
     def _bot_updates_worker(self) -> None:
         """Background listener thread: polls Telegram getUpdates for /unblock, /release, /block, and inline button callbacks.
@@ -296,9 +304,35 @@ class AlertManager:
                 self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
                 msg_text = f"🔒 Hardware containment block approved for '{target}'."
             elif action == "immunize":
+                # PHASE 6 (closed-loop self-healing): `target` here is the action_id from a
+                # published alert's "🛡️ Mark False Positive" button (see pipeline.py's
+                # "published_alert" ledger entry), not a raw domain string — mirrors the
+                # `revoke` branch's action_id convention below. The actual domain that got
+                # immunized is only known after the IPC call resolves it from the ledger
+                # entry's stashed alert_payload, so the confirmation text is built from the
+                # JSON response rather than echoing back what was clicked.
                 ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/immunize"
-                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
-                msg_text = f"🛡️ Domain '{target}' immunized."
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    immunized_domain = body.get("immunized", "the domain")
+                    unblock_note = " Pi-hole block released." if body.get("unblocked") else ""
+                    msg_text = f"🛡️ Marked false positive — '{immunized_domain}' immunized.{unblock_note}"
+                elif resp.status_code == 404:
+                    msg_text = "⚠️ Alert already expired or unknown — nothing to mark."
+                else:
+                    msg_text = f"⚠️ Mark-false-positive failed: HTTP {resp.status_code}"
+            elif action == "revoke":
+                # PHASE 3 (closed-loop): `target` here is the action_id from a "🔔
+                # Auto-action" notification's [Revoke] button, not a domain/IP/hostname.
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/revoke"
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    msg_text = "↩️ Action revoked — treated as a real threat going forward."
+                elif resp.status_code == 404:
+                    msg_text = "⚠️ Action already revoked, expired, or unknown."
+                else:
+                    msg_text = f"⚠️ Revoke failed: HTTP {resp.status_code}"
             else:
                 msg_text = "Action acknowledged."
 

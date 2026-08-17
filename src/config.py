@@ -3,20 +3,31 @@ config.py – Configuration management engine.
 
 RECENT FIXES:
 - FIXED (STATE DRIFT VULNERABILITY): Enforced Configuration Immutability for static keys.
-  During a live reload, if a key belonging to `_STATIC_KEYS` is altered in the JSON file,
-  the `LiveConfig` engine explicitly rejects the in-memory mutation. This prevents live 
-  daemons (like FastAPI or Prometheus) from decoupling from the `CONFIG` singleton state.
-  A warning is logged notifying the operator that a restart is required.
+  During a live reload, if a key belonging to `_STATIC_KEYS` is altered in the config
+  file, the `LiveConfig` engine explicitly rejects the in-memory mutation. This prevents
+  live daemons (like FastAPI or Prometheus) from decoupling from the `CONFIG` singleton
+  state. A warning is logged notifying the operator that a restart is required.
+- CHANGED (2026-08-17, config.yaml migration): config.json is replaced by config.yaml —
+  YAML instead of JSON so the file can carry real inline comments explaining what every
+  setting does. Loading now goes through yaml.safe_load() instead of json.load()/loads().
+  The old two-bucket static_requires_restart/dynamic_live_reload section split is gone;
+  config.yaml instead groups keys into logical categories (network_and_devices,
+  false_positive_engine, geofencing, etc.) — this was always purely cosmetic, since the
+  actual restart-vs-live protection has always been enforced by whether a key's NAME is
+  in `_STATIC_KEYS` below, independent of which file section it lived in. `_load()`'s
+  flattening step now merges every top-level category (any top-level mapping whose name
+  doesn't start with "_") instead of looking for those two specific section names.
 """
-import json
 import os
 import threading
 import time
 import logging
 from pathlib import Path
 
+import yaml
+
 LOGGER = logging.getLogger("home_ids.config")
-CONFIG_FILE = Path(__file__).parent.parent / "config.json"
+CONFIG_FILE = Path(__file__).parent.parent / "config.yaml"
 
 _ENV_OVERRIDES = {
     "TELEGRAM_TOKEN":         "telegram_token",
@@ -41,11 +52,16 @@ _ENV_OVERRIDES = {
 _STATIC_KEYS = {
     "metrics_port", "state_path", "model_path", "geoip_db", "geoip_asn_db", 
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
-    "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key", 
-    "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password", 
+    "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
+    "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
     "fritz_password", "fritz_api_token", "fastapi_port", "ollama_api_key",
-    "scheduled_tasks"
+    "env_file"
 }
+# NOTE: "scheduled_tasks" was removed from this set (2026-08-17 config audit) — it was a
+# legacy top-level schema (job -> {"enabled", "time"}) never actually read by any code.
+# The real, working schedule lives under dynamic_live_reload.scheduler (job -> {"enabled",
+# "cron", optional "script"}), polled by scripts/scheduler.py, plus autotune_schedule_cron
+# for the weekly retrain job. See DEFAULT_CONFIG below.
 
 def apply_env_overrides(config: dict) -> None:
     for env_key, cfg_key in _ENV_OVERRIDES.items():
@@ -56,6 +72,27 @@ def apply_env_overrides(config: dict) -> None:
             else:
                 config[cfg_key] = val
 
+def load_env_file(env_path: Path) -> None:
+    if not env_path.exists():
+        return
+    try:
+        content = env_path.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            line = line.strip()
+            # Seamlessly handle copied systemd lines
+            if line.startswith("Environment="):
+                line = line[12:]
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+    except Exception as e:
+        LOGGER.error("Failed to load .env file %s: %s", env_path, e)
+
 DEFAULT_CONFIG = {
     "poll_interval": 2.0,
     "window_seconds": 300,
@@ -65,16 +102,22 @@ DEFAULT_CONFIG = {
     "alert_threshold": 6.0,
     "threshold_std_dev": 3.0,
     "baseline_alpha": 0.05,
-    "state_path": "state/ids_state.json",               
-    "model_path": "state/ids_model.pkl",                
-    "alert_json_path": "SOC/alerts_stream.jsonl",
+    "state_path": "state/ids_state.json",
+    "model_path": "models/ids_model.pkl",
+    "alert_json_path": "alerts.json",
     "alert_json_max_bytes": 1073741824,
     "pihole_db": "/etc/pihole/pihole-FTL.db",
     "zeek_log_dir": "/opt/zeek/logs/current",
     "home_subnet": "192.168.1.0/24",
+    # PHASE 0 FIX: multi-subnet support. Prefer this list; "home_subnet" (singular) is kept
+    # only as a backward-compatible fallback for existing config files that don't set
+    # this key yet — see resolve_home_subnets() below. Leave as [] to keep using the legacy
+    # single-subnet key; populate it (e.g. ["192.168.1.0/24", "192.168.50.0/24"]) once you
+    # have more than one home subnet to track.
+    "home_subnets": [],
     "metrics_port": 9105,
-    "geoip_db": "state/GeoLite2-City.mmdb",             
-    "geoip_asn_db": "", 
+    "geoip_db": "models/GeoLite2-City.mmdb",
+    "geoip_asn_db": "",
     "ti_refresh_interval": 3600,
     "otx_api_key": "",
     "abuseipdb_api_key": "",
@@ -89,12 +132,21 @@ DEFAULT_CONFIG = {
     "ollama_url": "",         
     "ollama_model": "llama3", 
     "ollama_api_key": "",
-    "scheduled_tasks": {
-        "retrohunter": {"enabled": True, "time": "02:00"},
-        "autotune": {"enabled": True, "time": "03:00"},
-        "top_domains_report": {"enabled": True, "time": "06:00"}
+    # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are
+    # minute/hour/day/month/dow with only "*", "*/N", or an exact integer supported per
+    # field (no comma-lists, no ranges). "script" is an optional filename override for
+    # when the job key doesn't match "<job_name>.py" — see scripts/retro_hunter.py, which
+    # needs this because its job key doesn't match its own filename under the "scheduler"
+    # key. The weekly/nightly retrain job (train_fp_classifier.py) is scheduled separately
+    # via autotune_enabled/autotune_schedule_cron below, not through this dict. Times below
+    # (2am / every-4h-from-midnight / 6am) are chosen so no two jobs fire in the same hour
+    # as each other or as autotune_schedule_cron's 3am default.
+    "scheduler": {
+        "ollama_soc": {"enabled": True, "cron": "0 */4 * * *"},
+        "retro_hunter": {"enabled": True, "cron": "0 2 * * *", "script": "retro_hunter.py"},
+        "top_domains_report": {"enabled": True, "cron": "0 6 * * *"},
     },
-    "decay_factor": 0.995,    
+    "decay_factor": 0.995,
     "device_type_overrides": {},
     "ips_enabled": True,           # Master switch for IPS
     "ips_pihole_enabled": True,    # Controls DNS Sinkholing
@@ -118,12 +170,28 @@ DEFAULT_CONFIG = {
     "router_hosts_timeout_seconds": 5.0,
     "ml_warmup_samples": 5000,
     "simulation_mode": False,
+    "env_file": ".env",
 
     # CL-AFPE tunables (audit)
     "fp_lgbm_threshold": 0.75,
     "fp_embed_similarity_threshold": 0.82,
     "fp_combined_suppress_threshold": 0.80,
     "fp_combined_uncertain_threshold": 0.55,
+
+    # PHASE 2: how long a SUSPICIOUS state with the same signature must persist
+    # uninterrupted before it's escalated to HIGH.
+    "suspicious_escalation_seconds": 600.0,
+    # PHASE 3 (closed-loop autonomous actions): non-blocking "🔔 Auto-action" Telegram
+    # notifications with a one-tap [Revoke] button, sent whenever fp_engine autonomously
+    # immunizes a NEW domain. fp_revoke_action_ttl_seconds bounds how long the revoke
+    # option stays offered.
+    "fp_revoke_notifications_enabled": True,
+    "fp_revoke_action_ttl_seconds": 86400.0,
+    # PHASE 4 (device re-identification / MAC-rotation resilience — see
+    # core/device_matching.py). All three are read by core/identity.py.
+    "identity_reidentify_enabled": True,
+    "identity_reidentify_min_confidence": 0.75,
+    "identity_reidentify_window_seconds": 1800.0,
 }
 
 class LiveConfig:
@@ -134,6 +202,10 @@ class LiveConfig:
         self._notify_cb = None
         self._last_loaded = 0.0
         self._watcher_active = False
+        
+        env_path = self.file_path.parent / self._config.get("env_file", ".env")
+        load_env_file(env_path)
+        
         apply_env_overrides(self._config)
         self._load()
 
@@ -141,26 +213,49 @@ class LiveConfig:
         if not self.file_path.exists():
             try:
                 self.file_path.parent.mkdir(parents=True, exist_ok=True)
-                structured = {"static_requires_restart": {}, "dynamic_live_reload": {}}
+                # Minimal auto-generated bootstrap (first-ever boot, no config.yaml on
+                # disk yet) — a plain static/dynamic split with no per-key comments. The
+                # rich, category-organized, fully-commented config.yaml is a hand-authored
+                # deliverable (see CONFIG_AUDIT_REPORT.md); this fallback exists only so
+                # the app never crashes on a totally fresh checkout with zero config.
+                structured = {
+                    "# NOTE": (
+                        "auto-generated minimal bootstrap config — replace with the "
+                        "fully-documented config.yaml from your deployment package for "
+                        "real inline explanations of every setting."
+                    ),
+                    "static_requires_restart": {},
+                    "dynamic_live_reload": {},
+                }
                 for k, v in self._config.items():
                     if k in _STATIC_KEYS:
                         structured["static_requires_restart"][k] = v
                     else:
                         structured["dynamic_live_reload"][k] = v
-                self.file_path.write_text(json.dumps(structured, indent=2))
+                self.file_path.write_text(yaml.safe_dump(structured, sort_keys=False))
             except Exception as exc:
                 LOGGER.error("Failed to create default config: %s", exc)
             return
 
         try:
             mtime = self.file_path.stat().st_mtime
-            raw = json.loads(self.file_path.read_text())
+            raw = yaml.safe_load(self.file_path.read_text()) or {}
             flattened = {}
-            if "static_requires_restart" in raw or "dynamic_live_reload" in raw:
-                flattened.update(raw.get("static_requires_restart", {}))
-                flattened.update(raw.get("dynamic_live_reload", {}))
-            else:
-                flattened = raw
+            for section_name, section_val in raw.items():
+                if str(section_name).startswith("_") or str(section_name).startswith("#"):
+                    continue  # metadata, never treated as config
+                if isinstance(section_val, dict):
+                    # A category grouping (network_and_devices, false_positive_engine,
+                    # scheduled_jobs, ... or the legacy static_requires_restart /
+                    # dynamic_live_reload names) — merge its keys into the flat
+                    # namespace CONFIG.get() actually reads from. Category names
+                    # themselves are purely organizational; add/rename/split them
+                    # freely in config.yaml without touching this code.
+                    flattened.update(section_val)
+                else:
+                    # A bare top-level scalar/list — the file skipped categories
+                    # entirely and is already flat. Still supported.
+                    flattened[section_name] = section_val
 
             changed = {}
             ignored_static_keys = []
@@ -181,6 +276,8 @@ class LiveConfig:
                             changed[k] = v
                             self._config[k] = v
                             
+                env_path = self.file_path.parent / self._config.get("env_file", ".env")
+                load_env_file(env_path)
                 apply_env_overrides(self._config)
             
             self._last_loaded = mtime
@@ -231,3 +328,16 @@ class LiveConfig:
             return self._config[key]
 
 CONFIG = LiveConfig(DEFAULT_CONFIG, CONFIG_FILE)
+
+
+def resolve_home_subnets(config) -> list:
+    """PHASE 0 FIX: supports multiple home subnets. Prefers the new `home_subnets` list
+    key; falls back to the legacy single `home_subnet` string key when the list is unset
+    or empty, so existing config files keep working unchanged."""
+    subnets = config.get("home_subnets", None)
+    if subnets and isinstance(subnets, list):
+        cleaned = [str(s).strip() for s in subnets if str(s).strip()]
+        if cleaned:
+            return cleaned
+    legacy = config.get("home_subnet", "192.168.1.0/24")
+    return [legacy] if legacy else []

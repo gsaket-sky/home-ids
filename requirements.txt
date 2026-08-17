@@ -11,3 +11,10 @@ fastapi>=0.95.0
 uvicorn>=0.21.0
 pydantic>=1.10.0
 fritzconnection>=1.12.0
+
+# Added 2026-08-17 for the config.json -> config.yaml migration:
+pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py read config.yaml
+ruamel.yaml>=0.18     # scripts/ollama_soc.py's save_config_key() needs comment-preserving
+                      # round-trip writes when it auto-updates safe_host_patterns -- plain
+                      # pyyaml has no round-trip mode and would silently strip every comment
+                      # in config.yaml the first time it wrote back to the file.

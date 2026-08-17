@@ -89,6 +89,15 @@ class ThreatIntel:
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
         self._load_cache()
 
+    def is_ready(self) -> bool:
+        """PHASE 5 FIX (fail-open visibility): True once at least one feed refresh cycle
+        has completed successfully. Lookups return "no match" identically whether that
+        means "checked, genuinely clean" or "no feed data loaded yet" — this lets callers
+        (pipeline.py) distinguish the two for operator visibility without changing any
+        detection behavior."""
+        with self._lock:
+            return self._stats.get("last_refresh", "never") != "never"
+
     def is_allowlisted(self, domain: str) -> bool:
         """
         Returns True if:
@@ -545,11 +554,13 @@ class AbuseIPDB:
             with self._lock: 
                 d = dict(self._live_cache)
             import gzip, json
-            with gzip.open(self.live_cache_file, "wt", encoding="utf-8") as f: 
+            tmp_file = self.live_cache_file.with_suffix(".gz.tmp")
+            with gzip.open(tmp_file, "wt", encoding="utf-8") as f: 
                 json.dump(d, f)
-            LOGGER.debug("AbuseIPDB live cache flushed to disk.")
+            tmp_file.replace(self.live_cache_file)
+            LOGGER.debug("AbuseIPDB live cache flushed to disk atomically[cite: 16, 24].")
         except Exception as exc: 
-            LOGGER.error("Failed to save AbuseIPDB live cache: %s", exc)
+            LOGGER.error("Failed to save AbuseIPDB live cache: %s[cite: 16, 24]", exc)
 
     def _load_live_cache(self) -> None:
         if not self.live_cache_file.exists(): 
