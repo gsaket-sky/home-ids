@@ -2,7 +2,11 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+<<<<<<< HEAD
 ## [v7.0.1] - 2026-08-17
+=======
+## [v7.0.0] - 2026-08-17
+>>>>>>> 6dce07a (docs: update all documentation for Version 7.0 (config.yaml migration, Phase 7 fixes, config audit))
 
 This release closes out a full end-to-end audit of the configuration system and the background job scheduler. Nothing in the detection math changed — this is a reliability, transparency, and maintainability pass: two silent scheduling bugs are fixed, every configuration key was individually verified against the code that reads it, and the entire configuration file was migrated from `config.json` to a documented, categorized `config.yaml`.
 
