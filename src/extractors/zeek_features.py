@@ -429,11 +429,12 @@ class ZeekFeatureExtractor:
                 mac = mac.lower()
                 self._bind_mac(ip, mac, event.get("ts", time.time()))
 
-                # PHASE 4: capture the DHCP fingerprint fields added by the
-                # local-dhcp-fingerprint.zeek policy script (vendor_class / param_list /
-                # user_class from DHCP Options 60 / 55 / 77). Only stored when at least one
-                # is actually present, so devices/Zeek builds without the policy script
-                # simply never populate this (safe no-op degrade).
+                # PHASE 4: capture the DHCP fingerprint fields added by
+                # zeek_scripts/local-dhcp-fingerprint.zeek (vendor_class / param_list from
+                # DHCP Options 60 / 55 -- see that file for why Option 77/user_class was
+                # left out). Only stored when at least one is actually present, so
+                # devices/Zeek builds without the script simply never populate this (safe
+                # no-op degrade). Deployment step: Documentation/INSTALL.md §3.3.2.
                 vendor_class = event.get("vendor_class")
                 param_list = event.get("param_list")
                 user_class = event.get("user_class")
