@@ -638,6 +638,23 @@ class EnginePipeline:
                             )
                             decision = dict(decision)
                             decision["state"] = DecisionState.HIGH
+                            # PHASE 19 FIX: this escalation predates the severity gate (24e1d07) --
+                            # at the time it was written, EVERY non-suppressed alert triggered
+                            # mitigate() regardless of state, so mutating decision["state"] here had
+                            # no bearing on containment, only on alert visibility/urgency. Once the
+                            # severity gate started trusting decision["state"] alone to authorize a
+                            # Pi-hole block, this became a silent bypass: a single uncorroborated
+                            # signal that simply keeps recurring on the same device+signature (no
+                            # NEW independent evidence, just time) could escalate to HIGH and pass
+                            # the gate -- exactly the "block only after genuine corroboration"
+                            # guarantee the gate exists to provide. Tagging it here lets the
+                            # mitigate() call site downstream tell "genuinely corroborated HIGH"
+                            # (decision_engine.py's own >=2-independent-sources scoring) apart from
+                            # "escalated via persistence alone" -- only the former may contain.
+                            # Alert visibility/urgency (this whole block's original purpose) is
+                            # untouched: confidence, explanation text, and Telegram severity still
+                            # reflect the escalation exactly as before.
+                            decision["escalated_via_persistence"] = True
                             decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
                             decision["threat_confidence"] = max(decision["threat_confidence"], 0.75)
                             risk = decision["threat_confidence"] * 10.0
@@ -807,6 +824,18 @@ class EnginePipeline:
                             # Real threat or low-confidence alert -> execute IPS containment & publish Telegram
                             containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
                             lateral_threat = (features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0)
+                            # PHASE 19 FIX: decision["state"] alone can no longer be trusted here --
+                            # it reads HIGH both when decision_engine.py itself found >=2 genuinely
+                            # independent corroborating sources, AND when the escalation block above
+                            # promoted a single persisting-but-uncorroborated SUSPICIOUS signal to
+                            # HIGH purely because it kept recurring. Only the former should ever be
+                            # allowed to authorize containment -- persistence of one weak signal is
+                            # not the same as a second independent one. Alert text/Telegram severity
+                            # still shows the escalated HIGH exactly as before; only the value fed to
+                            # the severity gate is downgraded back to SUSPICIOUS for this case.
+                            containment_decision_state = decision.get("state", "SUSPICIOUS")
+                            if decision.get("escalated_via_persistence"):
+                                containment_decision_state = DecisionState.SUSPICIOUS
                             if self.ips_mitigator:
                                 self.ips_mitigator.mitigate(
                                     st=state,
@@ -817,7 +846,7 @@ class EnginePipeline:
                                     ti_engine=self.ti_engine,
                                     reason=primary_sig,
                                     fp_verdict=fp_verdict,
-                                    decision_state=decision.get("state", "SUSPICIOUS")
+                                    decision_state=containment_decision_state
                                 )
                                 containment_status = self.ips_mitigator.get_containment_status(
                                     client_ip=client_ip,
