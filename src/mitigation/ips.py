@@ -473,7 +473,7 @@ class IPSMitigator:
                     res = subprocess.run(["pihole", "deny", domain], capture_output=True, text=True, timeout=5.0)
                     if res.returncode == 0:
                         LOGGER.info(f"Successfully blocked {domain} using local pihole CLI.")
-                        self._finalize_block(domain, hostname, device_ip, dev_id)
+                        self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
                         return True
                     else:
                         LOGGER.error(f"Local CLI fallback failed: {res.stderr}")
@@ -487,13 +487,13 @@ class IPSMitigator:
                 LOGGER.info("Pi-hole v5 fallback response: %s %s", resp.status_code, resp.text)
                 if "Not authorized" in resp.text:
                     LOGGER.warning("Pi-hole v5 requires SHA256 hashed password, but raw password was used. Mocking success for tests.")
-                    self._finalize_block(domain, hostname, device_ip, dev_id)
+                    self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
                     return True
 
             if resp.status_code in (200, 201, 204):
                 if "Not authorized" in resp.text:
                     return False
-                self._finalize_block(domain, hostname, device_ip, dev_id)
+                self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
                 return True
             elif 400 <= resp.status_code < 500 and resp.status_code != 429:
                 self._add_to_dead_letter(domain, hostname, dev_id, f"HTTP {resp.status_code}: {resp.text}")
@@ -552,8 +552,15 @@ class IPSMitigator:
             ips_dead_letter_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(1.0)
             self._save_queues()
 
-    def _finalize_block(self, domain, hostname, device_ip, dev_id):
+    def _finalize_block(self, domain, hostname, device_ip, dev_id, comment: str = ""):
         timestamp = time.time()
+        # PHASE 14: the "Home-IDS Auto-Block | Device: ... | Trigger: ..." comment is only
+        # guaranteed to reach Pi-hole itself on the primary v6 API path (it's passed in the
+        # JSON body there). The CLI (`pihole deny`) and legacy v5 API fallback paths don't
+        # have a verified way to carry a comment through without risking the block call
+        # itself failing on unfamiliar CLI flags -- so the comment is stored here, in LOCAL
+        # state, on every successful block regardless of which path executed it. This is
+        # the durable, always-present answer to "was this blocked by the script, and why".
         # Snapshot and update IPS state while holding the state-manager lock, then flush outside the lock.
         with self.state_manager._global_lock:
             ips_state = self.state_manager.get_ips_state()
@@ -564,6 +571,7 @@ class IPSMitigator:
                 "timestamp": timestamp,
                 "status": "active",
                 "persisted": True,
+                "comment": comment or "Home-IDS Auto-Block",
             }
             self.state_manager.save_ips_state(ips_state)
         self.state_manager.flush_to_disk()

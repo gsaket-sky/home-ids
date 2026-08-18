@@ -51,7 +51,7 @@
         "spec": {
           "id": 1,
           "title": "🔍 Select a Device to Investigate",
-          "description": "",
+          "description": "Pick a device (or several) from the 'device' dropdown at the top of this dashboard to filter every panel below to just that hostname.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -88,7 +88,7 @@
         "spec": {
           "id": 10,
           "title": "📜 Device Specific Alert Log",
-          "description": "",
+          "description": "Every alert Loki has logged that mentions this device (matched on hostname substring against the alerts.json stream). This is your full forensic timeline for the device selected above — read top-to-bottom (newest first) to reconstruct exactly what happened and when.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -162,7 +162,7 @@
         "spec": {
           "id": 2,
           "title": "AI Anomaly Confidence",
-          "description": "",
+          "description": "The IsolationForest ML model's structural outlier score for this device's own bespoke baseline (activates once the device has generated detection_engine.ml_warmup_samples = 5000 events). 0 = looks exactly like this device's normal behavior. Rising toward 1 = increasingly unusual for THIS specific device, even if the traffic would look normal for a different device type.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -262,7 +262,7 @@
         "spec": {
           "id": 3,
           "title": "Markov State Transition Anomaly",
-          "description": "",
+          "description": "How unlikely this device's current behavioral state is, given its own historical state-transition history (the MarkovStateTracker, see ENGINEERING_MANUAL.md §2.3). A device that has been BENIGN for months has a transition probability to CRITICAL approaching zero — so a sudden jump here is one of the most statistically significant single signals in the whole engine.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -362,7 +362,7 @@
         "spec": {
           "id": 4,
           "title": "DNS Query Rate",
-          "description": "",
+          "description": "Raw DNS queries per minute from this device. Not inherently good or bad on its own — read it together with DNS Avg Entropy and DNS Z-Score Spikes to the right; a volume spike alongside high entropy is a much stronger DGA signal than volume alone.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -462,7 +462,7 @@
         "spec": {
           "id": 5,
           "title": "DNS Avg Entropy",
-          "description": "",
+          "description": "Shannon entropy of this device's queried domain names. Per ENGINEERING_MANUAL.md, values above ~4.5 mathematically indicate algorithmically-generated (DGA) domain strings rather than human-typed or CDN-style domains.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -562,7 +562,7 @@
         "spec": {
           "id": 6,
           "title": "DNS Z-Score Spikes",
-          "description": "",
+          "description": "Standard-deviation (Z-Score) spikes in this device's query rate relative to its own EWMA baseline (baseline_alpha in config.yaml). A Z-Score above 3.0 is a 3-sigma anomaly — statistically, only ~0.3% of normal traffic should ever reach this level.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -662,7 +662,7 @@
         "spec": {
           "id": 7,
           "title": "Beaconing Volume Score",
-          "description": "",
+          "description": "How closely this device's outbound connection VOLUME matches a periodic beaconing pattern, independent of timing regularity (see Jitter Uniformity Score, next panel). High values here plus low jitter together are the two components of C2 beaconing detection.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -762,7 +762,7 @@
         "spec": {
           "id": 8,
           "title": "Jitter Uniformity Score",
-          "description": "",
+          "description": "How UNIFORM (low-jitter) this device's connection timing is, measured via Coefficient of Variation. Human/application traffic is naturally irregular; malware C2 check-ins are often suspiciously metronomic. Low jitter + high beaconing volume (left) = classic C2 heartbeat.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -862,7 +862,7 @@
         "spec": {
           "id": 9,
           "title": "Cyber Kill-Chain Phase",
-          "description": "",
+          "description": "This device's current position in the Cyber Kill Chain: 🟢 Normal → 🟡 Recon → 🟠 Lateral Movement → 🔴 C2 → 🟪 Exfiltration. This is the single fastest way to understand how far an attack has progressed on this specific device.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -951,6 +951,294 @@
                     }
                   }
                 },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-4001": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4001,
+          "title": "🎯 Threat Confidence vs Alert Threshold (6.0)",
+          "description": "This device's live Threat Confidence score plotted against the exact alert_threshold (6.0) the engine uses in detection_engine.alert_threshold — set as a visible threshold line, not just a number, so you can see precisely when and how often this device has crossed into alert territory. Crossing the line is what actually triggers containment, not any other panel on this page.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_threat_confidence{hostname=~\"$device\"}",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 6.0,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "line"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-4002": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4002,
+          "title": "🌍 Combined External Reputation (TI + AbuseIPDB + VirusTotal)",
+          "description": "All three independent reputation feeds for this device's contacted IPs plotted together. Because these are independent data sources (verified separately from your own behavioral detections), agreement across two or more of them is very strong corroborating evidence — a device flagged by all three is essentially confirmed-malicious regardless of what your own ML models say.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-4003": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4003,
+          "title": "🛠️ What To Do If This Device Turns Red",
+          "description": "Step-by-step mitigation guidance tailored to what the panels above are telling you.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "**This device is showing 🟠 Suspicious or 🔴 Critical activity — what now?**\n\n1. **Check the Kill-Chain Phase panel above.** RECON/LATERAL means it's probing other devices on your LAN — the highest-priority signal to act on, since it can spread. C2/EXFIL means it's likely already compromised and talking to an attacker or leaking data.\n2. **DNS sinkholing has already happened automatically** for any confirmed malicious domain (Pi-hole Layer 7 is never gated behind approval). Check the Alert Log below for which domains were involved.\n3. **Hardware isolation** (Layer 2 ARP tarpit / Layer 3 router WAN cut) either fired automatically, or — if `interactive_blocking_enabled` is `true` — is waiting for your approval via a Telegram inline button. You can also isolate or release this device directly from the Hostname column's action links on the Overview dashboard's Master Threat Ledger.\n4. **After remediating** (running AV, resetting credentials, or simply confirming it was a false positive), release the device. Releasing starts a 1-hour cooldown (`operator_release_cooldown_seconds`) before it can be auto-isolated again — unless it resumes lateral-movement scanning, which bypasses the cooldown immediately.\n5. **If this turns out to be a false positive** (e.g. a smart TV doing a firmware check), the CL-AFPE false-positive engine should catch it automatically going forward — see the System Tuning, Healing & Health dashboard to see exactly why it was or wasn't suppressed.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
                 "overrides": []
               }
             }
@@ -1091,6 +1379,45 @@
                 "name": "panel-10"
               }
             }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 41,
+              "width": 12,
+              "height": 9,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4001"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 41,
+              "width": 12,
+              "height": 9,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4002"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 50,
+              "width": 24,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-4003"
+              }
+            }
           }
         ]
       }
@@ -1104,6 +1431,42 @@
         "tags": [
           "home-ids-v2"
         ],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🏠 Go to Overview",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🏠 Go to Overview",
+        "url": "/d/41383d25-297c-417d-b70e-51544da44612",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🌐 Go to Threat Landscape",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🌐 Go to Threat Landscape",
+        "url": "/d/6879f305-539b-45d6-9fdf-9cc26a1d782f",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🛡️ Go to System Tuning, Healing & Health",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
+        "url": "/d/a258bbcb-61a1-4829-8251-edc0f3b07407",
+        "tags": [],
         "asDropdown": false,
         "targetBlank": false,
         "includeVars": true,

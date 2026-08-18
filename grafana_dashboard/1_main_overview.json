@@ -50,7 +50,7 @@
         "spec": {
           "id": 1,
           "title": "🩺 How is the system doing?",
-          "description": "",
+          "description": "Section header. The six tiles below it are simple up/down health checks for each subsystem Home-IDS depends on — Pi-hole, Zeek, the ML model, the router integration, and the Layer-2 tarpit. Green = running normally. Red = that subsystem is down and the protection it provides is currently NOT active.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -87,7 +87,7 @@
         "spec": {
           "id": 10,
           "title": "Total Active Isolations",
-          "description": "",
+          "description": "How many devices are RIGHT NOW under active hardware containment (Layer-2 ARP tarpit and/or Layer-3 router isolation combined). 0 is the normal, healthy state. Any non-zero value means a device is currently isolated — check the Master Threat Ledger below to see which one and why.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -168,7 +168,7 @@
         "spec": {
           "id": 1001,
           "title": "📜 High-Priority Security Alerts (Live Timeline)",
-          "description": "",
+          "description": "A live, scrolling feed of every alert the engine has classified as verdict = CONFIRMED_THREAT (i.e. NOT suppressed by the false-positive engine). This is your primary 'what just happened' feed. Each row is one evaluated alert with its full evidence JSON. Sourced from alerts.json via Loki job=\"home_ids_alerts\".",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -185,7 +185,7 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} |= \"CONFIRMED THREAT\" | json",
+                        "expr": "{job=\"home_ids_alerts\"} | json | verdict=\"CONFIRMED_THREAT\"",
                         "format": "table",
                         "instant": false
                       }
@@ -243,7 +243,7 @@
         "spec": {
           "id": 11,
           "title": "Lifetime Threats Blocked",
-          "description": "",
+          "description": "Lifetime running total of domains Pi-hole has sinkholed on Home-IDS's instruction (Layer 7 / DNS containment, metric home_ids_ips_pihole_blocks_aggregate_total). This mitigation layer fires immediately and autonomously the moment a threat is confirmed, regardless of the interactive_blocking_enabled setting — DNS blocking is never gated behind Telegram approval. See the new 'Pi-hole Sinkhole Rate' panel further down for the trend.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -320,7 +320,7 @@
         "spec": {
           "id": 12,
           "title": "Total Alerts Triaged",
-          "description": "",
+          "description": "Lifetime count of alerts that crossed detection_engine.alert_threshold (6.0) and were sent through the full evaluation pipeline, whether they ended up confirmed or suppressed as false positives.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -397,7 +397,7 @@
         "spec": {
           "id": 2,
           "title": "Pi-hole IPS",
-          "description": "",
+          "description": "Is the Pi-hole DNS sinkhole integration currently reachable and authenticated? Green = Home-IDS can issue blocklist commands to Pi-hole right now. Red = Layer 7 (DNS) containment is not functioning — check pihole_integration config and the PIHOLE_API_PASSWORD / PIHOLE_API_URL secrets in .env.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -478,7 +478,7 @@
         "spec": {
           "id": 3,
           "title": "Zeek Network Monitor",
-          "description": "",
+          "description": "Is Zeek's log stream currently being read? Green = the engine is actively tailing conn.log/dns.log and extracting network features. Red = Brain 1 has lost its primary sensor and is flying blind on network-level detections (port scans, JA3/JA4 fingerprints, lateral movement).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -559,7 +559,7 @@
         "spec": {
           "id": 4,
           "title": "AI Model Loaded",
-          "description": "",
+          "description": "Has the global scikit-learn IsolationForest baseline model (models/ids_model.pkl) loaded successfully? Green = new/unknown devices get a working anomaly baseline. Red = anomaly scoring for devices that haven't hit their own ml_warmup_samples yet is effectively disabled.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -640,7 +640,7 @@
         "spec": {
           "id": 5,
           "title": "Router Kill-Switch",
-          "description": "",
+          "description": "Is the Fritz!Box TR-064 router integration configured and reachable? This gates Layer-3 hardware isolation (severing a device's WAN access). Red doesn't mean you're unprotected — Layer 7 (Pi-hole) and Layer 2 (ARP tarpit) still work independently — it just means the router 'kill switch' specifically is unavailable.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -721,7 +721,7 @@
         "spec": {
           "id": 6,
           "title": "Layer-2 Tarpit",
-          "description": "",
+          "description": "Is the Layer-2 Scapy ARP/NDP tarpit subsystem armed and ready? This is usually the fastest-acting containment layer since it works purely on the local LAN with no external API dependency. Red here is worth investigating first if a device seems to stay online despite being 'isolated'.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -802,7 +802,7 @@
         "spec": {
           "id": 7,
           "title": "API Integrations",
-          "description": "",
+          "description": "Minimum status across ALL configured external integrations (Pi-hole, router, and — depending on your build — threat-intel APIs). Shows red if even ONE integration you've enabled is currently failing, so you don't have to check every tile individually.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -883,7 +883,7 @@
         "spec": {
           "id": 71,
           "title": "Alert Queue",
-          "description": "",
+          "description": "How many evaluated alerts are currently sitting in the processing queue waiting for Brain 2 (CL-AFPE) to decide suppress-vs-confirm. Should hover near 0 in normal operation. A sustained climb usually means the false-positive engine or an external threat-intel lookup is stalling — check LGBM Model Status and API Integrations above.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -964,7 +964,7 @@
         "spec": {
           "id": 8,
           "title": "📖 How to read the Master Ledger",
-          "description": "",
+          "description": "Section header for the Master Threat Ledger below — explains how to read it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1001,7 +1001,7 @@
         "spec": {
           "id": 9,
           "title": "🛡️ What did the system block for me?",
-          "description": "",
+          "description": "Section header for the three lifetime counters to the right — explains that they answer 'how many threats has this thing actually stopped for me'.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1038,7 +1038,7 @@
         "spec": {
           "id": 9023,
           "title": "🚨 Master Threat Ledger (Complete Multi-Vector Device Matrix)",
-          "description": "",
+          "description": "The single most important panel in this dashboard set. One row per device, one column per detection signal — statistical (Threat Confidence, ML Outlier, Markov Score, Risk Velocity), threat-intel (TI Risk, AbuseIPDB, VirusTotal), network (JA4+ Hits, Honeypot, Lateral Moves, DoH Intercepts, Port Scans, Outbound Bytes, TXT/NULL Abuse), and containment/lifecycle state (Fritz! Router Block, Layer-2 Tarpit Trapped, Kill-Chain Phase, Probation, Baseline Frozen, Safe Listed). Sort by Threat Confidence to triage fastest. Click a hostname to open its full Device Deep Dive page. Thresholds on the Threat Confidence column (🟢 0-3.99 / 🟡 4-5.99 / 🟠 6-7.99 / 🔴 8+) mirror the engine's own detection_engine.alert_threshold = 6.0 — anything 🟠 or worse has already crossed the line that triggers a real alert.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2991,6 +2991,247 @@
             }
           }
         }
+      },
+      "panel-2001": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2001,
+          "title": "🧭 New Here? Start With This",
+          "description": "A guided orientation for first-time operators: what the 4 dashboards are for, what the color thresholds mean, and what to actually do when a device turns red.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "### Welcome — start here\n\nThis is one of **4 linked dashboards**. Use the links at the top-right of every dashboard (or the corner **Navigation** menu) to jump between them:\n\n1. **Overview** (this page) — is the system healthy, and what's the current threat picture across your whole network?\n2. **Threat Landscape** — where is the threat coming from (countries, C2, DNS tunneling, scanning)?\n3. **Device Deep Dive** — pick one device and see its full history.\n4. **System Tuning, Healing & Health** — how the AI is tuning itself, what it's silently suppressed, and whether the engine process itself is healthy.\n\n**What the colors mean everywhere in this dashboard set:** 🟢 Safe (0-3.99) → 🟡 Monitoring (4-5.99) → 🟠 Suspicious (6-7.99, this is the engine's real alert_threshold) → 🔴 Critical (8+). These bands are not arbitrary — they come directly from `detection_engine.alert_threshold: 6.0` in `config.yaml`.\n\n**If you see a 🔴 Critical device:** open its row link to go to Device Deep Dive, read the Kill-Chain Phase and which specific signals fired (TI/AbuseIPDB/VirusTotal flags = reputation, Port Scans/Lateral Moves = it's attacking other devices, Outbound Bytes spike = possible data exfiltration). If `interactive_blocking_enabled` is on, you'll get a Telegram prompt to approve isolation; DNS sinkholing (Pi-hole) has already happened automatically regardless. Use the Isolate/Release links on the Hostname column to act immediately without waiting for Telegram.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-2002": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2002,
+          "title": "📈 Alerts Triaged Over Time",
+          "description": "Trend view of home_ids_alerts_total (same counter as the 'Total Alerts Triaged' tile above, shown as a rate so you can see whether alert volume is rising, falling, or spiking — a sudden spike is worth investigating even if each individual alert looks minor).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "rate(home_ids_alerts_total[5m]) * 60",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-2003": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2003,
+          "title": "🚫 Pi-hole Sinkhole Rate (Blocks / min)",
+          "description": "How fast Home-IDS is instructing Pi-hole to sinkhole domains, derived from the same home_ids_ips_pihole_blocks_aggregate_total counter as the 'Lifetime Threats Blocked' tile above. This is Layer 7 containment — it fires immediately and autonomously, independent of interactive_blocking_enabled. A sustained non-zero rate means active threats are being neutralized at the DNS level right now.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "rate(home_ids_ips_pihole_blocks_aggregate_total[5m]) * 60",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "single",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -3191,6 +3432,45 @@
                 "name": "panel-1001"
               }
             }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 53,
+              "width": 24,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-2001"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 59,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-2002"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 59,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-2003"
+              }
+            }
           }
         ]
       }
@@ -3204,6 +3484,42 @@
         "tags": [
           "home-ids-v2"
         ],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🌐 Go to Threat Landscape",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🌐 Go to Threat Landscape",
+        "url": "/d/6879f305-539b-45d6-9fdf-9cc26a1d782f",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🔍 Go to Device Deep Dive",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🔍 Go to Device Deep Dive",
+        "url": "/d/f7bae534-afaa-4f37-ad66-83d8e61abd67",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🛡️ Go to System Tuning, Healing & Health",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
+        "url": "/d/a258bbcb-61a1-4829-8251-edc0f3b07407",
+        "tags": [],
         "asDropdown": false,
         "targetBlank": false,
         "includeVars": true,

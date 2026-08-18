@@ -1,4 +1,4 @@
-# Home-IDS Core Dependencies (Version 6)
+# Home-IDS Core Dependencies
 prometheus_client>=0.17.0
 scapy>=2.5.0
 lightgbm>=3.3.5
@@ -11,10 +11,20 @@ fastapi>=0.95.0
 uvicorn>=0.21.0
 pydantic>=1.10.0
 fritzconnection>=1.12.0
+tldextract>=3.4.0    # utils.etld1() / fp_engine._extract_base_domain() import this for
+                     # public-suffix-aware base-domain extraction; without it, domain
+                     # auto-immunization fails closed (silently inert) per the Phase 0 fix
 
 # Added 2026-08-17 for the config.json -> config.yaml migration:
-pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py read config.yaml
-ruamel.yaml>=0.18     # scripts/ollama_soc.py's save_config_key() needs comment-preserving
-                      # round-trip writes when it auto-updates safe_host_patterns -- plain
-                      # pyyaml has no round-trip mode and would silently strip every comment
-                      # in config.yaml the first time it wrote back to the file.
+pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py /
+                      # scripts/retro_hunter.py read config.yaml
+# PHASE 13 cleanup: ruamel.yaml removed -- it existed only for ollama_soc.py's old
+# save_config_key() (comment-preserving round-trip writes to safe_host_patterns), which
+# was itself removed in Phase 9 (that write target was always wrong -- safe_host_patterns
+# is matched against device HOSTNAMES, not destination domains, so it could never have
+# suppressed anything even before the fix). Domain suppression now goes through
+# fp_engine's trust cache (a plain JSON file, no YAML round-trip needed) via
+# mark_false_positive(). Nothing in this codebase writes to config.yaml at runtime
+# anymore -- autonomous adjustments live in state/config_overrides.json and
+# state/device_fp_profiles.json instead (see config.py's LiveConfig._load_overrides()
+# and fp_engine.py's per-device profiles).

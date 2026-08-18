@@ -51,7 +51,7 @@
         "spec": {
           "id": 1,
           "title": "🌍 Global OSINT Map",
-          "description": "",
+          "description": "Section header for the geographic map below.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -88,7 +88,7 @@
         "spec": {
           "id": 10,
           "title": "Malicious JA4 Hits",
-          "description": "",
+          "description": "Number of network connections whose TLS Client Hello fingerprint (JA4+) matched a known-malicious signature database (e.g. known RAT/C2 frameworks like AsyncRAT or Cobalt Strike). Any non-zero value here is high-confidence — JA4+ collisions with legitimate software are rare, so treat spikes as urgent.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -188,7 +188,7 @@
         "spec": {
           "id": 11,
           "title": "📜 Global Threat Events (Live Stream)",
-          "description": "",
+          "description": "Live feed of confirmed-threat and false-positive verdicts across your whole network (not filtered to one device). Use this to spot patterns across multiple devices at once — e.g. several devices suddenly hitting the same malicious domain usually means a compromised router, a malicious ad network, or a supply-chain issue in a shared app, not several independent infections.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -205,7 +205,7 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home-ids\"} |= \"drop\" or \"blocked\" | json",
+                        "expr": "{job=\"home_ids_alerts\"} | json | verdict=~\"CONFIRMED_THREAT|FALSE_POSITIVE\"",
                         "format": "table",
                         "instant": false
                       }
@@ -262,7 +262,7 @@
         "spec": {
           "id": 14,
           "title": "Network Geographic Footprint",
-          "description": "",
+          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_risk (0 = benign, 9+ = matches a blocked country in geofencing.geofencing_countries). Requires paths.geoip_db to have loaded successfully at startup — if this map is empty even though you have real traffic, check your startup logs for a GeoIP load failure before assuming your network is quiet.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -375,7 +375,7 @@
         "spec": {
           "id": 2,
           "title": "🦠 Command & Control (C2) & Intel",
-          "description": "",
+          "description": "Section header for the two C2/threat-intel panels below.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -412,7 +412,7 @@
         "spec": {
           "id": 3,
           "title": "Threat Intel IOC Hits",
-          "description": "",
+          "description": "Cumulative count of connections that matched a known Indicator of Compromise (malicious IP/domain) from OTX, AbuseIPDB, or VirusTotal. This is reputation-based detection — it catches known-bad infrastructure even before Home-IDS's own behavioral models would flag it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -512,7 +512,7 @@
         "spec": {
           "id": 4,
           "title": "C2 Beacons",
-          "description": "",
+          "description": "Count of connections exhibiting Command & Control 'beaconing' — highly uniform, periodic outbound traffic with low jitter (measured via Coefficient of Variation). This is one of the strongest behavioral signals for an active malware infection phoning home, independent of whether the destination has a known-bad reputation yet.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -612,7 +612,7 @@
         "spec": {
           "id": 5,
           "title": "📡 Internal Network Scanning & Probes",
-          "description": "",
+          "description": "Section header for the internal recon/scanning panels below.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -649,7 +649,7 @@
         "spec": {
           "id": 6,
           "title": "Lateral Movement Events",
-          "description": "",
+          "description": "Zeek-detected S0 (unanswered) / REJ (rejected) TCP connection attempts against multiple internal hosts — the classic signature of a device scanning your LAN for other vulnerable machines. This is almost always a sign a device is already compromised and looking for its next target.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -749,7 +749,7 @@
         "spec": {
           "id": 7,
           "title": "Honeypot Probes",
-          "description": "",
+          "description": "Connection attempts to your configured honeypot IP(s) (network_and_devices.honeypot_ips in config.yaml). Only meaningful if you've actually deployed a decoy listener there (see INSTALL.md Step 3.6) — but if you have, ANY hit here is a near-certain compromise signal, since nothing legitimate on your network should ever contact a honeypot.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -849,7 +849,7 @@
         "spec": {
           "id": 8,
           "title": "🔒 Encryption & TLS Anomalies",
-          "description": "",
+          "description": "Section header for TLS fingerprinting panels below.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -886,7 +886,7 @@
         "spec": {
           "id": 9,
           "title": "Malicious JA3 Hits",
-          "description": "",
+          "description": "Same concept as JA4+ (panel to the right) but for the older JA3 fingerprint format — some malware families and older C2 frameworks are only catalogued under JA3.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -940,6 +940,241 @@
                       {
                         "value": null,
                         "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3002": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3002,
+          "title": "🌍 How Geofencing Works Here",
+          "description": "Explains the geofencing_countries default, how to tune it live, and the #1 reason this map can appear empty even when it shouldn't.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "**How geofencing works.** `geofencing.geofencing_countries` in `config.yaml` currently defaults to blocking `RU`, `KP`, `IR` — any connection whose GeoIP-resolved country matches this list gets an instant CRITICAL verdict, same severity as a confirmed malicious IOC. This is **blocklist-only** (there's no allowlist mode) and it's a `[LIVE]` setting — edit the list in `config.yaml` and it takes effect within seconds, no restart.\n\n**Why the map might look empty:** geofencing (and this whole map) depends entirely on `paths.geoip_db` loading successfully at startup. If it fails to load, the engine logs one line and silently disables GeoIP features — geofencing will never fire and this map will show nothing, even with real traffic. Check your startup logs first before assuming your network is quiet.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3001": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3001,
+          "title": "🗺️ Top Risky Countries (GeoIP)",
+          "description": "The same home_ids_geo_risk data as the map above, as a sortable table — useful when you want exact numbers rather than reading map marker sizes. topk(10, ...) shows your 10 highest-risk countries by connection volume/severity.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "topk(10, home_ids_geo_risk)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true,
+                "footer": {
+                  "show": false
+                },
+                "sortBy": []
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": []
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3003": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3003,
+          "title": "🧬 DGA Signature Combo: Entropy + C2 Beaconing",
+          "description": "Two independent DGA/botnet signals plotted together so you can see them correlate: Shannon entropy of queried domain names (home_ids_entropy_avg — per ENGINEERING_MANUAL.md, values above ~4.5 mathematically indicate algorithmically-generated, non-human-typed domain names) and C2 beaconing count (home_ids_beaconing_c2_count — periodic, uniform outbound connections). When BOTH lines spike together, that's a strong Domain Generation Algorithm / botnet C2 pattern, much stronger evidence than either signal alone — this is exactly the combination the Hypothesis & Evidence Engine's DGA_BEACONING hypothesis looks for.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_entropy_avg",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_beaconing_c2_count",
+                        "format": "time_series",
+                        "instant": false
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "none"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 4.5,
+                        "color": "red"
                       }
                     ]
                   },
@@ -1141,6 +1376,45 @@
                 "name": "panel-11"
               }
             }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 54,
+              "width": 24,
+              "height": 5,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3002"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 59,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3001"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 59,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3003"
+              }
+            }
           }
         ]
       }
@@ -1154,6 +1428,42 @@
         "tags": [
           "home-ids-v2"
         ],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🏠 Go to Overview",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🏠 Go to Overview",
+        "url": "/d/41383d25-297c-417d-b70e-51544da44612",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🔍 Go to Device Deep Dive",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🔍 Go to Device Deep Dive",
+        "url": "/d/f7bae534-afaa-4f37-ad66-83d8e61abd67",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🛡️ Go to System Tuning, Healing & Health",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
+        "url": "/d/a258bbcb-61a1-4829-8251-edc0f3b07407",
+        "tags": [],
         "asDropdown": false,
         "targetBlank": false,
         "includeVars": true,

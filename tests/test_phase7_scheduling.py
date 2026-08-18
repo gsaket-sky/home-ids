@@ -5,7 +5,7 @@ the real scripts/scheduler.py cron logic and scripts/train_fp_classifier.py data
 loader against your actual repo layout and config.yaml, no mocks.
 
 Covers two confirmed bugs found while auditing the scheduled scripts (ollama_soc,
-retro_hunter, top_domains_report, train_fp_classifier) plus ollama_analyzer/ai_soc:
+retro_hunter, top_domains_report, train_fp_classifier) plus ai_soc:
 
   1. config.yaml's scheduler job key "retrohunter" never matched the actual filename
      scripts/retro_hunter.py — scheduler.py silently logged "not found" and the retro
@@ -54,7 +54,7 @@ check("config.yaml exists at the expected repo-root location", config_path.exist
 
 if config_path.exists():
     import yaml
-    raw_config = yaml.safe_load(config_path.read_text()) or {}
+    raw_config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     # Use scheduler.py's OWN flattening helper (not a re-derived expression here) so
     # this test proves the shipped code's category-merging behaves correctly, not just
     # this test's independent assumption about the file layout.

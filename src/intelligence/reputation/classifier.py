@@ -3,6 +3,19 @@ from typing import Dict, Any, Optional
 
 @dataclass
 class ReputationVector:
+    """`tier` is a reputation/context classification — "how much prior trust or suspicion
+    attaches to this destination" — not a threat score or a verdict. It does NOT mean
+    "tier 4 is 4x more dangerous than tier 1". decision_engine.py treats tier 5 as
+    corroborated-enough to justify auto-block; every lower tier only ever contributes
+    context toward hypothesis evaluation, never a verdict on its own.
+
+    0 local/internal (fritz.box, RFC1918)     — external reputation doesn't apply
+    1 trusted (apple.com, google.com, ...)    — strong counter-evidence required to override
+    2 known infrastructure (CDNs, cloud)      — lower suspicion, not fully trusted
+    3 unclassified                            — neutral, NOT malicious by default
+    4 one unconfirmed signal                  — worth surfacing, not worth auto-blocking
+    5 corroborated (TI/VT match, or a very high single-source signal) — can justify auto-block
+    """
     domain: str
     tier: int
     asn_owner: str = "Unknown"
@@ -32,7 +45,7 @@ class ReputationClassifier:
         self._TIER_1 = {"apple.com", "microsoft.com", "google.com", "icloud.com", "windowsupdate.com"}
         self._TIER_2 = {"doubleclick.net", "cloudflare.com", "amazonaws.com", "azure.com", "akamaiedge.net", "googlesyndication.com"}
 
-    def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0) -> ReputationVector:
+    def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0, asn_owner: str = "Unknown") -> ReputationVector:
         domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
 
@@ -51,18 +64,30 @@ class ReputationClassifier:
                 if _suffix_or_domain_match(domain, t2):
                     tier = 2
                     break
-                    
-        # Check malicious thresholds
-        confirmed_ioc = vt_score > 2.0 or ti_score > 2.0 or abuse_score > 2.0
+
+        # PHASE 8 FIX: a live alert for 149.154.166.110 (Telegram's own API infrastructure,
+        # AS62041) reached "Confirmed Malicious IOC" / 99% confidence / auto-block purely
+        # from an AbuseIPDB score of 3.78 (~63% abuseConfidenceScore) — with VirusTotal and
+        # ThreatIntel both at 0.0. AbuseIPDB is a crowd-sourced abuse-report aggregate, not
+        # IOC confirmation, and it's routinely non-zero for widely-shared infrastructure.
+        # fp_engine.py's own Stage 1 hard-stop already treats this exact metric
+        # conservatively (only "cannot be a FP" at abuse>=4.0) — this threshold used to be
+        # a lower, disagreeing bar (>2.0) for the identical number. VT (multi-vendor
+        # detection) and TI (curated malware-blacklist feeds: Feodo/ThreatFox/OTX) are both
+        # more authoritative single-source signals and keep their original >2.0 bar;
+        # AbuseIPDB alone now has to clear the same 4.0 bar fp_engine already trusted it at.
+        confirmed_ioc = vt_score > 2.0 or ti_score > 2.0 or abuse_score >= 4.0
         weak_signal = vt_score > 0.0 or ti_score > 0.0 or abuse_score > 0.0
         if confirmed_ioc:
             tier = 5
         elif weak_signal:
-            tier = 4 # Weak detection is suspicious, not confirmed malware
-            
+            tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
+                     # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).
+
         return ReputationVector(
             domain=domain,
             tier=tier,
+            asn_owner=asn_owner or "Unknown",
             vt_detection_ratio=vt_score,
             ti_risk=ti_score,
             abuse_risk=abuse_score,

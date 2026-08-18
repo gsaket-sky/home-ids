@@ -1,8 +1,10 @@
 # ⚙️ Home-IDS: Engineering & Architecture Manual
 
-This manual is written for developers, security engineers, and data scientists. It deeply explores the internal mathematics, system architecture, and code-level orchestration of Home-IDS Version 7.
+This manual is written for developers, security engineers, and data scientists. It explores the internal mathematics, system architecture, and code-level orchestration of Home-IDS.
 
 Unlike the User Manual (which explains *how to use* the system), this document explains exactly **how the system is built** and **why the mathematics work**.
+
+**A note on accuracy**: an earlier revision of this document described an `asyncio`-based event loop, a Fourier-transform diurnal-rhythm analysis, and a learned, per-device Markov transition matrix that "mathematically approaches 0.0001" over months of history — none of which exist anywhere in this codebase. Every claim below has been checked directly against the running source (file and line references included) rather than carried forward from that earlier description.
 
 ---
 
@@ -11,116 +13,202 @@ Unlike the User Manual (which explains *how to use* the system), this document e
 2. [The Hypothesis & Evidence Engine (HEE)](#2-the-hypothesis--evidence-engine-hee)
 3. [Machine Learning Methodologies](#3-machine-learning-methodologies)
 4. [Temporal Mathematics & Baselining](#4-temporal-mathematics--baselining)
-5. [Mitigation Pipeline & IPS Integrity](#5-mitigation-pipeline--ips-integrity)
+5. [The Autonomous Self-Calibration Loop](#5-the-autonomous-self-calibration-loop)
+6. [Mitigation Pipeline & IPS Integrity](#6-mitigation-pipeline--ips-integrity)
 
 ---
 
 ## 1. Core Architecture & The Real-Time Pipeline (`pipeline.py`)
 
-The heart of Home-IDS is `src/core/pipeline.py`. It is a strict `while True` execution loop that must never block. To achieve high throughput (processing thousands of packets per second), it relies on an asynchronous event architecture and highly concurrent memory locking.
+The heart of Home-IDS is `src/core/pipeline.py`. It is a **threaded** (`threading.Lock`/`threading.RLock`, background `threading.Thread` daemon workers) execution loop — there is no `asyncio` anywhere in this codebase. High throughput comes from disciplined lock scoping, not from an event loop.
 
 ### 1.1 Ingestion & File Cursors
-Home-IDS fuses two completely different data streams:
-1. **Pi-hole (SQLite)**: Polled asynchronously using `pihole_collector.py`.
-2. **Zeek NDR (JSON Logs)**: Tailed continuously using `zeek_collector.py`.
+Home-IDS fuses two data streams:
+1. **Pi-hole (SQLite)**: polled on `poll_interval` (default 2s) by `pihole_collector.py`.
+2. **Zeek NDR (JSON Logs)**: tailed continuously by `zeek_collector.py`.
 
-**The `tail -F` Problem**: Standard file trailing is dangerous in production. If the python script crashes, upon reboot, `tail` would start reading from the end of the file, losing all the packets that arrived while the script was dead.
-**The Solution**: `zeek_collector.py` utilizes a custom cursor tracking mechanism (`state/zeek_cursor_*.json`). As it processes Zeek JSON events, it serializes the exact byte-offset and file `inode` to disk. On reboot, it seeks to that exact byte offset, guaranteeing **zero packet loss** and **zero duplicate processing**.
+**The `tail -F` problem**: naive file trailing loses events across a restart (or duplicates them, depending on how you recover). The fix is a cursor file per Zeek log type (`state/zeek_cursor_conn.json`, `_dns.json`, `_http.json`, `_notice.json`, `_ssl.json`, `_dhcp.json`) storing the exact byte offset processed so far. On restart, the collector seeks to that offset before resuming.
 
 ### 1.2 The 5-Phase Execution Loop
-To prevent Thread Deadlocks while calculating math on thousands of devices concurrently, `pipeline.py` strictly adheres to a 5-Phase lock-release pattern:
+Verified against the actual `# ─── PHASE N:` comments in `pipeline.py`'s device-evaluation loop:
 
-1. **Phase 1: State Snapshot (Fast Lock)**: The engine briefly locks the `StateManager` LRU Cache, copies the device's current baseline variables into local thread memory, and immediately releases the lock.
-2. **Phase 2: Pre-fetch (No Lock)**: The engine parses raw Zeek dictionaries. Since this is purely functional, no locks are required.
-3. **Phase 3: Local Compute (Fast Lock)**: The lock is re-acquired to compute localized temporal features (Z-Scores, Entropy).
-4. **Phase 4: Expensive I/O (No Lock)**: The engine releases the lock to perform HTTP requests to AlienVault OTX, AbuseIPDB, and VirusTotal. This is critical—if the network drops, the engine will not freeze the `StateManager` while waiting for a 5-second API timeout.
-5. **Phase 5: ML Scoring & Decision (Fast Lock)**: The lock is acquired one final time to push the computed feature matrix into the Hypothesis Engine and IsolationForest models.
+```python
+# ─── PHASE 1: Snapshot state data (short lock window) ───────────────────
+# ─── PHASE 2: Pre-fetch Zeek data outside the lock ──────────────────────
+# ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
+# ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
+# ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ───────────
+```
+
+1. **Phase 1 (short lock)**: copy the device's current baseline variables (rate/entropy/variance state) into local memory, release immediately.
+2. **Phase 2 (no lock)**: parse raw Zeek dictionaries — purely functional, no shared state touched.
+3. **Phase 3 (short lock)**: compute local temporal features (z-scores, entropy) against the snapshot from Phase 1.
+4. **Phase 4 (no lock)**: HTTP calls to OTX/AbuseIPDB/VirusTotal, and (if configured) GeoIP/ASN lookups. This is the phase that matters most for throughput — if a threat-intel API is slow or unreachable, the pipeline does not hold the state lock while it waits, so every other device's evaluation this cycle is unaffected.
+5. **Phase 5 (short lock)**: push the computed feature matrix into the Hypothesis Engine, ML scorer, and CL-AFPE; commit the decision.
+
+Separate `Evidence`-generating detectors (`intelligence/detectors/*.py`, `intelligence/hypotheses/engine.py`) run inside Phase 5's window, consuming only already-computed feature values — no additional I/O, no additional feature extraction of their own.
 
 ---
 
 ## 2. The Hypothesis & Evidence Engine (HEE)
 
-Located in `src/core/decision_engine.py`, the HEE replaces traditional "If-This-Then-That" rule engines with a probabilistic evidence graph.
+Located in `src/core/decision_engine.py` (state machine + evaluation order) and `src/intelligence/hypotheses/` (the hypothesis classes themselves), the HEE replaces a single additive risk score with a typed evidence graph.
 
 ### 2.1 The Evidence Store
-Every anomaly detected by the feature extractors is normalized into an `Evidence` object.
 ```python
 Evidence(
     type="zeek_lateral_scan",
     source="zeek",
-    value=450,           # Raw number of S0/REJ packets
-    confidence=0.90,     # Sensor reliability 
-    independence_group="zeek_network"
+    value=450,               # raw S0/REJ packet count
+    confidence=0.90,         # sensor reliability
+    independence_group="zeek_network",
 )
 ```
-The `independence_group` prevents evidence stuffing. If Zeek detects 500 dropped TCP packets, and Pi-hole detects 500 NXDOMAIN queries, the engine knows these are independent vectors. If Zeek detects an SMB scan and Zeek *also* detects an RDP scan, they are grouped under `zeek_network` and only the highest confidence value is passed to the Hypothesis graph.
+`independence_group` prevents evidence-stuffing: two anomalies from the same underlying sensor category collapse into one vote when counting independent sources toward an escalation decision — a single noisy sensor cannot manufacture apparent corroboration by tripping multiple related signals at once.
 
-### 2.2 Hypothesis Graphs & Node Weighting
-A Hypothesis (e.g., `DATA_EXFILTRATION`) is a Directed Acyclic Graph (DAG). It requires specific evidence nodes to trigger.
-- **DGA Beaconing**: Requires (`high_entropy` OR `ml_anomaly`) AND (`nxdomain_ratio`).
-- **Data Exfiltration**: Requires (`outbound_bytes_zscore > 4.0`) AND (`connection_duration > 3600s`).
+`EvidenceStore.get_for_device()` also applies age-based decay: general behavioral evidence has a 10-minute TTL, reputation evidence a 24-hour TTL, with linear freshness decay inside that window (`effective_weight() = confidence × freshness`).
 
-### 2.3 Markov State Transitions
-The most advanced feature in the HEE is the `MarkovStateTracker`.
-It maintains an $N \times N$ matrix of historical device states (`BENIGN`, `ANOMALOUS`, `SUSPICIOUS`, `HIGH`). 
-If a smart plug stays in `BENIGN` for 6 months, the transition probability `P(BENIGN -> CRITICAL)` mathematically approaches `0.0001`. If it suddenly spikes to `CRITICAL`, the Markov Anomaly Score multiplies the final Threat Confidence, easily pushing it over the containment threshold.
+### 2.2 Hypothesis Scoring
+Each `Hypothesis` subclass (`hypotheses/engine.py`) evaluates required, strong, and contradicting evidence and returns a 0–4 confidence score:
+- **0.0** — required evidence absent, hypothesis doesn't apply.
+- **2.0 (Suspicious)** — required evidence present, nothing more.
+- **3.0 (Probable)** — required + at least one strong corroborating signal, no contradiction.
+- **4.0 (High)** — required + strong + no contradiction + (for some hypotheses) reputation tier supports it.
+
+Seven attack hypotheses are registered: `DNS_TUNNELING` (rate+entropy burst — distinct from the newer, richer `DNS_COVERT_TUNNELING`), `NETWORK_INTRUSION`, `DGA_BOTNET_C2`, `DATA_EXFILTRATION`, `C2_BEACONING`, `DNS_COVERT_TUNNELING` (encoded labels / TXT-NULL abuse / suspicious-TLD concentration), `CONNECTION_ABUSE`. One benign hypothesis, `ADVERTISING_BURST`, actively competes against the attack hypotheses for domains under known ad-network reputation tiers.
+
+### 2.3 The Decision Order (`decision_engine.py`)
+Evaluated strictly in this sequence — a hard-stop earlier in the list always wins:
+
+```mermaid
+flowchart TD
+    A["Honeypot access?"] -->|yes| Z1["CRITICAL / block, conf=1.0"]
+    A -->|no| B["ARP/NDP spoofing?"]
+    B -->|yes| Z1
+    B -->|no| C["Geofencing violation?"]
+    C -->|yes| Z1
+    C -->|no| D["Reputation tier 5?<br/>(corroborated: TI/VT hit,<br/>or AbuseIPDB alone at a genuinely high bar)"]
+    D -->|yes| Z2["CRITICAL / block, conf=0.99"]
+    D -->|no| E["attack_score > benign_score<br/>AND attack_score ≥ 2.0?"]
+    E -->|yes, ≥2 independent sources<br/>AND score ≥3.0| Z3["HIGH / alert, conf=0.85"]
+    E -->|yes, otherwise| Z4["SUSPICIOUS / monitor, conf=0.40"]
+    E -->|no| F["Reputation tier 4?<br/>(one unconfirmed signal)<br/>max signal ≥ 1.5?"]
+    F -->|yes| Z5["SUSPICIOUS / monitor, conf=0.45<br/>— NEVER auto-blocks on this alone"]
+    F -->|no| G["ML anomaly > 0.90?"]
+    G -->|yes| Z6["ANOMALOUS / log, conf=0.10"]
+    G -->|no| Z7["BENIGN / suppress"]
+```
+
+**Why tier 4 exists as its own branch (fixed in 8.0)**: before this branch existed, a reputation signal that never rose to "confirmed" (tier 5) had exactly one path through this function — silence. The gap between "99% Confirmed Malicious IOC" and "nothing at all" was a single classification threshold in `reputation/classifier.py`. This was found by tracing a real production alert: a connection to Telegram's own infrastructure reached `CRITICAL`/auto-block purely from a single AbuseIPDB score, with VirusTotal and ThreatIntel both clean. `reputation/classifier.py`'s confirmed-IOC threshold for AbuseIPDB alone is now `≥4.0` (aligned with the exact bar `fp_engine.py`'s own hard-stop check already used for the same metric — previously the two disagreed, `>2.0` vs `≥4.0`, for the identical input). VirusTotal and ThreatIntel — curated, multi-vendor, or blacklist-backed signals — keep the lower `>2.0` bar; they're more authoritative single-source signals than a crowd-sourced abuse-report aggregate.
+
+Every evaluation builds a `reasoning_trail` (list of strings) alongside the decision — hard-stop check results, reputation context (tier, VT/TI/AbuseIPDB values, and now IP ownership via ASN lookup), hypothesis scores, and the final verdict with an explicit note when neither an attack nor a benign hypothesis found supporting evidence ("this rests on reputation context alone"). This is what Telegram alerts render under **🧭 REASONING**, and what `ollama_soc.py`'s LLM prompts now also receive (`alert_payload["reasoning_trail"]`) for better-grounded analysis.
+
+### 2.4 Kill-Chain Phase & the Markov Anomaly Signal
+`extractors/dns_features.py` classifies each device's recent window into one of `NORMAL / RECON / LATERAL / C2` using simple threshold rules over already-computed features (e.g. beaconing count + suspicious TLD ratio → `C2`; lateral-move count + S0/REJ count → `LATERAL`). This is **not** a separate model — it's a deterministic function of numbers already computed elsewhere.
+
+The "Markov anomaly" score is a small, deliberately simple addition on top: a hand-authored, static transition-probability table (`_MARKOV_TRANSITIONS`) maps `(previous_phase, current_phase) → probability`, e.g.:
+```python
+"NORMAL":  {"NORMAL": 0.90, "RECON": 0.08, "C2": 0.01, "LATERAL": 0.01, "EXFIL": 0.00}
+"C2":      {"NORMAL": 0.20, "RECON": 0.10, "C2": 0.60, "LATERAL": 0.05, "EXFIL": 0.05}
+```
+The anomaly score is `1.0 − transition_prob`. This is an analyst-estimated kill-chain progression model, not a per-device learned Markov chain — it doesn't change based on a device's individual history, and there is no `MarkovStateTracker` class or NxN learned matrix anywhere in the code.
 
 ---
 
 ## 3. Machine Learning Methodologies
 
-Home-IDS utilizes a Tri-Brain approach to solve the classic IDS dilemma: high detection rates vs. high false-positive rates.
+### 3.1 `ml_engine.py` — Bespoke IsolationForests
+`scikit-learn`'s `IsolationForest`, chosen because it requires no labeled training data.
+- **Global model** (`models/ids_model.pkl`): trained on aggregate home-network traffic, the default scorer for new/unwarmed devices.
+- **Bespoke per-device fork** (`models/devices/<id>.pkl`): once a device passes `ml_warmup_samples` (default 5,000), a personalized model forks for that device specifically.
+- **Anti-poisoning**: `reject_threat()` opens a 120-second exclusion window after a confirmed threat, during which `learn_normal()` calls for that device are skipped — a confirmed-malicious sample can no longer train the model to think its own behavior is normal.
 
-### 3.1 Brain 1: `ml_engine.py` (Bespoke IsolationForests)
-We use `scikit-learn`'s `IsolationForest` because it does not require labeled training data (Unsupervised Learning).
-- **The Global Model**: `models/ids_model.pkl` is trained on the aggregate $X$ matrix of your entire home. It acts as a baseline for new, unknown devices.
-- **The Bespoke Fork**: Once a device generates `ml_warmup_samples` (e.g., 5,000 queries), `ml_engine.py` forks a new matrix specifically for that IP address (`devices/192.168.1.45.pkl`). 
-- **The Math**: The model splits the feature space using random hyperplanes. If a data point (a network event) requires very few splits to be isolated in a terminal leaf node, it is mathematically deemed an anomaly.
+### 3.2 `fp_engine.py` — CL-AFPE
+Prevents Brain 1 from blocking legitimate traffic before containment fires. Three stages, evaluated in order, each cheaper than the last is expensive:
 
-### 3.2 Brain 2: `fp_engine.py` (CL-AFPE)
-To prevent Brain 1 from blocking your smart TV when it downloads a firmware update, Brain 2 intercepts alerts before containment fires.
-- **LightGBM ONNX Classifier**: A gradient-boosted decision tree optimized for tabular data. It calculates the raw probability $P(False Positive | Features)$.
-- **FastEmbed Vector Similarity**: The engine serializes the alert payload into a string and passes it through `bge-small-en-v1.5-onnx-q`. It generates a 384-dimensional dense vector. It then calculates the **Cosine Similarity** against vectors of known benign events in the `fp_trust_cache.json`. If Similarity > 0.82, the alert is suppressed.
-- **Live threshold tuning**: All four Stage 2/3 thresholds (`fp_lgbm_threshold`, `fp_embed_similarity_threshold`, `fp_combined_suppress_threshold`, `fp_combined_uncertain_threshold`) are read via a fresh `self.config.get(...)` call on every single evaluation — as of Version 7.0 there is no cached/construction-time copy anywhere in the evaluation path, so edits to `config.yaml` take effect on the very next alert with no restart.
+1. **Stage 1 — hard-stop filter** (<1ms): confirmed TI IOC, active lateral movement, malicious JA3/JA4 fingerprint, honeypot access, AbuseIPDB ≥4.0, or an exfiltration payload-burst z-score >5.0. Any hit bypasses everything else — `CONFIRMED_THREAT`, no ML consulted. Re-run on **every** trust-cache hit too, not just first evaluation — an immunized domain can never permanently blind the system to a later confirmed IOC on the same registrable domain.
+2. **Stage 2 — LightGBM ONNX classifier** (<2ms): 9-dimensional tabular feature vector (Tranco rank, label entropy, label length, outbound-bytes z-score, device-type weight, historical-FP flag, lateral-moves, port-scan intensity, app-protocol weight) → `P(false positive)`.
+3. **Stage 3 — FastEmbed semantic similarity** (<15ms): `bge-small-en-v1.5`, 384-dim embeddings, cosine similarity against ~50 known-safe vendor telemetry patterns. **As of 8.0, this stage is skipped entirely when there's no real domain/hostname to compare** (a raw-IP connection has `domain="unknown"`, and scoring that literal string against vendor embeddings was producing a real-looking but meaningless similarity number that materially swayed the combined suppression decision — found by tracing the same Telegram-infrastructure alert mentioned in §2.3). When skipped, the combined score falls back to LightGBM alone at full weight rather than silently blending in a zero.
 
-### 3.3 Brain 3: `ollama_analyzer.py` (LLM Cognitive Core)
-Brain 3 takes the JSON output of Brain 2 and feeds it to a localized Large Language Model (LLaMA 3.1) with a strict system prompt.
-The LLM is given access to external context (AlienVault, device types). If the LLM deduces a benign telemetry pattern, a python regex extracts the domain from the LLM's Markdown output and dynamically injects it into `config.yaml`'s `network_and_devices.safe_host_patterns` list. As of Version 7.0 this write goes through `ruamel.yaml`'s round-trip mode rather than plain `pyyaml`, specifically so the file's existing comments and category structure survive the edit — a plain `yaml.safe_dump()` would silently discard every comment in the file on the first automated write.
+Combined score = `0.45 × LGBM + 0.55 × Embed` (or `LGBM` alone if Stage 3 was skipped). Compared against **the requesting device's own calibrated threshold if one exists, else the global default** (`get_device_suppress_threshold()` — new in 8.0, see §5).
+
+All four Stage 2/3/combined thresholds are read via a fresh `self.config.get(...)` call on every evaluation — no cached copy anywhere in the path, so a `config.yaml` edit or an autonomous override takes effect on the very next alert.
+
+### 3.3 `scripts/ollama_soc.py` — Batch LLM Analyst
+Runs out-of-band, every 4 hours, launched by `scripts/scheduler.py` as a fresh subprocess — never in the real-time per-alert path. (An earlier real-time analyzer class, `intelligence/ollama_analyzer.py`, was instantiated at boot but its only method was never actually called from anywhere in the codebase — a permanently-idle background thread polling an empty queue for the lifetime of every process. Removed in 8.0.)
+
+Groups the last 24h of published, non-suppressed alerts by `device_id + target + signature` before querying anything — a single recurring pattern costs one LLM call regardless of how many times it fired. Checks a 7-day verdict cache (`state/ollama_analysis_cache.json`) before that one call, and hard-caps fresh calls per run (default 5) — added after a live diagnostic call to the actual production Ollama server measured **849 seconds of `total_duration` for a trivial "say hello" prompt**, while the model's own reported load+eval durations summed to only ~13 seconds; the remaining ~836 seconds was pure CPU-contention queueing on the host hardware.
+
+`intelligence/ai_soc.py`'s `DeterministicValidator` is the hallucination guardrail: it reconstructs the alert's reputation evidence from persisted feature values (`max(ti_risk, abuseipdb_risk, vt_risk)`) and rejects any "benign" LLM verdict where that reconstructed evidence shows a confirmed IOC (`≥4.0`) or contradicts a "just telemetry" claim (`≥3.0`). Validated corrections call `fp_engine.mark_false_positive(..., source="llm_validated")` — same mechanism as an operator's Telegram correction (`source="operator"`), distinguished only by an audit-log tag so downstream consumers (the self-calibration pass, §5) can pool or separate the two evidence sources.
 
 ---
 
 ## 4. Temporal Mathematics & Baselining
 
-Home-IDS does not use static thresholds (e.g., "Alert if queries > 100"). It uses rolling statistical baselines, implemented in `src/core/state_guard.py`.
+Rolling statistical baselines, not static thresholds, implemented in `src/core/state_guard.py`.
 
 ### 4.1 Exponentially Weighted Moving Average (EWMA)
-For a feature $x$ at time $t$, the EWMA baseline $\mu_t$ is updated as:
 $$ \mu_t = \alpha \cdot x_t + (1 - \alpha) \cdot \mu_{t-1} $$
-Where $\alpha$ (defined as `baseline_alpha` in config) controls the memory. A small $\alpha$ (0.05) ensures the baseline is highly resistant to sudden spikes, meaning a malware infection cannot quickly "poison" the baseline to make itself look normal.
+`baseline_alpha` (default 0.05) controls memory. A small $\alpha$ resists sudden spikes — a fresh infection cannot quickly poison the baseline into thinking its own traffic is normal.
 
 ### 4.2 Welford's Online Algorithm for Variance
-To compute the Z-Score, we need the standard deviation $\sigma$. Because storing millions of data points in memory is impossible, we use Welford's algorithm to compute rolling variance $\sigma^2$ on the fly:
 $$ \sigma^2_t = (1 - \alpha) \cdot (\sigma^2_{t-1} + \alpha \cdot (x_t - \mu_{t-1})^2) $$
-The final Z-Score is simply:
 $$ Z = \frac{x_t - \mu_t}{\sigma_t} $$
-If $Z > 3.0$, the event is a 3-sigma anomaly (top 0.3% of statistical probability).
+Computed incrementally — no need to retain the full sample history in memory. $Z > 3.0$ is a 3-sigma anomaly (top ~0.3% of the statistical distribution for that feature).
 
-### 4.3 Shannon Entropy for DGA Detection
-Located in `src/utils.py`, we calculate the entropy $H$ of a domain string to detect Domain Generation Algorithms (e.g., `x89zj2.biz`):
+### 4.3 Per-Hour Rate Anomaly Bound
+Distinct from the general EWMA/z-score baselining above: `pipeline.py` maintains a **per-hour-of-day** rate baseline (`state.rate_baseline`, 24 buckets) and computes a live anomaly bound every cycle:
+$$ \text{threshold\_limit} = \text{rate\_mean}_h + \text{threshold\_std\_dev} \times \sqrt{\text{rate\_var}_h} $$
+where $h$ is the current hour and `threshold_std_dev` (default 3.0) is read live from config. This is exported as the `home_ids_query_rate_threshold_limit` telemetry gauge for operator visibility — it is **not** a scheduled "weekly autotune" recalculation of `alert_threshold`; it's computed fresh every ~2-second cycle, purely for that hour's rate baseline.
+
+### 4.4 Shannon Entropy for DGA Detection
+`src/utils.py`:
 $$ H = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i) $$
-Where $P(x_i)$ is the character frequency. High entropy domains ($H > 4.5$) combined with a high `nxdomain_ratio` mathematically proves a botnet is hunting for a C2 server.
+High entropy ($H > 3.2$ for labels ≥12 chars, with digit-ratio and vowel-ratio guards to avoid flagging legitimate brand-name-plus-hash patterns) combined with a high NXDOMAIN ratio is the DGA/botnet-C2-hunting signal.
 
 ---
 
-## 5. Mitigation Pipeline & IPS Integrity
+## 5. The Autonomous Self-Calibration Loop
 
-The execution of containment is localized in `src/mitigation/ips.py`. It is engineered for fail-safe resilience.
+New in 8.0. Full mechanics in the User Manual §2 — this section covers the implementation specifics relevant to extending it.
 
-### 5.1 Layer 7 (Pi-hole Sinkhole)
-The engine executes a POST request to the Pi-hole `/api/v2/domains` endpoint. If the Pi-hole is offline, the domain is pushed into a Thread-Safe Dead Letter Queue (DLQ). The pipeline will automatically retry the mitigation on the next cycle, ensuring malicious domains are eventually sinkholed when the API returns online.
+`scripts/train_fp_classifier.py` runs `calibrate_suppress_threshold()` — one function, shared by both the global calibration pass and the per-device pass (different `current`/`min_samples` arguments, not two parallel implementations that could quietly drift apart):
 
-### 5.2 Layer 3 (Fritz!Box WAN Sever)
-Uses the TR-064 SOAP API framework. By crafting a specific XML envelope, the engine instructs the router to apply the "Blocked" profile to the infected MAC address. This severs internet access at the physical gateway while leaving local LAN access intact (allowing you to SSH in and remediate the machine).
+```python
+def calibrate_suppress_threshold(corrected_fp_scores, uncorrected_uncertain_scores,
+                                  current, min_samples=AUTOTUNE_MIN_SAMPLES):
+    if len(corrected_fp_scores) < min_samples:
+        return None, "not enough evidence"
+    lowest_corrected = min(corrected_fp_scores)
+    if uncorrected_uncertain_scores and max(uncorrected_uncertain_scores) >= lowest_corrected:
+        return None, "ambiguous overlap — refusing"
+    candidate = max(lowest_corrected - SAFETY_MARGIN, ABSOLUTE_FLOOR)
+    candidate = min(candidate, current)  # never raises
+    if candidate >= current:
+        return None, "no change needed"
+    return candidate, "<full audit reason string>"
+```
 
-### 5.3 Layer 2 (Scapy ARP Tarpit)
-The most aggressive mitigation. The engine forks a daemonized Scapy thread that continuously broadcasts forged ARP (IPv4) and NDP (IPv6) `is-at` packets on the local subnet. It tells the infected device that the MAC address of the Gateway is `00:00:00:00:00:00`. The infected device updates its internal routing table and routes all outbound malware traffic into a blackhole, neutralizing the threat even if Layer 3 (Router) mitigation fails.
+Evidence is pulled from `state/autonomous_muted.jsonl` (both `OPERATOR_MARKED_FALSE_POSITIVE` and `LLM_VALIDATED_FALSE_POSITIVE` entries — pooled for the global pass, grouped by `device.id` for the per-device pass) cross-referenced against each corrected alert's *original* CL-AFPE combined confidence, which `pipeline.py` now persists into every alert record as `alert_payload["fp_verdict"]` (verdict/confidence/stage) — this field didn't previously exist, so there was no data to calibrate against at all before 8.0.
+
+Two independent triggers run this same function: the scheduler's standalone daily 3am cron invocation of `train_fp_classifier.py`'s `main()`, and `fp_engine.py`'s own internal 7-day in-process retrain thread (`_weekly_retrain_loop()`) — both now call `run_threshold_calibration()` after their respective model-retrain step, regardless of whether that retrain succeeded (calibration reads a different, if overlapping, slice of the same evidence and shouldn't be gated on ONNX export success).
+
+Output is written via `_write_config_override()` (global → `state/config_overrides.json`) or `AutonomousFPEngine.apply_device_fp_profile()` (per-device → `state/device_fp_profiles.json`, the same architectural home as the existing per-device sigma-shift and trust-cache state). Both are plain JSON, read by `config.py`'s `LiveConfig._load_overrides()` (global) or `fp_engine.py`'s `get_device_suppress_threshold()` (per-device) respectively — neither ever touches `config.yaml`.
+
+---
+
+## 6. Mitigation Pipeline & IPS Integrity
+
+`src/mitigation/ips.py`, engineered for fail-safe resilience.
+
+### 6.1 Layer 7 (Pi-hole Sinkhole)
+POST to Pi-hole's `/api/v2/domains` endpoint. On failure, the domain enters a thread-safe retry queue with exponential backoff (`30s × 2^attempts`), falling to a dead-letter queue after 5 attempts. Automatically retried on subsequent cycles.
+
+### 6.2 Layer 3 (Fritz!Box WAN Sever)
+TR-064 SOAP API. Applies a "Blocked" profile to the infected MAC, severing WAN access while leaving LAN access intact for remediation. Only reachable at `risk_score ≥ 8.5` or an active lateral-movement flag — and only actually fires if `ips_router_enabled` is set and (when `interactive_blocking_enabled` is true) an operator has approved it.
+
+### 6.3 Layer 2 (Scapy ARP/NDP Tarpit)
+The most aggressive mitigation, `risk_score ≥ 9.0` or lateral movement. A daemonized Scapy thread forges ARP (IPv4) and NDP (IPv6) responses telling the infected device the gateway's MAC is unreachable, blackholing its outbound traffic at Layer 2 even if Layer 3 isolation fails or is disabled.
+
+### 6.4 The `interactive_blocking_enabled` Fix (8.0)
+Previously, the Telegram "🔒 Approve Hardware Isolation" button and the "⏳ WAITING FOR APPROVAL" status text appeared on **every** alert whenever `interactive_blocking_enabled` was true — including `SUSPICIOUS`/monitor-only alerts where `mitigate()` never reached either isolation branch (both gated behind the 8.5/9.0 risk floors above). The bug: `pipeline.py`'s post-processing checked only "does the containment status contain the word UNBLOCKED", with no check on whether anything was actually pending. Found by tracing a real alert where the decision engine said `SUSPICIOUS / monitor` and the Telegram message simultaneously said `WAITING FOR APPROVAL` — a direct contradiction. Both the status-text override and the inline-button attachment are now gated on `risk ≥ 8.5 or lateral_threat`, matching `mitigate()`'s own floor exactly.

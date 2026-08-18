@@ -226,6 +226,14 @@ false_positive_engine:
   # Combined (Stage2×0.45 + Stage3×0.55) confidence required to AUTO-SUPPRESS
   # an alert as a false positive. Lower = fewer Telegram pings but higher risk
   # of quietly swallowing a real threat. Higher = noisier but safer. [LIVE]
+  #
+  # PHASE 12: this is the ONE value scripts/train_fp_classifier.py's weekly
+  # self-calibration pass may autonomously lower, based on operator-confirmed
+  # FP evidence (see calibrate_suppress_threshold() there for the exact rule).
+  # It NEVER edits this number here — autonomous adjustments live entirely in
+  # state/config_overrides.json, a separate file, so this baseline always
+  # reflects what a human actually set. Delete that file (or the one key in
+  # it) to instantly revert to the value below, no restart needed.
   fp_combined_suppress_threshold: 0.8
 
   # Combined confidence above which an alert that DIDN'T clear the suppress
@@ -297,12 +305,28 @@ threat_intel_and_ai:
   # = hourly. (API keys themselves come from .env, not this file.) [LIVE]
   ti_refresh_interval: 3600
 
-  # Base URL of your local Ollama server, used by ollama_soc.py / ollama_analyzer.py
-  # / ai_soc.py for LLM-based alert triage and summaries. [LIVE]
+  # Base URL of your local Ollama server, used by scripts/ollama_soc.py (batch triage,
+  # every 4h) and intelligence/ai_soc.py's DeterministicValidator for LLM-based alert
+  # triage and summaries. [LIVE]
   ollama_url: http://192.168.1.94:11434
 
   # Ollama model name to use for those requests. [LIVE]
   ollama_model: llama3.1
+
+  # PHASE 11: how long a cached LLM verdict for a given "threat pattern" (device +
+  # destination + signature) stays valid before scripts/ollama_soc.py will query Ollama
+  # about it again. A live diagnostic run found single Ollama calls taking 14+ minutes
+  # under real CPU load on this hardware -- caching avoids re-paying that cost for a
+  # threat pattern that's still recurring. Default 604800 = 7 days. [LIVE]
+  ollama_cache_ttl_seconds: 604800.0
+
+  # PHASE 11: hard cap on FRESH Ollama calls per scheduled ollama_soc.py run (cache hits
+  # don't count against this). Keeps one unusually noisy day from turning a 4-hourly job
+  # into an hours-long one -- at up to ~15 minutes worst-case per call (the request
+  # timeout), 5 calls is at most ~75 minutes, comfortably inside the 4h gap to the next
+  # run. Alerts beyond this cap are deferred to the next scheduled run, prioritized by
+  # which threat pattern repeated most often this run. [LIVE]
+  ollama_max_queries_per_run: 5
 
 
 # -----------------------------------------------------------------------------
@@ -428,7 +452,12 @@ scheduled_jobs:
 #   IDS_IPS_PIHOLE_ENABLED                     → per-mechanism IPS toggle: DNS sinkhole
 #   IDS_IPS_ROUTER_ENABLED                     → per-mechanism IPS toggle: hardware isolation
 #   IDS_IPS_TARPIT_ENABLED                     → per-mechanism IPS toggle: ARP tarpit
-#   OLLAMA_API_KEY                             → only if your Ollama server requires auth
+#
+# PHASE 13 cleanup: OLLAMA_API_KEY / ollama_api_key removed — it existed only for the
+# real-time intelligence/ollama_analyzer.py path, which was itself dead (instantiated but
+# its one method was never called). scripts/ollama_soc.py is the only remaining Ollama
+# consumer and doesn't send any auth header. If your Ollama server ever needs auth, say so
+# and this can be added back on the path that's actually live.
 #
 # Setting any of these in THIS file too would work (it'd just get silently
 # overwritten by .env on the next reload) but would be misleading, so don't.

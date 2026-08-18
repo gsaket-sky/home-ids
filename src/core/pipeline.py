@@ -33,7 +33,6 @@ from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 1
 from core.decision_engine import DecisionEngine, DecisionState
 from mitigation.alerts import AlertManager, AlertJSONWriter
-from intelligence.ollama_analyzer import OllamaAnalyzer
 from mitigation.ips import IPSMitigator
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
@@ -174,14 +173,6 @@ class EnginePipeline:
         
         self.metrics_exporter = MetricsExporter()
 
-        self.ollama_analyzer = OllamaAnalyzer(
-            ollama_url=self.config.get("ollama_url", ""),
-            ollama_model=self.config.get("ollama_model", "llama3"),
-            ollama_api_key=self.config.get("ollama_api_key", ""),
-            alert_file_logger=self.alert_writer,
-            metrics=self.metrics_exporter
-        )
-
         # -----------------------------------------------------------------------
         # Closed-Loop Autonomous FP Engine (CL-AFPE)
         # Instantiated here so it boots its background ML loader threads immediately.
@@ -209,9 +200,6 @@ class EnginePipeline:
                 new_patterns = {str(p).lower().strip() for p in self.config.get("safe_host_patterns", []) if str(p).strip()}
                 self.pihole_collector.excluded_patterns = new_patterns
                 self.zeek_fx.safe_patterns = new_patterns
-            if "ollama_url" in changed_keys or "ollama_model" in changed_keys:
-                self.ollama_analyzer.ollama_url = str(self.config.get("ollama_url", "")).strip().rstrip("/")
-                self.ollama_analyzer.ollama_model = str(self.config.get("ollama_model", "llama3")).strip()
             if "telegram_enabled" in changed_keys:
                 self.alert_manager.enabled = bool(self.config.get("telegram_enabled", False))
             if "home_subnet" in changed_keys or "home_subnets" in changed_keys:
@@ -527,7 +515,23 @@ class EnginePipeline:
                     ))
                 
                 # 2. Get Reputation
-                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk)
+                # PHASE 8 FIX: ReputationVector.asn_owner existed as a dataclass field but
+                # was never populated anywhere — the classifier had zero notion of IP
+                # ownership, which is exactly the context missing from the
+                # 149.154.166.110/Telegram false-positive-block case (an IP's owner is
+                # cheap to look up — self.geoip_engine already does this every cycle for
+                # geofencing a few lines below — and is now surfaced in the alert's
+                # reasoning trail so a human can see "this is Telegram infrastructure"
+                # instead of the system silently having no way to know).
+                asn_owner = "Unknown"
+                if self.geoip_engine and dest_ip and dest_ip != "unknown":
+                    try:
+                        asn_info = self.geoip_engine.lookup_asn(dest_ip)
+                        if asn_info and getattr(asn_info, "autonomous_system_organization", None):
+                            asn_owner = asn_info.autonomous_system_organization
+                    except Exception:
+                        pass
+                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=asn_owner)
                 
                 # 3. Decision Engine
                 active_evidence = self.evidence_store.get_for_device(dev_id)
@@ -680,6 +684,7 @@ class EnginePipeline:
                             "schema": "home_ids_alerts_v3",
                             "evidence_verification_required": decision.get("evidence_verification_required", False),
                             "hypothesis_weight": decision.get("hypothesis_weight", 0.0),
+                            "reasoning_trail": decision.get("reasoning_trail", []),
                         }
 
                         # =============================================================
@@ -693,6 +698,19 @@ class EnginePipeline:
                             risk_score=risk,
                             ti_engine=self.ti_engine,
                         )
+
+                        # PHASE 12: persist CL-AFPE's own combined confidence into the alert
+                        # record. Previously this number existed only in memory for the
+                        # duration of this evaluation — alerts.json never carried it, so
+                        # there was no way to later ask "how well-calibrated is the
+                        # suppress/uncertain threshold against what actually turned out to
+                        # be a confirmed FP or a confirmed threat?" This is the data
+                        # scripts/train_fp_classifier.py's threshold-calibration pass reads.
+                        alert_payload["fp_verdict"] = {
+                            "verdict": fp_verdict.get("verdict"),
+                            "confidence": fp_verdict.get("confidence"),
+                            "stage": fp_verdict.get("stage"),
+                        }
 
                         # Tightly coupled ML learning & Anti-Poisoning:
                         if self.ml_registry:
@@ -720,6 +738,36 @@ class EnginePipeline:
                             # NEW immunization (fp_engine already dedupes repeat hits).
                             # ═══════════════════════════════════════════════════════
                             action_info = fp_verdict.get("action")
+
+                            # PHASE 14 FIX: this is the PRIMARY, highest-volume autonomous
+                            # suppression path (every CL-AFPE Stage 2/3 auto-suppress runs
+                            # through here) — until now it immunized the domain (stopping
+                            # FUTURE alerts) but never checked whether an EARLIER cycle had
+                            # already blocked it in Pi-hole before CL-AFPE learned the
+                            # pattern was safe. A domain immunized today could stay blocked
+                            # in Pi-hole indefinitely, silently breaking the device that
+                            # depends on it, with nothing left to ever un-block it. Per
+                            # explicit direction: block only what's absolutely necessary.
+                            # Checks LOCAL state first (cheap, no network call) rather than
+                            # calling unblock_domain() unconditionally — it always fires a
+                            # real Pi-hole DELETE and always returns True regardless of
+                            # whether the domain was actually blocked, so an unconditional
+                            # call would both waste API traffic on every immunization and
+                            # make an inaccurate "released" log claim. Only on a genuinely
+                            # NEW immunization, matching the same dedup fp_engine already
+                            # applies before offering a revoke.
+                            if action_info and action_info.get("type") == "immunize_domain" and self.ips_mitigator:
+                                target_domain_imm = action_info["target"]
+                                currently_blocked = target_domain_imm in self.state_manager.get_ips_state().get("blocked_domains", {})
+                                if currently_blocked:
+                                    unblocked = self.ips_mitigator.unblock_domain(domain=target_domain_imm)
+                                    if unblocked:
+                                        LOGGER.info(
+                                            "🔓 [PIPELINE] '%s' was immunized as a false positive — "
+                                            "released its existing Pi-hole block.",
+                                            target_domain_imm
+                                        )
+
                             if action_info and bool(self.config.get("fp_revoke_notifications_enabled", True)):
                                 action_id = uuid.uuid4().hex[:10]
                                 ttl_seconds = float(self.config.get("fp_revoke_action_ttl_seconds", 86400.0))
@@ -743,12 +791,13 @@ class EnginePipeline:
                         else:
                             # Real threat or low-confidence alert -> execute IPS containment & publish Telegram
                             containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
+                            lateral_threat = (features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0)
                             if self.ips_mitigator:
                                 self.ips_mitigator.mitigate(
                                     st=state,
                                     target_domain=target_malicious_domain,
                                     risk_score=risk,
-                                    lateral_threat=(features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0),
+                                    lateral_threat=lateral_threat,
                                     is_safe=is_safe,
                                     ti_engine=self.ti_engine,
                                     reason=primary_sig,
@@ -759,8 +808,26 @@ class EnginePipeline:
                                     mac_addr=getattr(state, "mac_address", "unknown"),
                                     domain=target_malicious_domain
                                 )
-                                
-                            if bool(self.config.get("interactive_blocking_enabled", False)) and "UNBLOCKED" in containment_status:
+
+                            # PHASE 10 FIX: this used to rewrite ANY "UNBLOCKED" containment
+                            # status to "WAITING FOR APPROVAL" purely because
+                            # interactive_blocking_enabled was on — with no check on whether
+                            # mitigate() actually had anything pending. mitigate()'s own
+                            # interactive-mode branches (ips.py:344,362) are only even
+                            # reachable when risk_score >= 8.5 (router) or lateral_threat is
+                            # true — below that, mitigate() does nothing and "UNBLOCKED" is
+                            # just the correct, final status, not a placeholder. A SUSPICIOUS/
+                            # monitor alert at risk=4.5 was getting relabeled "Action Required"
+                            # with live approval buttons even though nothing was ever
+                            # queued — a real, user-facing contradiction (SUSPICIOUS/monitor
+                            # decision, WAITING FOR APPROVAL response). 8.5 is the lower of
+                            # mitigate()'s two thresholds (router 8.5, tarpit 9.0), so it's the
+                            # correct floor for "could plausibly have something pending".
+                            if (
+                                bool(self.config.get("interactive_blocking_enabled", False))
+                                and "UNBLOCKED" in containment_status
+                                and (risk >= 8.5 or lateral_threat)
+                            ):
                                 containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
                         self.alert_writer.write(alert_payload)
@@ -808,7 +875,16 @@ class EnginePipeline:
                                 else:
                                     rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
 
-                                threat_name = decision.get("hypotheses", {}).get("attack", {}).get("name", "Unknown Threat")
+                                # PHASE 8 FIX: this used to read decision["hypotheses"]["attack"]["name"] —
+                                # the behavioral hypothesis engine's best guess, which falls back to the
+                                # generic label "DIRECT_IOC_HIT" whenever no attack hypothesis's own evidence
+                                # matched, even when the real trigger was a reputation-tier hard-stop or plain
+                                # decision-engine explanation. That's how one alert could headline "THREAT:
+                                # DIRECT_IOC_HIT (99% Confidence)" while the very next line said "Trigger:
+                                # Confirmed Malicious IOC" — two different sources describing the same
+                                # verdict. decision["explanation"] (== primary_sig) is what actually decided
+                                # the state below; use that for both so they can never disagree.
+                                threat_name = decision.get("explanation", primary_sig)
                                 threat_conf_pct = int(decision.get('threat_confidence', 0) * 100)
 
                                 alert_msg = (
@@ -851,18 +927,59 @@ class EnginePipeline:
                                 alert_msg += (
                                     f"\n🛡️ *RESPONSE*\n"
                                     f"- Action: `{containment_status}`\n"
-                                    f"- AI Analysis: `{fp_pct}% FP / {threat_pct}% Threat`\n"
                                 )
-                            
-                                if decision.get("evidence_verification_required", False):
-                                    alert_msg += "- Verification: `Required` (partial hypothesis support)\n"
-                                
+
+                                # PHASE 8 FIX: this section used to append a standalone
+                                # "AI Analysis: X% FP / Y% Threat" line plus an unrelated
+                                # "Verification: Required" flag — two independently-computed
+                                # subsystems (decision_engine's hypothesis/reputation verdict
+                                # above, and fp_engine's own 3-stage ML verdict) concatenated
+                                # with zero reconciliation. That's mechanically how one event
+                                # read "99% Confirmed" + "32% Threat" + "Low Confidence Alert"
+                                # in the same message. Both are now shown as an explicit,
+                                # ordered trail — what was checked, at each stage, and why —
+                                # instead of two bare, sometimes-disagreeing percentages.
+                                alert_msg += "\n🧭 *REASONING (Decision Engine)*\n"
+                                for step in decision.get("reasoning_trail", []):
+                                    alert_msg += f"- {step}\n"
+
+                                fp_reasons = fp_verdict.get("reasons", [])
+                                if fp_reasons:
+                                    alert_msg += (
+                                        f"\n🩺 *FALSE-POSITIVE CHECK "
+                                        f"(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})*\n"
+                                    )
+                                    for reason in fp_reasons:
+                                        alert_msg += f"- {reason}\n"
+
+                                # PHASE 10 FIX: labeled explicitly per third-party review feedback
+                                # — this and the headline "{threat_conf_pct}% Confidence" are two
+                                # independently-computed numbers measuring different things (the
+                                # decision engine's evidence-based verdict vs. CL-AFPE's statistical
+                                # benign-context estimate). Printing them side by side as bare
+                                # percentages with no labels read as a contradiction; naming which
+                                # is which removes the ambiguity without changing either number.
+                                alert_msg += (
+                                    f"\n- CL-AFPE benign-context estimate: `{fp_pct}%` "
+                                    f"(independent ML/embedding score — not the same measurement "
+                                    f"as the {threat_conf_pct}% threat confidence above)\n"
+                                )
                                 alert_msg += f"\n{rec_badge}"
 
 
                                 reply_markup = None
                                 inline_keyboard = []
-                                if bool(self.config.get("interactive_blocking_enabled", False)):
+                                # PHASE 10 FIX: same bug as the containment_status override
+                                # above — this used to attach live "Approve Hardware
+                                # Isolation" / "Release Device" buttons to EVERY alert
+                                # whenever interactive_blocking_enabled was on, regardless of
+                                # whether mitigate() ever had anything pending (only
+                                # possible at risk>=8.5 or a lateral-movement/honeypot hit —
+                                # see ips.py's own thresholds). A SUSPICIOUS/monitor alert
+                                # offering an "Approve Isolation" button for an isolation
+                                # that was never queued is misleading regardless of what the
+                                # containment_status text says.
+                                if bool(self.config.get("interactive_blocking_enabled", False)) and (risk >= 8.5 or lateral_threat):
                                     inline_keyboard.append([
                                         {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
                                         {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
@@ -892,7 +1009,6 @@ class EnginePipeline:
                                 if inline_keyboard:
                                     reply_markup = {"inline_keyboard": inline_keyboard}
 
-                                # self.ollama_analyzer.analyze(alert_payload)
                                 self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
                 elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
@@ -966,8 +1082,6 @@ class EnginePipeline:
 
 
     def stop(self) -> None:
-        if hasattr(self, "ollama_analyzer"):
-            self.ollama_analyzer.stop()
         LOGGER.info("Stopping Engine Pipeline...")
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()

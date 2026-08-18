@@ -1,81 +1,137 @@
-# 🛡️ Home-IDS: Advanced Autonomous Threat Defense (Version 7)
+# 🛡️ Home-IDS: Autonomous Threat Defense (Version 8.0)
 
-**Home-IDS Version 7** is a professional-grade, autonomous Intrusion Detection and Prevention System (IDS/IPS) engineered for edge networks and smart home environments. Moving far beyond static blocklists, Home-IDS utilizes a state-of-the-art **Tri-Brain Architecture** to detect, analyze, and neutralize sophisticated threats in real-time, while autonomously learning to ignore false positives.
+**Home-IDS** is a self-hosted, autonomous Intrusion Detection and Prevention System (IDS/IPS) for home and edge networks. It fuses network metadata from **Zeek** and DNS telemetry from **Pi-hole** into a real-time evidence-and-hypothesis engine, backs every alert with a false-positive-suppression layer that learns from its own mistakes, and — new in 8.0 — **calibrates its own sensitivity over time**, globally and per device, from real evidence, without needing a human to keep up with every alert.
 
-Designed for uncompromising security, it acts as a self-healing immune system for your network — capable of identifying Zero-Day malware, Domain Generation Algorithms (DGAs), and lateral movement, all while running comfortably on a Raspberry Pi.
+It is not a toy project pretending to be enterprise-grade. It is a genuinely careful piece of engineering with known, documented limitations — and as of this release, most of the gaps found by two rounds of independent audit this year have been closed, verified against the real running code rather than assumed from its own comments.
 
 ---
 
-## ✨ What's New in 7.0
+## ✨ What's New in 8.0
 
-Version 7.0 is a reliability and transparency release. Two silent scheduling bugs were found and fixed, every configuration key in the system was individually audited against the code that reads it, and the entire configuration file was rebuilt from the ground up.
+Version 7.0 was a configuration and reliability pass. **8.0 is a correctness, transparency, and autonomy pass** — it fixes real detection bugs found by tracing actual production alerts line-by-line back through the code, and it replaces "the system silently patches its own config file" with a properly layered, auditable, reversible self-tuning architecture.
 
 | | |
 |---|---|
-| 🐛 **Two scheduling bugs, fixed** | The `retro_hunter` historical threat-intel job had a job-key mismatch that meant it silently never ran. The `ollama_soc` batch analyst had a training-data contamination path where it could partially re-ingest its own prior output. Both are fixed and locked in by a new regression test. |
-| 🔍 **Full configuration audit** | Every key read by the code was checked against the config file, and every key in the config file was checked against the code. 5 dead keys removed, 12 missing-but-live keys documented, a broken GeoIP database path fixed (which was silently disabling geofencing), and the entire `tests/` suite relocated to a proper top-level directory. |
-| ⚙️ **`config.json` → `config.yaml`** | The configuration file has been rebuilt as a categorized, heavily-commented `config.yaml` — 13 logical categories instead of an opaque restart/live split, with every key annotated `[LIVE]` or `[RESTART]` right where you're reading it. Secrets are fully separated into `.env`. |
-| 🎯 **Live false-positive tuning** | The four CL-AFPE thresholds (`fp_lgbm_threshold`, `fp_embed_similarity_threshold`, `fp_combined_suppress_threshold`, `fp_combined_uncertain_threshold`) are now genuinely hot-reloadable — tune your false-positive sensitivity without a restart. |
+| 🎯 **A real false-block bug, fixed** | A live alert for a connection to Telegram's own infrastructure was reaching "Confirmed Malicious IOC / 99% confidence / auto-block" from a single AbuseIPDB score alone — with VirusTotal and ThreatIntel both clean. The reputation classifier's confirmation bar for that one crowd-sourced signal is now aligned with the bar the false-positive engine itself already trusted it at. See [§2](#2-the-hypothesis--evidence-engine-hee) of the Engineering Manual. |
+| 🧭 **Alerts now show their reasoning, not just a verdict** | Every Telegram alert carries an explicit step-by-step trail — hard-stop checks, reputation context (with IP ownership), hypothesis scores, and the false-positive engine's own stage-by-stage numbers — instead of two independently-computed confidence percentages sitting side by side with no explanation of what either one means. |
+| 🚫 **A resource crisis with the local LLM, fixed** | A live diagnostic call showed a single Ollama request taking 849 seconds under real CPU load for a trivial prompt. The batch analyst (`ollama_soc.py`) now deduplicates identical threat patterns before ever calling the LLM, caches verdicts for 7 days, and hard-caps fresh calls per run — collapsing what could have been 50+ multi-minute calls into a handful. |
+| 🤖 **Autonomous, human-independent self-calibration** | The false-positive engine's suppression threshold now calibrates itself from real evidence — both operator Telegram corrections *and* the LLM's own validated corrections (the latter requiring zero human involvement) — conservatively, with a minimum sample count, a safety margin, and an explicit refusal rule whenever the evidence is ambiguous. It **never** writes to `config.yaml`; adjustments live in a separate, human-readable, deletable state file. See [§3](#3-autonomous-self-calibration-new-in-80) below. |
+| 📱 **Per-device profiles** | Devices with genuinely different traffic profiles (an IoT sensor vs. a laptop vs. a NAS) can now converge on their own calibrated suppression sensitivity once there's enough of *that device's own* evidence — not forced onto one global number. |
+| 🧹 **Dead code removed** | The legacy `mitigation/scoring.py` risk-scoring engine (superseded by the Hypothesis & Evidence Engine, but never deleted) and a duplicate, unthrottled real-time Ollama analyzer (instantiated but never actually called) are gone. |
 
-See [CHANGELOG.md](CHANGELOG.md) for the full technical write-up, and [USER_MANUAL.md](USER_MANUAL.md) for the complete `config.yaml` reference.
+See [CHANGELOG.md](Doku/CHANGELOG.md) for the complete, dated technical write-up of every fix, and [USER_MANUAL.md](Doku/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
 
 ---
 
 ## 🌟 The Tri-Brain Architecture
 
-Version 7 runs a revolutionary tri-brain processing pipeline that combines raw speed, continuous machine learning, and deep cognitive reasoning — each brain doing exactly the amount of thinking its job requires, and no more.
+```mermaid
+flowchart LR
+    subgraph Sensors
+        Zeek["Zeek NDR<br/>(packet/flow metadata)"]
+        Pihole["Pi-hole<br/>(DNS query log)"]
+    end
+
+    subgraph Brain1["🧠 Brain 1 — Real-Time Pipeline"]
+        direction TB
+        Extract["Feature extraction<br/>(entropy, z-scores, kill-chain phase)"]
+        HEE["Hypothesis & Evidence Engine<br/>(decision_engine.py)"]
+        Extract --> HEE
+    end
+
+    subgraph Brain2["🛡️ Brain 2 — CL-AFPE"]
+        direction TB
+        Stage1["Stage 1: Hard-stop filter"]
+        Stage2["Stage 2: LightGBM P(FP)"]
+        Stage3["Stage 3: FastEmbed similarity"]
+        Combine["Weighted combine<br/>(per-device threshold)"]
+        Stage1 --> Stage2 --> Stage3 --> Combine
+    end
+
+    subgraph Brain3["🕵️ Brain 3 — Batch LLM Analyst"]
+        direction TB
+        Dedup["Group by device+target+signature"]
+        Cache["7-day verdict cache"]
+        LLM["Ollama query<br/>(capped per run)"]
+        Dedup --> Cache --> LLM
+    end
+
+    Zeek --> Extract
+    Pihole --> Extract
+    HEE -->|evidence + verdict| Brain2
+    Combine -->|suppress| Muted["state/autonomous_muted.jsonl"]
+    Combine -->|publish| Alerts["alerts.json + Telegram"]
+    Alerts -.every 4h, capped.-> Brain3
+    LLM -->|validated correction| Muted
+```
 
 ### 🧠 Brain 1: The Statistical Engine (Real-Time Pipeline)
-The core detection loop operates entirely in-memory and asynchronously. It fuses high-volume network metadata from **Zeek (Bro)** with DNS logs from **Pi-hole**.
-- Evaluates thousands of packets per second with **zero network latency**.
-- Uses a deterministic, graph-based **Hypothesis & Evidence Engine (HEE)**. Instead of a flat risk score, it collects structural network facts (e.g., `high_entropy`, `dns_tunneling`, `covert_beaconing`) and evaluates them against strict threat hypotheses (e.g., `EXFILTRATION`).
-- Employs a custom LightGBM classifier to evaluate baseline temporal context (`time_sin`, `time_cos`) and diurnal rhythms.
+`src/core/pipeline.py` and `src/main.py`. A strict, threaded (not `asyncio`) polling loop with a disciplined 5-phase lock/release pattern per cycle — snapshot state under a short lock, pre-fetch Zeek data with no lock held, compute local features under a short lock, do expensive threat-intel I/O with no lock held, then finalize scoring under a short lock. This is what lets thousands of events get processed per second without one slow HTTP call to a threat-intel API stalling every other device's evaluation.
+
+Detection itself runs through the **Hypothesis & Evidence Engine (HEE)**: instead of one additive risk number, the engine collects typed `Evidence` objects (DNS entropy, Zeek lateral-movement counts, reputation signals, ...) and evaluates them against explicit attack and benign hypotheses. A hard-stop (confirmed IOC, honeypot access, ARP spoofing, geofencing violation) can escalate straight to `CRITICAL`; everything else has to actually explain itself through corroborating evidence before it can auto-block anything.
 
 ### 🛡️ Brain 2: The Continuous Learning False-Positive Engine (CL-AFPE)
-Positioned between detection and containment, this ultra-fast Machine Learning brain prevents the system from blocking legitimate traffic.
-- **LightGBM & FastEmbed:** Uses a dedicated LightGBM model and structural vector embeddings (FastEmbed) to evaluate alerts before they are executed.
-- **Anti-Poisoning:** It compares the structural vector of an anomaly against known benign profiles. If your Smart TV starts acting strangely, Brain 2 instantly recognizes the structural similarity to benign telemetry and silently suppresses the alert.
-- **Dynamic Trust Cache:** Harmless behaviors are learned instantly and cached for 14 days without human intervention.
-- **Live-tunable sensitivity:** All four suppression thresholds are hot-reloadable straight from `config.yaml` — no restart required to dial noise up or down.
+`src/intelligence/fp_engine.py`. Sits between detection and containment. A 3-stage pipeline (hard-stop re-check → LightGBM tabular classifier → FastEmbed semantic domain-similarity) produces a combined confidence that an alert is a false positive. Above the suppress threshold, the alert is silently muted and the domain is trust-cached for 14 days. Below the uncertain threshold, it's published as a full-confidence threat. In between, it's published but explicitly labeled low-confidence — never silently dropped, never silently escalated.
 
-### 🕵️ Brain 3: The Cognitive Analyst (Local LLM SOC)
-While Brain 1 & 2 react in milliseconds, Brain 3 thinks in seconds. Home-IDS natively integrates with **Ollama (LLaMA 3.1)** running locally on your hardware as a background daemon.
-- **Batch Analysis:** A dedicated background scheduler (`scripts/scheduler.py`) wakes up periodically to batch-process recent alerts.
-- **Deep Reasoning:** It acts as a Tier 2 SOC Analyst, ingesting JSON evidence graphs, identifying attack chains, and writing executive summaries.
-- **Hallucination Protection:** A deterministic guardrail system validates all AI decisions against actual OTX Threat Intelligence, physically preventing the LLM from hallucinating benign verdicts for known malicious IPs.
+As of 8.0, the suppress threshold is **per-device aware** (falls back to the global default for devices without their own calibrated profile — see below) and Stage 3 no longer runs semantic similarity against the literal string `"unknown"` for raw-IP connections with no resolved hostname.
+
+### 🕵️ Brain 3: The Batch Cognitive Analyst (Local LLM)
+`src/scripts/ollama_soc.py`, launched every 4 hours by `src/scripts/scheduler.py`. Reads the last 24h of *published, non-suppressed* alerts (CL-AFPE already resolved the rest cheaply), groups them by device+target+signature so a single noisy pattern only costs one LLM call no matter how many times it fired, checks a 7-day verdict cache before spending a call at all, and hard-caps fresh calls per run. A `DeterministicValidator` rejects any LLM "benign" verdict that contradicts a confirmed IOC or bad reputation signal in the actual evidence — the model cannot hallucinate its way past a real threat signal. Validated corrections feed the exact same closed loop an operator's Telegram tap does (see below) — just running continuously, with zero human involvement required.
 
 ---
 
 ## 🧬 Autonomous Evolution & Self-Healing
 
-Home-IDS gets smarter over time without any user intervention. It features two fully autonomous evolutionary loops:
+### 1. False-Positive Self-Healing (per-alert, immediate)
+When CL-AFPE or the batch LLM analyst confirms a false positive, four things happen immediately: the base domain is added to a 14-day trust cache (`state/fp_trust_cache.json`), the device's own anomaly-sensitivity baseline is widened slightly (`state/fp_sigma_shifts.json`), a labeled training-correction entry is written (`state/autonomous_muted.jsonl`) so the weekly model retrain learns from the correction instead of re-reinforcing the mistake it just fixed — and, **new in 8.0.1**, if an earlier cycle had already blocked that domain in Pi-hole before the pattern was learned as safe, that block is released too. Immunizing a domain only ever stops *future* alerts; it doesn't undo a block already in place, so both autonomous correction paths (CL-AFPE's own suppression and the LLM-validated path) now check and release a stale block, not just the human-operator "Mark False Positive" path that already did. The goal is to block only what's actually still necessary — an over-eager block that outlives its own justification just breaks a device's normal function for no remaining reason.
 
-### 1. Autotuning (Threshold Calibration)
-The background daemon runs a daily `autotune` cron job that analyzes your network's unique standard deviation of risk scores over a 7-day rolling window. It automatically adjusts the mathematical alert thresholds in your configuration to perfectly fit your environment, silently reducing noise.
+Every Pi-hole block also carries a `"Home-IDS Auto-Block | Device: ... | Trigger: ..."` comment, so anyone looking at Pi-hole's own blocklist can see it was the script, and why — and that same text is now stored durably in `state/ids_state.json` too, so it's answerable locally even for the two Pi-hole fallback paths that can't verifiably carry a comment through to Pi-hole itself.
 
-### 2. Self-Healing False Positives
-When the **Cognitive Analyst (Brain 3)** reviews an alert and determines it to be a benign anomaly (e.g., a Smart TV uploading diagnostic telemetry), it doesn't just send you a report.
-- It actively extracts the benign domains.
-- It dynamically injects them into the live `network_and_devices.safe_host_patterns` list inside `config.yaml`, using a comment-preserving writer so your hand-written notes and category structure survive every automated edit.
-- The real-time pipeline (Brain 1) seamlessly reloads this configuration into memory without dropping a single packet.
+### 2. Autonomous Self-Calibration (new in 8.0)
+Once a week (piggybacking on the existing model-retrain schedule), `scripts/train_fp_classifier.py` looks at every confirmed false positive from the last cycle — from *either* an operator's Telegram tap or the LLM's own validated corrections — and asks a narrow, conservative question: **"is there a clean, unambiguous gap between confirmed-safe scores and everything else, that would let us safely catch more false positives automatically?"**
 
-**The system literally patches its own ruleset to heal false positives forever.**
+- Needs at least 5 pooled confirmations (or 3 for a device's own profile) before touching anything.
+- Only ever *lowers* the suppression threshold — raising it back up after over-tuning stays a human decision.
+- Refuses outright if any never-corrected alert scored as high as a confirmed false positive — that ambiguity is never auto-resolved toward suppression.
+- Has a hard floor it will never cross regardless of evidence.
+- **Never writes to `config.yaml`.** Adjustments live in `state/config_overrides.json` (global) and `state/device_fp_profiles.json` (per-device) — separate, human-readable, deletable files that layer on top of your hand-authored config at read time. Delete the file, or just the one key inside it, and the system reverts to your `config.yaml` value on its next reload. No restart, no `config.yaml` edit, no risk of your own configuration being silently rewritten underneath you.
+
+```mermaid
+flowchart LR
+    A["Operator Telegram tap<br/>OR LLM validated correction"] --> B["state/autonomous_muted.jsonl<br/>(labeled evidence)"]
+    B --> C["Weekly calibration pass<br/>(conservative, gated, one-directional)"]
+    C -->|enough clean evidence| D["state/config_overrides.json<br/>(global) or<br/>device_fp_profiles.json (per-device)"]
+    C -->|ambiguous or too little evidence| E["No change — logged why"]
+    D -->|watched, live, no restart| F["config.py: effective value<br/>= override ?? config.yaml baseline"]
+    G["config.yaml<br/>(human-authored, never touched)"] --> F
+```
 
 ---
 
 ## 💥 Multi-Tier Hardware Containment
 
-Upon detecting a critical threat, Home-IDS executes a latched, multi-tier isolation protocol:
-*   **Layer 2 (ARP/NDP Dual-Stack Tarpitting)**: Instantly neutralizes the infected device locally using Scapy to forge ARP/NDP responses, severing its ability to communicate with other devices on the LAN.
-*   **Layer 3 (Router WAN Isolation)**: Integrates via TR-064 API directly with Fritz!Box routers to instantly sever the infected device's connection to the internet, terminating C2 beaconing.
-*   **Layer 7 (DNS Sinkholing)**: Automatically updates Pi-hole blocklists to sinkhole malicious infrastructure network-wide.
+Upon a genuinely confirmed critical threat, Home-IDS executes a latched, multi-tier isolation protocol — latched meaning it is never auto-released purely because traffic decayed to zero (that would create an isolate → silence → auto-release → re-beacon flapping loop):
+* **Layer 2 (ARP/NDP Dual-Stack Tarpit)** — Scapy forges ARP/NDP responses to sever the device from the rest of the LAN.
+* **Layer 3 (Router WAN Isolation)** — TR-064 calls a Fritz!Box to cut the device's internet access while leaving LAN access intact for remediation.
+* **Layer 7 (DNS Sinkholing)** — Pi-hole blocks the malicious domain network-wide, with a persistent retry queue if the Pi-hole API is briefly unreachable.
 
 ---
 
-## 📊 Enterprise Observability
+## 📊 Observability
 
-- **SecOps via Telegram:** Receive interactive, 1-sentence AI executive summaries. Approve hardware isolation or manually immunize devices with a single tap using inline buttons.
-- **Markdown Reports:** The background daemon generates daily, beautifully formatted Markdown reports detailing top domains and all cognitive threat analysis.
-- **Prometheus & Grafana:** Full integration with Prometheus metrics and Loki logs, providing enterprise-level visibility into HEE decision states, AI confidence intervals, and autonomous mitigations across your entire infrastructure.
+- **Telegram**: interactive alerts showing the full reasoning trail, one-tap hardware-isolation approval (only offered when something is actually pending — a monitor-only alert no longer shows an "Approve" button that approves nothing), and one-tap false-positive correction.
+- **Markdown reports**: daily SOC and top-domains reports in `reports/`, plus a durable `state/retro_hunt_findings.jsonl` for anything the retroactive threat hunter finds.
+- **Prometheus & Grafana**: 80+ metrics covering HEE decision states, per-device feature telemetry, CL-AFPE efficacy, and containment status — see the User Manual for the full catalog.
 
 ---
+
+## 📚 Documentation Map
+
+| Document | What's in it |
+|---|---|
+| [USER_MANUAL.md](Doku/USER_MANUAL.md) | The exhaustive reference: every `config.yaml` key, the full state-file and autonomous-override layer, service lifecycle, test suite, and the complete Prometheus metric catalog. |
+| [INSTALL.md](Doku/INSTALL.md) | Step-by-step installation of Home-IDS and every subsystem it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, Ollama). |
+| [ENGINEERING_MANUAL.md](Doku/ENGINEERING_MANUAL.md) | The internal mathematics and architecture, verified line-by-line against the actual code — for developers extending or debugging the engine. |
+| [CHANGELOG.md](Doku/CHANGELOG.md) | The full, dated version history including this release's audit write-up. |
+
+For detailed configuration, architecture diagrams, and metric definitions, start with the [USER_MANUAL.md](Doku/USER_MANUAL.md).

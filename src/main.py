@@ -176,16 +176,35 @@ def main():
     )
 
     LOGGER.debug("Booting Centralized Background Scheduler (subprocess)...")
+    scheduler_log_file = None
     try:
+        # PHASE 9 FIX: this used to redirect to DEVNULL, silently discarding not just
+        # scheduler.py's own dispatch logs but — since scripts.scheduler launches
+        # ollama_soc.py/retro_hunter.py/top_domains_report.py/train_fp_classifier.py via a
+        # plain subprocess.Popen(...) with no stdout/stderr override of its own — EVERY
+        # log line those four scripts ever produce too, since a child with no explicit
+        # redirect inherits its parent's actual file descriptors, and scheduler.py's fd 1/2
+        # were already pointed at the null device. Concretely: retro_hunter.py's sole
+        # channel for reporting a genuine zero-day match is `LOGGER.critical(...)` — that
+        # was going straight into the void, unrecoverable, no journalctl line, no file, no
+        # notification. Same fix already applied to the FastAPI subprocess a few lines up
+        # (`webhook_log_file`) — this was the one process-spawn site that fix didn't reach.
+        scheduler_log_path = Path("state/scheduler.log")
+        scheduler_log_path.parent.mkdir(parents=True, exist_ok=True)
+        scheduler_log_file = open(scheduler_log_path, "a")  # noqa: WPS515
+
         scheduler_path = Path(__file__).resolve().parent / "scripts" / "scheduler.py"
         scheduler_proc = subprocess.Popen(
             [sys.executable, str(scheduler_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stdout=scheduler_log_file,
+            stderr=subprocess.STDOUT
         )
-        LOGGER.debug(f"Scheduler daemon started (PID: {scheduler_proc.pid})")
+        LOGGER.debug(f"Scheduler daemon started (PID: {scheduler_proc.pid}). Logs → {scheduler_log_path}")
     except Exception as e:
         LOGGER.error("⚠️ Failed to start scheduler daemon: %s", e)
+        if scheduler_log_file and not scheduler_log_file.closed:
+            scheduler_log_file.close()
+            scheduler_log_file = None
 
     # =====================================================================
     # 5. SIGNAL HANDLING (Graceful Shutdown)
@@ -218,6 +237,11 @@ def main():
                 scheduler_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 scheduler_proc.kill()
+        if scheduler_log_file and not scheduler_log_file.closed:
+            try:
+                scheduler_log_file.close()
+            except Exception:
+                pass
         pipeline.stop()
         LOGGER.info("Engine termination complete. Exiting.")
         sys.exit(0)

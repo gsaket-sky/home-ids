@@ -12,8 +12,10 @@ RECENT FIXES:
 """
 import sys
 import json
+import time
 import logging
 import argparse
+import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -25,6 +27,32 @@ from intelligence.threat_intel import ThreatIntel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [RETRO-HUNTER] %(message)s")
 LOGGER = logging.getLogger("retro_hunter")
+
+
+def _send_telegram(msg: str) -> None:
+    """PHASE 9 FIX: run_retro_hunt() previously had exactly one output channel —
+    LOGGER.critical() — for its single most important finding: a domain your network
+    already talked to that's now known to be malicious. Between scripts/scheduler.py
+    launching this as a subprocess.Popen with no stdout/stderr override, and main.py (see
+    the scheduler_proc fix a few commits up) formerly piping THAT subprocess's own
+    stdout/stderr to DEVNULL, every one of those log lines was unrecoverable — no
+    journalctl entry, no file, no notification, nothing. Even with that now fixed, a
+    genuine zero-day retroactive match deserves the same real-time channel every other
+    finding in this codebase gets, not just a log line an operator has to think to go
+    read. Mirrors scripts/top_domains_report.py's own send_telegram() helper."""
+    token = CONFIG.get("telegram_token", "")
+    chat_id = CONFIG.get("telegram_chat_id", "")
+    if not token or not chat_id:
+        return
+    try:
+        data = json.dumps({"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        LOGGER.error("Failed to send Telegram retro-hunt alert: %s", e)
 
 def load_historical_domains(log_path: Path, days_back: int) -> set:
     """Parses massive JSONL log streams efficiently to extract unique queried domains."""
@@ -72,8 +100,18 @@ def run_retro_hunt(days: int = 14) -> None:
     # FIXED: Replaced targeted refresh with global refresh payload
     ti._refresh_all() 
     
-    alert_path_cfg = Path(CONFIG.get("alert_json_path", "/app/state/alerts_stream.jsonl"))
-    log_path = alert_path_cfg if alert_path_cfg.exists() else alert_path_cfg.with_name("alerts_stream.jsonl")
+    # PHASE 9 FIX: the default value here (/app/state/alerts_stream.jsonl) is a leftover
+    # from an earlier Docker-based layout this project no longer uses (see the v3.0.0
+    # changelog: "removes hardcoded Docker dependencies"), and the fallback filename
+    # ("alerts_stream.jsonl") is a file GEMINI.md explicitly says must never be referenced
+    # — "the current architecture strictly expects alerts.json for Promtail/Loki
+    # scraping." Both were dead in practice (alert_json_path is correctly "alerts.json" in
+    # the live config, so the primary branch always won), but if it were ever briefly
+    # unset or the file briefly missing, this would have silently hunted the wrong,
+    # nonexistent file forever instead of erroring. Mirrors ollama_soc.py's own
+    # already-correct fallback-to-the-real-filename pattern.
+    alert_path_cfg = Path(CONFIG.get("alert_json_path", "state/alerts.json"))
+    log_path = alert_path_cfg if alert_path_cfg.exists() else alert_path_cfg.with_name("alerts.json")
     historical_domains = load_historical_domains(log_path, days)
     
     if not historical_domains:
@@ -94,11 +132,41 @@ def run_retro_hunt(days: int = 14) -> None:
             })
             
     if matches:
+        matches_sorted = sorted(matches, key=lambda x: x["confidence"], reverse=True)
         LOGGER.critical("🚨 RETROACTIVE THREATS DISCOVERED 🚨")
         LOGGER.critical("The following domains were accessed in the past %d days and have recently been classified as malicious:", days)
-        for match in sorted(matches, key=lambda x: x["confidence"], reverse=True):
+        for match in matches_sorted:
             LOGGER.critical(" -> [MATCH] Domain: %s | Source: %s | Confidence: %.2f | Tags: %s", 
                             match["domain"], match["source"], match["confidence"], match["tags"])
+
+        # PHASE 9 FIX: durable record, separate from alerts.json on purpose — that file
+        # feeds train_fp_classifier.py's label=0 threat set and ollama_soc.py's 24h
+        # analysis window, both of which expect the live pipeline's real alert schema
+        # (device/network_context/features). A retro-hunt match has none of that (no
+        # active device state, no computed features at the time of the original
+        # connection) — forcing it into that schema would either crash extraction or, worse,
+        # get silently reinterpreted as something it isn't. A dedicated JSONL append,
+        # same pattern as state/autonomous_muted.jsonl, avoids that class of bug entirely.
+        try:
+            findings_path = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "retro_hunt_findings.jsonl"
+            with open(findings_path, "a", encoding="utf-8") as f:
+                for match in matches_sorted:
+                    f.write(json.dumps({
+                        "type": "retro_hunt_match", "ts_unix": time.time(),
+                        "ts_human": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "lookback_days": days, **match,
+                    }) + "\n")
+        except Exception as e:
+            LOGGER.error("Failed to write retro_hunt_findings.jsonl: %s", e)
+
+        top = matches_sorted[:10]
+        lines = [f"🚨 <b>Retroactive Threat Hunt: {len(matches)} match(es)</b>",
+                 f"Domains queried in the past {days}d, now classified malicious by fresh intel:", ""]
+        for match in top:
+            lines.append(f"• <code>{match['domain']}</code> — {match['source']}, confidence {match['confidence']:.2f}")
+        if len(matches) > len(top):
+            lines.append(f"...and {len(matches) - len(top)} more (see retro_hunt_findings.jsonl)")
+        _send_telegram("\n".join(lines)[:4000])
     else:
         LOGGER.info("✅ Retroactive hunt complete. Zero historical compromises detected against fresh intel.")
 

@@ -19,6 +19,7 @@ RECENT FIXES:
   doesn't start with "_") instead of looking for those two specific section names.
 """
 import os
+import json
 import threading
 import time
 import logging
@@ -46,7 +47,6 @@ _ENV_OVERRIDES = {
     "IDS_IPS_PIHOLE_ENABLED": "ips_pihole_enabled",
     "IDS_IPS_ROUTER_ENABLED": "ips_router_enabled",
     "IDS_IPS_TARPIT_ENABLED": "ips_tarpit_enabled",
-    "OLLAMA_API_KEY":         "ollama_api_key",
 }
 
 _STATIC_KEYS = {
@@ -54,7 +54,7 @@ _STATIC_KEYS = {
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
-    "fritz_password", "fritz_api_token", "fastapi_port", "ollama_api_key",
+    "fritz_password", "fritz_api_token", "fastapi_port",
     "env_file"
 }
 # NOTE: "scheduled_tasks" was removed from this set (2026-08-17 config audit) — it was a
@@ -131,7 +131,11 @@ DEFAULT_CONFIG = {
     "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "paperless", "fritz", "repeater"],
     "ollama_url": "",         
     "ollama_model": "llama3", 
-    "ollama_api_key": "",
+    # PHASE 11: scripts/ollama_soc.py's per-pattern verdict cache TTL and per-run fresh-
+    # query cap -- see config.yaml's threat_intel_and_ai category for the full rationale
+    # (a live diagnostic run found single Ollama calls taking 14+ minutes under real load).
+    "ollama_cache_ttl_seconds": 604800.0,
+    "ollama_max_queries_per_run": 5,
     # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are
     # minute/hour/day/month/dow with only "*", "*/N", or an exact integer supported per
     # field (no comma-lists, no ranges). "script" is an optional filename override for
@@ -202,7 +206,15 @@ class LiveConfig:
         self._notify_cb = None
         self._last_loaded = 0.0
         self._watcher_active = False
-        
+
+        # PHASE 12: a separate, state-directory-scoped override layer for autonomous
+        # tuning -- see _load_overrides() below for the full rationale. Computed the same
+        # way env_path already is (relative to file_path's own directory) rather than via
+        # the "state_path" config key, since that key comes FROM config and isn't resolved
+        # yet at this point in __init__.
+        self._overrides_path = self.file_path.parent / "state" / "config_overrides.json"
+        self._last_overrides_loaded = 0.0
+
         env_path = self.file_path.parent / self._config.get("env_file", ".env")
         load_env_file(env_path)
         
@@ -232,14 +244,21 @@ class LiveConfig:
                         structured["static_requires_restart"][k] = v
                     else:
                         structured["dynamic_live_reload"][k] = v
-                self.file_path.write_text(yaml.safe_dump(structured, sort_keys=False))
+                self.file_path.write_text(yaml.safe_dump(structured, sort_keys=False), encoding="utf-8")
             except Exception as exc:
                 LOGGER.error("Failed to create default config: %s", exc)
             return
 
         try:
             mtime = self.file_path.stat().st_mtime
-            raw = yaml.safe_load(self.file_path.read_text()) or {}
+            # PHASE 9 FIX: read_text() without an explicit encoding falls back to the
+            # platform default (e.g. cp1252 on Windows, and even on Linux this is only
+            # UTF-8 by convention, not guarantee — a minimal/POSIX C locale would hit the
+            # same failure). config.yaml's comments are full of UTF-8 emoji/em-dashes, so a
+            # non-UTF-8 default silently breaks every config reload with a decode error.
+            # scheduler.py and scripts/ollama_soc.py's own config loaders already specified
+            # encoding="utf-8" explicitly — this was the one inconsistent reader.
+            raw = yaml.safe_load(self.file_path.read_text(encoding="utf-8")) or {}
             flattened = {}
             for section_name, section_val in raw.items():
                 if str(section_name).startswith("_") or str(section_name).startswith("#"):
@@ -292,9 +311,70 @@ class LiveConfig:
 
             if changed and not is_initial_boot and self._notify_cb:
                 self._notify_cb(changed)
-                
+
+            # PHASE 12: re-assert autonomous overrides on top of whatever config.yaml just
+            # set. Without this, an operator editing any UNRELATED key in config.yaml would
+            # silently clobber a previously-applied override back to its config.yaml
+            # baseline (the per-key diff above compares self._config's current value
+            # against the yaml value and treats a mismatch as "yaml changed this", with no
+            # way to tell "the override changed it" apart from "the operator changed it in
+            # config.yaml").
+            self._load_overrides()
+
         except Exception as exc:
             LOGGER.error("Failed to parse configuration file %s: %s", self.file_path, exc)
+
+    def _load_overrides(self) -> None:
+        """PHASE 12: autonomous/self-tuning adjustments live HERE, never in config.yaml.
+        config.yaml stays the human-authored, hand-edited baseline (the thing you'd diff,
+        back up, or put under version control); this file
+        (state/config_overrides.json) is a separate, plainly-inspectable layer written
+        only by scripts/train_fp_classifier.py's threshold-calibration pass (see that
+        file for the conservative, evidence-gated rule that writes to it) -- never by this
+        class itself.
+
+        Format: {"<config_key>": {"value": <override>, "baseline": <original>,
+                 "set_at": <unix_ts>, "set_by": "<mechanism>", "reason": "<why>"}}
+
+        Deleting this file (or any single key in it) instantly reverts to the config.yaml
+        value on the next reload -- no code change, no restart, no config.yaml edit. Never
+        touches _STATIC_KEYS: autonomous tuning is scoped to live-reloadable behavioral
+        thresholds only, never paths/ports/secrets.
+
+        Self-contained locking (acquires self._lock itself) -- callers must NOT already
+        hold self._lock, since it's a plain non-reentrant threading.Lock and a second
+        acquire from the same thread would deadlock.
+        """
+        if not self._overrides_path.exists():
+            return
+        try:
+            mtime = self._overrides_path.stat().st_mtime
+            raw = json.loads(self._overrides_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            LOGGER.warning("Failed to parse config overrides file %s: %s", self._overrides_path, exc)
+            return
+
+        applied = {}
+        with self._lock:
+            for key, entry in raw.items():
+                if not isinstance(entry, dict) or "value" not in entry:
+                    continue
+                if key in _STATIC_KEYS:
+                    LOGGER.warning(
+                        "Ignoring autonomous override for static key '%s' -- self-tuning is "
+                        "scoped to live-reloadable keys only.", key
+                    )
+                    continue
+                value = entry["value"]
+                if self._config.get(key) != value:
+                    self._config[key] = value
+                    applied[key] = value
+
+        self._last_overrides_loaded = mtime
+        if applied:
+            LOGGER.info("🔧 Applied %d autonomous config override(s): %s", len(applied), applied)
+            if self._notify_cb:
+                self._notify_cb(applied)
 
     def start_watcher(self, interval: float = 5.0) -> None:
         if self._watcher_active:
@@ -309,7 +389,15 @@ class LiveConfig:
                     mtime = self.file_path.stat().st_mtime
                     if mtime > self._last_loaded:
                         LOGGER.info("Config file modification detected. Reloading dynamic parameters...")
-                        self._load()
+                        self._load()  # re-applies overrides at the end too
+                    else:
+                        # PHASE 12: config.yaml itself didn't change, but the override
+                        # layer is written by a completely separate process
+                        # (train_fp_classifier.py) on its own schedule -- check it
+                        # independently so an autonomous adjustment applies live instead
+                        # of waiting on an unrelated config.yaml edit to trigger a reload.
+                        # _load_overrides() acquires its own lock; do not wrap it here.
+                        self._load_overrides()
                 except Exception as e:
                     LOGGER.debug("Config file watcher exception: %s", e)
                     

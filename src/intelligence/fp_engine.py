@@ -173,6 +173,18 @@ class AutonomousFPEngine:
         # Example: {"fc3e26115482": 0.50}  (2 FPs confirmed, 2 x 0.25 = 0.5 sigma)
         self._sigma_shifts: dict = {}
 
+        # PHASE 13: per-device threshold profiles — same "strongly different device
+        # profiles deserve their own tuning" reasoning that already justifies
+        # per-device sigma shifts above, extended to the suppress threshold itself.
+        # Maps device_id -> {config_key: {"value", "baseline", "set_at", "set_by",
+        # "reason", "sample_count"}}. Written only by
+        # scripts/train_fp_classifier.py's per-device calibration pass (see
+        # apply_device_fp_profile() below); deliberately NOT routed through config.py's
+        # global override layer, which is a flat key-value store not designed for
+        # per-device granularity — this stays scoped to AutonomousFPEngine's own state,
+        # the same architectural home sigma shifts and the trust cache already use.
+        self._device_fp_profiles: dict = {}
+
         # Thread lock for concurrent access from pipeline worker threads
         self._lock = threading.Lock()
 
@@ -200,6 +212,7 @@ class AutonomousFPEngine:
         # Load persisted trust cache and sigma-shifts from previous session
         self._load_trust_cache()
         self._load_sigma_shifts()
+        self._load_device_fp_profiles()
 
         # Set model status Prometheus gauges to 0 until models are ready
         fp_engine_lgbm_model_status.set(0.0)
@@ -435,22 +448,39 @@ class AutonomousFPEngine:
         # STAGE 3: FastEmbed Vector Similarity Matcher
         # Compares the domain semantically against the safe vendor reference db.
         # Falls back to static CDN rule matching if model not loaded yet.
+        #
+        # PHASE 10 FIX: a raw-IP-only connection (no DNS resolution happened) has
+        # `domain` set to the literal string "unknown", not empty. Previously that string
+        # was fed straight into FastEmbed as if it were a real hostname — cosine-similarity
+        # scoring the word "unknown" against vendor domain embeddings and getting back a
+        # meaningless-but-real-looking number (e.g. 0.608) that then materially swayed the
+        # combined suppression score. Skip Stage 3 entirely when there's no real
+        # domain/hostname to compare — the honest answer is "not applicable", not a
+        # semantic similarity score for a placeholder string.
         # ==================================================================
-        LOGGER.debug("[FP ENGINE » Stage 3] Running FastEmbed vector similarity...")
-        embed_sim, embed_match = self._stage3_embed(domain, hostname)
+        has_real_domain = bool(domain) and domain.strip().lower() not in ("unknown", "null", "none", "")
 
-        if embed_sim is None:
-            # FastEmbed not yet loaded – use static CDN/vendor rule fallback
-            embed_sim, embed_match = self._stage3_rule_fallback(domain)
-            LOGGER.debug(
-                "[FP ENGINE » Stage 3] Rule fallback: similarity=%.3f, match='%s'",
-                embed_sim, embed_match
-            )
+        if not has_real_domain:
+            embed_sim, embed_match = None, "N/A (no resolved hostname/domain — raw IP connection)"
+            LOGGER.debug("[FP ENGINE » Stage 3] Skipped: no real domain/hostname to compare (target='%s').", domain)
         else:
-            LOGGER.info(
-                "🧠 [FP ENGINE » Stage 3] %s: cosine similarity=%.3f for domain='%s' │ best match='%s'",
-                hostname, embed_sim, domain, embed_match
-            )
+            LOGGER.debug("[FP ENGINE » Stage 3] Running FastEmbed vector similarity...")
+            embed_sim, embed_match = self._stage3_embed(domain, hostname)
+
+            if embed_sim is None:
+                # FastEmbed not yet loaded – use static CDN/vendor rule fallback
+                embed_sim, embed_match = self._stage3_rule_fallback(domain)
+                LOGGER.debug(
+                    "[FP ENGINE » Stage 3] Rule fallback: similarity=%.3f, match='%s'",
+                    embed_sim, embed_match
+                )
+            else:
+                LOGGER.info(
+                    "🧠 [FP ENGINE » Stage 3] %s: cosine similarity=%.3f for domain='%s' │ best match='%s'",
+                    hostname, embed_sim, domain, embed_match
+                )
+
+        embed_sim_str = f"{embed_sim:.3f}" if embed_sim is not None else "N/A"
 
         # ==================================================================
         # FINAL VERDICT: Weighted combination of Stage 2 + Stage 3 scores
@@ -460,19 +490,31 @@ class AutonomousFPEngine:
         #                    about the semantics of domain names.
         #   FastEmbed (0.55): Better at understanding vendor domain name patterns
         #                     but slower and needs model warm-up.
+        #
+        # PHASE 10 FIX: when Stage 3 is N/A (embed_sim is None), fall back to LightGBM
+        # alone at full weight instead of silently treating a missing signal as 0.0 in the
+        # weighted blend — a 0.0 would itself be a false "strongly not similar to anything
+        # safe" signal, just as wrong as the "unknown"-string similarity it replaces.
         # ==================================================================
-        if lgbm_prob == 0.50 and embed_sim >= self.embed_similarity_threshold:
+        if embed_sim is None:
+            combined = lgbm_prob
+        elif lgbm_prob == 0.50 and embed_sim >= self.embed_similarity_threshold:
             combined = embed_sim
         else:
             combined = (lgbm_prob * 0.45) + (embed_sim * 0.55)
         LOGGER.info(
             "⚖️  [FP ENGINE » Final] %s: combined=%.3f "
-            "(LGBM=%.3f×0.45 + Embed=%.3f×0.55) | domain='%s'",
-            hostname, combined, lgbm_prob, embed_sim, domain
+            "(LGBM=%.3f×0.45 + Embed=%s×0.55) | domain='%s'",
+            hostname, combined, lgbm_prob, embed_sim_str, domain
         )
         fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(combined)
 
-        if combined >= self.combined_suppress_threshold:
+        # PHASE 13: per-device threshold, falling back to the global one — see
+        # get_device_suppress_threshold()'s docstring. Computed once and reused for both
+        # the actual decision and the audit-trail text below so they can never disagree.
+        effective_suppress_threshold = self.get_device_suppress_threshold(device_id)
+
+        if combined >= effective_suppress_threshold:
             # ---------------------------------------------------------------
             # HIGH CONFIDENCE FALSE POSITIVE → auto-suppress + self-heal
             # ---------------------------------------------------------------
@@ -482,7 +524,7 @@ class AutonomousFPEngine:
                 hostname, combined, domain, embed_match
             )
             fp_engine_suppressed_total.inc()
-            if embed_sim >= self.embed_similarity_threshold:
+            if embed_sim is not None and embed_sim >= self.embed_similarity_threshold:
                 fp_engine_stage3_embed_hits.inc()
             elif lgbm_prob >= self.lgbm_fp_threshold:
                 fp_engine_stage2_lgbm_hits.inc()
@@ -496,8 +538,8 @@ class AutonomousFPEngine:
             # Self-healing Action 3: Write full audit log entry (never silently lost)
             reasons = [
                 f"LightGBM P(FP)={lgbm_prob:.3f} (Stage 2)",
-                f"FastEmbed cosine similarity={embed_sim:.3f} → best match: '{embed_match}' (Stage 3)",
-                f"Combined confidence={combined:.3f} >= {self.combined_suppress_threshold} (suppress threshold)",
+                f"FastEmbed cosine similarity={embed_sim_str} → best match: '{embed_match}' (Stage 3)",
+                f"Combined confidence={combined:.3f} >= {effective_suppress_threshold} (suppress threshold)",
             ]
             self._write_muted_log(alert_payload, "AUTONOMOUS_FP_SUPPRESSED", reasons, combined)
 
@@ -532,8 +574,8 @@ class AutonomousFPEngine:
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim:.3f} for domain '{domain}'",
-                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={self.combined_suppress_threshold})",
+                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}'",
+                    f"Combined confidence={combined:.3f} insufficient to suppress (threshold={effective_suppress_threshold})",
                 ],
                 "suppress": False,
             }
@@ -559,7 +601,7 @@ class AutonomousFPEngine:
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim:.3f} for domain '{domain}'",
+                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}'",
                     "Alert pattern consistent with genuine threat activity",
                 ],
                 "suppress": False,
@@ -949,11 +991,25 @@ class AutonomousFPEngine:
             LOGGER.debug("[FP ENGINE » REVOKE] '%s' was not in trust cache (already expired or never cached).", base_domain)
         return existed
 
-    def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "") -> dict:
-        """PHASE 6 (operator-driven self-healing): the human-in-the-loop half of the FP
-        closed loop — called when an operator taps "🛡️ Mark False Positive" on a PUBLISHED
-        alert's Telegram message (i.e. one fp_engine did NOT autonomously suppress; see
-        AUTONOMOUS_FP_SUPPRESSED for the fully-autonomous path via evaluate()).
+    def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "", source: str = "operator") -> dict:
+        """PHASE 6 (operator-driven self-healing): originally the human-in-the-loop half of
+        the FP closed loop — called when an operator taps "🛡️ Mark False Positive" on a
+        PUBLISHED alert's Telegram message (i.e. one fp_engine did NOT autonomously
+        suppress; see AUTONOMOUS_FP_SUPPRESSED for the fully-autonomous Stage2/3 path via
+        evaluate()).
+
+        PHASE 13: also called by scripts/ollama_soc.py for its own validated LLM verdicts
+        — the same correction, just triggered autonomously every 4h instead of by a
+        Telegram tap. Both call this same method (same domain-immunization, same sigma
+        widening, same training-set correction), but `source` tags WHICH judge made the
+        call ("operator" | "llm_validated") so downstream consumers — specifically
+        train_fp_classifier.py's threshold self-calibration — can tell them apart, or pool
+        both, without conflating "a human confirmed this" with "the LLM did, and passed
+        DeterministicValidator's hallucination check". Per explicit direction: with
+        alert volume high enough that 5 human corrections in a reasonable window isn't
+        realistic, autonomous LLM-validated evidence is the PRIMARY calibration signal;
+        human corrections remain a valid, faster-acting, optional addition on top, never
+        a requirement.
 
         Why this matters beyond just immunizing the domain: without this, an operator
         correction only ever silences the ONE alert in front of them. The alert itself
@@ -989,20 +1045,25 @@ class AutonomousFPEngine:
             )
 
         # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
-        # the autonomous path applies, scoped to the one device the operator corrected.
+        # the autonomous path applies, scoped to the one device this correction is about.
         self._apply_sigma_shift(device_id, hostname)
 
+        is_llm = source == "llm_validated"
+        event_type = "LLM_VALIDATED_FALSE_POSITIVE" if is_llm else "OPERATOR_MARKED_FALSE_POSITIVE"
+        origin_text = "Ollama LLM (DeterministicValidator-passed)" if is_llm else "operator via Telegram"
+
         reasons = [
-            f"Operator manually marked alert for '{domain or 'unknown'}' as a false positive via Telegram.",
+            f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
             f"Base domain '{base_domain}' added to trust cache." if base_domain else
             "Base domain could not be extracted — trust cache NOT updated for this domain.",
         ]
-        self._write_muted_log(alert_payload, "OPERATOR_MARKED_FALSE_POSITIVE", reasons, 1.0)
+        self._write_muted_log(alert_payload, event_type, reasons, 1.0)
 
         LOGGER.warning(
-            "🛡️  [FP ENGINE » MARK FP] %s: operator-corrected alert for '%s' — training "
+            "🛡️  [FP ENGINE » MARK FP] %s: %s-corrected alert for '%s' — training "
             "correction logged, sigma widened, domain %s.",
-            hostname, domain, f"immunized ('{base_domain}')" if base_domain else "NOT immunized (extraction failed)"
+            hostname, "LLM" if is_llm else "operator", domain,
+            f"immunized ('{base_domain}')" if base_domain else "NOT immunized (extraction failed)"
         )
 
         return {
@@ -1069,6 +1130,66 @@ class AutonomousFPEngine:
             LOGGER.info("✅ Sigma shift state loaded: %d entries, %d pruned.", len(self._sigma_shifts), pruned)
         except Exception as exc:
             LOGGER.error("Failed to load sigma shifts: %s", exc, exc_info=True)
+
+    # ==========================================================================
+    # PHASE 13: PER-DEVICE THRESHOLD PROFILES
+    # ==========================================================================
+
+    def get_device_suppress_threshold(self, device_id: Optional[str]) -> float:
+        """The effective fp_combined_suppress_threshold for ONE device: its own calibrated
+        profile if one exists (written by train_fp_classifier.py's per-device calibration
+        pass, gated on that device's own confirmed-FP history), else the global value
+        (config.yaml, possibly itself autonomously lowered by the global calibration pass
+        — see config.py's LiveConfig._load_overrides()). Devices with "strongly different
+        profiles" (an IoT bulb vs. a laptop vs. a NAS) get their own number once there's
+        enough of their OWN evidence to justify it; everything else shares the global
+        default, same layered-fallback shape as the config override layer."""
+        with self._lock:
+            profile = self._device_fp_profiles.get(device_id or "")
+        if profile and "fp_combined_suppress_threshold" in profile:
+            return float(profile["fp_combined_suppress_threshold"]["value"])
+        return self.combined_suppress_threshold
+
+    def apply_device_fp_profile(self, device_id: str, key: str, value: float, baseline: float,
+                                 set_by: str, reason: str, sample_count: int = 0) -> None:
+        """Writes ONE calibrated value into ONE device's profile, preserving every other
+        key/device already present. Called by train_fp_classifier.py's per-device
+        calibration pass — see get_device_suppress_threshold() for how it's read back."""
+        with self._lock:
+            profile = self._device_fp_profiles.setdefault(device_id, {})
+            profile[key] = {
+                "value": value, "baseline": baseline, "set_at": time.time(),
+                "set_by": set_by, "reason": reason, "sample_count": sample_count,
+            }
+        self._save_device_fp_profiles()
+        LOGGER.info(
+            "🔧 [FP ENGINE » DEVICE PROFILE] %s: %s = %.3f (baseline %.3f, %d sample(s)). %s",
+            device_id, key, value, baseline, sample_count, reason
+        )
+
+    def _save_device_fp_profiles(self):
+        try:
+            p = self._state_dir / "device_fp_profiles.json"
+            with self._lock:
+                snapshot = dict(self._device_fp_profiles)
+            p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        except Exception:
+            LOGGER.error("Failed to save device FP profiles.", exc_info=True)
+
+    def _load_device_fp_profiles(self):
+        path = self._state_dir / "device_fp_profiles.json"
+        if not path.exists():
+            LOGGER.info("No existing per-device FP profiles at %s. Starting fresh.", path)
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            with self._lock:
+                for device_id, profile in raw.items():
+                    if isinstance(profile, dict):
+                        self._device_fp_profiles[device_id] = profile
+            LOGGER.info("✅ Per-device FP profiles loaded: %d device(s).", len(self._device_fp_profiles))
+        except Exception as exc:
+            LOGGER.error("Failed to load per-device FP profiles: %s", exc, exc_info=True)
 
     # ==========================================================================
     # TRUST CACHE PERSISTENCE
@@ -1542,7 +1663,7 @@ class AutonomousFPEngine:
                 # Retrain once every 7 days (604,800 seconds)
                 if (now - last_ts) >= 7 * 24 * 3600:
                     LOGGER.info("📅 [FP ENGINE] Scheduled 7-day model retraining interval reached. Launching trainer...")
-                    from scripts.train_fp_classifier import train_and_export_onnx
+                    from scripts.train_fp_classifier import train_and_export_onnx, run_threshold_calibration
                     success = train_and_export_onnx(self._state_dir)
                     if success:
                         last_retrain_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1550,6 +1671,15 @@ class AutonomousFPEngine:
                         # Hot-reload ONNX session with the newly trained model
                         self._load_lgbm_model()
                         LOGGER.info("✅ [FP ENGINE] Retrained LightGBM ONNX model hot-reloaded successfully.")
+                    # PHASE 13 FIX: this in-process 7-day loop is a second, independent path
+                    # to the exact same train_fp_classifier.py module the scheduler's daily
+                    # 3am cron job invokes as a standalone script — but only the standalone
+                    # script's main() called run_threshold_calibration(). This path called
+                    # train_and_export_onnx() directly, silently skipping self-calibration
+                    # every time IT fired. Threshold calibration is independent of whether
+                    # the (expensive) ONNX retrain above succeeded — same reasoning as
+                    # main()'s own unconditional call — so it runs regardless of `success`.
+                    run_threshold_calibration(self._state_dir)
             except Exception as exc:
                 LOGGER.error("❌ Exception during scheduled weekly retrain loop: %s", exc, exc_info=True)
 

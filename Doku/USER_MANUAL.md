@@ -1,370 +1,431 @@
-# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 7)
+# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 8.0)
 
-Welcome to the definitive, PhD-thesis-level documentation for **Home-IDS Version 7**.
+Welcome to the definitive reference documentation for **Home-IDS**.
 
-This manual is engineered to provide 100% transparency into the inner workings of the Home-IDS autonomous engine. It covers the exact data flow of the Tri-Brain architecture, an exhaustive breakdown of every single configuration parameter in `config.yaml`, a complete guide to every file in the state repository, service lifecycle management, testing protocols, and complete Prometheus telemetry mappings.
+This manual covers the exact data flow of the Tri-Brain architecture, an exhaustive breakdown of every configuration parameter in `config.yaml`, the new autonomous self-calibration/override layer, a complete guide to every file in the state repository, service lifecycle management, testing protocols, and complete Prometheus telemetry mappings.
 
-If you are maintaining, debugging, or extending this script, every piece of knowledge you require is contained within this document.
+**Every technical claim in this document was verified directly against the running source code as of this revision** — not carried forward from an earlier draft. Where an earlier version of this manual described something that doesn't actually exist in the code (an `asyncio` event loop, a learned Markov transition matrix, Fourier-transform diurnal analysis, a "weekly autotune job that recalculates `alert_threshold` from historical standard deviation"), it has been corrected or removed rather than repeated. If you are maintaining, debugging, or extending this script, every piece of knowledge here should match what `grep` finds in `src/`.
 
 ---
 
 ## 📋 Table of Contents
 1. [🌟 The Tri-Brain Architecture & Internal Data Flow](#-the-tri-brain-architecture--internal-data-flow)
-2. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
-3. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
-4. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
-5. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
-6. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
-7. [📚 Categorized Threat Catalog & Playbooks](#-categorized-threat-catalog--playbooks)
+2. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
+3. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
+4. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
+5. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
+6. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
+7. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
+8. [📚 Categorized Threat Catalog & Playbooks](#-categorized-threat-catalog--playbooks)
+9. [❓ How Do I... (Task-Oriented Index)](#-how-do-i-task-oriented-index)
 
 ---
 
 ## 🌟 The Tri-Brain Architecture & Internal Data Flow
 
-Version 7 operates on a revolutionary tri-brain processing pipeline. To maintain a zero-latency network response, heavy computational tasks are physically separated from the real-time detection loop.
+Home-IDS separates real-time detection from expensive cognitive analysis so that nothing slow ever blocks the packet/DNS ingestion path.
 
 ### 🧠 Brain 1: The Statistical Engine (Real-Time Pipeline)
-**Location**: `src/core/pipeline.py` and `src/main.py`
-**Responsibility**: Real-time packet inspection and high-speed threat scoring.
-- Operates entirely in-memory using highly optimized asynchronous workers (`asyncio`).
-- Intercepts Zeek (Bro) metadata and Pi-hole DNS logs using `tail -F` cursor tracking.
-- Calculates structural deviations using a custom LightGBM model and temporal mathematics (Shannon Entropy, Markov Chains, Fourier Transforms for diurnal rhythms).
-- **Data Flow**: Reads configuration dynamically from `config.yaml`. If Threat Confidence exceeds `detection_engine.alert_threshold`, it pushes the alert object directly to Brain 2.
+**Location**: `src/core/pipeline.py`, `src/main.py`, `src/core/decision_engine.py`
+**Concurrency model**: a single **threaded** polling loop (`threading.Lock`/`threading.RLock`, background `threading.Thread` workers) — there is no `asyncio` event loop anywhere in this codebase.
+
+Each evaluation cycle follows a disciplined 5-phase lock-release pattern (real comments in `pipeline.py`, not paraphrased):
+
+```mermaid
+flowchart TB
+    P1["Phase 1: State Snapshot<br/>(short lock — copy device baseline, release)"]
+    P2["Phase 2: Pre-fetch Zeek data<br/>(no lock held)"]
+    P3["Phase 3: Compute local features<br/>(short lock — Z-scores, entropy, release)"]
+    P4["Phase 4: Expensive I/O<br/>(no lock held — OTX/AbuseIPDB/VirusTotal HTTP calls)"]
+    P5["Phase 5: ML scoring + decision<br/>(short lock — HypothesisEngine, IsolationForest)"]
+    P1 --> P2 --> P3 --> P4 --> P5
+```
+
+The point of Phase 4 running with no lock held: if a threat-intel API is slow or the network drops, the pipeline does not freeze evaluation of every other device while it waits out a timeout.
+
+Detection itself runs through the **Hypothesis & Evidence Engine (HEE)**, `src/core/decision_engine.py` + `src/intelligence/hypotheses/`. Every anomaly is normalized into an `Evidence` object:
+```python
+Evidence(
+    type="zeek_lateral_scan",
+    source="zeek",
+    value=450,               # raw S0/REJ packet count
+    confidence=0.90,
+    independence_group="zeek_network",
+)
+```
+`independence_group` prevents evidence-stuffing: multiple signals from the same underlying sensor (e.g. two different Zeek anomalies) collapse to one vote when the engine counts "independent sources", so a single noisy sensor can't manufacture the appearance of corroboration.
+
+**Decision order** (`decision_engine.py`, evaluated in this exact sequence):
+1. Honeypot access → `CRITICAL` / block, confidence 1.0.
+2. ARP/NDP spoofing → `CRITICAL` / block, confidence 1.0.
+3. Geofencing violation → `CRITICAL` / block, confidence 1.0.
+4. Reputation tier 5 (corroborated: TI/VT hit, or AbuseIPDB alone at a genuinely high bar) → `CRITICAL` / block, confidence 0.99.
+5. A behavioral attack hypothesis scoring above its benign counterpart, with ≥2.0 confidence → `HIGH` (auto-block-eligible, needs ≥2 independent sources and ≥3.0 score) or `SUSPICIOUS` (monitor only).
+6. Reputation tier 4 (one unconfirmed signal, e.g. a moderate AbuseIPDB score with clean VT/TI) → `SUSPICIOUS` / monitor only, confidence 0.45. **Never auto-blocks on this alone.**
+7. ML anomaly only, score > 0.90 → `ANOMALOUS` / log only, confidence 0.10.
+8. Otherwise → `BENIGN`, suppressed.
+
+Every evaluation also produces a `reasoning_trail` — a plain-language, ordered list of what was checked and why the verdict landed where it did (hard-stop results, reputation context including IP ownership, hypothesis scores, final verdict). This is what Telegram alerts display under **🧭 REASONING** instead of a bare confidence number.
+
+**Kill-chain phase tracking**: each device's recent behavior is classified into `NORMAL` / `RECON` / `LATERAL` / `C2` (`src/extractors/dns_features.py`, simple threshold rules over already-computed features — not a separate ML model). The engine also computes a small "Markov anomaly" signal: `1.0 - transition_prob`, where `transition_prob` comes from a small **hand-authored, static lookup table** of phase-to-phase transition likelihoods (e.g. `NORMAL → NORMAL` = 0.90, `NORMAL → C2` = 0.01) — an analyst-estimated kill-chain progression model, not a per-device learned Markov chain built up over months of history.
 
 ### 🛡️ Brain 2: The Continuous Learning False-Positive Engine (CL-AFPE)
 **Location**: `src/intelligence/fp_engine.py`
-**Responsibility**: Preventing the system from blocking legitimate traffic (Smart TVs, backup jobs).
-- Evaluates alerts in real-time before containment is triggered.
-- Uses a dedicated LightGBM model and structural vector embeddings (FastEmbed `bge-small-en-v1.5-onnx-q`) to compare the alert's mathematical signature against known benign telemetry.
-- All four suppression thresholds (`false_positive_engine.fp_lgbm_threshold`, `fp_embed_similarity_threshold`, `fp_combined_suppress_threshold`, `fp_combined_uncertain_threshold`) are read fresh from `config.yaml` on every evaluation — tune them and the very next alert uses the new values, no restart.
-- **Data Flow**: If benign, the alert is written to `state/autonomous_muted.jsonl` and the domain is temporarily cached in `state/fp_trust_cache.json`. If malicious, the alert is committed to `alerts.json` (for Loki and Brain 3) and hardware containment is fired.
 
-### 🕵️ Brain 3: The Cognitive Analyst (Local LLM SOC)
-**Location**: `src/scripts/ollama_soc.py` and `src/scripts/scheduler.py`
-**Responsibility**: Deep, cognitive post-incident analysis and permanent self-healing.
-- Runs entirely out-of-band as a scheduled batch background task (see `scheduled_jobs.scheduler.ollama_soc` in `config.yaml`).
-- Queries a local **Ollama (LLaMA 3.1)** instance.
-- **Data Flow (Self-Healing Loop)**: Brain 3 reads the raw JSON alerts from `alerts.json`. If the AI determines an alert is a False Positive, Brain 3 opens `config.yaml` and injects the benign domain directly into `network_and_devices.safe_host_patterns`, using a comment-preserving writer (`ruamel.yaml` round-trip mode) so the file's structure and your own notes survive the edit untouched. Brain 1's file watcher instantly detects this change and reloads the configuration into memory with zero downtime.
+Sits between detection and containment, evaluating every alert that clears `alert_threshold` before it's published or acted on:
+
+```mermaid
+flowchart LR
+    A["Alert breach"] --> B{"Trust cache hit?<br/>(base domain immunized)"}
+    B -- yes --> B2{"Hard-stop re-check<br/>(even for cached domains)"}
+    B2 -- clean --> S["SUPPRESS<br/>(instant, no ML)"]
+    B2 -- fired --> T1["CONFIRMED_THREAT<br/>(cache overridden)"]
+    B -- no --> C["Stage 1: Hard-stop filter<br/>(IOC / lateral move / malicious JA3-JA4 /<br/>honeypot / AbuseIPDB≥4.0 / exfil burst)"]
+    C -- fired --> T2["CONFIRMED_THREAT"]
+    C -- clean --> D["Stage 2: LightGBM P(FP)"]
+    D --> E["Stage 3: FastEmbed cosine similarity<br/>(skipped if no real hostname —<br/>never scores the literal string 'unknown')"]
+    E --> F["Combined = 0.45×LGBM + 0.55×Embed"]
+    F --> G{"combined ≥ device's own<br/>suppress threshold?"}
+    G -- yes --> H["SUPPRESS + self-heal<br/>(trust cache 14d, sigma widen,<br/>muted-log training correction)"]
+    G -- no, but ≥ uncertain threshold --> I["UNCERTAIN<br/>published, tagged Low Confidence"]
+    G -- no --> J["CONFIRMED_THREAT<br/>published full severity, sigma tightened"]
+```
+
+**Per-device thresholds (new in 8.0)**: the suppress-threshold comparison in the diagram above (`combined ≥ threshold`) uses `get_device_suppress_threshold(device_id)` — that device's own calibrated profile if one exists (`state/device_fp_profiles.json`), else the global value. See [§2](#-autonomous-self-calibration--the-override-layer).
+
+All four Stage 2/3/combined thresholds are read via a fresh `self.config.get(...)` call on every single evaluation — there is no cached/construction-time copy anywhere in the evaluation path, so a `config.yaml` edit (or an autonomous override) takes effect on the very next alert with no restart.
+
+### 🕵️ Brain 3: The Batch Cognitive Analyst (`scripts/ollama_soc.py`)
+**Location**: `src/scripts/ollama_soc.py`, launched every 4 hours by `src/scripts/scheduler.py`.
+
+Reads the last 24h of `alerts.json` entries, filtered to `type=="ids_alert"` (excludes its own prior `ollama_transparency` log entries — without this filter it would re-analyze its own output forever) and `suppressed != true` (CL-AFPE already resolved those cheaply; Ollama is reserved for alerts that actually needed a judgment call).
 
 ```mermaid
 sequenceDiagram
-    participant Net as Network (Zeek/Pi-hole)
-    participant B1 as Brain 1: Real-Time Pipeline
-    participant B2 as Brain 2: CL-AFPE
-    participant Alert as alerts.json
-    participant B3 as Brain 3: Cognitive LLM Analyst
-    participant Cfg as config.yaml
+    participant Sched as scheduler.py (every 4h)
+    participant OS as ollama_soc.py
+    participant Alerts as alerts.json
+    participant Cache as ollama_analysis_cache.json
+    participant LLM as Ollama
+    participant Val as DeterministicValidator
+    participant FP as fp_engine.mark_false_positive()
 
-    %% Real-time flow
-    loop Every Millisecond
-        Net->>B1: Ingest Packet/DNS Metadata
-        B1->>B1: Extract 40+ Features & Score
-        alt Threat Confidence > Threshold
-            B1->>B2: Forward to False-Positive Engine
-            alt B2 Verdict == Benign
-                B2->>B2: Suppress Alert (Write to autonomous_muted.jsonl)
-            else B2 Verdict == Malicious
-                B2->>Alert: Write Alert Event (For Grafana Loki & Brain 3)
-                B2->>Net: Issue Immediate Hardware Containment (Tarpit)
-            end
+    Sched->>OS: launch
+    OS->>Alerts: read last 24h, published, non-suppressed
+    OS->>OS: group by device+target+signature
+    loop each distinct pattern, largest first
+        OS->>Cache: cache hit (< 7 days old)?
+        alt cache hit
+            Cache-->>OS: reuse prior verdict, no LLM call
+        else cache miss, under per-run cap
+            OS->>LLM: query (system prompt + alert JSON)
+            LLM-->>OS: classification/confidence/reason/action
+            OS->>Val: validate against reconstructed reputation evidence
+            Val-->>OS: pass/fail (rejects "benign" if a confirmed IOC/bad reputation exists)
+            OS->>Cache: write verdict
+        else cache miss, over cap
+            OS->>OS: defer to next run
+        end
+        alt validated benign + suppress, not already actioned
+            OS->>FP: mark_false_positive(source="llm_validated")
+            FP->>FP: immunize domain, widen device sigma,<br/>write LLM_VALIDATED_FALSE_POSITIVE to muted log
         end
     end
-
-    %% Background Scheduled Flow
-    loop Every 4 Hours (Cron)
-        B3->>Alert: Read new alerts
-        B3->>B3: Query LLaMA 3.1 & Threat Intel
-        alt Verdict == Benign (False Positive)
-            B3->>B3: Extract Safe Domains
-            B3->>Cfg: Write domains to network_and_devices.safe_host_patterns
-        else Verdict == Malicious
-            B3->>B3: Generate Executive Summary (reports/soc_daily_report.md)
-        end
-    end
-
-    %% Configuration Live Reload (Brain 3 Training Brain 1)
-    loop File Watcher
-        Cfg-->>B1: config.yaml modified by Brain 3!
-        B1->>B1: Dynamically reload safe_host_patterns (Zero Downtime)
-    end
+    OS->>Alerts: append ONE transparency log per pattern (not per alert)
+    OS-->>Sched: write reports/soc_daily_report_YYYYMMDD.md
 ```
+
+A single noisy pattern that fired 50 times in the source alert stream costs **one** Ollama call, not 50 — and that one verdict is reused for up to 7 days (`ollama_cache_ttl_seconds`) if the pattern keeps recurring. A hard per-run cap (`ollama_max_queries_per_run`, default 5) protects against a genuinely noisy day turning a 4-hourly job into an hours-long one; anything beyond the cap is deferred to the next run, prioritized by which pattern repeated most.
+
+`DeterministicValidator` (`src/intelligence/ai_soc.py`) is the hallucination guardrail: it reconstructs the alert's reputation evidence from the persisted feature values and rejects any LLM "benign" verdict that contradicts a confirmed IOC (`reputation ≥ 4.0`) or a bad-reputation claim of "just telemetry" (`reputation ≥ 3.0`). The LLM cannot talk its way past a real threat signal.
+
+Validated corrections call `fp_engine.mark_false_positive(..., source="llm_validated")` — the **exact same mechanism** an operator's "🛡️ Mark False Positive" Telegram tap uses (`source="operator"`), distinguished only by an audit-log tag (`LLM_VALIDATED_FALSE_POSITIVE` vs `OPERATOR_MARKED_FALSE_POSITIVE`) so the calibration pass in §2 can tell them apart or pool them.
+
+---
+
+## 🤖 Autonomous Self-Calibration & The Override Layer
+
+New in 8.0. Home-IDS now tunes its own false-positive suppression sensitivity from real evidence, without requiring a human to keep pace with every alert — and it does this **without ever writing to `config.yaml`**.
+
+### Why not just edit `config.yaml`?
+An earlier design (never shipped in a working state) had the batch LLM analyst write directly into `config.yaml` using a comment-preserving YAML writer. That approach was rejected for 8.0: it conflates a human-authored, version-controllable baseline with autonomous, statistically-derived adjustments, makes it hard to tell "did I set this, or did the robot?", and makes reverting a bad automated decision require editing YAML by hand. 8.0 replaces it with a **layered override system**.
+
+### The layering
+```mermaid
+flowchart TB
+    subgraph Layer0["Layer 0 — Human baseline"]
+        Yaml["config.yaml<br/>hand-edited, version-controllable,<br/>NEVER written to by any autonomous mechanism"]
+    end
+    subgraph Layer1["Layer 1 — Global autonomous override"]
+        Global["state/config_overrides.json<br/>{key: {value, baseline, set_at, set_by, reason}}<br/>written only by scripts/train_fp_classifier.py"]
+    end
+    subgraph Layer2["Layer 2 — Per-device autonomous override"]
+        Device["state/device_fp_profiles.json<br/>{device_id: {key: {value, baseline, ...}}}<br/>written only by scripts/train_fp_classifier.py"]
+    end
+    Yaml --> Effective["Effective value read by the running pipeline"]
+    Global -->|overrides Layer 0, same key| Effective
+    Device -->|overrides Layer 0/1, for that device only| Effective
+```
+
+- **Layer 0 (`config.yaml`)** is read by `config.py`'s `LiveConfig`, watched for changes every 5 seconds, exactly as in prior versions.
+- **Layer 1 (`state/config_overrides.json`)** is a separate JSON file, watched independently (its own mtime, same 5-second cadence) by the same `LiveConfig` instance. `LiveConfig._load_overrides()` re-applies it on top of whatever `config.yaml` just set — so an unrelated `config.yaml` edit can never silently clobber an active override back to its old baseline. **Static keys** (`state_path`, ports, secrets — anything in `config.py`'s `_STATIC_KEYS`) are explicitly rejected here; autonomous tuning is scoped to live-reloadable behavioral thresholds only.
+- **Layer 2 (`state/device_fp_profiles.json`)** is owned by `AutonomousFPEngine` itself (`fp_engine.py`), not `config.py` — the same architectural home already used for the per-device trust cache and sigma shifts. `get_device_suppress_threshold(device_id)` checks this first, falls back to the Layer 0/1 effective value.
+
+**To revert an autonomous adjustment**: delete the one key from the relevant JSON file (or the whole file). The next reload (within 5 seconds, no restart) reverts to the `config.yaml` baseline. Nothing about your hand-authored config is ever touched.
+
+### The calibration rule (`scripts/train_fp_classifier.py`)
+Runs once a week, piggybacking on the existing model-retrain schedule (both the scheduler's daily 3am `autotune_schedule_cron` invocation and `fp_engine.py`'s own internal 7-day in-process retrain thread — both paths call the same calibration function).
+
+1. **Collect evidence**: every `LLM_VALIDATED_FALSE_POSITIVE` and `OPERATOR_MARKED_FALSE_POSITIVE` entry in `state/autonomous_muted.jsonl`, cross-referenced back to that alert's own CL-AFPE combined confidence (persisted in `alerts.json` as `fp_verdict.confidence` — see the note in §4 on why this field exists). Also collects every published `UNCERTAIN` alert that was **never** corrected by either source, as a safety ceiling.
+2. **Global pass**: needs ≥5 pooled confirmations. Candidate new threshold = `min(confirmed-FP scores) − 0.02`, clamped to never exceed the current value (one-directional: never raises) and never below `0.60` (absolute floor). **Refuses outright** if any never-corrected `UNCERTAIN` alert scored at or above the lowest confirmed-FP score — that overlap is never auto-resolved toward suppression.
+3. **Per-device pass**: same rule, same function, but scoped to one device's own evidence, needing only ≥3 samples (a device's own history is sparser but more directly relevant to that device than the global pool).
+4. **Write**: a qualifying result is written to `state/config_overrides.json` (global) or `state/device_fp_profiles.json` (that device), with a full `reason` string explaining exactly what evidence justified the change — this is what appears if you inspect either file directly.
+
+Because the LLM-validated path requires zero human action, this loop can run and improve continuously even if you never touch a Telegram button. Operator corrections still count — they're pooled in as additional evidence, not a prerequisite.
 
 ---
 
 ## ⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)
 
-`config.yaml`, at the project root, controls every aspect of the IDS. As of Version 7.0 it replaces the old `config.json` and is organized into **13 logical categories** — grouped by what each key actually controls, not by restart behavior. Every key below is individually tagged:
+`config.yaml`, at the project root, controls every aspect of the IDS baseline behavior. It replaces the old `config.json` and is organized into **13 logical categories**. Every key is individually tagged:
 
-- **`[LIVE]`** — edit and save the file; the change takes effect within seconds, no restart needed.
-- **`[RESTART]`** — the value is read once at boot. Saving a new value is preserved on disk (it will not be silently overwritten), but has no effect on the running process until you run `sudo systemctl restart soc.service`. This is a deliberate safety rail — these are settings where changing them underneath a live process (a model file path, a listening port) could corrupt state or crash a bound resource.
+- **`[LIVE]`** — edit and save the file; the change takes effect within ~5 seconds, no restart needed.
+- **`[RESTART]`** — read once at boot. Saving a new value is preserved on disk (never silently overwritten), but has no effect on the running process until `sudo systemctl restart soc.service`.
 
-> **Under the hood**: restart-vs-live behavior is enforced by a single Python set (`_STATIC_KEYS`) in `src/config.py`, matched purely by key *name* — completely independent of which of the 13 categories a key lives in. The category structure below exists entirely for human readability; you can reorganize categories in the future without touching this enforcement mechanism.
+> **Under the hood**: restart-vs-live behavior is enforced by a single Python set (`_STATIC_KEYS`) in `src/config.py`, matched purely by key *name* — independent of which of the 13 categories a key lives in.
 
-**Secrets are not in this file at all.** Telegram tokens, Pi-hole passwords, Fritz!Box credentials, and threat-intel API keys live in `.env` (path set by `paths.env_file` below) — see [Secrets (`.env`)](#secrets-env) at the end of this section.
+**Secrets are not in this file at all.** They live in `.env` — see [Secrets (`.env`)](#secrets-env) at the end of this section.
 
 ### 1. `service_ports`
-Network ports this process listens on.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `metrics_port` | `9105` | `[RESTART]` | Prometheus `/metrics` scrape port. Grafana dashboards read from here. |
-| `fastapi_port` | `8010` | `[RESTART]` | Local-only IPC/webhook port. Receives Telegram bot webhooks and serves the Fritz!Box isolate/hosts endpoints used by `mitigation/ips.py`. Not meant to be internet-exposed. |
+| `metrics_port` | `9105` | `[RESTART]` | Prometheus `/metrics` scrape port. |
+| `fastapi_port` | `8010` | `[RESTART]` | Local-only IPC/webhook port — Telegram bot webhooks, Fritz!Box isolate/hosts endpoints. Not meant to be internet-exposed. |
 
 ### 2. `paths`
-Every file and directory this process reads from or writes to. **All relative paths resolve against the directory you launch the process from** (your repo root — the same directory `config.yaml` lives in), **not** against `src/`. Absolute paths (starting with `/`) are used as-is.
+All relative paths resolve against the directory you launch the process from (repo root), not `src/`.
 
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `state_path` | `state/ids_state.json` | `[RESTART]` | Where per-device baselines and IPS mitigation state are persisted between restarts. |
-| `model_path` | `models/ids_model.pkl` | `[RESTART]` | Where the trained global ML anomaly model is loaded from and (on retrain) saved to. |
-| `geoip_db` | `models/GeoLite2-City.mmdb` | `[RESTART]` | MaxMind GeoLite2 City database. Used for GeoIP telemetry **and** by geofencing — geofencing cannot fire at all if this file fails to load. Check startup logs for a GeoIP load-failure line if geofencing ever seems inactive. |
-| `geoip_asn_db` | `models/GeoLite2-ASN.mmdb` | `[RESTART]` | MaxMind GeoLite2 ASN database. Enables ASN/organization name in GeoIP telemetry; leaving it missing just keeps those fields "unknown". |
-| `pihole_db` | `/etc/pihole/pihole-FTL.db` | `[RESTART]` | Pi-hole's own SQLite FTL database, read directly for DNS query telemetry. This is Pi-hole's system path — leave as-is unless your install is nonstandard. |
-| `zeek_log_dir` | `/opt/zeek/logs/current` | `[RESTART]` | Directory Zeek writes its live logs into (`conn.log`, `dns.log`, etc.). Zeek's system path — leave as-is unless your Zeek deployment is nonstandard. |
-| `alert_json_path` | `alerts.json` | `[RESTART]` | Every evaluated alert is appended here. Also the training-data source for the weekly false-positive classifier retrain. |
-| `alert_json_max_bytes` | `1073741824` | `[RESTART]` | (1 GiB.) Once `alert_json_path` exceeds this size, older entries are pruned. |
-| `env_file` | `.env` | `[RESTART]` | Path (relative to `config.yaml`'s own directory) to your secrets file. `.env` is correct for the standard layout — change only if you keep secrets elsewhere. |
+| `state_path` | `state/ids_state.json` | `[RESTART]` | Per-device baselines + IPS mitigation state. |
+| `model_path` | `models/ids_model.pkl` | `[RESTART]` | Global ML anomaly model. |
+| `geoip_db` | `models/GeoLite2-City.mmdb` | `[RESTART]` | MaxMind City DB. Geofencing cannot fire at all if this fails to load — check startup logs for "GeoIP features will be disabled". |
+| `geoip_asn_db` | `models/GeoLite2-ASN.mmdb` | `[RESTART]` | MaxMind ASN DB. Missing = ASN/org fields stay "unknown". |
+| `pihole_db` | `/etc/pihole/pihole-FTL.db` | `[RESTART]` | Pi-hole's own SQLite FTL database. |
+| `zeek_log_dir` | `/opt/zeek/logs/current` | `[RESTART]` | Directory Zeek writes live logs into. |
+| `alert_json_path` | `alerts.json` | `[RESTART]` | Every evaluated alert is appended here. Also the training-data source for the weekly classifier retrain and the self-calibration pass. |
+| `alert_json_max_bytes` | `1073741824` | `[RESTART]` | 1 GiB. Older entries pruned past this size. |
+| `env_file` | `.env` | `[RESTART]` | Path (relative to this file's directory) to your secrets file. |
 
 ### 3. `network_and_devices`
-Your LAN topology and per-device classification.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `home_subnet` | `192.168.1.0/24` | `[LIVE]` | Your home LAN in CIDR form. Legacy single-subnet key, still used as the fallback whenever `home_subnets` (below) is empty. |
-| `home_subnets` | `[]` | `[LIVE]` | Preferred multi-subnet form — a list of CIDR ranges (e.g. `["192.168.1.0/24", "192.168.50.0/24"]`). While empty, `home_subnet` above is used instead. |
-| `max_device_states` | `5000` | `[RESTART]` | Safety cap on how many distinct devices get their own tracked baseline state at once (memory/disk bound). |
-| `safe_ips` | `["127.0.0.1"]` | `[LIVE]` | IPs never treated as suspicious destinations, regardless of what else fires (your own infra: Pi-hole box, router, this host, etc.). |
-| `honeypot_ips` | `["192.168.1.200"]` | `[LIVE]` | Decoy IP(s) on your LAN. Any device that contacts one gets an instant 10.0 (max) risk score. Only meaningful if you actually run a decoy listener at that address (see [INSTALL.md](INSTALL.md) Step 3.6). |
-| `safe_domains` | `[]` | `[LIVE]` | Domains never treated as suspicious (like `safe_ips`, but for DNS queries). Evaluated as exact match. |
-| `safe_host_patterns` | `["pi-hole", "paperless"]` | `[LIVE]` | Substring whitelist — any domain *containing* one of these strings is suppressed. **Brain 3 dynamically injects into this list to heal false positives.** |
-| `device_type_overrides` | `{}` | `[LIVE]` | Manual device-classification overrides, keyed by hostname or IP. Values: `laptop`, `desktop`, `phone`, `tablet`, `smart_tv`, `gaming_console`, `printer`, `nas`, `iot`, `camera`, `server`, `unknown`. Affects which mathematical baseline is applied to the device in the HEE graph. |
+| `home_subnet` | `192.168.1.0/24` | `[LIVE]` | Legacy single-subnet CIDR. Fallback when `home_subnets` is empty. |
+| `home_subnets` | `[]` | `[LIVE]` | Preferred multi-subnet list, e.g. `["192.168.1.0/24", "192.168.50.0/24"]`. |
+| `max_device_states` | `5000` | `[RESTART]` | Cap on concurrently tracked devices. |
+| `safe_ips` | `["127.0.0.1", ...]` | `[LIVE]` | IPs never treated as suspicious destinations. |
+| `honeypot_ips` | `["192.168.1.200"]` | `[LIVE]` | Decoy IP(s). Any device contacting one gets an instant 10.0 risk score. |
+| `safe_domains` | `[]` | `[LIVE]` | Domains never treated as suspicious (exact match). |
+| `safe_host_patterns` | `["paperless", "repeater", "pi-hole", ...]` | `[LIVE]` | Hostname *substring* markers for "safe infrastructure" devices — dampens noisy behavioral evidence for these devices only; reputation/honeypot evidence is never dampened. **This is matched against device hostnames, not destination domains** — do not confuse it with domain-level FP suppression (that's the trust cache, §4). |
+| `device_type_overrides` | `{...}` | `[LIVE]` | Manual device-type overrides by hostname/IP. Values: `laptop, desktop, phone, tablet, smart_tv, gaming_console, printer, nas, iot, camera, server, unknown`. |
 
 ### 4. `detection_engine`
-Core scoring loop timing and sensitivity.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `log_level` | `INFO` | `[LIVE]` | Python `logging` severity. Switch to `DEBUG` to see raw Zeek dictionary parsing in `journalctl`. |
-| `poll_interval` | `2` | `[LIVE]` | Seconds between Pi-hole DB polls. Pi-hole's DB is event-driven, not time-driven, so lower doesn't meaningfully help. |
-| `window_seconds` | `300` | `[LIVE]` | (5 min.) Rolling temporal window for rate/entropy/uniqueness baselines. |
-| `startup_lookback_seconds` | `300` | `[LIVE]` | On boot, how far back to backfill from existing logs before going fully live. Prevents an avalanche of false alerts from stale traffic on reboot. |
-| `alert_threshold` | `6.0` | `[LIVE]` | Threat Confidence (0–10 scale) required to trigger the alert/containment pipeline. |
-| `threshold_std_dev` | `3.0` | `[LIVE]` | Autotune sensitivity parameter. When autotuning runs, the threshold is recalculated as `Mean(Historical Scores) + (StdDev * threshold_std_dev)`. |
-| `ml_warmup_samples` | `5000` | `[LIVE]` | Number of events a device must generate before its bespoke per-device ML model activates. Prevents wild AI scores on brand-new devices. |
-| `baseline_alpha` | `0.05` | `[LIVE]` | EWMA smoothing factor for rate/entropy/unique-domain baselines. Higher = adapts faster; lower = more resistant to sudden spikes (and to poisoning). |
-| `decay_factor` | `0.995` | `[LIVE]` | Per-minute decay multiplier for domain-count baselines (~4.6 minute half-life at the default). |
-| `suspicious_escalation_seconds` | `600.0` | `[LIVE]` | How long (seconds) a `SUSPICIOUS` state must persist uninterrupted with the same signature before it's escalated to `HIGH`. |
+| `log_level` | `INFO` | `[LIVE]` | Python logging severity. |
+| `poll_interval` | `2` | `[LIVE]` | Seconds between Pi-hole DB polls. |
+| `window_seconds` | `300` | `[LIVE]` | Rolling window for rate/entropy/uniqueness baselines. |
+| `startup_lookback_seconds` | `300` | `[LIVE]` | Backfill window on boot. |
+| `alert_threshold` | `6.0` | `[LIVE]` | Risk score (0–10) required to trigger the alert pipeline. |
+| `threshold_std_dev` | `3.0` | `[LIVE]` | Standard-deviation multiplier used **live, per evaluation cycle** in the per-hour DNS query-rate anomaly bound (`pipeline.py`: `threshold_limit = rate_mean + threshold_std_dev × sqrt(hourly_variance)`), exported as the `home_ids_query_rate_threshold_limit` telemetry gauge. This is *not* a weekly recalculation job — it's read fresh on every cycle. |
+| `ml_warmup_samples` | `5000` | `[LIVE]` | Samples before a device's own ML model activates. |
+| `baseline_alpha` | `0.05` | `[LIVE]` | EWMA smoothing factor. |
+| `decay_factor` | `0.995` | `[LIVE]` | Decay factor for domain-count baselines (~4.6 min half-life). |
+| `suspicious_escalation_seconds` | `600.0` | `[LIVE]` | How long a `SUSPICIOUS` state must persist uninterrupted with the same signature before escalating to `HIGH`. |
 
 ### 5. `false_positive_engine`
-Tuning for CL-AFPE's 3-stage pipeline: hard-stop security filter → LightGBM tabular classifier → FastEmbed semantic domain-similarity matcher.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `fp_lgbm_threshold` | `0.75` | `[LIVE]` | Stage 2: minimum LightGBM P(false positive) to lean towards suppression. Lower = trust the tabular model more readily. |
-| `fp_embed_similarity_threshold` | `0.82` | `[LIVE]` | Stage 3: minimum cosine similarity to a known-safe vendor domain pattern to count as a match. Lower = more domains match as "looks like a known vendor". |
-| `fp_combined_suppress_threshold` | `0.8` | `[LIVE]` | Combined score (Stage2×0.45 + Stage3×0.55) required to auto-suppress an alert. Lower = quieter but riskier; higher = noisier but safer. |
-| `fp_combined_uncertain_threshold` | `0.55` | `[LIVE]` | Combined-score floor above which an alert that didn't clear the suppress threshold is still tagged "⚠️ Low Confidence" instead of firing as a normal alert. |
-| `fp_revoke_notifications_enabled` | `true` | `[LIVE]` | Send a non-blocking Telegram "🔔 Auto-action" notification (with a one-tap Revoke button) whenever the engine autonomously immunizes a new domain. |
-| `fp_revoke_action_ttl_seconds` | `86400.0` | `[LIVE]` | (24h.) How long the one-tap Revoke option stays available after an autonomous immunization. |
-| `fp_operator_feedback_ttl_seconds` | `2592000.0` | `[LIVE]` | (30 days.) How long an operator's "Mark False Positive" correction stays active as a training-correction signal for the weekly classifier retrain. |
+| `fp_lgbm_threshold` | `0.75` | `[LIVE]` | Stage 2: minimum LightGBM P(FP) to lean toward suppression. |
+| `fp_embed_similarity_threshold` | `0.82` | `[LIVE]` | Stage 3: minimum cosine similarity to a known-safe vendor pattern. |
+| `fp_combined_suppress_threshold` | `0.80` | `[LIVE]` | Combined score required to auto-suppress. **The one value the self-calibration pass may autonomously lower** — see §2. The number here is always your own hand-set baseline; the *effective* live value may be lower if `state/config_overrides.json` or `state/device_fp_profiles.json` has an active override. |
+| `fp_combined_uncertain_threshold` | `0.55` | `[LIVE]` | Floor above which a non-suppressed alert is tagged "⚠️ Low Confidence" instead of full severity. |
+| `fp_revoke_notifications_enabled` | `true` | `[LIVE]` | Send a "🔔 Auto-action" Telegram notification (one-tap Revoke) on new autonomous domain immunization. |
+| `fp_revoke_action_ttl_seconds` | `86400.0` | `[LIVE]` | 24h. How long the Revoke option stays available. |
+| `fp_operator_feedback_ttl_seconds` | `2592000.0` | `[LIVE]` | 30 days. How long "Mark False Positive" stays actionable on a published alert. |
 
 ### 6. `device_identity`
-MAC-rotation / re-identification resilience.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `identity_reidentify_enabled` | `true` | `[LIVE]` | Whether a device that rotates its MAC/IP can be automatically re-linked to its prior identity (keeping threat history) instead of starting a fresh cold-start profile. |
-| `identity_reidentify_min_confidence` | `0.75` | `[LIVE]` | Minimum match-confidence score (0–1, from DHCP fingerprint + JA3/JA4 overlap) required to auto-merge two identities. |
-| `identity_reidentify_window_seconds` | `1800.0` | `[LIVE]` | (30 min.) How long a candidate stays eligible for re-identification merging after last being seen. |
+| `identity_reidentify_enabled` | `true` | `[LIVE]` | Auto re-link a MAC/IP-rotated device to its prior identity. |
+| `identity_reidentify_min_confidence` | `0.75` | `[LIVE]` | Minimum DHCP-fingerprint + JA3/JA4-overlap match confidence to auto-merge. |
+| `identity_reidentify_window_seconds` | `1800.0` | `[LIVE]` | 30 min. Re-identification eligibility window. |
 
 ### 7. `geofencing`
-Block traffic to specific countries by GeoIP. **Depends entirely on `paths.geoip_db` loading successfully** — see that key's note above.
+Depends entirely on `paths.geoip_db` loading successfully.
 
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `geofencing_enabled` | `true` | `[LIVE]` | Master switch. When true, any device contacting an IP whose GeoIP country is in `geofencing_countries` gets an instant CRITICAL verdict (same severity as a confirmed malicious IOC). |
-| `geofencing_countries` | `["RU", "CN"]` | `[LIVE]` | ISO 3166-1 alpha-2 country codes to block. **This is blocklist-only** — there is no allowlist mode and no time-of-day policy support in the current implementation (see the note on removed keys below). |
+| `geofencing_enabled` | `true` | `[LIVE]` | Master switch. |
+| `geofencing_countries` | `["RU", "KP", "IR"]` | `[LIVE]` | ISO country codes to block. Blocklist-only — no allowlist mode, no time-of-day policy exists in the code. |
 
 ### 8. `threat_intel_and_ai`
-External threat-intel refresh cadence and the local Ollama LLM connection.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `ti_refresh_interval` | `3600` | `[LIVE]` | (1h.) How often OTX/AbuseIPDB/VirusTotal cache entries are invalidated and re-fetched. API keys themselves come from `.env`, not this file. |
-| `ollama_url` | `http://192.168.1.94:11434` | `[LIVE]` | Base URL of your local Ollama server, used by Brain 3 for LLM-based triage and summaries. |
-| `ollama_model` | `llama3.1` | `[LIVE]` | Ollama model tag Brain 3 invokes. |
+| `ti_refresh_interval` | `3600` | `[LIVE]` | Seconds between OTX/AbuseIPDB/VirusTotal feed refreshes. |
+| `ollama_url` | `http://192.168.1.94:11434` | `[LIVE]` | Base URL of your local Ollama server. |
+| `ollama_model` | `llama3.1` | `[LIVE]` | Ollama model tag. |
+| `ollama_cache_ttl_seconds` | `604800.0` | `[LIVE]` | **New in 8.0.** 7 days. How long a cached verdict for one device+target+signature pattern stays valid before Brain 3 will query Ollama about it again. |
+| `ollama_max_queries_per_run` | `5` | `[LIVE]` | **New in 8.0.** Hard cap on fresh Ollama calls per 4-hourly Brain 3 run (cache hits don't count). Exists because a single live call was measured at 849 seconds under real CPU load — see the CHANGELOG. |
 
 ### 9. `ips_mitigation`
-Active-response master switches and policy. Per-mechanism toggles (Pi-hole sinkhole / router isolation / ARP tarpit) live in `.env`, not here — see [Secrets (`.env`)](#secrets-env).
+Per-mechanism toggles (Pi-hole/router/tarpit) live in `.env`, not here.
 
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `ips_enabled` | `true` | `[LIVE]` | Global kill switch for all active response. `false` = detection-only, nothing gets blocked. |
-| `interactive_blocking_enabled` | `false` | `[LIVE]` | `true` = a human must tap "Approve" in Telegram before hardware isolation executes. `false` = fully autonomous auto-block. DNS sinkholing (Layer 7) is always immediate regardless of this setting. |
-| `operator_release_cooldown_seconds` | `3600.0` | `[LIVE]` | (1h.) Cooldown after an operator manually releases a device before it can be auto-isolated again. |
-| `simulation_mode` | `false` | `[LIVE]` | `true` = IPS actions are logged as if they executed but nothing actually happens on the network (dry-run/testing mode). |
+| `ips_enabled` | `true` | `[LIVE]` | Global kill switch. `false` = detection-only. |
+| `interactive_blocking_enabled` | `true` | `[LIVE]` | `true` = a human must tap Approve before hardware isolation. **As of 8.0, the Telegram "Approve"/"Release" buttons and the "WAITING FOR APPROVAL" status text only appear when a hardware-isolation decision is actually pending** (`risk ≥ 8.5` or an active lateral-movement flag) — a monitor-only `SUSPICIOUS` alert no longer shows an approval prompt for an action that was never queued. DNS sinkholing (Layer 7) is always immediate regardless of this setting. |
+| `operator_release_cooldown_seconds` | `3600.0` | `[LIVE]` | 1h. Post-release cooldown before re-isolation. |
+| `simulation_mode` | `false` | `[LIVE]` | `true` = IPS actions logged, nothing actually executes. |
 
 ### 10. `pihole_integration`
-Pi-hole API call behavior. The URL and password come from `.env`.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `pihole_api_path` | `/api/v2/domains` | `[LIVE]` | Pi-hole v6 API path for domain sinkholing calls. Change for Pi-hole v5 (`/api/dns/blacklist`) or a custom setup. |
-| `pihole_api_timeout_seconds` | `5.0` | `[LIVE]` | HTTP timeout for Pi-hole API calls. |
+| `pihole_api_path` | `/api/v2/domains` | `[LIVE]` | Pi-hole v6 API path. |
+| `pihole_api_timeout_seconds` | `5.0` | `[LIVE]` | HTTP timeout. |
 
 ### 11. `fritzbox_router`
-Fritz!Box hardware isolation integration. User/password/API token come from `.env`.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `fritz_ip` | `192.168.1.1` | `[LIVE]` | Your Fritz!Box's LAN IP — the target for TR-064 isolation calls. |
-| `router_webhook_timeout_seconds` | `5.0` | `[LIVE]` | HTTP timeout for the isolate-device webhook call. |
-| `router_hosts_url` | `http://127.0.0.1:8010/hosts` | `[LIVE]` | URL this process's own FastAPI server polls to keep the router's connected-hosts list in sync (used by `core/identity.py`). |
-| `router_hosts_timeout_seconds` | `5.0` | `[LIVE]` | HTTP timeout for that hosts-list poll. |
+| `fritz_ip` | `192.168.1.1` | `[LIVE]` | Fritz!Box LAN IP. |
+| `router_webhook_timeout_seconds` | `5.0` | `[LIVE]` | Isolate-webhook timeout. |
+| `router_hosts_url` | `http://127.0.0.1:8010/hosts` | `[LIVE]` | Self-poll URL for the connected-hosts sync. |
+| `router_hosts_timeout_seconds` | `5.0` | `[LIVE]` | Hosts-poll timeout. |
 
 ### 12. `telegram`
-Bot notification behavior. Token and chat ID come from `.env`.
-
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `telegram_enabled` | `true` | `[LIVE]` | Master switch for Telegram alerting. Set `false` if you only want Grafana/Loki logging. |
-| `telegram_allowed_chat_ids` | `[]` | `[LIVE]` | Allowlist of chat IDs permitted to send bot commands (approve/release/revoke buttons). Empty = allow commands from any chat that has the bot — populate this if you add the bot to a shared/group chat and want to restrict who can act on alerts. |
+| `telegram_enabled` | `true` | `[LIVE]` | Master switch. |
+| `telegram_allowed_chat_ids` | `[]` | `[LIVE]` | Allowlist for bot commands. Empty = allow any chat with the bot. |
 
 ### 13. `scheduled_jobs`
-Background jobs, polled every 60 seconds by `scripts/scheduler.py`. Cron fields are `minute hour day month day-of-week`; only `*`, `*/N`, and an exact integer are supported per field (no comma-lists, no ranges).
+Polled every 60s by `scripts/scheduler.py`. Cron fields: minute/hour/day/month/day-of-week; only `*`, `*/N`, exact integers (no comma-lists, no ranges).
 
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `autotune_enabled` | `true` | `[LIVE]` | Enables the weekly/nightly retrain-and-recalibrate job for `alert_threshold`. This job is not part of the `scheduler` sub-block below — it has its own dedicated enable/cron pair. |
-| `autotune_schedule_cron` | `"0 3 * * *"` | `[LIVE]` | Cron expression for the autotune job. Default: 3:00 AM daily. |
-| `scheduler.ollama_soc.enabled` | `true` | `[LIVE]` | Enables Brain 3's batch LLM triage job. |
-| `scheduler.ollama_soc.cron` | `"0 */4 * * *"` | `[LIVE]` | Runs every 4 hours, starting at midnight. |
-| `scheduler.retro_hunter.enabled` | `true` | `[LIVE]` | Enables the retroactive threat-intel re-scan job (re-checks recent history against newly-updated OTX/AbuseIPDB/VirusTotal data). |
-| `scheduler.retro_hunter.cron` | `"0 2 * * *"` | `[LIVE]` | Runs daily at 2:00 AM. |
-| `scheduler.retro_hunter.script` | `retro_hunter.py` | `[LIVE]` | Explicit script-filename override. Required because this job's config key doesn't match its filename by the scheduler's default convention — omitting this was the root cause of the Phase 7 "`retro_hunter` never runs" bug (see [CHANGELOG.md](CHANGELOG.md)). Don't remove it. |
-| `scheduler.top_domains_report.enabled` | `true` | `[LIVE]` | Enables the daily top-domains-per-device Markdown/Telegram summary. |
-| `scheduler.top_domains_report.cron` | `"0 6 * * *"` | `[LIVE]` | Runs daily at 6:00 AM. |
+| `autotune_enabled` | `true` | `[LIVE]` | Enables the daily retrain-and-recalibrate job (`train_fp_classifier.py`). Separate dedicated enable/cron pair — not part of the `scheduler` sub-block. |
+| `autotune_schedule_cron` | `"0 3 * * *"` | `[LIVE]` | 3:00 AM daily. |
+| `scheduler.ollama_soc.enabled/cron` | `true` / `"0 */4 * * *"` | `[LIVE]` | Brain 3, every 4h from midnight. |
+| `scheduler.retro_hunter.enabled/cron/script` | `true` / `"0 2 * * *"` / `retro_hunter.py` | `[LIVE]` | Retroactive threat-intel re-scan, 2 AM. The `script` override is required — this job's config key has never matched its filename by the scheduler's default convention. Don't remove it. |
+| `scheduler.top_domains_report.enabled/cron` | `true` / `"0 6 * * *"` | `[LIVE]` | Daily top-domains report, 6 AM. |
 
-### Removed in 7.0 (dead keys — do not reintroduce)
-The following keys were confirmed to be read nowhere in the codebase during the Version 7.0 audit and have been removed entirely:
+No two jobs above fire in the same hour as each other or as `autotune_schedule_cron`'s 3am default — this is asserted by `tests/test_phase7_scheduling.py`, so a future config edit that breaks it fails a test rather than silently double-booking two jobs.
 
+### Removed / dead keys (do not reintroduce)
 | Removed Key | Why |
 |---|---|
-| `scheduled_tasks` | Legacy top-level schema, fully superseded by `scheduled_jobs.scheduler`. |
-| `geofencing_mode` | Geofencing has always been blocklist-only in the actual implementation — no allowlist code path exists. |
-| `geofencing_time_policies` | No time-of-day geofencing logic exists in the code. |
-| `autotune_min_risk_threshold` | Never read by the autotune job. |
-| `layer2_spoofing_detection_enabled` | Layer-2 spoofing (MAC/IP mismatch) detection is unconditional in the code — it was never actually gated by this flag. |
+| `scheduled_tasks` | Legacy top-level schema, superseded by `scheduled_jobs.scheduler`. |
+| `geofencing_mode`, `geofencing_time_policies` | Geofencing has always been blocklist-only — no allowlist or time-of-day code path exists. |
+| `autotune_min_risk_threshold` | Never read by the retrain job. |
+| `layer2_spoofing_detection_enabled` | Layer-2 spoofing detection is unconditional in the code — never actually gated by this flag. |
+| `ollama_api_key` | **New in 8.0.** Existed only for the real-time `intelligence/ollama_analyzer.py` path, which was itself dead code (instantiated, but its only method was never called — removed in 8.0). `scripts/ollama_soc.py`, the sole remaining Ollama consumer, sends no auth header. |
 
 ### Secrets (`.env`)
-Anything sensitive — bot tokens, passwords, API keys — lives in `.env` at the project root (path configurable via `paths.env_file`), and is pulled in as environment variables on every config reload. **Never put these in `config.yaml`** — if you do, they'll just get silently overwritten by `.env` on the next reload, which is more confusing than helpful.
-
 | `.env` Variable | Feeds | Notes |
 |---|---|---|
 | `TELEGRAM_TOKEN` | Telegram bot HTTP API token | From BotFather. |
-| `TELEGRAM_CHAT_ID` | Destination chat for alerts | Personal ID or group chat ID. |
-| `OTX_API_KEY` | AlienVault OTX lookups | Strongly recommended — prevents Brain 3 from hallucinating benign verdicts for known malicious IPs. |
-| `ABUSEIPDB_KEY` (or `ABUSEIPDB_API_KEY`) | AbuseIPDB reputation lookups | Either variable name is accepted. |
-| `VIRUSTOTAL_KEY` (or `VIRUSTOTAL_API_KEY`) | VirusTotal sandbox/AV lookups | Either variable name is accepted. |
-| `PIHOLE_API_PASSWORD` | Pi-hole admin API auth | Web interface password or API token, depending on your Pi-hole version. |
-| `PIHOLE_API_URL` | Pi-hole admin API base URL | e.g. `http://192.168.1.94:8080`. |
-| `FRITZ_USER`, `FRITZ_PASS` | Fritz!Box TR-064 login | Used to authenticate SOAP calls that sever WAN access. |
-| `API_SECRET_TOKEN` | This app's own webhook auth token | Protects `fastapi_port` endpoints from unauthenticated remote calls. Loopback (`127.0.0.1`) requests are always trusted regardless. |
-| `ROUTER_WEBHOOK_URL` | Isolate-device webhook target | Usually points back at your own `fastapi_port`. |
-| `IDS_IPS_PIHOLE_ENABLED` | Per-mechanism IPS toggle: DNS sinkhole (Layer 7) | |
-| `IDS_IPS_ROUTER_ENABLED` | Per-mechanism IPS toggle: router isolation (Layer 3) | |
-| `IDS_IPS_TARPIT_ENABLED` | Per-mechanism IPS toggle: ARP tarpit (Layer 2) | |
-| `OLLAMA_API_KEY` | Ollama server auth | Only needed if your Ollama server requires authentication. |
+| `TELEGRAM_CHAT_ID` | Destination chat for alerts | |
+| `OTX_API_KEY` | AlienVault OTX lookups | Recommended — feeds hard-stop confirmation. |
+| `ABUSEIPDB_KEY` (or `ABUSEIPDB_API_KEY`) | AbuseIPDB reputation | Either name accepted. |
+| `VIRUSTOTAL_KEY` (or `VIRUSTOTAL_API_KEY`) | VirusTotal lookups | Either name accepted. |
+| `PIHOLE_API_PASSWORD`, `PIHOLE_API_URL` | Pi-hole admin API | |
+| `FRITZ_USER`, `FRITZ_PASS` | Fritz!Box TR-064 login | |
+| `API_SECRET_TOKEN` | This app's own webhook auth token | Loopback requests always trusted regardless. |
+| `ROUTER_WEBHOOK_URL` | Isolate-device webhook target | Usually your own `fastapi_port`. |
+| `IDS_IPS_PIHOLE_ENABLED` / `IDS_IPS_ROUTER_ENABLED` / `IDS_IPS_TARPIT_ENABLED` | Per-mechanism IPS toggles | |
 
-Two more `.env` variables exist for convenience in shell scripting around the project (`ZEEK_INTERFACE`, `HOME_SUBNET`) but are **not read by the Python application at all** — in particular, `.env`'s `HOME_SUBNET` does **not** override `config.yaml`'s `network_and_devices.home_subnet`, despite the similar name. To change your tracked LAN subnet, edit `config.yaml`, not `.env`.
+Two more `.env` variables (`ZEEK_INTERFACE`, `HOME_SUBNET`) exist for shell-scripting convenience but are **not read by the Python application at all** — in particular, `.env`'s `HOME_SUBNET` does **not** override `config.yaml`'s `home_subnet`. To change your tracked LAN subnet, edit `config.yaml`.
 
 ---
 
 ## 📁 Exhaustive State & File System Reference
 
-To survive reboots, power outages, and to provide data to Brain 3 and Grafana Loki, the system writes specialized artifacts to disk. As of Version 7.0, the project root is a flat, predictable layout:
-
 ```
 home_ids/
-├── config.yaml        # the configuration file described above
-├── .env                # secrets (git-ignored)
-├── alerts.json         # confirmed alert stream (see paths.alert_json_path)
-├── src/                # application code
-├── state/              # mutable runtime state (see below)
-├── models/              # ML model weights + GeoIP databases
-├── reports/            # Brain 3's generated Markdown reports
-└── tests/              # the full test suite (see Section 5)
+├── config.yaml         # human-authored baseline (this document, §3)
+├── .env                 # secrets (git-ignored)
+├── alerts.json           # confirmed alert stream (paths.alert_json_path)
+├── requirements.txt
+├── src/                  # application code
+├── state/                # mutable runtime state (below)
+├── models/                # ML model weights + GeoIP databases
+├── reports/               # Brain 3's generated Markdown reports
+└── tests/                 # the full test suite (§6)
 ```
 
-### The `state/` Directory (Mutable Event Data)
+### The `state/` Directory
 
 | File | Purpose and Lifecycle |
 |---|---|
-| `ids_state.json` | **The Core Brain Record**. Managed by `core/state_guard.py`. Contains the massive nested dictionary of every tracked IP address, its current Threat Confidence score, its mathematical baseline (EWMA rates, variances), and its active hardware containment status (`is_isolated=True/False`). Flushed to disk periodically and on shutdown. |
-| `autonomous_muted.jsonl` | **The Suppressed Event Log**. Identical in structure to `alerts.json`, but contains only the alerts that Brain 2 (CL-AFPE) successfully identified as False Positives and suppressed. Used for audits to prove the AI isn't ignoring real threats. |
-| `fp_trust_cache.json` | **Brain 2's Short-Term Memory**. When Brain 2 suppresses a false positive, it saves the base domain here with a TTL timestamp (default 14 days). Queries matching this cache bypass heavy ML execution entirely for raw speed. |
-| `fp_sigma_shifts.json` | **Brain 2's Variance Adjustments**. If a device keeps triggering false positives by slightly exceeding its volume baseline, Brain 2 writes a "sigma shift" here to permanently widen the standard deviation threshold for that specific device without impacting the global threshold. |
-| `zeek_cursor_*.json` | **File Ingestion Trackers**. (`zeek_cursor_conn.json`, `zeek_cursor_dns.json`, etc.). Because `tail -F` is dangerous if the script restarts, these files store the exact byte-offset and inode of the Zeek logs. Upon restart, the engine seeks exactly to this byte offset, guaranteeing zero missed packets and zero duplicate logs. |
-| `.last_autotune` | A tiny lock file containing the UNIX timestamp of the last time the `autotune` cron job ran. Prevents duplicate execution. |
-| `.last_retro_hunt` | A lock file for the `retro_hunter` script. |
-| `ti_cache/` | **Threat Intelligence Caching Directory**. Stores MD5-hashed JSON files mapping external IP addresses to their AlienVault/AbuseIPDB scores. Prevents API rate-limit exhaustion by serving local hits for `ti_refresh_interval` seconds. |
+| `ids_state.json` | Every tracked device's identity, EWMA/variance baselines, active containment status. Managed by `core/state_guard.py`. Flushed periodically and on shutdown. Its `blocked_domains[domain]` entries each carry a `comment` field (**new in 8.0.1**) — the same "Home-IDS Auto-Block \| Device: ... \| Trigger: ..." text sent to Pi-hole, stored here durably regardless of which of the three Pi-hole block paths (v6 API / CLI / legacy v5 API) actually executed the block, so "was this blocked by the script, and why" is always locally answerable. |
+| `autonomous_muted.jsonl` | Every suppressed/corrected alert, three event types: `AUTONOMOUS_FP_SUPPRESSED` (CL-AFPE's own Stage 2/3 catch), `OPERATOR_MARKED_FALSE_POSITIVE` (human Telegram correction), `LLM_VALIDATED_FALSE_POSITIVE` (**new in 8.0** — Brain 3's own validated correction). All three feed the weekly retrain and the self-calibration pass equally. |
+| `fp_trust_cache.json` | Base-domain → immunization-timestamp map. 14-day TTL. Bypasses ML entirely on a hit (after a mandatory hard-stop re-check — an immunized domain can never permanently blind the system to a later confirmed IOC on the same registrable domain). |
+| `fp_sigma_shifts.json` | Per-device EWMA sensitivity adjustment (`+0.25σ` per confirmed FP, `-0.50σ` per confirmed threat, capped `[-1.5, +2.0]`). |
+| `config_overrides.json` | **New in 8.0.** Global autonomous threshold overrides — see §2. Absent by default; only appears once the self-calibration pass has real evidence to act on. |
+| `device_fp_profiles.json` | **New in 8.0.** Per-device autonomous threshold overrides — see §2. Same absent-until-earned behavior. |
+| `ollama_analysis_cache.json` | **New in 8.0.** Brain 3's 7-day verdict cache, keyed by device+target+signature. |
+| `retro_hunt_findings.jsonl` | **New in 8.0.** Durable record of `retro_hunter.py`'s zero-day matches — kept separate from `alerts.json` deliberately, since a retro-hunt match has no live device state/features and forcing it into that schema would either crash extraction or be silently misinterpreted by the training pipeline. Only written when a match is actually found. |
+| `scheduler.log` | **New in 8.0.** `scripts/scheduler.py`'s own log output, and (since it launches every scheduled job as a child process with no redirect of its own) every scheduled script's log output too. Previously piped to `/dev/null` — a real zero-day retro-hunt finding was going completely unrecorded before this fix. |
+| `zeek_cursor_*.json` | Byte-offset + inode trackers per Zeek log file, so a restart never re-reads or skips events. |
+| `models/.last_retrain` | Timestamp lock file for `fp_engine.py`'s own internal 7-day retrain thread (a second, in-process path to the same retrain function the scheduler's cron job calls standalone — see §5). |
+| `ti_cache/` | Cached threat-intel feed data (OTX/AbuseIPDB/VirusTotal/URLhaus/ThreatFox/Tranco), refreshed on `ti_refresh_interval`. |
+| `fritz_webhook.log` | FastAPI/uvicorn subprocess's own log (isolate/hosts endpoints). |
 
-*(`alerts.json` itself lives at the project root, not inside `state/` — see `paths.alert_json_path`.)*
+*(`alerts.json` lives at the project root, not inside `state/` — see `paths.alert_json_path`.)*
 
-### The `models/` Directory (Machine Learning Weights + GeoIP Databases)
-
-| File / Folder | Purpose and Lifecycle |
+### The `models/` Directory
+| File / Folder | Purpose |
 |---|---|
-| `ids_model.pkl` | The *global* `scikit-learn` IsolationForest model. Trained on the aggregate traffic of your entire home network. Provides the "default" anomaly scoring for new devices. |
-| `devices/<IP_ADDRESS>.pkl` | *Bespoke* IsolationForest models. Once a device hits `ml_warmup_samples` (default 5,000 queries), the system forks a personalized ML model for that specific IP and saves it here. |
-| `GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb` | MaxMind databases referenced by `paths.geoip_db` / `paths.geoip_asn_db`. Not shipped with the repo — download separately from MaxMind and place here. |
+| `ids_model.pkl` | Global IsolationForest, trained on aggregate home-network traffic. |
+| `devices/<id>.pkl` | Bespoke per-device IsolationForest, forked once a device passes `ml_warmup_samples`. |
+| `fp_classifier.onnx` | CL-AFPE's Stage 2 LightGBM classifier, retrained weekly. |
+| `GeoLite2-City.mmdb`, `GeoLite2-ASN.mmdb` | MaxMind databases (not shipped — download separately). |
 
-### The `reports/` Directory (Brain 3 Output)
-- **`soc_daily_report_YYYYMMDD.md`**: Generated by the Cognitive Analyst (Brain 3). Contains the LLaMA 3.1 LLM's deep-dive investigations into your alerts, natural language summaries, and a record of any autonomous self-healing config injections it executed.
-- **`top_domains_YYYYMMDD.md`**: Generated by the `top_domains_report` cron job daily at 06:00. Lists the top domains queried per device.
-
-### The `tests/` Directory (Validation Suite)
-Added as its own top-level directory in Version 7.0 (previously the test files lived inside `src/`, mixed in with application code). See [Section 5](#-test-suite--validation-scripts) below for what each file covers.
+### The `reports/` Directory
+- `soc_daily_report_YYYYMMDD.md` — Brain 3's per-run summary, now including a per-run header (`N fresh, M cached, K deferred`) so you can see at a glance how much of that run's cost was actually spent on the LLM.
+- `top_domains_YYYYMMDD.md` — daily top-domains-per-device summary, 6 AM.
 
 ---
 
 ## 🔄 Service Lifecycle: Warm vs. Cold Restarts
 
-Because Home-IDS is an AI system that *learns* over time, how you restart the daemon (`soc.service`) fundamentally alters its intelligence.
-
-### 🟡 The Warm Restart (Standard Operation)
-A warm restart occurs when you run:
+### 🟡 Warm Restart (standard operation)
 ```bash
 sudo systemctl restart soc.service
 ```
-1. The script receives a `SIGTERM` signal.
-2. `state_guard.py` intercepts the signal and immediately flushes the in-memory device states to `state/ids_state.json`.
-3. The script terminates.
-4. Systemd restarts the script.
-5. The engine boots, reads `ids_state.json`, reads all `.pkl` models from `models/`, and reads the byte-offsets from `zeek_cursor_*.json`.
+1. `SIGTERM` received; `state_guard.py` flushes in-memory state to `state/ids_state.json`.
+2. Process terminates; systemd restarts it.
+3. Engine reads `ids_state.json`, every `.pkl` model, every `zeek_cursor_*.json` byte offset, `state/config_overrides.json`, `state/device_fp_profiles.json`.
 
-**The Result**: The system resumes processing the exact next packet with 100% of its Machine Learning baselines, historical device Trust Caches, and active hardware isolation states perfectly preserved.
-**When to use**: When updating any `[RESTART]`-tagged `config.yaml` key, or applying standard Python code updates.
+**Result**: processing resumes with 100% of ML baselines, trust caches, autonomous overrides, and active containment states preserved. Use this for any `[RESTART]`-tagged config change or code update.
 
-### 🔴 The Cold Restart (The Brain Wipe)
-A cold restart is a manual process that forcefully obliterates the AI's memory and state trackers.
+### 🔴 Cold Restart (the brain wipe)
 ```bash
 sudo systemctl stop soc.service
 rm -rf state/ids_state.json models/*.pkl models/devices/*.pkl state/fp_trust_cache.json
 sudo systemctl start soc.service
 ```
-1. You delete all `.pkl` machine learning weights and the `ids_state.json` memory bank.
-2. Upon startup, the engine sees missing files and initializes entirely empty matrices.
-3. Every device on your network is forced back into a 24-hour **"Probationary State"**. The system begins at ground zero, re-learning what "normal" traffic looks like.
+Deletes the ML weights and device memory. Every device re-enters a fresh probationary baselining period. **Only do this if your baselines are genuinely poisoned** — e.g. Home-IDS was installed while the network was already compromised, so it learned the infection as "normal."
 
-**When to use**:
-- ONLY use this if your ML baselines are completely poisoned. For example, if you installed Home-IDS *while your network was actively infected by a botnet*, the system will have learned that DGA beaconing is "normal." A cold restart after cleaning the botnet will force the AI to learn a clean baseline.
+Note: this does **not** touch `state/config_overrides.json` or `state/device_fp_profiles.json` by default — those represent calibration decisions, not ML weights. Delete them separately (or individual keys inside them) if you also want to reset autonomous tuning back to your `config.yaml` baseline.
+
+Two retrain paths exist for the LightGBM classifier specifically, and both now also run the self-calibration pass (§2): the scheduler's standalone daily 3am cron job, and `fp_engine.py`'s own internal background thread that checks hourly whether 7 days have passed since `state/models/.last_retrain`. They're redundant by design — if the cron job is ever misconfigured or fails to fire, the in-process thread is a second path to the same outcome.
 
 ---
 
 ## 🧪 Test Suite & Validation Scripts
 
-The repository includes a `tests/` directory with 9 self-contained test files, one per implementation phase, that validate the system's logic without requiring live network traffic, a running Pi-hole, or real malware. All 9 files together cover 151 individual checks.
+`tests/` contains 9 self-contained phase test files (no live network, no running Pi-hole, no real malware required) plus two broader tools.
 
 ```bash
 source venv/bin/activate
@@ -376,17 +437,21 @@ done
 
 | File | What it validates |
 |---|---|
-| `test_phase0_fixes.py` | Foundational bug fixes: state-guard correctness, lock handling, and other early stability fixes. |
-| `test_phase1_hypotheses.py` | The Hypothesis & Evidence Engine — that specific evidence combinations correctly trigger (or don't trigger) the intended threat hypotheses. |
-| `test_phase2_escalation.py` | State escalation logic — `SUSPICIOUS` → `HIGH` → `CRITICAL` transitions and their timing rules. |
-| `test_phase3_revoke.py` | The false-positive revoke workflow — operator "Mark False Positive" corrections and their TTL handling. |
-| `test_phase4_reidentify.py` | Device re-identification after MAC/IP rotation, including the confidence-scoring logic. |
-| `test_phase5_structural.py` | Structural/vector similarity matching in Brain 2's FastEmbed stage. |
-| `test_phase6_fp_selfheal.py` | The Brain 3 self-healing config write path, including the `ruamel.yaml` comment-preservation fix for `safe_host_patterns` edits. |
-| `test_phase6_mac_correlation.py` | MAC-address correlation and reverse-index lookups used during device identity tracking. |
-| `test_phase7_scheduling.py` | The Version 7.0 scheduler fixes — `retro_hunter`'s job-key/script-override resolution and `ollama_soc`'s read/write path separation. |
+| `test_phase0_fixes.py` | Foundational fixes: reputation-tier boundary matching, ML poisoning-window rejection, multi-subnet config resolution, fail-closed base-domain extraction. |
+| `test_phase1_hypotheses.py` | HEE evidence-to-hypothesis wiring, including the Prime Video/CDN allowlist regression check. |
+| `test_phase2_escalation.py` | Single-signal `SUSPICIOUS` alerting and cross-cycle escalation to `HIGH`, verified against `pipeline.py`'s actual source text so the test can't silently drift from what's shipped. |
+| `test_phase3_revoke.py` | The closed-loop revoke workflow and the IPC split-brain reconciliation fix. |
+| `test_phase4_reidentify.py` | Device re-identification after MAC/IP rotation. |
+| `test_phase5_structural.py` | Infra-device evidence dampening scope, TI readiness telemetry, confirms the "async threat-intel worker" requirement was already satisfied by existing code. |
+| `test_phase6_fp_selfheal.py` | CL-AFPE Stage 2/3 fall-through fix, training-data mislabeling fix, `record_action()`'s `extra` field round-trip. |
+| `test_phase6_mac_correlation.py` | Cross-address-family (IPv4/IPv6) device identity correlation via MAC. |
+| `test_phase7_scheduling.py` | Scheduler job→script resolution (the `retro_hunter` filename-mismatch bug class) and non-alert-stream training contamination exclusion. |
 
-Run a single file directly to validate one subsystem after a targeted change, e.g. after editing anything in `intelligence/fp_engine.py`:
+Two additional, broader-scope tools live alongside them but are not part of the phase suite:
+- `tests/live_system_tester.py` — injects synthetic traffic against a *running* daemon (multi-stage timing/injection test), for validating an actual live deployment rather than pure logic.
+- `tests/regression_tester.py` — a broader smoke test across many subsystems (Pi-hole, Zeek, ML engine, geofencing policy reader). Known limitation: it prints expected-vs-actual for a human to eyeball rather than using `assert`, so it will not fail loudly on a silent regression the way the phase tests do.
+
+Run a single file directly after touching a specific subsystem, e.g. after editing `fp_engine.py`:
 ```bash
 python3 tests/test_phase6_fp_selfheal.py
 ```
@@ -395,67 +460,105 @@ python3 tests/test_phase6_fp_selfheal.py
 
 ## 📊 Prometheus Telemetry & Loki Observability
 
-Home-IDS exposes a massive array of metrics on port `9105/metrics` (see `service_ports.metrics_port`). By scraping this with Grafana, you obtain enterprise-level observability over the engine's internal calculations.
+All metrics defined in `src/metrics.py`, exposed on `service_ports.metrics_port` (default `9105`) at `/metrics`.
 
-*(All metrics defined in `src/metrics.py`)*
-
-### 1. Threat Confidence & AI State Metrics
-| Prometheus Metric (`home_ids_*`) | Type | Deep Explanation |
+### Decision & confidence
+| Metric | Type | Meaning |
 |---|---|---|
-| `threat_confidence` | Gauge (0-1.0) | The live, real-time Threat Confidence score. A spike directly correlates to an alert generation in `alerts.json`. |
-| `anomaly_confidence` | Gauge (0-1.0) | The IsolationForest ML structural outlier score. Indicates deviation from the `.pkl` baseline (e.g., unusual query volumes during off-hours). |
-| `decision_state` | Gauge (0-4) | The quantized output of the HEE graph state matrix. `0=BENIGN`, `1=ANOMALOUS`, `2=SUSPICIOUS`, `3=HIGH`, `4=CRITICAL`. |
+| `home_ids_threat_confidence` | Gauge | Live HEE threat confidence, 0.0–1.0. |
+| `home_ids_anomaly_confidence` | Gauge | IsolationForest structural-outlier score. |
+| `home_ids_decision_state` | Gauge | `0=BENIGN, 1=ANOMALOUS, 2=SUSPICIOUS, 3=HIGH, 4=CRITICAL`. |
+| `home_ids_killchain_phase` | Gauge | `0=Normal, 1=Recon, 2=C2, 3=Lateral, 4=Exfil`. |
+| `home_ids_markov_anomaly_score` | Gauge | `1 − transition_prob` from the static kill-chain phase table (see §1). |
+| `home_ids_risk_velocity` | Gauge | Risk-score z-score vs. that device's own risk baseline. |
 
-### 2. DNS & Zeek Network Feature Extraction
-| Prometheus Metric (`home_ids_*`) | Type | Deep Explanation |
+### DNS & Zeek feature extraction
+| Metric | Type | Meaning |
 |---|---|---|
-| `query_rate` | Gauge | Raw volume of DNS queries per minute. Spikes indicate DoS, DGA, or aggressive telemetry bursts. |
-| `entropy_avg` | Gauge | Shannon Entropy of queried domain strings. The higher the number, the closer the strings are to pure random distribution. |
-| `nxdomain_ratio` | Gauge | Fraction of queries resulting in NXDOMAIN. Crucial for catching botnets hunting for unregistered backup C2 servers. |
-| `zeek_lateral_events_total` | Counter | Tracks aggregate internal `S0/REJ` state connections (Port Scanning). |
-| `beaconing_c2_count` | Gauge | Tracks highly uniform, periodic "heartbeat" connections calculated via Coefficient of Variation (Jitter). |
-| `outbound_bytes_window` | Gauge | Cumulative payload volume (in bytes) leaving your network across the rolling `window_seconds`. Spikes indicate Data Exfiltration. |
-| `zeek_ja3_malicious` | Gauge | Flags devices presenting a TLS Client Hello cryptographic fingerprint (JA3/JA4+) matching a known malware hash table (e.g., AsyncRAT, Cobalt Strike). |
+| `home_ids_query_rate` | Gauge | DNS queries/minute. |
+| `home_ids_entropy_avg` | Gauge | Average Shannon entropy of queried domain labels. |
+| `home_ids_nxdomain_ratio` | Gauge | Fraction of queries resulting in NXDOMAIN. |
+| `home_ids_blocked_ratio` | Gauge | Fraction of queries Pi-hole blocked. |
+| `home_ids_suspicious_domains` | Gauge | Suspicious/DGA-like domain count this window. |
+| `home_ids_new_domains`, `home_ids_deep_domains` | Gauge | First-seen-this-window count; count with >5 DNS labels. |
+| `home_ids_dns_txt_null_ratio` | Gauge | Fraction of TXT/NULL/ANY queries (covert-tunneling signal). |
+| `home_ids_suspicious_tld_ratio` | Gauge | Fraction of queries to high-abuse-rate TLDs. |
+| `home_ids_dns_tunneling_domains` | Gauge | Count of high-entropy encoded-label domains. |
+| `home_ids_max_label_length` | Gauge | Longest DNS subdomain label seen this window. |
+| `home_ids_zscore_query_rate/entropy/unique_domains/nxdomain_ratio/blocked_ratio/suspicious_domains` | Gauge | Per-feature z-scores against that device's own EWMA baseline. |
+| `home_ids_query_rate_baseline_mean` / `_threshold_limit` | Gauge | Per-hour rate baseline mean, and the live `threshold_std_dev`-derived anomaly bound (see §3, `detection_engine.threshold_std_dev`). |
+| `home_ids_zeek_conn_count`, `_new_ips` | Gauge | Zeek-observed connection count; unique destination IPs. |
+| `home_ids_zeek_lateral_moves`, `home_ids_zeek_lateral_events_total` | Gauge / Counter | Internal port-scan / lateral-movement activity. |
+| `home_ids_zeek_s0_rej_count` | Gauge | Rejected/unanswered TCP attempts. |
+| `home_ids_zeek_max_duration` | Gauge | Longest continuous connection this window. |
+| `home_ids_zeek_suspicious_ports`, `home_ids_zeek_doh_bypass` | Gauge | Suspicious outbound ports; direct DoH bypass attempts. |
+| `home_ids_zeek_honeypot_hits`, `home_ids_honeypot_probes_total` | Gauge / Counter | Connections to the configured honeypot IP(s). |
+| `home_ids_outbound_bytes_window`, `_zscore` | Gauge | Windowed outbound payload volume; its z-score (exfiltration signal). |
+| `home_ids_beaconing_volume_score`, `home_ids_jitter_cv_score` | Gauge | Single-destination traffic concentration; timing-uniformity coefficient of variation (C2 beaconing signals). |
+| `home_ids_abuseipdb_risk`, `home_ids_virustotal_risk`, `home_ids_ti_risk`, `home_ids_ti_match` | Gauge | Reputation contribution from each source, and IOC-match flag. |
+| `home_ids_ti_ioc_hits_total` | Counter | Total IOC matches, labeled `source`/`ioc_type`. |
+| `home_ids_ti_engine_ready` | Gauge | 1 once ThreatIntel has completed at least one feed refresh; distinguishes "checked and clean" from "still cold-starting". |
 
-### 3. Brain 2 (CL-AFPE) Efficacy Metrics
-| Prometheus Metric (`home_ids_*`) | Type | Deep Explanation |
+### CL-AFPE (Brain 2) efficacy
+| Metric | Type | Meaning |
 |---|---|---|
-| `fp_evaluations_total` | Counter | Total alerts that crossed `alert_threshold` and were intercepted by Brain 2. |
-| `fp_suppressed_total` | Counter | Total alerts Brain 2 identified as benign and killed. (Higher = quieter SOC). |
-| `fp_confidence_score` | Gauge (0-1) | The probability matrix output from the LightGBM classifier. High score means "Highly confident this is a False Positive." |
-| `fp_domains_immunized_total`| Counter | Number of unique eTLD+1 domains dynamically injected into the local trust cache. |
+| `home_ids_fp_evaluations_total` | Counter | Total alerts CL-AFPE evaluated. |
+| `home_ids_fp_suppressed_total` | Counter | Total suppressed as false positive. |
+| `home_ids_fp_confirmed_threats_total` | Counter | Total that bypassed suppression (hard-stop or low FP probability). |
+| `home_ids_fp_confidence_score` | Gauge, `[device, hostname]` | Latest combined FP confidence for that device. |
+| `home_ids_fp_trust_cache_size` | Gauge | Current immunized-domain count. |
+| `home_ids_fp_domains_immunized_total` | Counter | Total unique domains ever immunized. |
+| `home_ids_fp_sigma_shifts_total` | Counter, `[device, hostname]` | Total sigma-widening adjustments applied. |
+| `home_ids_fp_lgbm_model_status`, `home_ids_fp_embed_model_status` | Gauge | 1=loaded, 0=unavailable, for each ML sub-model. |
 
-### 4. Containment Status & Mitigation Telemetry
-| Prometheus Metric (`home_ids_*`) | Type | Deep Explanation |
+### Containment & IPS
+| Metric | Type | Meaning |
 |---|---|---|
-| `ips_tarpit_active` | Gauge (0/1) | Emits `1` if a device is currently being locked down by the Scapy Layer-2 ARP Blackhole loop. |
-| `ips_router_isolated_active` | Gauge (0/1) | Emits `1` if a device has had its WAN access severed via Fritz!Box API. |
-| `ips_pihole_blocks_aggregate_total` | Counter | Running total of all domains automatically written to the DNS Sinkhole. |
+| `home_ids_ips_tarpit_active`, `home_ids_ips_router_isolated_active` | Gauge, `[device, hostname, mac]` | 1 while a specific device is under Layer-2/Layer-3 containment. |
+| `home_ids_ips_pihole_status`, `home_ids_ips_router_status`, `home_ids_ips_tarpit_status` | Gauge | Per-mechanism operational state (1=active, 0=bypassed/disabled). |
+| `home_ids_ips_pihole_blocks_total`, `home_ids_ips_router_isolations_total` | Counter, per-device | Per-device action counts. |
+| `home_ids_ips_pihole_blocks_aggregate_total`, `_router_isolations_aggregate_total`, `_tarpit_activations_aggregate_total` | Counter | Network-wide totals. |
+| `home_ids_ips_errors_total` | Counter, `[target_type]` | Mitigation failures by target type. |
 
-### Loki LogQL Debugging Queries
-Use these queries in Grafana Explore to inspect the raw JSON evidence graphs:
-- **View Critical Threats**: `{job="home_ids_alerts"} | json | threat_confidence > 8.0`
-- **Audit Brain 2 Suppressions**: `{job="home_ids_muted"} | json | action = "suppressed"`
-- **Trace Exfiltration Events**: `{job="home_ids_alerts"} | json | hypothesis_triggered = "DATA_EXFILTRATION"`
+### Geo & infrastructure health
+| Metric | Type | Meaning |
+|---|---|---|
+| `home_ids_geo_risk`, `home_ids_asn_risk_score`, `home_ids_country_threat_density` | Gauge | Risk aggregated by geography/ASN. |
+| `home_ids_geo_hits_total`, `home_ids_geo_beaconing_total`, `home_ids_geo_traffic_total` | Counter | Event counts by geography. |
+| `home_ids_collector_lag_seconds`, `home_ids_alert_queue_size` | Gauge | Pipeline health. |
+| `home_ids_integration_status` | Gauge, `[integration]` | 1=active, 0=inactive, per external integration (Telegram, etc.). |
+
+### Loki LogQL examples
+- Critical threats: `{job="home_ids_alerts"} | json | threat_confidence > 0.8`
+- Brain 2 suppressions: `{job="home_ids_muted"} | json`
+- Exfiltration hypothesis hits: `{job="home_ids_alerts"} | json | explanation="DATA_EXFILTRATION"`
 
 ---
 
 ## 📚 Categorized Threat Catalog & Playbooks
 
-### Threat 1: Domain Generation Algorithms (DGA) & Botnet C2
-**Engine Detection:** Sudden spike in `home_ids_entropy_avg` + high `home_ids_nxdomain_ratio` + Markov Chain transition anomalies.
-**Automated Response:** Brain 1 executes a Pi-hole sinkhole and initiates an ARP Tarpit to isolate the device.
-**Analyst Playbook:** Isolate device, run endpoint antivirus (Malwarebytes, Defender). Terminate rogue background processes. Release via Telegram webhook once purged.
+### DGA / Botnet C2
+**Detection**: `DGAHypothesis` — high entropy + digit-heavy labels, dampened for known telemetry domains. **Response**: Pi-hole sinkhole; ARP tarpit if risk crosses the tarpit floor. **Playbook**: isolate, run endpoint AV, terminate rogue processes, release via Telegram once purged.
 
-### Threat 2: DNS Tunneling & Covert Data Exfiltration
-**Engine Detection:** Subdomain labels exceeding 45 characters (`max_label_length`), deep domain nesting (>$5$ levels), combined with a spike in `home_ids_outbound_bytes_window` and high TXT/NULL query ratios.
-**Automated Response:** Immediate Layer-3 Router WAN isolation (kill internet access).
-**Analyst Playbook:** Keep device isolated. Execute `netstat -abno` or `lsof -i` to locate the process holding the network socket. Reset all passwords accessed by the compromised machine.
+### DNS Covert Tunneling
+**Detection**: `DNSTunnelingV2Hypothesis` — long/encoded subdomain labels, TXT/NULL query abuse, suspicious-TLD concentration. **Known false-positive class**: CDN edge nodes issuing long session-token subdomains (Amazon Prime Video, `msh.amazon.co.uk`, Facebook/WhatsApp CDN nodes — all now allowlisted after being found in production traffic; see CHANGELOG). **Playbook**: if a genuinely new domain trips this, check `netstat`/`lsof` for the owning process before assuming malice — this hypothesis has a real history of false positives on legitimate CDN infrastructure.
 
-### Threat 3: Internal Lateral Movement
-**Engine Detection:** Zeek NDR logs reveal a high counter of `S0` (Unanswered) or `REJ` (Rejected) TCP states targeting multiple internal IP addresses (Port Scanning).
-**Automated Response:** Layer-2 ARP Tarpit to sever LAN access and protect peer devices.
-**Analyst Playbook:** Cross-reference the Grafana Zeek dashboard to identify the targeted ports (e.g., Port 445 = SMB). Power off the infected IoT device immediately.
+### Data Exfiltration
+**Detection**: `ExfiltrationHypothesis` — outbound byte z-score + absolute volume, dampened for curated vendor cloud APIs. **Response**: router WAN isolation. **Playbook**: keep isolated, identify the process holding the socket, rotate credentials that device had access to.
+
+### Internal Lateral Movement
+**Detection**: Zeek S0/REJ scan counts against multiple internal targets. **Response**: immediate ARP/NDP tarpit (this is one of the few signals that can push through to tarpit-tier containment even without hitting the raw risk-score floor). **Playbook**: identify targeted ports (445=SMB is common), power off the source device.
+
+### Confirmed/Corroborated Malicious Reputation
+**Detection**: reputation tier 5 — either a curated threat-intel feed hit, a real multi-vendor VirusTotal detection, or a very high (≥4.0-equivalent) AbuseIPDB score. **Not** a single moderate crowd-sourced score alone (tier 4 territory — monitor, not block; see §1's decision order). **Playbook**: check the alert's 🧭 REASONING section for exactly which source corroborated it before acting — the IP owner is shown explicitly.
 
 ---
-*Home-IDS Master Documentation & SecOps Playbook — Engine Version 7.0.0*
+
+## ❓ How Do I... (Task-Oriented Index)
+
+- **...make the system quieter without risking missed threats?** Don't lower `fp_combined_suppress_threshold` by hand first — check whether the self-calibration pass (§2) already has enough evidence to do it safely. If it's refusing, that usually means the evidence is genuinely ambiguous, which is useful information on its own.
+- **...see why a specific autonomous adjustment happened?** `cat state/config_overrides.json` or `state/device_fp_profiles.json` — every entry has a full `reason` string.
+- **...undo an autonomous adjustment?** Delete its key from the relevant JSON file. Reverts within ~5 seconds, no restart.
+- **...reduce Ollama's CPU/time cost further?** Lower `ollama_max_queries_per_run`, or raise `ollama_cache_ttl_seconds` so repeat patterns get re-analyzed less often.
+- **...find out if a device has its own calibrated threshold?** `cat state/device_fp_profiles.json | grep -A5 <device_id>`.
+- **...confirm a scheduled job actually ran?** `grep <job-name> state/scheduler.log` — this used to go to `/dev/null` entirely; if you're on a pre-8.0 deployment, upgrade first.

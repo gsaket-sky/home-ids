@@ -50,6 +50,17 @@ def etld1(domain):
     """Extracts the base domain and suffix (e.g., mail.google.com -> google.com)."""
     if not domain:
         return ""
+    # PHASE 8 FIX: a bare IP address (raw-IP connection with no resolved DNS name) has no
+    # eTLD+1. tldextract correctly returns an empty domain/suffix for IPs, but the naive
+    # last-two-labels fallback below doesn't know that and happily chops one into a fake
+    # 2-octet "domain" (e.g. "149.154.166.110" -> "166.110") — this silently populated
+    # fp_engine's trust cache with a meaningless, collision-prone key (found sitting in
+    # state/fp_trust_cache.json as literally "166.110"). Reject IP-shaped input up front.
+    try:
+        ipaddress.ip_address(domain.strip("."))
+        return ""
+    except ValueError:
+        pass
     if tldextract is not None:
         try:
             ext = tldextract.extract(domain)
@@ -90,7 +101,16 @@ _CDN_PARENT_ALLOWLIST = frozenset({
     "samsungcloud.com", "samsungcloud.net", "samsungrm.net", "samsungdm.com", "samsung.com",
     "gvt1.com", "gvt2.com", "gvt3.com", "crashlytics.com", "app-measurement.com", "firebaseio.com",
     "icloud.com", "apple-dns.net", "push.apple.com", "googleapis.com", "android.clients.google.com",
-    "appsflyersdk.com", "amplitude.com", "moengage.com", "iterable.com", "mwbsys.com"
+    "appsflyersdk.com", "amplitude.com", "moengage.com", "iterable.com", "mwbsys.com",
+    # PHASE 8 FIX: found by tracing the live alerts.json flood — 97 of 169
+    # DNS_COVERT_TUNNELING alerts (43% of ALL alerts in the file) were msh.amazon.co.uk
+    # alone (Amazon Alexa/FireTV device-management telemetry), the same
+    # long/encoded-session-token-subdomain shape as the aiv-delivery.net Prime Video hotfix
+    # already in this file, just a different Amazon domain and never patched. facebook.com/
+    # whatsapp were the next-largest repeat offenders (z-m-gateway.facebook.com,
+    # g.whatsapp.net, media-*.cdn.whatsapp.net) — both Meta-owned, same CDN pattern.
+    "amazon.co.uk", "amazon.de", "facebook.com", "whatsapp.com", "whatsapp.net",
+    "netflix.net", "pluto.tv", "bugsnag.com", "ntp.org"
 })
 
 _TELEMETRY_DOMAINS = frozenset({
@@ -150,6 +170,10 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "amazonvideo.com", "media-amazon.com", "cloudfront.net", "awsstatic.com",
     "aiv-cdn.net", "aiv-delivery.net", "amazon-adsystem.com", "ssl-images-amazon.com",
     "firetvcaptiveportal.com", "mmechocaptiveportal.com", "kindle.com",
+    "amazon.co.uk", "amazon.de",  # PHASE 8 FIX: msh.amazon.co.uk was 43% of all alerts
+
+    # Meta / Facebook / WhatsApp Ecosystem — PHASE 8 FIX
+    "facebook.com", "whatsapp.com", "whatsapp.net",
     
     # Google & Android Ecosystem
     "google.com", "googleapis.com", "gstatic.com", "googlevideo.com",
@@ -171,15 +195,18 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "quickconnect.to", "synology.me", "synology.com", "samsungcloud.com",
     "samsung.com", "samsungcloud.net", "samsungrm.net", "samsungdm.com", "lgsmartad.com",
     "lgthing.com", "roku.com", "netflix.com", "nflxvideo.net", "nflxso.net",
-    "nflxext.com", "spotify.com", "scdn.co", "spotifycdn.com", "plex.tv",
+    "nflxext.com", "netflix.net", "spotify.com", "scdn.co", "spotifycdn.com", "plex.tv",
     "sonos.com", "tplinkcloud.com", "tuya.com", "tuyacn.com", "myq-cloud.com",
+    "pluto.tv",  # PHASE 8 FIX: service-media-catalog.clusters.pluto.tv false positives
     
     # Global CDNs & Security Ingestion
     "cloudflare.com", "cloudflare.net", "cloudflare-dns.com", "fastly.net", "fastlylb.net", "fastly-edge.com",
     "akamaized.net", "akamai.net", "akamaihd.net", "akamaiedge.net",
     "appsflyersdk.com", "amplitude.com", "moengage.com", "iterable.com", "mwbsys.com",
     "akadns.net", "edgesuite.net", "edgekey.net", "brave.com", "nordvpn.com",
-    "bitdefender.net", "bitdefender.com", "fritz.box"
+    "bitdefender.net", "bitdefender.com", "fritz.box",
+    "bugsnag.com",  # PHASE 8 FIX: sessions.bugsnag.com — legit crash reporting (same class as sentry.io)
+    "ntp.org",  # PHASE 8 FIX: pool.ntp.org subdomains (e.g. datadog.pool.ntp.org) — standard NTP, never malicious
 })
 
 _CLOUD_PUSH_PATTERNS = (
