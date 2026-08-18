@@ -157,16 +157,16 @@ Everything from raw DNS row to a Pi-hole block is **synchronous, in-process, in 
 ```mermaid
 sequenceDiagram
     participant Pihole as Pi-hole DB
-    participant Loop as Pipeline._step() (every 2s)
+    participant Core as Pipeline._step() (every 2s)
     participant HEE as Decision Engine (Brain 1)
     participant FP as CL-AFPE Stage 1/2/3 (Brain 2)
     participant IPS as IPS Mitigator
     participant TG as Telegram
 
     loop every 2s
-        Loop->>Pihole: poll new query rows
-        Loop->>Loop: recompute 5-min rolling features
-        Loop->>HEE: hard-stops, reputation, hypothesis, then ML anomaly
+        Core->>Pihole: poll new query rows
+        Core->>Core: recompute 5-min rolling features
+        Core->>HEE: hard-stops, reputation, hypothesis, then ML anomaly
         HEE->>FP: fp_engine.evaluate(alert_payload)
         FP-->>HEE: suppress, confirm, or uncertain (Stage 1 sub-ms, Stage 2 LightGBM, Stage 3 FastEmbed)
         alt not suppressed and above containment thresholds
