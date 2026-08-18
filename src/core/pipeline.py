@@ -801,7 +801,8 @@ class EnginePipeline:
                                     is_safe=is_safe,
                                     ti_engine=self.ti_engine,
                                     reason=primary_sig,
-                                    fp_verdict=fp_verdict
+                                    fp_verdict=fp_verdict,
+                                    decision_state=decision.get("state", "SUSPICIOUS")
                                 )
                                 containment_status = self.ips_mitigator.get_containment_status(
                                     client_ip=client_ip,
@@ -868,12 +869,24 @@ class EnginePipeline:
                                 fp_pct = int(fp_verdict.get("confidence", 0.0) * 100)
                                 threat_pct = 100 - fp_pct
 
+                                # PHASE 15 FIX: this badge used to be driven ENTIRELY by fp_verdict's
+                                # own confidence, with no reference to decision["state"] at all -- so a
+                                # SUSPICIOUS/monitor verdict (a single uncorroborated signal, never
+                                # eligible for containment -- see ips.py's decision_state gate) could
+                                # still show "High Threat Confidence - Immediate remedy recommended.",
+                                # directly contradicting both the verdict shown a few lines above AND
+                                # the fact that nothing was actually blocked. Decision state -- the
+                                # authoritative, corroborated verdict -- now takes precedence; CL-AFPE's
+                                # own confidence only refines within states it can't override.
+                                decision_state_for_rec = decision.get("state", DecisionState.SUSPICIOUS)
                                 if fp_verdict["confidence"] >= 0.75:
                                     rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
+                                elif decision_state_for_rec in (DecisionState.HIGH, DecisionState.CRITICAL):
+                                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
                                 elif fp_verdict["confidence"] >= 0.55:
                                     rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
                                 else:
-                                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
+                                    rec_badge = "🟡 *Recommendation:* Monitor – Insufficient independent corroboration for containment."
 
                                 # PHASE 8 FIX: this used to read decision["hypotheses"]["attack"]["name"] —
                                 # the behavioral hypothesis engine's best guess, which falls back to the

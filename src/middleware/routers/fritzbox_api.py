@@ -182,7 +182,8 @@ def _ipc_block_logic(target: str):
                 risk_score=10.0,
                 lateral_threat=False,
                 is_safe=False,
-                reason="Operator explicitly approved hardware isolation."
+                reason="Operator explicitly approved hardware isolation.",
+                decision_state="CRITICAL"
             )
         
         sm.flush_to_disk()

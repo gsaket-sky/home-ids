@@ -268,7 +268,8 @@ class IPSMitigator:
         is_safe: bool,
         ti_engine: Optional[Any] = None,
         reason: str = "High Risk Identified",
-        fp_verdict: Optional[dict] = None
+        fp_verdict: Optional[dict] = None,
+        decision_state: str = "SUSPICIOUS"
     ) -> None:
         LOGGER.debug("Mitigate evaluation triggered | Device: %s, Domain: %s, Risk: %.2f, Safe: %s", 
                      getattr(st, "hostname", "unknown"), target_domain, risk_score, is_safe)
@@ -327,15 +328,31 @@ class IPSMitigator:
         interactive_mode = bool(self.config.get("interactive_blocking_enabled", False))
         pihole_enabled = bool(self.config.get("ips_pihole_enabled", True)) and bool(self.config.get("ips_enabled", True))
 
+        # SEVERITY-GATED BLOCKING: a complete safe-domain list can never exist, so blocking
+        # cannot rely on "not on the allowlist" as its bar — that blocks anything merely
+        # unrecognized, which risks breaking a device's normal function on nothing more than
+        # CL-AFPE failing to suppress it. Pi-hole blocking now requires the decision engine's
+        # own corroborated verdict (HIGH/CRITICAL — reached only via a hard-stop, a confirmed
+        # reputation tier, or >=2 independent evidence sources scoring >=3.0; see
+        # decision_engine.py) before it will act at all. A SUSPICIOUS/monitor verdict — a
+        # single uncorroborated signal — is alerted on but never blocks: it stays under
+        # observation until either it escalates on its own evidence or CL-AFPE/Ollama clears it.
         if pihole_enabled and target_domain and target_domain not in ("unknown", "-"):
-            safe_domains = set(self.config.get("safe_domains", []))
-            is_domain_safe = (target_domain in safe_domains) or (ti_engine and ti_engine.is_allowlisted(target_domain))
-
-            if not is_domain_safe:
-                LOGGER.debug("Executing immediate Pi-hole block protocol for %s.", target_domain)
-                self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id, reason=reason)
+            if decision_state not in ("HIGH", "CRITICAL"):
+                LOGGER.debug(
+                    "🛡️ [IPS] Pi-hole block withheld for %s: decision state '%s' has not reached "
+                    "HIGH/CRITICAL corroboration — monitoring only, no containment action taken.",
+                    target_domain, decision_state
+                )
             else:
-                LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
+                safe_domains = set(self.config.get("safe_domains", []))
+                is_domain_safe = (target_domain in safe_domains) or (ti_engine and ti_engine.is_allowlisted(target_domain))
+
+                if not is_domain_safe:
+                    LOGGER.debug("Executing immediate Pi-hole block protocol for %s.", target_domain)
+                    self._block_domain(domain=target_domain, hostname=hostname, device_ip=client_ip, dev_id=dev_id, reason=reason)
+                else:
+                    LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
 
         router_enabled = bool(self.config.get("ips_router_enabled", False))
         if router_enabled and (risk_score >= 8.5 or lateral_threat):

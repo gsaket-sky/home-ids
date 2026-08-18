@@ -98,7 +98,7 @@ _CDN_PARENT_ALLOWLIST = frozenset({
     "fastly.net", "fastlylb.net", "fastly-edge.com", "cloudflare.net", "cdn.ampproject.org", "fbcdn.net", "azureedge.net", "msecnd.net",
     "aaplimg.com", "mzstatic.com", "nflxvideo.net", "nflxso.net", "nflxext.com",
     "scdn.co", "spotifycdn.com", "twimg.com", "ytimg.com",
-    "samsungcloud.com", "samsungcloud.net", "samsungrm.net", "samsungdm.com", "samsung.com",
+    "samsungcloud.com", "samsungcloud.net", "samsungrm.net", "samsungdm.com", "samsung.com", "samsungapps.com",
     "gvt1.com", "gvt2.com", "gvt3.com", "crashlytics.com", "app-measurement.com", "firebaseio.com",
     "icloud.com", "apple-dns.net", "push.apple.com", "googleapis.com", "android.clients.google.com",
     "appsflyersdk.com", "amplitude.com", "moengage.com", "iterable.com", "mwbsys.com",

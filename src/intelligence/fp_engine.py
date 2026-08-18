@@ -574,7 +574,7 @@ class AutonomousFPEngine:
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}'",
+                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}' → best match: '{embed_match or 'N/A'}'",
                     f"Combined confidence={combined:.3f} insufficient to suppress (threshold={effective_suppress_threshold})",
                 ],
                 "suppress": False,
@@ -601,7 +601,7 @@ class AutonomousFPEngine:
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}'",
+                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}' → best match: '{embed_match or 'N/A'}'",
                     "Alert pattern consistent with genuine threat activity",
                 ],
                 "suppress": False,
