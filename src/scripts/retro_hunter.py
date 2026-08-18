@@ -24,6 +24,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
+from utils import write_job_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [RETRO-HUNTER] %(message)s")
 LOGGER = logging.getLogger("retro_hunter")
@@ -53,6 +54,20 @@ def _send_telegram(msg: str) -> None:
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
         LOGGER.error("Failed to send Telegram retro-hunt alert: %s", e)
+
+def _count_findings(state_dir: Path) -> int:
+    """Cumulative retro-hunt match count, read straight from the append-only findings
+    file itself rather than a separately-maintained running counter -- avoids any
+    chance of the relay stat drifting out of sync with the actual source of truth."""
+    findings_path = state_dir / "retro_hunt_findings.jsonl"
+    if not findings_path.exists():
+        return 0
+    try:
+        with open(findings_path, "r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except Exception:
+        return 0
+
 
 def load_historical_domains(log_path: Path, days_back: int) -> set:
     """Parses massive JSONL log streams efficiently to extract unique queried domains."""
@@ -89,6 +104,8 @@ def load_historical_domains(log_path: Path, days_back: int) -> set:
 
 def run_retro_hunt(days: int = 14) -> None:
     """Executes the retroactive threat hunt for a given number of days."""
+    run_start = time.time()
+    state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
     # Load Active Intelligence Engine (Updated for Modular Architecture)
     ti = ThreatIntel(
         cache_dir        = str(Path(CONFIG.get("state_path", "/app/state/ids_state.json")).parent / "ti_cache"),
@@ -116,6 +133,7 @@ def run_retro_hunt(days: int = 14) -> None:
     
     if not historical_domains:
         LOGGER.info("No historical domains found to scan. Exiting.")
+        write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={"findings_count": _count_findings(state_dir)})
         return
         
     LOGGER.info("Extracted %d unique historical domains. Commencing Threat Intel detonation...", len(historical_domains))
@@ -169,6 +187,8 @@ def run_retro_hunt(days: int = 14) -> None:
         _send_telegram("\n".join(lines)[:4000])
     else:
         LOGGER.info("✅ Retroactive hunt complete. Zero historical compromises detected against fresh intel.")
+
+    write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={"findings_count": _count_findings(state_dir)})
 
 def main():
     parser = argparse.ArgumentParser(description="Retroactive Zero-Day Threat Hunter")

@@ -55,13 +55,23 @@ def remove_stale_device_metrics(device_id: str, hostname: str, device_type: str 
         except Exception:
             pass
 
-geo_risk_metric = Gauge("home_ids_geo_risk", "Risk score by geography", ["country", "city", "asn", "org", "continent", "latitude", "longitude"])
-geo_hits_metric = Counter("home_ids_geo_hits_total", "Threat hits by geolocation", ["country", "asn"])
+# PHASE 18 FIX (CARDINALITY): latitude/longitude removed from every geo label set below.
+# Rounded-to-0.1-degree coordinates crossed with country/city/asn/org is effectively
+# unbounded over time (a new grid cell + ASN combination for every new IP that ever
+# resolves). Geo aggregation now stops at city/country/asn/org, which is what every
+# panel actually groups by anyway -- a Grafana geomap can still plot a point per
+# country/city via a small static centroid lookup if a map view is ever needed, without
+# the metric itself carrying unbounded coordinate labels.
+geo_risk_metric = Gauge("home_ids_geo_risk", "Risk score by geography", ["country", "city", "asn", "org", "continent"])
 asn_risk_metric = Gauge("home_ids_asn_risk_score", "Risk score by ASN", ["asn", "org"])
 country_density_metric = Gauge("home_ids_country_threat_density", "Threat density per country", ["country"])
 geo_beacon_metric = Counter("home_ids_geo_beaconing_total", "Beaconing detections by geography", ["country", "asn"])
-geo_traffic_total = Counter("home_ids_geo_traffic_total", "All DNS traffic by geography", ["country", "city", "continent", "asn", "org", "latitude", "longitude"])
-geo_queries_per_minute = Gauge("home_ids_geo_queries_per_minute", "DNS query rate by geography", ["country", "city", "asn", "latitude", "longitude"])
+# PHASE 18 FIX (REDUNDANT): geo_hits_metric used to double-count the same "beaconing
+# threat" cross-section as geo_beacon_metric/country_density_metric once latitude/
+# longitude stopped differentiating it from geo_traffic_total -- dropped as a duplicate
+# label-subset of geo_traffic_total below, not a distinct signal.
+geo_traffic_total = Counter("home_ids_geo_traffic_total", "All DNS traffic by geography", ["country", "city", "continent", "asn", "org"])
+geo_queries_per_minute = Gauge("home_ids_geo_queries_per_minute", "DNS query rate by geography", ["country", "city", "asn"])
 geo_unique_domains = Gauge("home_ids_geo_unique_domains", "Unique domains by geography", ["country", "city", "asn"])
 geo_entropy = Gauge("home_ids_geo_entropy", "Entropy score by geography", ["country", "city", "asn"])
 geo_device_count = Gauge("home_ids_geo_device_count", "Device count by geography", ["country", "city", "asn"])
@@ -88,9 +98,21 @@ ips_tarpit_status = Gauge("home_ids_ips_tarpit_status", "Layer-2 Scapy ARP Tarpi
 # instead of silently reading as "checked, nothing found."
 ti_engine_ready_status = Gauge("home_ids_ti_engine_ready", "1 if ThreatIntel has completed at least one successful feed refresh, 0 if still cold-starting/degraded")
 
-ips_pihole_blocks_metric = Counter("home_ids_ips_pihole_blocks_total", "Total automated domain blocks executed", ["device", "hostname", "domain"])
+# PHASE 18 FIX (CARDINALITY): dropped the "domain" label -- domains are attacker/DGA
+# chosen strings, unbounded, and a per-domain trend Counter isn't needed for anything a
+# dashboard actually queries by domain (the currently-blocked *state* is what needs
+# per-domain resolution, and that's ips_active_blocks_gauge below, already bounded and
+# GC'd). Per-domain detail for any specific block still lives in the Pi-hole comment and
+# in alerts.json.
+ips_pihole_blocks_metric = Counter("home_ids_ips_pihole_blocks_total", "Total automated domain blocks executed", ["device", "hostname"])
 ips_isolations_metric = Counter("home_ids_ips_router_isolations_total", "Total automated network isolation commands triggered", ["device", "hostname", "mac"])
 ips_errors_metric = Counter("home_ids_ips_errors_total", "Total failure states encountered during active mitigation runs", ["target_type"])
+# PHASE 18: the block-side counter above always had a per-device breakdown; the
+# unblock/release side previously had no metric at all -- "block only what's necessary"
+# is only verifiable if release activity is as visible as block activity. `reason`
+# is a small fixed enum (immunized/manual), never attacker-controlled.
+ips_pihole_unblocks_metric = Counter("home_ids_ips_pihole_unblocks_total", "Total automated/manual domain releases executed", ["device", "hostname", "reason"])
+ips_router_releases_metric = Counter("home_ids_ips_router_releases_total", "Total router isolation releases executed", ["device", "hostname", "reason"])
 
 new_domains_metric = Gauge("home_ids_new_domains", "Domains seen for the first time this window", _DEV_LABELS)
 deep_domains_metric = Gauge("home_ids_deep_domains", "Domains with > 5 DNS labels", _DEV_LABELS)
@@ -125,7 +147,11 @@ jitter_cv_metric = Gauge("home_ids_jitter_cv_score", "Timing uniformity coeffici
 ndr_tcp_scan_metric = Gauge("home_ids_zeek_s0_rej_count", "Rejected or unanswered TCP connection attempts (Port Scans)", _DEV_LABELS)
 ndr_max_duration_metric = Gauge("home_ids_zeek_max_duration", "Maximum continuous connection session duration in seconds", _DEV_LABELS)
 ndr_honeypot_hits_metric = Gauge("home_ids_zeek_honeypot_hits", "Connections to internal deception honeypots", _DEV_LABELS)
-honeypot_probes_total = Counter("home_ids_honeypot_probes_total", "Total external probes hitting honeypot IPs", ["attacker_ip", "dest_port", "protocol"])
+# PHASE 18 FIX (CARDINALITY + mislabel): dropped "attacker_ip" -- unbounded, and the
+# only call site was actually passing the local device_id there, not a real attacker IP
+# (a pre-existing mislabel, independent of the cardinality fix). Detail on which IP
+# probed which honeypot belongs in alerts.json/Loki, not a metric label.
+honeypot_probes_total = Counter("home_ids_honeypot_probes_total", "Total external probes hitting honeypot IPs", ["dest_port", "protocol"])
 
 # 🎓 Full Transparency & Novice Security Educational Metrics
 killchain_phase_metric = Gauge("home_ids_killchain_phase", "Cyber Kill-Chain phase (0=Normal, 1=Recon, 2=C2, 3=Lateral, 4=Exfil)", _DEV_LABELS)
@@ -166,10 +192,19 @@ ips_router_isolated_active = Gauge(
     ["device", "hostname", "mac"]
 )
 
-# Low-cardinality aggregate counters (audit-safe long-term storage)
-ips_pihole_blocks_total = Counter("home_ids_ips_pihole_blocks_aggregate_total", "Total automated domain blocks executed (aggregate)")
-ips_router_isolations_total = Counter("home_ids_ips_router_isolations_aggregate_total", "Total automated router isolations executed (aggregate)")
-ips_tarpit_activations_total = Counter("home_ids_ips_tarpit_activations_aggregate_total", "Total tarpit activations executed (aggregate)")
+# PHASE 18 FIX (REDUNDANT): ips_pihole_blocks_total and ips_router_isolations_total
+# (both plain "*_aggregate_total" Counters) formerly here were declared but never
+# incremented anywhere in the codebase -- dead metrics, always reading zero.
+# ips_pihole_blocks_metric/ips_isolations_metric already cover the same ground with a
+# real per-device breakdown, summable in Grafana (sum(...) without (device,hostname))
+# for the same aggregate view these existed to provide.
+#
+# ips_tarpit_activations_total was ALSO dead, but unlike the router/pihole case there
+# was no non-aggregate replacement to fall back on -- ips_tarpit_active (below) is a
+# Gauge of who's *currently* trapped, with no Counter anywhere tracking activations
+# over time the way ips_isolations_metric does for router isolation. Real gap, not
+# just a naming redundancy -- kept as a proper per-device Counter instead of deleting it.
+ips_tarpit_activations_total = Counter("home_ids_ips_tarpit_activations_total", "Total Layer-2 ARP/NDP tarpit activations executed", ["device", "hostname", "mac"])
 
 # ===========================================================================
 # Autonomous False-Positive Elimination Engine (CL-AFPE) Metrics
@@ -181,8 +216,72 @@ fp_engine_confidence_score = Gauge("home_ids_fp_confidence_score", "FP Engine co
 fp_engine_trust_cache_size = Gauge("home_ids_fp_trust_cache_size", "Number of base domains currently in the autonomous dynamic trust cache")
 fp_engine_lgbm_model_status = Gauge("home_ids_fp_lgbm_model_status", "LightGBM ONNX classifier model status (1=loaded, 0=unavailable)")
 fp_engine_embed_model_status = Gauge("home_ids_fp_embed_model_status", "FastEmbed ONNX vector similarity model status (1=loaded, 0=unavailable)")
-fp_engine_stage1_hardstop_hits = Counter("home_ids_fp_stage1_hardstop_hits_total", "Alerts blocked at Stage 1")
+# PHASE 18 FIX (REDUNDANT): fp_engine_stage1_hardstop_hits removed -- every call site
+# that incremented it also incremented fp_engine_confirmed_threats_total in the same
+# breath, always in lockstep, no code path fires one without the other. Kept the more
+# semantically meaningful name.
 fp_engine_stage2_lgbm_hits = Counter("home_ids_fp_stage2_lgbm_hits_total", "Alerts classified FP at Stage 2")
 fp_engine_stage3_embed_hits = Counter("home_ids_fp_stage3_embed_hits_total", "Alerts classified FP at Stage 3")
-fp_engine_domains_immunized_total = Counter("home_ids_fp_domains_immunized_total", "Total unique eTLD+1 base domains autonomously added to the trust cache")
-fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total automatic baseline sigma-widening adjustments applied to devices", ["device", "hostname"])
+# PHASE 18: added a "source" label (autonomous/operator/llm_validated) to both self-
+# healing counters below -- this is the direct answer to "how much of the healing is
+# autonomous vs human-approved," which the whole self-calibration system exists to grow
+# over time. Fixed small enum, safe cardinality.
+fp_engine_domains_immunized_total = Counter("home_ids_fp_domains_immunized_total", "Total unique eTLD+1 base domains added to the trust cache", ["source"])
+fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total automatic baseline sigma-widening adjustments applied to devices", ["device", "hostname", "source"])
+
+# ===========================================================================
+# PHASE 18: Decision-Path Transparency (Brain 1 / HEE)
+# ===========================================================================
+# Which branch of decision_engine.py's decision order actually resolved each
+# evaluation -- the direct "is the system getting smarter over time" signal: watching
+# hard_stop/tier5 share shrink and benign share grow across weeks is exactly what
+# autonomous healing is supposed to produce. Fixed 7-value enum, safe cardinality.
+decision_path_total = Counter(
+    "home_ids_decision_path_total",
+    "Which decision-engine branch resolved each evaluation "
+    "(hard_stop/tier5_confirmed/hypothesis_high/hypothesis_suspicious/tier4_unconfirmed/ml_anomaly/benign)",
+    ["device", "hostname", "path"]
+)
+
+# ===========================================================================
+# PHASE 18: Autonomous Self-Calibration Transparency
+# ===========================================================================
+# train_fp_classifier.py runs as a separate cron/thread process with no HTTP server of
+# its own -- these are synced into the long-running pipeline process from
+# state/autotune_stats.json (see core/metrics_sync.py's sync_relay_metrics()), the same
+# relay pattern used for the Ollama and job-health metrics below.
+autotune_global_threshold_effective = Gauge("home_ids_autotune_global_threshold_effective", "Live effective global fp_combined_suppress_threshold (config.yaml baseline, or lower if autonomously calibrated)")
+autotune_global_threshold_baseline = Gauge("home_ids_autotune_global_threshold_baseline", "config.yaml's own fp_combined_suppress_threshold value, unaffected by any override")
+autotune_device_threshold_effective = Gauge("home_ids_autotune_device_threshold_effective", "Live effective per-device suppress threshold, only set for devices with their own calibrated profile", ["device", "hostname"])
+autotune_calibration_total = Gauge(
+    "home_ids_autotune_calibration_total",
+    "Cumulative calibration pass outcomes since state/autotune_stats.json existed "
+    "(scope=global/device, outcome=applied/refused_ambiguous/insufficient_samples). "
+    "A Gauge, not a Counter, by design -- it's re-synced from a periodic external "
+    "snapshot rather than incremented in-process; refusals are as informative as "
+    "applications here (proves the system isn't blindly loosening).",
+    ["scope", "outcome"]
+)
+autotune_evidence_count = Gauge("home_ids_autotune_evidence_count", "Pooled correction sample count feeding the next calibration pass", ["scope", "kind"])
+
+# ===========================================================================
+# PHASE 18: Ollama (Brain 3) Run Transparency
+# ===========================================================================
+# ollama_soc.py is also a separate cron process -- synced from state/ollama_run_stats.json.
+ollama_last_run_timestamp = Gauge("home_ids_ollama_last_run_timestamp", "Unix timestamp of the most recently completed ollama_soc.py run")
+ollama_calls_last_run = Gauge("home_ids_ollama_calls_last_run", "Fresh LLM calls made in the most recent run")
+ollama_cache_hits_last_run = Gauge("home_ids_ollama_cache_hits_last_run", "Verdicts served from the 7-day cache without an LLM call in the most recent run")
+ollama_deferred_last_run = Gauge("home_ids_ollama_deferred_last_run", "Patterns deferred to next run after hitting the per-run call cap")
+ollama_validated_total = Gauge("home_ids_ollama_validated_total", "Cumulative Ollama verdicts by outcome since state/ollama_run_stats.json existed", ["verdict"])
+
+# ===========================================================================
+# PHASE 18: Scheduled-Job Health (all scripts/*.py cron jobs)
+# ===========================================================================
+# Synced from state/job_health.json, written by each script at the end of a successful
+# run. Directly targets the exact class of silent-scheduling-bug already found once in
+# this project (a job-key/filename mismatch that ran nothing for months with nothing
+# surfacing it beyond a daemon log line nobody was watching) -- turns "is the system
+# healthy" from "check state/scheduler.log by hand" into a Grafana staleness panel.
+job_last_success_timestamp = Gauge("home_ids_job_last_success_timestamp", "Unix timestamp of each scheduled job's last successful completion", ["job"])
+job_last_duration_seconds = Gauge("home_ids_job_last_duration_seconds", "Wall-clock duration of each scheduled job's last run", ["job"])
+retro_hunt_findings_total = Gauge("home_ids_retro_hunt_findings_total", "Cumulative retroactive threat-intel matches found by retro_hunter.py since state/job_health.json existed")

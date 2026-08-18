@@ -35,7 +35,10 @@ from metrics import (
     ips_tarpit_active,
     ips_router_isolated_active,
     ips_queue_status_gauge,
-    ips_dead_letter_gauge
+    ips_dead_letter_gauge,
+    ips_pihole_unblocks_metric,
+    ips_router_releases_metric,
+    ips_tarpit_activations_total,
 )
 
 LOGGER = logging.getLogger("home_ids.ips")
@@ -309,7 +312,7 @@ class IPSMitigator:
 
             if should_unisolate_router:
                 LOGGER.info("Device %s marked safe. Initiating router un-isolation restore.", hostname)
-                self._unisolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id)
+                self._unisolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason="device_marked_safe")
             return
 
         # Check operator release cooldown status quietly
@@ -391,6 +394,10 @@ class IPSMitigator:
                             self._tarpit_active_targets[client_ip] = {"mac": mac_addr, "hostname": hostname, "dev_id": dev_id}
                             self._save_queues()
                             ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
+                            try:
+                                ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac_addr).inc()
+                            except Exception:
+                                pass
                             LOGGER.critical("⚠️ [DUAL-STACK TARPIT] Trapped compromised device %s (%s) in Layer-2 isolation.", hostname, client_ip)
                         else:
                             self._ensure_tarpit_target(client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id)
@@ -634,7 +641,7 @@ class IPSMitigator:
 
         try:
             ips_active_blocks_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(1.0)
-            ips_pihole_blocks_metric.labels(device=dev_id, hostname=hostname, domain=domain).inc()
+            ips_pihole_blocks_metric.labels(device=dev_id, hostname=hostname).inc()
         except Exception:
             pass
             
@@ -662,7 +669,7 @@ class IPSMitigator:
                         self._retry_queue[domain]["last_attempt_ts"] = time.time()
                 self._block_domain(domain, meta["hostname"], meta.get("device_ip", ""), meta["device_id"], meta["reason"])
 
-    def unblock_domain(self, domain: str) -> bool:
+    def unblock_domain(self, domain: str, reason: str = "manual") -> bool:
         if not domain: return False
         api_url = self.config.get("pihole_api_url", "")
         api_path = self.config.get("pihole_api_path", "/api/domains")
@@ -723,6 +730,7 @@ class IPSMitigator:
 
         try: 
             ips_active_blocks_gauge.remove(dev_id, hostname, domain)
+            ips_pihole_unblocks_metric.labels(device=dev_id, hostname=hostname, reason=reason).inc()
         except Exception: 
             pass
         return True
@@ -749,7 +757,7 @@ class IPSMitigator:
         matches = [d for d in blocked if d == base_domain or d.endswith("." + base_domain)]
         released = []
         for domain in matches:
-            if self.unblock_domain(domain=domain):
+            if self.unblock_domain(domain=domain, reason="immunized"):
                 released.append(domain)
         return released
 
@@ -771,7 +779,7 @@ class IPSMitigator:
             ips_errors_metric.labels(target_type="router_webhook_connection").inc()
         return False
 
-    def _unisolate_device_router(self, mac: str, ip: str, hostname: str, dev_id: str) -> bool:
+    def _unisolate_device_router(self, mac: str, ip: str, hostname: str, dev_id: str, reason: str = "manual") -> bool:
         webhook_url = self.config.get("router_webhook_url") or "http://127.0.0.1:8010/isolate"
         api_token = self.config.get("fritz_api_token", "")
         try:
@@ -788,6 +796,13 @@ class IPSMitigator:
                 try:
                     ips_router_isolated_active.labels(dev_id, hostname, mac).set(0.0)
                     ips_router_isolated_active.remove(dev_id, hostname, mac)
+                except Exception:
+                    # release_device() sometimes already removed this gauge label itself
+                    # before calling here -- a resulting KeyError must not skip the
+                    # counter increment below, so it's in its own try, not this one.
+                    pass
+                try:
+                    ips_router_releases_metric.labels(device=dev_id, hostname=hostname, reason=reason).inc()
                 except Exception:
                     pass
                 LOGGER.critical("✅ [ROUTER IPS] Hardware un-isolation request accepted for %s (%s)", hostname, mac)
@@ -845,7 +860,7 @@ class IPSMitigator:
 
         # Phase 2: Execute router HTTP call OUTSIDE the lock to avoid blocking other operations
         if target_mac and target_mac != "unknown":
-            self._unisolate_device_router(mac=target_mac, ip=target_ip or "0.0.0.0", hostname=target_host, dev_id=target_dev)
+            self._unisolate_device_router(mac=target_mac, ip=target_ip or "0.0.0.0", hostname=target_host, dev_id=target_dev, reason="manual")
             released = True
             LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from Hardware Router Isolation.", target_host, target_mac)
 
@@ -854,7 +869,7 @@ class IPSMitigator:
         blocked_dict = ips_state.get("blocked_domains", {})
         domains_to_unblock = [dom for dom, meta in blocked_dict.items() if identifier in (dom, meta.get("device_id"), meta.get("hostname"), meta.get("device_ip"))]
         for dom in domains_to_unblock:
-            self.unblock_domain(dom)
+            self.unblock_domain(dom, reason="manual")
             released = True
 
         # Clear retry & dead-letter queue items matching identifier

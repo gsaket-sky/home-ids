@@ -50,7 +50,7 @@ SRC_DIR = SCRIPT_DIR.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from utils import entropy as compute_entropy
+from utils import entropy as compute_entropy, write_job_health
 from config import CONFIG
 from intelligence.fp_engine import AutonomousFPEngine
 
@@ -406,6 +406,86 @@ def _write_config_override(state_dir: Path, key: str, value, baseline, set_by: s
     LOGGER.info(f"🔧 [AUTOTUNE] Wrote config override: {key} = {value} (baseline {baseline}).")
 
 
+def _classify_outcome(new_value, reason: str) -> str:
+    """Maps calibrate_suppress_threshold()'s (new_value, reason) to a small fixed enum
+    for the home_ids_autotune_calibration_total relay metric. Matched against the exact
+    reason-string prefixes calibrate_suppress_threshold() returns -- see its docstring."""
+    if new_value is not None:
+        return "applied"
+    if reason.startswith("Refusing to calibrate"):
+        return "refused_ambiguous"
+    if reason.startswith("Only "):
+        return "insufficient_samples"
+    return "no_change_needed"
+
+
+def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcome: str,
+                                 global_evidence: tuple, device_outcomes: dict, device_evidence: dict) -> None:
+    """Writes state/autotune_stats.json -- synced into Prometheus gauges by the
+    long-running pipeline process's sync_relay_metrics() (this script is a separate
+    cron/thread-triggered process with no HTTP server of its own). Reads back
+    config_overrides.json/device_fp_profiles.json for the authoritative effective/
+    baseline values rather than re-deriving them, since _write_config_override() and
+    apply_device_fp_profile() already recorded that pairing at the moment they wrote it.
+    calibration_outcomes counts are cumulative across runs (read-modify-write), matching
+    the metric's own documented semantics.
+    """
+    stats_path = state_dir / "autotune_stats.json"
+    try:
+        existing = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.exists() else {}
+    except Exception:
+        existing = {}
+
+    global_current = float(CONFIG.get("fp_combined_suppress_threshold", 0.80))
+    global_baseline = global_current
+    try:
+        overrides = json.loads((state_dir / "config_overrides.json").read_text(encoding="utf-8"))
+        entry = overrides.get("fp_combined_suppress_threshold")
+        if entry:
+            global_baseline = entry.get("baseline", global_current)
+    except Exception:
+        pass
+
+    prev_global = existing.get("global", {})
+    prev_outcomes = prev_global.get("calibration_outcomes", {})
+    prev_outcomes[global_outcome] = prev_outcomes.get(global_outcome, 0) + 1
+
+    devices = existing.get("devices", {})
+    try:
+        profiles = json.loads((state_dir / "device_fp_profiles.json").read_text(encoding="utf-8"))
+    except Exception:
+        profiles = {}
+
+    for device_id, outcome in device_outcomes.items():
+        dev_entry = devices.setdefault(device_id, {})
+        dev_outcomes = dev_entry.get("calibration_outcomes", {})
+        dev_outcomes[outcome] = dev_outcomes.get(outcome, 0) + 1
+        dev_entry["calibration_outcomes"] = dev_outcomes
+        dev_profile = profiles.get(device_id, {}).get("fp_combined_suppress_threshold", {})
+        if "value" in dev_profile:
+            dev_entry["effective"] = dev_profile["value"]
+        corrected, uncorrected = device_evidence.get(device_id, (0, 0))
+        dev_entry["evidence_counts"] = {"corrected": corrected, "uncorrected": uncorrected}
+        dev_entry.setdefault("hostname", "unknown")
+
+    corrected, uncorrected = global_evidence
+    stats = {
+        "global": {
+            "effective": global_current,
+            "baseline": global_baseline,
+            "calibration_outcomes": prev_outcomes,
+            "evidence_counts": {"corrected": corrected, "uncorrected": uncorrected},
+        },
+        "devices": devices,
+    }
+    try:
+        stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    except Exception as exc:
+        LOGGER.debug(f"Failed to write autotune_stats.json: {exc}")
+
+    write_job_health(state_dir, "train_fp_classifier", time.time() - run_start)
+
+
 def run_threshold_calibration(state_dir: Path) -> None:
     """Entry point called from main() after the model retrain. Never allowed to raise past
     this function — a calibration failure must never be mistaken for (or cause) a
@@ -415,13 +495,29 @@ def run_threshold_calibration(state_dir: Path) -> None:
     still the fallback for devices without enough of their own history) and per-device
     (new: devices with "strongly different profiles" get their own calibrated threshold
     once their OWN evidence supports it, via AutonomousFPEngine's device-profile state —
-    see fp_engine.py's get_device_suppress_threshold())."""
+    see fp_engine.py's get_device_suppress_threshold()).
+
+    PHASE 18: also writes state/autotune_stats.json (see _write_autotune_relay_stats())
+    and updates job_health.json -- this function is the single code path BOTH the daily
+    cron trigger (via main()) AND fp_engine.py's independent in-process weekly retrain
+    thread converge on, so hooking the relay write here (rather than in main()) is what
+    makes job-health/calibration metrics correctly reflect activity from either trigger.
+    """
+    run_start = time.time()
+    global_outcome = "no_change_needed"
+    global_evidence = (0, 0)
+    device_outcomes: dict = {}
+    device_evidence: dict = {}
+
     try:
         corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected = \
             _collect_calibration_evidence(state_dir)
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] Failed to collect calibration evidence (non-fatal): {exc}")
+        _write_autotune_relay_stats(state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence)
         return
+
+    global_evidence = (len(corrected_fp_scores), len(uncorrected_uncertain_scores))
 
     # --- Global pass ---------------------------------------------------------------
     try:
@@ -430,6 +526,7 @@ def run_threshold_calibration(state_dir: Path) -> None:
             corrected_fp_scores, uncorrected_uncertain_scores,
             current=global_current, min_samples=AUTOTUNE_MIN_SAMPLES,
         )
+        global_outcome = _classify_outcome(new_value, reason)
         LOGGER.info(f"[AUTOTUNE » GLOBAL] fp_combined_suppress_threshold: {reason}")
         if new_value is not None:
             _write_config_override(
@@ -447,31 +544,37 @@ def run_threshold_calibration(state_dir: Path) -> None:
         device_ids.discard("unknown")
         if not device_ids:
             LOGGER.info("[AUTOTUNE » PER-DEVICE] No per-device evidence this run.")
-            return
-
-        # CONFIG (config.py's LiveConfig singleton) already exposes .get(key, default) —
-        # the exact interface AutonomousFPEngine's config properties expect — so it can be
-        # passed directly, no need to reach into its internals.
-        fp_engine = AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
-        for device_id in sorted(device_ids):
-            dev_corrected = per_device_corrected.get(device_id, [])
-            dev_uncorrected = per_device_uncorrected.get(device_id, [])
-            dev_current = fp_engine.get_device_suppress_threshold(device_id)
-            new_value, reason = calibrate_suppress_threshold(
-                dev_corrected, dev_uncorrected,
-                current=dev_current, min_samples=AUTOTUNE_DEVICE_MIN_SAMPLES,
-            )
-            if new_value is not None:
-                LOGGER.info(f"[AUTOTUNE » DEVICE {device_id}] fp_combined_suppress_threshold: {reason}")
-                fp_engine.apply_device_fp_profile(
-                    device_id, "fp_combined_suppress_threshold", new_value, baseline=dev_current,
-                    set_by="train_fp_classifier.py:calibrate_suppress_threshold",
-                    reason=reason, sample_count=len(dev_corrected),
+        else:
+            # CONFIG (config.py's LiveConfig singleton) already exposes .get(key, default) —
+            # the exact interface AutonomousFPEngine's config properties expect — so it can be
+            # passed directly, no need to reach into its internals.
+            fp_engine = AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
+            for device_id in sorted(device_ids):
+                dev_corrected = per_device_corrected.get(device_id, [])
+                dev_uncorrected = per_device_uncorrected.get(device_id, [])
+                device_evidence[device_id] = (len(dev_corrected), len(dev_uncorrected))
+                dev_current = fp_engine.get_device_suppress_threshold(device_id)
+                new_value, reason = calibrate_suppress_threshold(
+                    dev_corrected, dev_uncorrected,
+                    current=dev_current, min_samples=AUTOTUNE_DEVICE_MIN_SAMPLES,
                 )
-            else:
-                LOGGER.debug(f"[AUTOTUNE » DEVICE {device_id}] {reason}")
+                device_outcomes[device_id] = _classify_outcome(new_value, reason)
+                if new_value is not None:
+                    LOGGER.info(f"[AUTOTUNE » DEVICE {device_id}] fp_combined_suppress_threshold: {reason}")
+                    fp_engine.apply_device_fp_profile(
+                        device_id, "fp_combined_suppress_threshold", new_value, baseline=dev_current,
+                        set_by="train_fp_classifier.py:calibrate_suppress_threshold",
+                        reason=reason, sample_count=len(dev_corrected),
+                    )
+                else:
+                    LOGGER.debug(f"[AUTOTUNE » DEVICE {device_id}] {reason}")
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE » PER-DEVICE] Threshold calibration failed (non-fatal): {exc}")
+
+    try:
+        _write_autotune_relay_stats(state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence)
+    except Exception as exc:
+        LOGGER.error(f"[AUTOTUNE] Failed to write autotune relay stats (non-fatal): {exc}")
 
 
 def load_dataset(state_dir: Path) -> tuple:

@@ -33,7 +33,7 @@ from metrics import (
     ips_pihole_status, ips_router_status, ips_tarpit_status,
     ips_pihole_blocks_metric, ips_isolations_metric, ips_errors_metric,
     ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric,
-    ndr_lateral_events_total, geo_risk_metric, geo_hits_metric,
+    ndr_lateral_events_total, geo_risk_metric,
     geo_beacon_metric, asn_risk_metric, country_density_metric,
     geo_traffic_total, geo_queries_per_minute, geo_unique_domains,
     geo_entropy, geo_device_count, collector_lag_metric, alert_queue_metric,
@@ -42,8 +42,15 @@ from metrics import (
     outbound_bytes_1h_metric, beaconing_c2_1h_metric, dns_tunneling_domains_metric,
     max_label_length_metric,
     ips_active_blocks_gauge, ips_queue_status_gauge, ips_dead_letter_gauge, ips_tarpit_active,
-    ips_router_isolated_active
+    ips_router_isolated_active,
+    autotune_global_threshold_effective, autotune_global_threshold_baseline,
+    autotune_device_threshold_effective, autotune_calibration_total, autotune_evidence_count,
+    ollama_last_run_timestamp, ollama_calls_last_run, ollama_cache_hits_last_run,
+    ollama_deferred_last_run, ollama_validated_total,
+    job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
 )
+import json
+from pathlib import Path
 
 LOGGER = logging.getLogger("home_ids.metrics_sync")
 
@@ -70,6 +77,12 @@ class MetricsExporter:
     Handles exporting and clearing Prometheus metrics for network devices,
     pipeline performance, and GeoIP traffic analysis.
     """
+
+    def __init__(self):
+        # mtime per relay file path -- lets sync_relay_metrics() skip re-parsing a file
+        # that hasn't changed since the last cycle, mirroring config.py's own live-watcher
+        # mtime-check pattern instead of re-reading 3 tiny files every ~2s for nothing.
+        self._relay_mtimes: Dict[str, float] = {}
 
     def _get_metric_keys(self, metric) -> list:
         keys = []
@@ -345,7 +358,6 @@ class MetricsExporter:
             def _match_labels(metric):
                 return {k: master_labels.get(k, "UNKNOWN") for k in metric._labelnames}
 
-            geo_hits_metric.labels(**_match_labels(geo_hits_metric)).inc()
             geo_traffic_total.labels(**_match_labels(geo_traffic_total)).inc()
             
             if features:
@@ -381,3 +393,80 @@ class MetricsExporter:
             ml_model_loaded_metric.set(1 if ml_model_loaded else 0)
         except Exception as exc:
             LOGGER.error("Failed to export pipeline health metrics: %s", exc)
+
+    def _read_relay_file(self, path: Path) -> dict:
+        """Reads a small JSON relay file written by a separate cron process. Returns {}
+        if the file is missing, invalid, or unchanged since the last read -- callers
+        should treat an empty dict as "nothing new to sync", not "reset to zero"."""
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return {}
+        if self._relay_mtimes.get(str(path)) == mtime:
+            return {}
+        self._relay_mtimes[str(path)] = mtime
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            LOGGER.debug("Failed to parse relay file %s: %s", path, exc)
+            return {}
+
+    def sync_relay_metrics(self, state_dir: str) -> None:
+        """Syncs Prometheus gauges from the small JSON stats files written by
+        ollama_soc.py, train_fp_classifier.py, and every scripts/*.py cron job -- all
+        separate short-lived processes with no HTTP server of their own, so this relay
+        is how their activity becomes visible to Prometheus at all (they can't just call
+        .set() themselves; nothing would ever scrape that process's registry). Cheap to
+        call every pipeline cycle -- each file is only re-parsed when its mtime changes.
+        """
+        base = Path(state_dir)
+
+        autotune = self._read_relay_file(base / "autotune_stats.json")
+        if autotune:
+            try:
+                g = autotune.get("global", {})
+                if "effective" in g:
+                    autotune_global_threshold_effective.set(g["effective"])
+                if "baseline" in g:
+                    autotune_global_threshold_baseline.set(g["baseline"])
+                for outcome, count in g.get("calibration_outcomes", {}).items():
+                    autotune_calibration_total.labels(scope="global", outcome=outcome).set(count)
+                for kind, count in g.get("evidence_counts", {}).items():
+                    autotune_evidence_count.labels(scope="global", kind=kind).set(count)
+
+                for dev_id, dev in autotune.get("devices", {}).items():
+                    hostname = dev.get("hostname", "unknown")
+                    if "effective" in dev:
+                        autotune_device_threshold_effective.labels(device=dev_id, hostname=hostname).set(dev["effective"])
+                    for outcome, count in dev.get("calibration_outcomes", {}).items():
+                        autotune_calibration_total.labels(scope="device", outcome=outcome).set(count)
+                    for kind, count in dev.get("evidence_counts", {}).items():
+                        autotune_evidence_count.labels(scope="device", kind=kind).set(count)
+            except Exception as exc:
+                LOGGER.debug("Failed to sync autotune relay metrics: %s", exc)
+
+        ollama = self._read_relay_file(base / "ollama_run_stats.json")
+        if ollama:
+            try:
+                if "last_run" in ollama:
+                    ollama_last_run_timestamp.set(ollama["last_run"])
+                ollama_calls_last_run.set(ollama.get("calls_made", 0))
+                ollama_cache_hits_last_run.set(ollama.get("cache_hits", 0))
+                ollama_deferred_last_run.set(ollama.get("deferred", 0))
+                for verdict, count in ollama.get("validated_totals", {}).items():
+                    ollama_validated_total.labels(verdict=verdict).set(count)
+            except Exception as exc:
+                LOGGER.debug("Failed to sync Ollama relay metrics: %s", exc)
+
+        jobs = self._read_relay_file(base / "job_health.json")
+        if jobs:
+            try:
+                for job_name, meta in jobs.items():
+                    if "last_success" in meta:
+                        job_last_success_timestamp.labels(job=job_name).set(meta["last_success"])
+                    if "duration_seconds" in meta:
+                        job_last_duration_seconds.labels(job=job_name).set(meta["duration_seconds"])
+                    if job_name == "retro_hunter" and "findings_count" in meta:
+                        retro_hunt_findings_total.set(meta["findings_count"])
+            except Exception as exc:
+                LOGGER.debug("Failed to sync job-health relay metrics: %s", exc)

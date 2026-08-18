@@ -24,6 +24,9 @@ import socket
 import ipaddress
 import logging
 import functools
+import json
+import time
+from pathlib import Path
 
 try:
     import tldextract
@@ -130,6 +133,29 @@ def register_dynamic_allowlist_domain(domain: str) -> None:
     base_dom = etld1(domain.lower().strip("."))
     _DYNAMIC_TELEMETRY_ALLOWLIST.add(base_dom)
     LOGGER.debug("Registered dynamic telemetry domain: %s", base_dom)
+
+# PHASE 18: shared by every scripts/*.py cron job (ollama_soc.py, retro_hunter.py,
+# top_domains_report.py, train_fp_classifier.py) to report its own health -- these are
+# all separate short-lived processes with no Prometheus HTTP server of their own, so
+# this small relay file is how their activity becomes visible to Grafana at all.
+# core/metrics_sync.py's sync_relay_metrics() reads it from the long-running pipeline
+# process. Read-modify-write against one shared file; last-write-wins is acceptable
+# since scheduled jobs are staggered by design (config.yaml: "Verified: no two enabled
+# jobs fire in the same hour").
+def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: dict = None) -> None:
+    path = Path(state_dir) / "job_health.json"
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        existing = {}
+    entry = {"last_success": time.time(), "duration_seconds": duration_seconds}
+    if extra:
+        entry.update(extra)
+    existing[job_name] = entry
+    try:
+        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+    except Exception as exc:
+        LOGGER.debug("Failed to write job_health.json for %s: %s", job_name, exc)
 
 def is_telemetry_domain(domain: str) -> bool:
     """True if domain matches known high-volume telemetry SDKs, reverse DNS (.arpa), local network boundaries, cloud telemetry infrastructure, or CL-AFPE dynamic trust cache."""

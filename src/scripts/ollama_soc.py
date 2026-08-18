@@ -44,6 +44,7 @@ from intelligence.hypotheses.evidence import Evidence
 from intelligence.fp_engine import AutonomousFPEngine
 from mitigation.ips import IPSMitigator
 from core.state_guard import StateManager
+from utils import write_job_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [OLLAMA-SOC] %(message)s")
 LOGGER = logging.getLogger("ollama_soc")
@@ -117,6 +118,32 @@ def _save_cache(cache_path: Path, cache: dict) -> None:
         LOGGER.error(f"Failed to save ollama analysis cache: {e}")
 
 
+def _write_ollama_relay_stats(state_dir: Path, calls_made: int, cache_hits: int, deferred: int, run_validated: dict) -> None:
+    """Writes state/ollama_run_stats.json -- synced into Prometheus gauges by the
+    long-running pipeline process's sync_relay_metrics() (this script is a separate
+    cron process with no HTTP server of its own). validated_totals is cumulative across
+    runs, not just this one, so it's read-modify-write against the existing file."""
+    path = state_dir / "ollama_run_stats.json"
+    try:
+        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        existing = {}
+    validated_totals = existing.get("validated_totals", {})
+    for verdict, count in run_validated.items():
+        validated_totals[verdict] = validated_totals.get(verdict, 0) + count
+    stats = {
+        "last_run": time.time(),
+        "calls_made": calls_made,
+        "cache_hits": cache_hits,
+        "deferred": deferred,
+        "validated_totals": validated_totals,
+    }
+    try:
+        path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+    except Exception as e:
+        LOGGER.debug(f"Failed to write ollama_run_stats.json: {e}")
+
+
 def _query_ollama(ollama_url: str, ollama_model: str, prompt_text: str, system_prompt: str) -> dict:
     """Single /api/generate call. Returns the parsed response JSON, or None on any
     failure (HTTP error, timeout, malformed JSON) -- caller decides how to log/handle."""
@@ -144,6 +171,7 @@ def _query_ollama(ollama_url: str, ollama_model: str, prompt_text: str, system_p
 
 def main():
     LOGGER.info("Starting Daily Ollama SOC Batch Analysis...")
+    run_start = time.time()
 
     root_dir = Path(__file__).resolve().parent.parent.parent
 
@@ -196,6 +224,9 @@ def main():
 
     if not alerts_to_analyze:
         LOGGER.info("No recent (published, non-suppressed) alerts found for analysis.")
+        state_dir = root_dir / "state"
+        _write_ollama_relay_stats(state_dir, calls_made=0, cache_hits=0, deferred=0, run_validated={})
+        write_job_health(state_dir, "ollama_soc", time.time() - run_start)
         return
 
     # 2. Group into "same threat" buckets -- one Ollama call per bucket, not per alert.
@@ -243,6 +274,7 @@ def main():
     queries_made = 0
     cache_hits = 0
     deferred = 0
+    run_validated = defaultdict(int)  # classification -> count this run, for the cumulative relay metric
 
     system_prompt = (
         "You are an autonomous Tier 2 SOC Analyst for a Home Intrusion Detection System. "
@@ -316,6 +348,8 @@ def main():
                 "ts": time.time(),
                 "action_taken": False,
             }
+
+        run_validated[response_json.get("classification", "unknown")] += 1
 
         # PHASE 9/11: one transparency log per PATTERN, not per repeat alert -- keeps
         # alerts.json growth bounded to the number of distinct threats, not the number of
@@ -421,6 +455,10 @@ def main():
         f"Generated SOC Daily Report: {report_path} "
         f"({queries_made} fresh Ollama calls, {cache_hits} cache hits, {deferred} deferred)"
     )
+
+    state_dir = root_dir / "state"
+    _write_ollama_relay_stats(state_dir, calls_made=queries_made, cache_hits=cache_hits, deferred=deferred, run_validated=run_validated)
+    write_job_health(state_dir, "ollama_soc", time.time() - run_start)
 
 if __name__ == "__main__":
     main()

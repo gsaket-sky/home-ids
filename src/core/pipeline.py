@@ -39,7 +39,7 @@ from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 
-from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status
+from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total
 
 # PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
 # (and therefore have certain behavioral evidence dampened) when device_type came from an
@@ -95,6 +95,7 @@ class EnginePipeline:
         state_path = self.config.get("state_path", "state/ids_state.json")
         state_dir = Path(state_path).parent
         state_dir.mkdir(parents=True, exist_ok=True)
+        self.state_dir = state_dir  # PHASE 18: sync_relay_metrics() needs this every cycle
         
         self.state_manager = state_manager or StateManager(state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)))
         if state_manager is None:
@@ -431,7 +432,7 @@ class EnginePipeline:
                 if dest_ip in honeypots:
                     # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                     abuse_risk = 4.0
-                    honeypot_probes_total.labels(attacker_ip=dev_id, dest_port=features.get("last_dest_port", 0), protocol=features.get("dominant_protocol", "TCP")).inc()
+                    honeypot_probes_total.labels(dest_port=features.get("last_dest_port", 0), protocol=features.get("dominant_protocol", "TCP")).inc()
                 else:
                     self.abuseipdb.enqueue_ip(dest_ip)
                     if self.abuseipdb.lookup(dest_ip):
@@ -604,6 +605,16 @@ class EnginePipeline:
 
                 if not is_poisoned:
                     self.state_manager.update_baselines(state, features, now, window_seconds, current_risk=risk)
+
+                # PHASE 18: after the geofencing loop above (which can re-evaluate `decision`
+                # per contacted IP), this is the FINAL decision for the cycle -- the same one
+                # everything downstream (baselines already updated above, alert-building,
+                # fp_engine.evaluate()) treats as authoritative. One increment per cycle, not
+                # per re-evaluation, using decision_path from whichever branch actually won.
+                try:
+                    decision_path_total.labels(device=dev_id, hostname=hostname, path=decision.get("decision_path", "benign")).inc()
+                except Exception:
+                    pass
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
 
@@ -1060,6 +1071,10 @@ class EnginePipeline:
         )
         # Real-time Prometheus gauge cleanup for Grafana dashboard sync
         self.metrics_exporter.garbage_collect_ips_metrics(self.state_manager.get_ips_state())
+        # PHASE 18: syncs autotune/Ollama/job-health gauges from the small JSON files
+        # those separate cron processes write -- cheap every cycle, each file is only
+        # actually re-parsed when its own mtime changes (see sync_relay_metrics()).
+        self.metrics_exporter.sync_relay_metrics(str(self.state_dir))
         
         if now - self._last_prune > 3600.0:
             pruned_list = self.state_manager.prune_stale_devices(now)

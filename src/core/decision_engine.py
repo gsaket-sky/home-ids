@@ -107,30 +107,39 @@ class DecisionEngine:
         action = "suppress"
         explanation = hyp_results["benign"]["name"]
         threat_confidence = 0.0
+        # PHASE 18: which branch below actually resolved this evaluation -- exported as
+        # home_ids_decision_path_total{path} so the mix (hard_stop/tier5 share shrinking,
+        # benign share growing over weeks) is the direct, graphable "is the system getting
+        # smarter over time" signal across all of Brain 1, not just CL-AFPE.
+        decision_path = "benign"
 
         if has_honeypot:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Internal Honeypot Accessed"
             threat_confidence = 1.0
+            decision_path = "hard_stop"
             
         elif has_arp_spoof:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Layer-2 ARP Spoofing Detected"
             threat_confidence = 1.0
+            decision_path = "hard_stop"
             
         elif has_geofence:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Geofencing Policy Violation"
             threat_confidence = 1.0
+            decision_path = "hard_stop"
             
         elif rep.tier == 5:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Confirmed Malicious IOC"
             threat_confidence = 0.99
+            decision_path = "tier5_confirmed"
             
         elif attack_score > benign_score and attack_score >= 2.0:
             explanation = hyp_results["attack"]["name"]
@@ -138,10 +147,12 @@ class DecisionEngine:
                 state = DecisionState.HIGH
                 action = "alert"
                 threat_confidence = 0.85
+                decision_path = "hypothesis_high"
             else:
                 state = DecisionState.SUSPICIOUS
                 action = "monitor"
                 threat_confidence = 0.40
+                decision_path = "hypothesis_suspicious"
 
         elif rep.tier == 4 and max(rep_vt, rep_ti, rep_abuse) >= 1.5:
             # PHASE 8 FIX: before this branch existed, a reputation signal that never rose
@@ -157,12 +168,14 @@ class DecisionEngine:
             action = "monitor"
             explanation = "Elevated Reputation Signal (Unconfirmed)"
             threat_confidence = 0.45
+            decision_path = "tier4_unconfirmed"
 
         elif any(e.type == "ml_anomaly" and e.value > 0.90 for e in ev_store):
             state = DecisionState.ANOMALOUS
             action = "log"
             explanation = "ML Anomaly Only"
             threat_confidence = 0.10
+            decision_path = "ml_anomaly"
 
         trail.append(f"Verdict: {state} / {action} — {explanation} (confidence={threat_confidence:.2f})")
 
@@ -176,4 +189,5 @@ class DecisionEngine:
             "evidence_verification_required": evidence_verification_required,
             "hypothesis_weight": hypothesis_weight,
             "reasoning_trail": trail,
+            "decision_path": decision_path,
         }

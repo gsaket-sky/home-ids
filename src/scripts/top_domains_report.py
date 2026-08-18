@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
+from utils import write_job_health
 
 LOGGER = logging.getLogger("home_ids.top_domains")
 
@@ -46,6 +47,8 @@ def get_device_names():
 
 def generate_report():
     LOGGER.info("Generating Top Domains per Device Report...")
+    run_start = time.time()
+    state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
     db_path = CONFIG.get("pihole_db", "/etc/pihole/pihole-FTL.db")
     if not os.path.exists(db_path):
         LOGGER.error(f"Pi-hole database not found at {db_path}")
@@ -69,6 +72,7 @@ def generate_report():
 
     if not device_domains:
         LOGGER.info("No DNS queries found in the last 24 hours.")
+        write_job_health(state_dir, "top_domains_report", time.time() - run_start)
         return
 
     # Initialize Threat Intel engine (it will load cache from disk)
@@ -145,7 +149,9 @@ def generate_report():
         
     telegram_text = "\n".join(telegram_summary)[:4000] # Telegram limit
     send_telegram(telegram_text)
-    
+
+    write_job_health(state_dir, "top_domains_report", time.time() - run_start)
+
 if __name__ == "__main__":
     # Configure basic logging if run directly
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")

@@ -66,7 +66,6 @@ from metrics import (
     fp_engine_trust_cache_size,
     fp_engine_lgbm_model_status,
     fp_engine_embed_model_status,
-    fp_engine_stage1_hardstop_hits,
     fp_engine_stage2_lgbm_hits,
     fp_engine_stage3_embed_hits,
     fp_engine_domains_immunized_total,
@@ -342,7 +341,6 @@ class AutonomousFPEngine:
             stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain)
             if stage1_triggers:
                 fp_engine_confirmed_threats_total.inc()
-                fp_engine_stage1_hardstop_hits.inc()
                 fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
                 self._apply_sigma_shift(device_id, hostname, direction="TUNE_UP")
                 LOGGER.warning(
@@ -389,7 +387,6 @@ class AutonomousFPEngine:
         if stage1_triggers:
             # One or more hard-stop signals fired → this is a real threat
             fp_engine_confirmed_threats_total.inc()
-            fp_engine_stage1_hardstop_hits.inc()
             fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
             
             # Self-Strengthening Action: TUNE UP sensitivity for this device (tighten thresholds)
@@ -915,9 +912,14 @@ class AutonomousFPEngine:
     # SELF-HEALING ACTIONS
     # ==========================================================================
 
-    def _immunize_domain(self, base_domain: str, hostname: str) -> bool:
+    def _immunize_domain(self, base_domain: str, hostname: str, source: str = "autonomous") -> bool:
         """
         Add a base domain to the persistent dynamic trust cache (14-day TTL).
+
+        `source` is one of "autonomous" (CL-AFPE's own Stage 2/3 suppress path),
+        "operator" (Telegram "Mark False Positive" tap), or "llm_validated" (Brain 3) --
+        tags the immunized_total counter so Grafana can show how much of the healing is
+        autonomous vs human-approved, the entire point of the self-calibration story.
 
         After immunization:
         - Any subdomain of base_domain across ALL devices gets is_domain_safe=True
@@ -950,7 +952,7 @@ class AutonomousFPEngine:
             pass
 
         if is_new:
-            fp_engine_domains_immunized_total.inc()
+            fp_engine_domains_immunized_total.labels(source=source).inc()
             LOGGER.info(
                 "🛡️  [FP ENGINE » IMMUNIZE] NEW: '%s' added to autonomous trust cache "
                 "(TTL: 14 days). Triggered by device: %s",
@@ -1035,7 +1037,7 @@ class AutonomousFPEngine:
 
         is_new_immunization = False
         if base_domain:
-            is_new_immunization = self._immunize_domain(base_domain, hostname)
+            is_new_immunization = self._immunize_domain(base_domain, hostname, source=source)
         else:
             LOGGER.warning(
                 "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
@@ -1046,7 +1048,7 @@ class AutonomousFPEngine:
 
         # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
         # the autonomous path applies, scoped to the one device this correction is about.
-        self._apply_sigma_shift(device_id, hostname)
+        self._apply_sigma_shift(device_id, hostname, source=source)
 
         is_llm = source == "llm_validated"
         event_type = "LLM_VALIDATED_FALSE_POSITIVE" if is_llm else "OPERATOR_MARKED_FALSE_POSITIVE"
@@ -1072,13 +1074,15 @@ class AutonomousFPEngine:
             "domain": domain,
         }
 
-    def _apply_sigma_shift(self, device_id: str, hostname: str, direction: str = "TUNE_DOWN"):
+    def _apply_sigma_shift(self, device_id: str, hostname: str, direction: str = "TUNE_DOWN", source: str = "autonomous"):
         """
         Bidirectional sensitivity adjustment:
         - TUNE_DOWN (FP confirmed): Widens EWMA threshold by +0.25σ (up to +2.0σ max).
         - TUNE_UP (Threat confirmed): Tightens EWMA threshold by -0.50σ (down to -1.5σ floor).
 
         The shift value is read by scoring.py via get_sigma_shift(device_id).
+        `source` is "autonomous"/"operator"/"llm_validated" -- see _immunize_domain()'s
+        docstring for why this is tagged the same way.
         """
         with self._lock:
             current = self._sigma_shifts.get(device_id, 0.0)
@@ -1089,7 +1093,7 @@ class AutonomousFPEngine:
                 new_val = max(current - 0.50, -1.5)
             self._sigma_shifts[device_id] = new_val
 
-        fp_engine_sigma_shifts_total.labels(device=device_id, hostname=hostname).inc()
+        fp_engine_sigma_shifts_total.labels(device=device_id, hostname=hostname, source=source).inc()
         self._save_sigma_shifts()
 
         if direction == "TUNE_DOWN":
