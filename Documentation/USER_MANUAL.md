@@ -392,7 +392,7 @@ Per-mechanism toggles (Pi-hole/router/tarpit) live in `.env`, not here.
 ### 10. `pihole_integration`
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `pihole_api_path` | `/api/v2/domains` | `[LIVE]` | Pi-hole v6 API path. |
+| `pihole_api_path` | `/api/domains` | `[LIVE]` | Pi-hole v6 API base path. The code appends `/deny/exact[/{domain}]` itself — confirmed live against a running Pi-hole v6 instance; the earlier `/api/v2/domains` 404'd on every call (FTL's own "route not found"), meaning every block/unblock had been silently falling through to the CLI fallback. |
 | `pihole_api_timeout_seconds` | `5.0` | `[LIVE]` | HTTP timeout. |
 
 ### 11. `fritzbox_router`

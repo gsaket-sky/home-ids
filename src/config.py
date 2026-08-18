@@ -161,7 +161,7 @@ DEFAULT_CONFIG = {
     "pihole_api_url": "http://pihole",
     "pihole_api_password": "",
     "pihole_api_timeout_seconds": 5.0,
-    "pihole_api_path": "/api/v2/domains",  # AUDIT FIX #9: configurable Pi-hole API path
+    "pihole_api_path": "/api/domains",  # AUDIT FIX #9: configurable Pi-hole API path (v6 base; code appends /deny/exact[/{domain}])
     "router_webhook_url": "http://127.0.0.1:8010/isolate",
     "router_webhook_timeout_seconds": 5.0,
     "fritz_ip": "192.168.1.1",

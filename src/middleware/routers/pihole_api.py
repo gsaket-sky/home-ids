@@ -73,14 +73,20 @@ def _ipc_immunize_logic(action_id: str):
             )
 
         # FIX #3 (unblock): undo any active Pi-hole block on the immunized domain.
-        unblocked = False
+        # PHASE 16 FIX: was a single unblock_domain(base_domain) call -- but Pi-hole
+        # blocks are keyed by the specific queried FQDN, which is almost always a
+        # subdomain of base_domain, not base_domain literally (e.g. immunizing
+        # 'samsungapps.com' never touched an actual block on 'vas.samsungapps.com').
+        # unblock_by_base_domain() sweeps every blocked entry under this base domain.
+        unblocked_domains = []
         base_domain = result.get("base_domain", "")
         if base_domain:
             try:
                 ips = IPSMitigator(config=CONFIG, state_manager=sm)
-                unblocked = ips.unblock_domain(domain=base_domain)
+                unblocked_domains = ips.unblock_by_base_domain(base_domain)
             except Exception as exc:
-                LOGGER.warning("Failed to unblock domain '%s' after FP mark: %s", base_domain, exc)
+                LOGGER.warning("Failed to unblock domain(s) under '%s' after FP mark: %s", base_domain, exc)
+        unblocked = bool(unblocked_domains)
 
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()

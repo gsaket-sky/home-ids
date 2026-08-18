@@ -202,7 +202,7 @@ Output is written via `_write_config_override()` (global → `state/config_overr
 `src/mitigation/ips.py`, engineered for fail-safe resilience.
 
 ### 6.1 Layer 7 (Pi-hole Sinkhole)
-POST to Pi-hole's `/api/v2/domains` endpoint. On failure, the domain enters a thread-safe retry queue with exponential backoff (`30s × 2^attempts`), falling to a dead-letter queue after 5 attempts. Automatically retried on subsequent cycles.
+POST to Pi-hole v6's `/api/domains/deny/exact` endpoint (`{"domain": [domain], "comment": ...}`); release is a DELETE to `/api/domains/deny/exact/{domain}`. Both the list-type (`deny`) and match-kind (`exact`) live in the URL path, not the request body — a live test against a running Pi-hole v6 instance is what surfaced this; the URL shape this code used before always 404'd. On failure, the domain enters a thread-safe retry queue with exponential backoff (`30s × 2^attempts`), falling to a dead-letter queue after 5 attempts. Automatically retried on subsequent cycles.
 
 ### 6.2 Layer 3 (Fritz!Box WAN Sever)
 TR-064 SOAP API. Applies a "Blocked" profile to the infected MAC, severing WAN access while leaving LAN access intact for remediation. Only reachable at `risk_score ≥ 8.5` or an active lateral-movement flag — and only actually fires if `ips_router_enabled` is set and (when `interactive_blocking_enabled` is true) an operator has approved it.

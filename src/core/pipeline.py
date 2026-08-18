@@ -758,15 +758,19 @@ class EnginePipeline:
                             # applies before offering a revoke.
                             if action_info and action_info.get("type") == "immunize_domain" and self.ips_mitigator:
                                 target_domain_imm = action_info["target"]
-                                currently_blocked = target_domain_imm in self.state_manager.get_ips_state().get("blocked_domains", {})
-                                if currently_blocked:
-                                    unblocked = self.ips_mitigator.unblock_domain(domain=target_domain_imm)
-                                    if unblocked:
-                                        LOGGER.info(
-                                            "🔓 [PIPELINE] '%s' was immunized as a false positive — "
-                                            "released its existing Pi-hole block.",
-                                            target_domain_imm
-                                        )
+                                # PHASE 16 FIX: was an exact-match check against target_domain_imm
+                                # itself (the base domain) -- but Pi-hole blocks are keyed by the
+                                # specific queried FQDN, which is almost always a SUBDOMAIN of the
+                                # base domain, not the base domain literally. That exact match
+                                # essentially never fired in practice. unblock_by_base_domain()
+                                # sweeps every blocked entry under this base domain instead.
+                                released = self.ips_mitigator.unblock_by_base_domain(target_domain_imm)
+                                if released:
+                                    LOGGER.info(
+                                        "🔓 [PIPELINE] '%s' was immunized as a false positive — "
+                                        "released %d existing Pi-hole block(s): %s",
+                                        target_domain_imm, len(released), ", ".join(released)
+                                    )
 
                             if action_info and bool(self.config.get("fp_revoke_notifications_enabled", True)):
                                 action_id = uuid.uuid4().hex[:10]

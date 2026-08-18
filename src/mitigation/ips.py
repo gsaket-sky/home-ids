@@ -409,24 +409,43 @@ class IPSMitigator:
                 LOGGER.debug("ARP Tarpit iteration exception: %s", exc)
             time.sleep(2.0)
 
+    def _pihole_domain_url(self, api_url: str, api_path: str, domain: str = "") -> str:
+        """Builds a Pi-hole v6 domain-list REST URL.
+
+        PHASE 17 FIX: the v6 REST API keys its domain-list endpoints by list type and
+        match kind IN THE URL PATH -- /api/domains/{type}/{kind}[/{domain}] -- not via a
+        JSON body field, confirmed against a live Pi-hole v6 instance (GET returned 200
+        with the real blocklist at this exact shape; the old {api_path} alone 404'd with
+        FTL's own "route not found" error). Every domain this codebase manages is an
+        exact-match denylist entry -- no regex, no allowlist -- so 'deny/exact' is fixed,
+        matching existing behavior exactly; nothing upstream ever set kind/type differently.
+        """
+        base = f"{api_url}{api_path}/deny/exact"
+        return f"{base}/{domain}" if domain else base
+
     def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "") -> bool:
         ips_state = self.state_manager.get_ips_state()
         
         # Self-healing desync check: Clear queues if block is already confirmed active
         if domain in ips_state.get("blocked_domains", {}):
             api_url = self.config.get("pihole_api_url", "")
-            api_path = self.config.get("pihole_api_path", "/api/v2/domains")
+            api_path = self.config.get("pihole_api_path", "/api/domains")
             api_password = self.config.get("pihole_api_password", "")
             headers = {"sid": api_password} if api_password else {}
             
             is_actually_blocked = True
             if api_url:
                 try:
-                    resp = self.session.get(f"{api_url}{api_path}", headers=headers, timeout=2.0)
+                    resp = self.session.get(self._pihole_domain_url(api_url, api_path), headers=headers, timeout=2.0)
                     if resp.status_code == 200:
                         data = resp.json()
-                        items = data.get("data", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
-                        actual_domains = {item.get("domain") for item in items if isinstance(item, dict) and item.get("type", "") in ("black", "regex_black", 1, 3)}
+                        # PHASE 17 FIX: v6's actual response shape is {"domains": [...], "took": ...},
+                        # not {"data": [...]} -- the old key never matched, so actual_domains was
+                        # always empty and this desync check would have wrongly concluded every
+                        # already-blocked domain had been "unblocked externally" on every single
+                        # call, the moment the API path fix above made this branch actually reachable.
+                        items = data.get("domains", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                        actual_domains = {item.get("domain") for item in items if isinstance(item, dict)}
                         if domain not in actual_domains:
                             is_actually_blocked = False
                             LOGGER.warning("Pi-hole desync: %s was unblocked externally. Resyncing internal state.", domain)
@@ -459,8 +478,8 @@ class IPSMitigator:
             
         comment = f"Home-IDS Auto-Block | Device: {hostname} | Trigger: {reason}"
         api_url = self.config.get("pihole_api_url", "")
-        # AUDIT FIX #9: Pi-hole API path is now configurable, not hardcoded to /api/v2/domains
-        api_path = self.config.get("pihole_api_path", "/api/v2/domains")
+        # AUDIT FIX #9: Pi-hole API path is now configurable, not hardcoded to /api/domains
+        api_path = self.config.get("pihole_api_path", "/api/domains")
 
         if not api_url:
             LOGGER.warning("⚠️ Pi-hole API URL is not configured. Cannot enforce network block for domain %s.", domain)
@@ -476,9 +495,14 @@ class IPSMitigator:
 
         import subprocess
         try:
+            # PHASE 17 FIX: v6's addDomain endpoint takes "domain" as an ARRAY (its bulk-add
+            # convention) with type/kind conveyed by the URL path, not a "type" body field --
+            # the old body shape was rejected by FTL's own request validation before it ever
+            # got to check auth or do anything else, which is why every real block on this
+            # deployment has been silently falling through to the CLI fallback below.
             resp = self.session.post(
-                f"{api_url}{api_path}",
-                json={"domain": domain, "type": "black", "comment": comment},
+                self._pihole_domain_url(api_url, api_path),
+                json={"domain": [domain], "comment": comment},
                 headers=headers,
                 timeout=timeout_seconds
             )
@@ -641,7 +665,7 @@ class IPSMitigator:
     def unblock_domain(self, domain: str) -> bool:
         if not domain: return False
         api_url = self.config.get("pihole_api_url", "")
-        api_path = self.config.get("pihole_api_path", "/api/v2/domains")
+        api_path = self.config.get("pihole_api_path", "/api/domains")
         
         if api_url and self.config.get("ips_pihole_enabled", True):
             api_password = self.config.get("pihole_api_password", "")
@@ -652,9 +676,13 @@ class IPSMitigator:
                 timeout_seconds = float(self.config.get("pihole_api_timeout_seconds", 5.0))
                 if timeout_seconds <= 0:
                     timeout_seconds = 5.0
+                # PHASE 17 FIX: v6's DELETE targets a specific /{domain} in the URL path --
+                # the old bare {api_path} with a JSON body 404'd (FTL's own "route not
+                # found"), meaning unblock_domain() has never actually reached Pi-hole's v6
+                # API on this deployment; every release has been silently going through the
+                # CLI fallback below instead.
                 resp = self.session.delete(
-                    f"{api_url}{api_path}",
-                    json={"domain": domain, "type": "black"},
+                    self._pihole_domain_url(api_url, api_path, domain),
                     headers=headers,
                     timeout=timeout_seconds
                 )
@@ -698,6 +726,32 @@ class IPSMitigator:
         except Exception: 
             pass
         return True
+
+    def unblock_by_base_domain(self, base_domain: str) -> list:
+        """Releases every currently-blocked domain whose registrable (eTLD+1) domain is
+        base_domain -- not just a blocked_domains entry that equals base_domain literally.
+
+        Immunization always operates on a base domain (e.g. 'zee5.com'), but Pi-hole
+        blocks are keyed by the specific queried FQDN (e.g. 'stcf-prod.zee5.com',
+        'stcf1.zee5.com'). All three self-healing callers (autonomous CL-AFPE suppress in
+        pipeline.py, the LLM-validated path in ollama_soc.py, and the operator "Mark False
+        Positive" IPC handler) used to call unblock_domain(base_domain) directly or check
+        `base_domain in blocked_domains` -- an exact-string match that almost never fires,
+        since the base domain itself is rarely what got blocked. The practical effect,
+        confirmed against live production state: a base domain could sit in the trust
+        cache for over a day while every one of its actually-blocked subdomains stayed
+        blocked indefinitely, silently breaking the device that depended on them. This
+        sweeps every blocked entry sharing the newly-trusted base domain, not just one.
+        """
+        if not base_domain:
+            return []
+        blocked = dict(self.state_manager.get_ips_state().get("blocked_domains", {}))
+        matches = [d for d in blocked if d == base_domain or d.endswith("." + base_domain)]
+        released = []
+        for domain in matches:
+            if self.unblock_domain(domain=domain):
+                released.append(domain)
+        return released
 
     def _isolate_device_router(self, mac: str, ip: str, hostname: str, dev_id: str, reason: str) -> bool:
         webhook_url = self.config.get("router_webhook_url") or "http://127.0.0.1:8010/isolate"

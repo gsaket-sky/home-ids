@@ -367,13 +367,16 @@ def main():
                     # PHASE 14: an earlier cycle may have already blocked this domain in
                     # Pi-hole before the LLM had a chance to validate it as benign -- an
                     # immunization alone only stops FUTURE alerts, it doesn't undo an
-                    # existing block. Check local state first (no network call) so this
-                    # doesn't fire a wasted Pi-hole API call on every immunization.
-                    was_blocked = base_domain in state_manager.get_ips_state().get("blocked_domains", {})
+                    # existing block.
+                    # PHASE 16 FIX: was an exact-match check against base_domain itself, but
+                    # Pi-hole blocks are keyed by the specific queried FQDN -- almost always a
+                    # subdomain of base_domain, not base_domain literally. unblock_by_base_domain()
+                    # sweeps every blocked entry under this base domain instead of missing all of them.
+                    released = ips_mitigator.unblock_by_base_domain(base_domain)
                     unblocked_note = ""
-                    if was_blocked and ips_mitigator.unblock_domain(domain=base_domain):
-                        unblocked_note = " Released its existing Pi-hole block."
-                        LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released its existing Pi-hole block.")
+                    if released:
+                        unblocked_note = f" Released {len(released)} existing Pi-hole block(s)."
+                        LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released {len(released)} existing Pi-hole block(s): {released}")
                     report_lines.append(
                         f"- **Autonomous Action Taken:** 🤖 Immunized `{base_domain}` in the FP trust "
                         f"cache and logged an operator-equivalent training correction "

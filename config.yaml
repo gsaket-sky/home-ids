@@ -78,7 +78,16 @@ paths:
 
   # Every evaluated alert is appended here (also the training data source for
   # the weekly false-positive classifier retrain). [RESTART]
-  alert_json_path: alerts.json
+  # PHASE 16 FIX: was a bare "alerts.json" with no state/ prefix -- since this is a
+  # relative path, it resolved against whatever the process's CWD happened to be
+  # (in practice, the project root), landing outside state/ entirely despite every
+  # other state file and every doc assuming it lives in state/. retro_hunter.py,
+  # ollama_soc.py, and train_fp_classifier.py all already default their OWN fallback
+  # reads to "state/alerts.json" when this key is absent -- this now matches that
+  # convention instead of silently overriding it with a root-level path.
+  # If you're updating an existing deployment: move your current alerts.json into
+  # state/ before restarting, or the training-data history will appear to reset.
+  alert_json_path: state/alerts.json
 
   # Once alert_json_path exceeds this many bytes, older entries are pruned
   # (currently 1 GiB). [RESTART]
@@ -359,8 +368,12 @@ ips_mitigation:
 # pihole_integration — Pi-hole API behavior (URL/password come from .env)
 # -----------------------------------------------------------------------------
 pihole_integration:
-  # Pi-hole v6 API path used for domain sinkholing calls. [LIVE]
-  pihole_api_path: /api/v2/domains
+  # Pi-hole v6 API base path for domain sinkholing calls -- the code appends
+  # /deny/exact[/{domain}] itself (v6's actual REST shape; confirmed live against a
+  # running Pi-hole v6 instance -- the old /api/v2/domains 404'd on every single call,
+  # meaning every real block/unblock had been silently falling through to the CLI
+  # fallback this whole time). [LIVE]
+  pihole_api_path: /api/domains
 
   # HTTP timeout (seconds) for Pi-hole API calls. [LIVE]
   pihole_api_timeout_seconds: 5.0
