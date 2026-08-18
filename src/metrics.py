@@ -75,6 +75,13 @@ geo_queries_per_minute = Gauge("home_ids_geo_queries_per_minute", "DNS query rat
 geo_unique_domains = Gauge("home_ids_geo_unique_domains", "Unique domains by geography", ["country", "city", "asn"])
 geo_entropy = Gauge("home_ids_geo_entropy", "Entropy score by geography", ["country", "city", "asn"])
 geo_device_count = Gauge("home_ids_geo_device_count", "Device count by geography", ["country", "city", "asn"])
+# PHASE 18: gives the geomap panel its coordinates back without reintroducing unbounded
+# cardinality -- latitude/longitude here come from core/country_centroids.py's static
+# ~195-country lookup table, not from any actual resolved IP's coordinates. Bounded at
+# ~195 label combinations regardless of traffic volume. Value is the same risk score
+# geo_risk_metric carries (set under the identical risk>=alert_threshold gate), so the
+# geomap panel can query this one metric alone for both the marker size/color AND its position.
+geo_country_marker = Gauge("home_ids_geo_country_marker", "Risk score by country, with static centroid coordinates for geomap plotting", ["country", "latitude", "longitude"])
 
 collector_lag_metric = Gauge("home_ids_collector_lag_seconds", "Collector processing lag")
 alert_queue_metric = Gauge("home_ids_alert_queue_size", "Current alert queue size")

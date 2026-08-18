@@ -48,7 +48,9 @@ from metrics import (
     ollama_last_run_timestamp, ollama_calls_last_run, ollama_cache_hits_last_run,
     ollama_deferred_last_run, ollama_validated_total,
     job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
+    geo_country_marker,
 )
+from core.country_centroids import country_centroid
 import json
 from pathlib import Path
 
@@ -371,6 +373,15 @@ class MetricsExporter:
                 asn_risk_metric.labels(**_match_labels(asn_risk_metric)).set(risk)
                 country_density_metric.labels(**_match_labels(country_density_metric)).set(risk)
                 geo_beacon_metric.labels(**_match_labels(geo_beacon_metric)).inc()
+
+                # PHASE 18: static-centroid coordinates -- deliberately NOT master_labels'
+                # own lat/lon (that's the actual resolved IP's rounded-but-still-unbounded
+                # coordinates, the exact thing removed from geo_risk_metric for cardinality).
+                # country_centroid() returns (None, None) for a code not in the ~195-country
+                # table -- skip the marker entirely rather than plot a fabricated point.
+                centroid_lat, centroid_lon = country_centroid(country_val)
+                if centroid_lat is not None:
+                    geo_country_marker.labels(country=country_val, latitude=centroid_lat, longitude=centroid_lon).set(risk)
 
         except Exception as exc:
             LOGGER.error("Failed to dynamically map and export GeoIP telemetry metric: %s", exc)

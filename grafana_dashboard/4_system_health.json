@@ -87,7 +87,7 @@
         "kind": "Panel",
         "spec": {
           "id": 10,
-          "title": "Stage 1 Hardstop Hits",
+          "title": "Confirmed Threats (Hard-Stop Bypass)",
           "description": "How many alerts were stopped at Stage 1 — the deterministic hard-stop security filter that runs BEFORE any ML model, on signals like a confirmed honeypot hit or a Tier-5 threat-intel match. These bypass the false-positive engine entirely and always fire as confirmed threats (see fp_engine.py: 'hard-stop signals fired → CONFIRMED THREAT despite trust cache hit').",
           "links": [],
           "data": {
@@ -105,7 +105,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_stage1_hardstop_hits_total"
+                        "expr": "home_ids_fp_confirmed_threats_total"
                       }
                     },
                     "refId": "A",
@@ -1455,7 +1455,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_stage1_hardstop_hits_total",
+                        "expr": "home_ids_fp_confirmed_threats_total",
                         "format": "time_series",
                         "instant": false
                       }
@@ -1816,7 +1816,7 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🏠 Go to Overview",
-        "url": "/d/41383d25-297c-417d-b70e-51544da44612",
+        "url": "/d/home_ids_v3_main",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1828,7 +1828,7 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🌐 Go to Threat Landscape",
-        "url": "/d/6879f305-539b-45d6-9fdf-9cc26a1d782f",
+        "url": "/d/home_ids_v3_landscape",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1840,7 +1840,19 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🔍 Go to Device Deep Dive",
-        "url": "/d/f7bae534-afaa-4f37-ad66-83d8e61abd67",
+        "url": "/d/home_ids_v3_device",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🤖 Go to Autonomous Behavior",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🤖 Go to Autonomous Behavior",
+        "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,

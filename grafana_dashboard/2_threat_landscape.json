@@ -262,7 +262,7 @@
         "spec": {
           "id": 14,
           "title": "Network Geographic Footprint",
-          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_risk (0 = benign, 9+ = matches a blocked country in geofencing.geofencing_countries). Requires paths.geoip_db to have loaded successfully at startup — if this map is empty even though you have real traffic, check your startup logs for a GeoIP load failure before assuming your network is quiet.",
+          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_country_marker (same risk value as home_ids_geo_risk, paired with a static per-country centroid so the map has coordinates to plot -- see core/country_centroids.py) (0 = benign, 9+ = matches a blocked country in geofencing.geofencing_countries). Requires paths.geoip_db to have loaded successfully at startup — if this map is empty even though you have real traffic, check your startup logs for a GeoIP load failure before assuming your network is quiet.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -279,7 +279,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_geo_risk",
+                        "expr": "home_ids_geo_country_marker",
                         "format": "table",
                         "instant": true
                       }
@@ -1438,7 +1438,7 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🏠 Go to Overview",
-        "url": "/d/41383d25-297c-417d-b70e-51544da44612",
+        "url": "/d/home_ids_v3_main",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1450,7 +1450,7 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🔍 Go to Device Deep Dive",
-        "url": "/d/f7bae534-afaa-4f37-ad66-83d8e61abd67",
+        "url": "/d/home_ids_v3_device",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1462,7 +1462,19 @@
         "type": "link",
         "icon": "external link",
         "tooltip": "🛡️ Go to System Tuning, Healing & Health",
-        "url": "/d/a258bbcb-61a1-4829-8251-edc0f3b07407",
+        "url": "/d/home_ids_v3_mitigation",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🤖 Go to Autonomous Behavior",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🤖 Go to Autonomous Behavior",
+        "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
