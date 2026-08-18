@@ -166,9 +166,9 @@ sequenceDiagram
     loop every 2s
         Loop->>Pihole: poll new query rows
         Loop->>Loop: recompute 5-min rolling features
-        Loop->>HEE: hard-stops -> reputation -> hypothesis -> ML anomaly -> verdict
+        Loop->>HEE: hard-stops, reputation, hypothesis, then ML anomaly
         HEE->>FP: fp_engine.evaluate(alert_payload)
-        FP-->>HEE: suppress / confirm / uncertain (Stage 1 <1ms, Stage 2 LightGBM, Stage 3 FastEmbed)
+        FP-->>HEE: suppress, confirm, or uncertain (Stage 1 sub-ms, Stage 2 LightGBM, Stage 3 FastEmbed)
         alt not suppressed and above containment thresholds
             HEE->>IPS: mitigate()
             IPS->>Pihole: block domain (autonomous, no human gate)
