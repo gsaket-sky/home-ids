@@ -19,7 +19,7 @@ Version 7.0 was a configuration and reliability pass. **8.0 is a correctness, tr
 | 📱 **Per-device profiles** | Devices with genuinely different traffic profiles (an IoT sensor vs. a laptop vs. a NAS) can now converge on their own calibrated suppression sensitivity once there's enough of *that device's own* evidence — not forced onto one global number. |
 | 🧹 **Dead code removed** | The legacy `mitigation/scoring.py` risk-scoring engine (superseded by the Hypothesis & Evidence Engine, but never deleted) and a duplicate, unthrottled real-time Ollama analyzer (instantiated but never actually called) are gone. |
 
-See [CHANGELOG.md](Doku/CHANGELOG.md) for the complete, dated technical write-up of every fix, and [USER_MANUAL.md](Doku/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
+See [CHANGELOG.md](Documentation/CHANGELOG.md) for the complete, dated technical write-up of every fix, and [USER_MANUAL.md](Documentation/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
 
 ---
 
@@ -88,7 +88,7 @@ When CL-AFPE or the batch LLM analyst confirms a false positive, four things hap
 Every Pi-hole block also carries a `"Home-IDS Auto-Block | Device: ... | Trigger: ..."` comment, so anyone looking at Pi-hole's own blocklist can see it was the script, and why — and that same text is now stored durably in `state/ids_state.json` too, so it's answerable locally even for the two Pi-hole fallback paths that can't verifiably carry a comment through to Pi-hole itself.
 
 ### 2. Autonomous Self-Calibration (new in 8.0)
-Once a week (piggybacking on the existing model-retrain schedule), `scripts/train_fp_classifier.py` looks at every confirmed false positive from the last cycle — from *either* an operator's Telegram tap or the LLM's own validated corrections — and asks a narrow, conservative question: **"is there a clean, unambiguous gap between confirmed-safe scores and everything else, that would let us safely catch more false positives automatically?"**
+Effectively daily (piggybacking on the existing model-retrain schedule — a 3am cron with no freshness gate, plus a second, independent ~weekly in-process pass layered on top, see the User Manual's Automation Timeline for the full breakdown), `scripts/train_fp_classifier.py` looks at every confirmed false positive from the last cycle — from *either* an operator's Telegram tap or the LLM's own validated corrections — and asks a narrow, conservative question: **"is there a clean, unambiguous gap between confirmed-safe scores and everything else, that would let us safely catch more false positives automatically?"**
 
 - Needs at least 5 pooled confirmations (or 3 for a device's own profile) before touching anything.
 - Only ever *lowers* the suppression threshold — raising it back up after over-tuning stays a human decision.
@@ -129,9 +129,9 @@ Upon a genuinely confirmed critical threat, Home-IDS executes a latched, multi-t
 
 | Document | What's in it |
 |---|---|
-| [USER_MANUAL.md](Doku/USER_MANUAL.md) | The exhaustive reference: every `config.yaml` key, the full state-file and autonomous-override layer, service lifecycle, test suite, and the complete Prometheus metric catalog. |
-| [INSTALL.md](Doku/INSTALL.md) | Step-by-step installation of Home-IDS and every subsystem it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, Ollama). |
-| [ENGINEERING_MANUAL.md](Doku/ENGINEERING_MANUAL.md) | The internal mathematics and architecture, verified line-by-line against the actual code — for developers extending or debugging the engine. |
-| [CHANGELOG.md](Doku/CHANGELOG.md) | The full, dated version history including this release's audit write-up. |
+| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | The exhaustive reference: every `config.yaml` key, the full state-file and autonomous-override layer, service lifecycle, test suite, and the complete Prometheus metric catalog. |
+| [INSTALL.md](Documentation/INSTALL.md) | Step-by-step installation of Home-IDS and every subsystem it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, Ollama). |
+| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The internal mathematics and architecture, verified line-by-line against the actual code — for developers extending or debugging the engine. |
+| [CHANGELOG.md](Documentation/CHANGELOG.md) | The full, dated version history including this release's audit write-up. |
 
-For detailed configuration, architecture diagrams, and metric definitions, start with the [USER_MANUAL.md](Doku/USER_MANUAL.md).
+For detailed configuration, architecture diagrams, and metric definitions, start with the [USER_MANUAL.md](Documentation/USER_MANUAL.md).

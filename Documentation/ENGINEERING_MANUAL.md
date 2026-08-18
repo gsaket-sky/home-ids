@@ -170,7 +170,7 @@ High entropy ($H > 3.2$ for labels ≥12 chars, with digit-ratio and vowel-ratio
 
 ## 5. The Autonomous Self-Calibration Loop
 
-New in 8.0. Full mechanics in the User Manual §2 — this section covers the implementation specifics relevant to extending it.
+New in 8.0. Full mechanics in the User Manual §3 — this section covers the implementation specifics relevant to extending it.
 
 `scripts/train_fp_classifier.py` runs `calibrate_suppress_threshold()` — one function, shared by both the global calibration pass and the per-device pass (different `current`/`min_samples` arguments, not two parallel implementations that could quietly drift apart):
 

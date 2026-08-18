@@ -10,14 +10,15 @@ This manual covers the exact data flow of the Tri-Brain architecture, an exhaust
 
 ## 📋 Table of Contents
 1. [🌟 The Tri-Brain Architecture & Internal Data Flow](#-the-tri-brain-architecture--internal-data-flow)
-2. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
-3. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
-4. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
-5. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
-6. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
-7. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
-8. [📚 Categorized Threat Catalog & Playbooks](#-categorized-threat-catalog--playbooks)
-9. [❓ How Do I... (Task-Oriented Index)](#-how-do-i-task-oriented-index)
+2. [⏱️ The Automation Timeline: Sequence, Cadence & Latency](#%EF%B8%8F-the-automation-timeline-sequence-cadence--latency)
+3. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
+4. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
+5. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
+6. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
+7. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
+8. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
+9. [📚 Categorized Threat Catalog & Playbooks](#-categorized-threat-catalog--playbooks)
+10. [❓ How Do I... (Task-Oriented Index)](#-how-do-i-task-oriented-index)
 
 ---
 
@@ -91,7 +92,7 @@ flowchart LR
     G -- no --> J["CONFIRMED_THREAT<br/>published full severity, sigma tightened"]
 ```
 
-**Per-device thresholds (new in 8.0)**: the suppress-threshold comparison in the diagram above (`combined ≥ threshold`) uses `get_device_suppress_threshold(device_id)` — that device's own calibrated profile if one exists (`state/device_fp_profiles.json`), else the global value. See [§2](#-autonomous-self-calibration--the-override-layer).
+**Per-device thresholds (new in 8.0)**: the suppress-threshold comparison in the diagram above (`combined ≥ threshold`) uses `get_device_suppress_threshold(device_id)` — that device's own calibrated profile if one exists (`state/device_fp_profiles.json`), else the global value. See [§3](#-autonomous-self-calibration--the-override-layer).
 
 All four Stage 2/3/combined thresholds are read via a fresh `self.config.get(...)` call on every single evaluation — there is no cached/construction-time copy anywhere in the evaluation path, so a `config.yaml` edit (or an autonomous override) takes effect on the very next alert with no restart.
 
@@ -139,7 +140,107 @@ A single noisy pattern that fired 50 times in the source alert stream costs **on
 
 `DeterministicValidator` (`src/intelligence/ai_soc.py`) is the hallucination guardrail: it reconstructs the alert's reputation evidence from the persisted feature values and rejects any LLM "benign" verdict that contradicts a confirmed IOC (`reputation ≥ 4.0`) or a bad-reputation claim of "just telemetry" (`reputation ≥ 3.0`). The LLM cannot talk its way past a real threat signal.
 
-Validated corrections call `fp_engine.mark_false_positive(..., source="llm_validated")` — the **exact same mechanism** an operator's "🛡️ Mark False Positive" Telegram tap uses (`source="operator"`), distinguished only by an audit-log tag (`LLM_VALIDATED_FALSE_POSITIVE` vs `OPERATOR_MARKED_FALSE_POSITIVE`) so the calibration pass in §2 can tell them apart or pool them.
+Validated corrections call `fp_engine.mark_false_positive(..., source="llm_validated")` — the **exact same mechanism** an operator's "🛡️ Mark False Positive" Telegram tap uses (`source="operator"`), distinguished only by an audit-log tag (`LLM_VALIDATED_FALSE_POSITIVE` vs `OPERATOR_MARKED_FALSE_POSITIVE`) so the calibration pass in §3 can tell them apart or pool them.
+
+---
+
+## ⏱️ The Automation Timeline: Sequence, Cadence & Latency
+
+Everything below is verified directly against the constants and gating logic in the running code, not aspirational — including one place where a code comment says "weekly" but the actual behavior is different (flagged explicitly, not implemented around, since this section is documentation-only).
+
+### The continuous loop (Brain 1 + Brain 2, same process, sub-2-second cycle)
+
+The core pipeline never sleeps for long. It polls Pi-hole's query DB every **`poll_interval` = 2 seconds** (`config.yaml → detection_engine`). On every single tick it recomputes each device's features over a **trailing 5-minute window** (`window_seconds = 300`) — the 5 minutes is the width of the lookback, not the refresh rate; the refresh itself happens every 2 seconds.
+
+Everything from raw DNS row to a Pi-hole block is **synchronous, in-process, in the same tick** — there is no queue and no separate worker thread for detection or FP evaluation:
+
+```mermaid
+sequenceDiagram
+    participant Pihole as Pi-hole DB
+    participant Loop as Pipeline._step() (every 2s)
+    participant HEE as Decision Engine (Brain 1)
+    participant FP as CL-AFPE Stage 1/2/3 (Brain 2)
+    participant IPS as IPS Mitigator
+    participant TG as Telegram
+
+    loop every 2s
+        Loop->>Pihole: poll new query rows
+        Loop->>Loop: recompute 5-min rolling features
+        Loop->>HEE: hard-stops -> reputation -> hypothesis -> ML anomaly -> verdict
+        HEE->>FP: fp_engine.evaluate(alert_payload)
+        FP-->>HEE: suppress / confirm / uncertain (Stage 1 <1ms, Stage 2 LightGBM, Stage 3 FastEmbed)
+        alt not suppressed and above containment thresholds
+            HEE->>IPS: mitigate()
+            IPS->>Pihole: block domain (autonomous, no human gate)
+            IPS-->>TG: alert + containment status
+        end
+    end
+```
+
+**Lag in practice:** from the offending DNS query landing in Pi-hole's own log to a domain block being live is bounded by one poll tick (≤2s) plus the Pi-hole API call itself (timeout ceiling 5s, typically well under 1s). CL-AFPE's FP check adds no separate lag — it's part of the same tick, not a downstream job.
+
+### What's autonomous vs. what waits for you
+
+| Action | Trigger | Human gate? | Typical lag |
+|---|---|---|---|
+| **Pi-hole domain block** | Hard-stop / tier-5 reputation / hypothesis score above threshold, domain not on safe/allow list | Never — always autonomous | ≤2s poll tick + ≤5s API call |
+| **Pi-hole domain unblock (immunize path)** | CL-AFPE suppress-verdict includes an `immunize_domain` action for an already-blocked domain | Never — always autonomous | Same tick (≤2s) |
+| **Pi-hole domain unblock (LLM-validated path)** | Ollama (Brain 3) re-reviews a suppressed alert during its 4-hourly batch and validates it benign | Never — always autonomous | Up to ~4h (bounded by the Ollama schedule below) |
+| **Fritz!Box device isolation** | `risk_score ≥ 8.5` OR active lateral movement/honeypot hit, and `ips_router_enabled` | **Yes**, unless `lateral_threat=True` (active internal scanning bypasses the gate) — controlled by `interactive_blocking_enabled` (default `true`) | Same tick if lateral_threat overrides the gate; otherwise indefinite — waits for a human tap on the Telegram "Approve Hardware Isolation" button, no timeout, no auto-approval fallback |
+| **Layer-2 ARP/NDP Tarpit** | `risk_score ≥ 9.0` OR lateral_threat, `ips_tarpit_enabled` | Same gating as router isolation | Same as router isolation |
+| **Device release / un-isolation** | Device explicitly marked safe (`is_safe=True`), or an explicit "Release Device" Telegram tap | Isolation is **deliberately latched** — never auto-released just because traffic decayed to zero (this would create an isolate→silence→auto-release→re-beacon flapping loop) | Same tick once `is_safe` is true, or immediate on the human tap |
+| **Re-isolation after a manual release** | Any new isolation-worthy event for that device | Suppressed for 1 hour after a manual release (`operator_release_cooldown_seconds = 3600`), unless a new lateral-threat event overrides the cooldown | N/A (cooldown window) |
+
+### Background threads and pollers (same process, but off the main 2-second cycle)
+
+| Mechanism | Cadence | What it does |
+|---|---|---|
+| `config.py` live-watcher | Every **5s** | Re-reads `config.yaml`'s mtime and `state/config_overrides.json` / `state/device_fp_profiles.json`; applies any change with no restart. This is the delivery lag for anything the autotune system decides — see below. |
+| Fritz!Box connected-hosts poller (`core/identity.py`) | Every **60s** | Refreshes the router's MAC/IP hosts list used for device identity resolution. Not a detection action itself. |
+| ARP/NDP tarpit resend loop (`ips.py`) | Every **2s** | Keeps an already-trapped device's spoofed ARP entries fresh so it stays isolated at Layer 2. |
+| Threat-intel feed refresh (OTX/AbuseIPDB/VirusTotal) | Every **3600s (1h)** (`ti_refresh_interval`) | Refreshes the IOC feed cache used by reputation classification. |
+| Suspicious-state escalation | After **600s (10 min)** of uninterrupted persistence | A `SUSPICIOUS` verdict with the same signature escalates to `HIGH` if it doesn't clear. |
+| Device re-identification window | **1800s (30 min)** | How long a candidate device stays eligible for identity-merging after last being seen (handles DHCP IP rebinds). |
+| Telegram "Revoke" button validity | **86400s (24h)** (`fp_revoke_action_ttl_seconds`) | How long the one-tap Revoke option stays available after an autonomous immunization, in case it turns out to be wrong. |
+| Domain trust-cache TTL | **14 days** | An immunized domain stays whitelisted for 14 days, then falls back under normal scrutiny unless immunized again. |
+| Operator feedback signal weight | **2592000s (30 days)** (`fp_operator_feedback_ttl_seconds`) | How long a human's "Mark False Positive" correction stays counted as active training/calibration evidence. |
+
+### The autotune / self-calibration cadence — the "getting smarter over time" mechanism
+
+This is the part worth reading carefully, because the code currently runs it on **two independent, overlapping schedules**, and the in-code comments describe it as "weekly" when the practical cadence is closer to daily:
+
+1. **Daily, via cron** (`scripts/scheduler.py`, `autotune_schedule_cron: "0 3 * * *"`, 3:00 AM every day): launches `train_fp_classifier.py` as a standalone subprocess. It unconditionally retrains the LightGBM/ONNX false-positive classifier from the full alert+correction history **and** runs the global + per-device threshold calibration pass — every single time it fires, with no internal freshness check. In practice: **the model and the suppress thresholds are both re-evaluated once a day.**
+2. **Independently, roughly every 7 days**, `fp_engine.py`'s own in-process background thread (`_weekly_retrain_loop`) checks once an hour whether ≥7 days have passed since *its own* last retrain (tracked in `state/models/.last_retrain`, a file the daily cron path never touches), and if so, retrains + calibrates again through the same code, then hot-reloads the new ONNX model into the live pipeline with no restart.
+
+Net effect: expect the model file and threshold values to be re-evaluated **daily**, with a second, overlapping retrain roughly every 7th day. Most daily runs find nothing new to adjust (calibration requires ≥5 pooled corrections globally, or ≥3 per device, and refuses on ambiguous evidence) — the calibration step confirms the status quo far more often than it changes anything, by design.
+
+Once a calibration pass *does* write a new value to `state/config_overrides.json` or `state/device_fp_profiles.json`, the **5-second config watcher** above is what actually makes it live — that's the full latency from "system decided to adjust itself" to "the new threshold is being used on the next alert."
+
+### Scheduled reports (observational — don't block or unblock anything themselves)
+
+```mermaid
+gantt
+    dateFormat  HH:mm
+    axisFormat  %H:%M
+    title 24-hour schedule (scripts/scheduler.py polls cron expressions every 60s)
+    section Daily jobs
+    retro_hunter.py (retro threat-intel re-scan)      :02:00, 5m
+    train_fp_classifier.py (retrain + calibrate)      :03:00, 10m
+    top_domains_report.py (digest)                    :06:00, 5m
+    section Every 4 hours
+    ollama_soc.py run                                 :00:00, 5m
+    ollama_soc.py run                                 :04:00, 5m
+    ollama_soc.py run                                 :08:00, 5m
+    ollama_soc.py run                                 :12:00, 5m
+    ollama_soc.py run                                 :16:00, 5m
+    ollama_soc.py run                                 :20:00, 5m
+```
+
+- **`retro_hunter.py`** — 2:00 AM daily. Re-scans recent history against threat intel, writes findings to `state/retro_hunt_findings.jsonl` and a Telegram summary. Purely informational — never blocks or unblocks anything itself.
+- **`train_fp_classifier.py`** — 3:00 AM daily (plus the independent ~weekly in-process pass above). The only scheduled job that changes live detection behavior, and only via the override layer + 5s watcher, never immediately.
+- **`top_domains_report.py`** — 6:00 AM daily. Markdown + Telegram "top domains per device" digest. Observational only.
+- **`ollama_soc.py`** — every 4 hours, on the hour boundary (00/04/08/12/16/20). The only scheduled job that can *directly* unblock a Pi-hole domain (via the LLM-validated correction path in the table above).
+- All of the above are launched by `scripts/scheduler.py`, which itself only checks cron expressions once a minute — so any job can start up to 60 seconds after its exact cron minute.
 
 ---
 
@@ -174,9 +275,9 @@ flowchart TB
 **To revert an autonomous adjustment**: delete the one key from the relevant JSON file (or the whole file). The next reload (within 5 seconds, no restart) reverts to the `config.yaml` baseline. Nothing about your hand-authored config is ever touched.
 
 ### The calibration rule (`scripts/train_fp_classifier.py`)
-Runs once a week, piggybacking on the existing model-retrain schedule (both the scheduler's daily 3am `autotune_schedule_cron` invocation and `fp_engine.py`'s own internal 7-day in-process retrain thread — both paths call the same calibration function).
+Runs on the same schedule as the model retrain — which in practice is **daily**, not weekly, since the scheduler's `autotune_schedule_cron` (3am, every day) has no freshness gate; `fp_engine.py`'s own internal 7-day in-process retrain thread is a second, independent, roughly-weekly pass through the same calibration function. See [§2](#%EF%B8%8F-the-automation-timeline-sequence-cadence--latency) for the full breakdown of this overlap and why it exists.
 
-1. **Collect evidence**: every `LLM_VALIDATED_FALSE_POSITIVE` and `OPERATOR_MARKED_FALSE_POSITIVE` entry in `state/autonomous_muted.jsonl`, cross-referenced back to that alert's own CL-AFPE combined confidence (persisted in `alerts.json` as `fp_verdict.confidence` — see the note in §4 on why this field exists). Also collects every published `UNCERTAIN` alert that was **never** corrected by either source, as a safety ceiling.
+1. **Collect evidence**: every `LLM_VALIDATED_FALSE_POSITIVE` and `OPERATOR_MARKED_FALSE_POSITIVE` entry in `state/autonomous_muted.jsonl`, cross-referenced back to that alert's own CL-AFPE combined confidence (persisted in `alerts.json` as `fp_verdict.confidence` — see the note in §5 on why this field exists). Also collects every published `UNCERTAIN` alert that was **never** corrected by either source, as a safety ceiling.
 2. **Global pass**: needs ≥5 pooled confirmations. Candidate new threshold = `min(confirmed-FP scores) − 0.02`, clamped to never exceed the current value (one-directional: never raises) and never below `0.60` (absolute floor). **Refuses outright** if any never-corrected `UNCERTAIN` alert scored at or above the lowest confirmed-FP score — that overlap is never auto-resolved toward suppression.
 3. **Per-device pass**: same rule, same function, but scoped to one device's own evidence, needing only ≥3 samples (a device's own history is sparser but more directly relevant to that device than the global pool).
 4. **Write**: a qualifying result is written to `state/config_overrides.json` (global) or `state/device_fp_profiles.json` (that device), with a full `reason` string explaining exactly what evidence justified the change — this is what appears if you inspect either file directly.
@@ -226,7 +327,7 @@ All relative paths resolve against the directory you launch the process from (re
 | `safe_ips` | `["127.0.0.1", ...]` | `[LIVE]` | IPs never treated as suspicious destinations. |
 | `honeypot_ips` | `["192.168.1.200"]` | `[LIVE]` | Decoy IP(s). Any device contacting one gets an instant 10.0 risk score. |
 | `safe_domains` | `[]` | `[LIVE]` | Domains never treated as suspicious (exact match). |
-| `safe_host_patterns` | `["paperless", "repeater", "pi-hole", ...]` | `[LIVE]` | Hostname *substring* markers for "safe infrastructure" devices — dampens noisy behavioral evidence for these devices only; reputation/honeypot evidence is never dampened. **This is matched against device hostnames, not destination domains** — do not confuse it with domain-level FP suppression (that's the trust cache, §4). |
+| `safe_host_patterns` | `["paperless", "repeater", "pi-hole", ...]` | `[LIVE]` | Hostname *substring* markers for "safe infrastructure" devices — dampens noisy behavioral evidence for these devices only; reputation/honeypot evidence is never dampened. **This is matched against device hostnames, not destination domains** — do not confuse it with domain-level FP suppression (that's the trust cache, §5). |
 | `device_type_overrides` | `{...}` | `[LIVE]` | Manual device-type overrides by hostname/IP. Values: `laptop, desktop, phone, tablet, smart_tv, gaming_console, printer, nas, iot, camera, server, unknown`. |
 
 ### 4. `detection_engine`
@@ -248,7 +349,7 @@ All relative paths resolve against the directory you launch the process from (re
 |---|---|---|---|
 | `fp_lgbm_threshold` | `0.75` | `[LIVE]` | Stage 2: minimum LightGBM P(FP) to lean toward suppression. |
 | `fp_embed_similarity_threshold` | `0.82` | `[LIVE]` | Stage 3: minimum cosine similarity to a known-safe vendor pattern. |
-| `fp_combined_suppress_threshold` | `0.80` | `[LIVE]` | Combined score required to auto-suppress. **The one value the self-calibration pass may autonomously lower** — see §2. The number here is always your own hand-set baseline; the *effective* live value may be lower if `state/config_overrides.json` or `state/device_fp_profiles.json` has an active override. |
+| `fp_combined_suppress_threshold` | `0.80` | `[LIVE]` | Combined score required to auto-suppress. **The one value the self-calibration pass may autonomously lower** — see §3. The number here is always your own hand-set baseline; the *effective* live value may be lower if `state/config_overrides.json` or `state/device_fp_profiles.json` has an active override. |
 | `fp_combined_uncertain_threshold` | `0.55` | `[LIVE]` | Floor above which a non-suppressed alert is tagged "⚠️ Low Confidence" instead of full severity. |
 | `fp_revoke_notifications_enabled` | `true` | `[LIVE]` | Send a "🔔 Auto-action" Telegram notification (one-tap Revoke) on new autonomous domain immunization. |
 | `fp_revoke_action_ttl_seconds` | `86400.0` | `[LIVE]` | 24h. How long the Revoke option stays available. |
@@ -352,7 +453,7 @@ Two more `.env` variables (`ZEEK_INTERFACE`, `HOME_SUBNET`) exist for shell-scri
 
 ```
 home_ids/
-├── config.yaml         # human-authored baseline (this document, §3)
+├── config.yaml         # human-authored baseline (this document, §4)
 ├── .env                 # secrets (git-ignored)
 ├── alerts.json           # confirmed alert stream (paths.alert_json_path)
 ├── requirements.txt
@@ -360,7 +461,7 @@ home_ids/
 ├── state/                # mutable runtime state (below)
 ├── models/                # ML model weights + GeoIP databases
 ├── reports/               # Brain 3's generated Markdown reports
-└── tests/                 # the full test suite (§6)
+└── tests/                 # the full test suite (§7)
 ```
 
 ### The `state/` Directory
@@ -371,13 +472,13 @@ home_ids/
 | `autonomous_muted.jsonl` | Every suppressed/corrected alert, three event types: `AUTONOMOUS_FP_SUPPRESSED` (CL-AFPE's own Stage 2/3 catch), `OPERATOR_MARKED_FALSE_POSITIVE` (human Telegram correction), `LLM_VALIDATED_FALSE_POSITIVE` (**new in 8.0** — Brain 3's own validated correction). All three feed the weekly retrain and the self-calibration pass equally. |
 | `fp_trust_cache.json` | Base-domain → immunization-timestamp map. 14-day TTL. Bypasses ML entirely on a hit (after a mandatory hard-stop re-check — an immunized domain can never permanently blind the system to a later confirmed IOC on the same registrable domain). |
 | `fp_sigma_shifts.json` | Per-device EWMA sensitivity adjustment (`+0.25σ` per confirmed FP, `-0.50σ` per confirmed threat, capped `[-1.5, +2.0]`). |
-| `config_overrides.json` | **New in 8.0.** Global autonomous threshold overrides — see §2. Absent by default; only appears once the self-calibration pass has real evidence to act on. |
-| `device_fp_profiles.json` | **New in 8.0.** Per-device autonomous threshold overrides — see §2. Same absent-until-earned behavior. |
+| `config_overrides.json` | **New in 8.0.** Global autonomous threshold overrides — see §3. Absent by default; only appears once the self-calibration pass has real evidence to act on. |
+| `device_fp_profiles.json` | **New in 8.0.** Per-device autonomous threshold overrides — see §3. Same absent-until-earned behavior. |
 | `ollama_analysis_cache.json` | **New in 8.0.** Brain 3's 7-day verdict cache, keyed by device+target+signature. |
 | `retro_hunt_findings.jsonl` | **New in 8.0.** Durable record of `retro_hunter.py`'s zero-day matches — kept separate from `alerts.json` deliberately, since a retro-hunt match has no live device state/features and forcing it into that schema would either crash extraction or be silently misinterpreted by the training pipeline. Only written when a match is actually found. |
 | `scheduler.log` | **New in 8.0.** `scripts/scheduler.py`'s own log output, and (since it launches every scheduled job as a child process with no redirect of its own) every scheduled script's log output too. Previously piped to `/dev/null` — a real zero-day retro-hunt finding was going completely unrecorded before this fix. |
 | `zeek_cursor_*.json` | Byte-offset + inode trackers per Zeek log file, so a restart never re-reads or skips events. |
-| `models/.last_retrain` | Timestamp lock file for `fp_engine.py`'s own internal 7-day retrain thread (a second, in-process path to the same retrain function the scheduler's cron job calls standalone — see §5). |
+| `models/.last_retrain` | Timestamp lock file for `fp_engine.py`'s own internal 7-day retrain thread (a second, in-process path to the same retrain function the scheduler's cron job calls standalone — see §6). |
 | `ti_cache/` | Cached threat-intel feed data (OTX/AbuseIPDB/VirusTotal/URLhaus/ThreatFox/Tranco), refreshed on `ti_refresh_interval`. |
 | `fritz_webhook.log` | FastAPI/uvicorn subprocess's own log (isolate/hosts endpoints). |
 
@@ -419,7 +520,7 @@ Deletes the ML weights and device memory. Every device re-enters a fresh probati
 
 Note: this does **not** touch `state/config_overrides.json` or `state/device_fp_profiles.json` by default — those represent calibration decisions, not ML weights. Delete them separately (or individual keys inside them) if you also want to reset autonomous tuning back to your `config.yaml` baseline.
 
-Two retrain paths exist for the LightGBM classifier specifically, and both now also run the self-calibration pass (§2): the scheduler's standalone daily 3am cron job, and `fp_engine.py`'s own internal background thread that checks hourly whether 7 days have passed since `state/models/.last_retrain`. They're redundant by design — if the cron job is ever misconfigured or fails to fire, the in-process thread is a second path to the same outcome.
+Two retrain paths exist for the LightGBM classifier specifically, and both now also run the self-calibration pass (§3): the scheduler's standalone daily 3am cron job, and `fp_engine.py`'s own internal background thread that checks hourly whether 7 days have passed since `state/models/.last_retrain`. They're redundant by design — if the cron job is ever misconfigured or fails to fire, the in-process thread is a second path to the same outcome. See §2 for the full timing breakdown of why this results in an effectively-daily cadence rather than the weekly one the naming implies.
 
 ---
 
@@ -486,7 +587,7 @@ All metrics defined in `src/metrics.py`, exposed on `service_ports.metrics_port`
 | `home_ids_dns_tunneling_domains` | Gauge | Count of high-entropy encoded-label domains. |
 | `home_ids_max_label_length` | Gauge | Longest DNS subdomain label seen this window. |
 | `home_ids_zscore_query_rate/entropy/unique_domains/nxdomain_ratio/blocked_ratio/suspicious_domains` | Gauge | Per-feature z-scores against that device's own EWMA baseline. |
-| `home_ids_query_rate_baseline_mean` / `_threshold_limit` | Gauge | Per-hour rate baseline mean, and the live `threshold_std_dev`-derived anomaly bound (see §3, `detection_engine.threshold_std_dev`). |
+| `home_ids_query_rate_baseline_mean` / `_threshold_limit` | Gauge | Per-hour rate baseline mean, and the live `threshold_std_dev`-derived anomaly bound (see §4, `detection_engine.threshold_std_dev`). |
 | `home_ids_zeek_conn_count`, `_new_ips` | Gauge | Zeek-observed connection count; unique destination IPs. |
 | `home_ids_zeek_lateral_moves`, `home_ids_zeek_lateral_events_total` | Gauge / Counter | Internal port-scan / lateral-movement activity. |
 | `home_ids_zeek_s0_rej_count` | Gauge | Rejected/unanswered TCP attempts. |
@@ -556,7 +657,7 @@ All metrics defined in `src/metrics.py`, exposed on `service_ports.metrics_port`
 
 ## ❓ How Do I... (Task-Oriented Index)
 
-- **...make the system quieter without risking missed threats?** Don't lower `fp_combined_suppress_threshold` by hand first — check whether the self-calibration pass (§2) already has enough evidence to do it safely. If it's refusing, that usually means the evidence is genuinely ambiguous, which is useful information on its own.
+- **...make the system quieter without risking missed threats?** Don't lower `fp_combined_suppress_threshold` by hand first — check whether the self-calibration pass (§3) already has enough evidence to do it safely. If it's refusing, that usually means the evidence is genuinely ambiguous, which is useful information on its own.
 - **...see why a specific autonomous adjustment happened?** `cat state/config_overrides.json` or `state/device_fp_profiles.json` — every entry has a full `reason` string.
 - **...undo an autonomous adjustment?** Delete its key from the relevant JSON file. Reverts within ~5 seconds, no restart.
 - **...reduce Ollama's CPU/time cost further?** Lower `ollama_max_queries_per_run`, or raise `ollama_cache_ttl_seconds` so repeat patterns get re-analyzed less often.
