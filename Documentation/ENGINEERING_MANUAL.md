@@ -48,6 +48,14 @@ Verified against the actual `# ─── PHASE N:` comments in `pipeline.py`'s d
 
 Separate `Evidence`-generating detectors (`intelligence/detectors/*.py`, `intelligence/hypotheses/engine.py`) run inside Phase 5's window, consuming only already-computed feature values — no additional I/O, no additional feature extraction of their own.
 
+### 1.3 Cross-Address-Family Device Identity (MAC Correlation)
+
+One physical device shows up on the network under multiple, unrelated-looking addresses over its lifetime — a DHCPv4 lease, a SLAAC/privacy-rotated IPv6 address that changes periodically, an IPv6 link-local address — and without correlation each of those would cold-start its own separate `DeviceState`, permanently fragmenting that device's actual behavioral baseline across several never-merged, statistically-thin profiles instead of one continuous one.
+
+`extractors/zeek_features.py`'s `_bind_mac(ip, mac)` is the single correlation point both ingestion paths feed: the DHCPv4 branch of `ingest()` (IPv4 only — a lease is inherently IPv4-only) and `_process_conn()`'s read of `conn.log`'s `orig_l2_addr` field (protocol-family-agnostic — this is what makes IPv6 addresses correlatable at all). `core/identity.py` resolves a device_id by MAC first when one is bound, falling back to per-IP cold-start only when no binding exists yet. `tests/test_phase6_mac_correlation.py` exercises this end-to-end, including the specific case of an IPv6 link-local address correctly resolving to the same `device_id` as that device's already-known IPv4 identity.
+
+**Critical, easy-to-miss deployment dependency**: `orig_l2_addr` is not in `conn.log` by default — it only appears once Zeek's `policy/protocols/conn/mac-logging.zeek` is loaded (`@load` line in the real site-policy file, `$(zeek-config --site_dir)/local.zeek` — for a `zeekctl`-managed install from the `security:zeek` OBS package this is typically `/opt/zeek/share/zeek/site/local.zeek`, **not** `/etc/zeek/local.zeek`; run `zeek-config --site_dir` to confirm on your own install. See `INSTALL.md` §3.3.1). Without it, `_bind_mac()` has nothing to bind for any non-DHCPv4 traffic — the code path is correct and tested, but silently idle. This was true of this project for some time before being caught: the mechanism was built, tested, and referenced in a source comment as "see the Phase 6 README" for its one-line deployment step, but that step was never actually written into the install guide, so IPv6 correlation was live in code but inert in practice. If you're investigating why the same physical device appears to have many entries in the Master Threat Ledger with `hostname` values that are raw IPv6 addresses rather than a resolved name, this is the first thing to check.
+
 ---
 
 ## 2. The Hypothesis & Evidence Engine (HEE)

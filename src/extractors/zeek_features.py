@@ -479,9 +479,14 @@ class ZeekFeatureExtractor:
         # every address family the SAME correlation key, so core/identity.py can resolve
         # an IPv6 flow to the SAME device_id as that device's IPv4 identity instead of
         # cold-starting a second, permanently-separate tracking profile. Requires adding
-        # `@load policy/protocols/conn/mac-logging.zeek` to your Zeek config — see the
-        # Phase 6 README for the one-line deployment step. Safe no-op if that script isn't
-        # loaded (the field is simply absent from the event, exactly like today).
+        # `@load policy/protocols/conn/mac-logging.zeek` to your Zeek config -- see
+        # Documentation/INSTALL.md §3.3.1 and Documentation/ENGINEERING_MANUAL.md §1.3 for
+        # the deployment step and verification command. Safe no-op if that script isn't
+        # loaded (the field is simply absent from the event) -- this was true of this
+        # project's own production deployment for some time before being traced back to
+        # this exact gap: the mechanism was built and tested, but the deployment step was
+        # only ever mentioned in this comment, never actually written into the install
+        # guide, so it was live in code and inert in practice.
         orig_mac = ev.get("orig_l2_addr")
         if orig_mac and isinstance(orig_mac, str):
             self._bind_mac(src, orig_mac.lower())
