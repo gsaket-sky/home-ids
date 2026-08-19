@@ -72,6 +72,21 @@ DEFAULT_MAX_QUERIES_PER_RUN = 5             # 5 x up to ~15min worst-case (900s 
                                             # timeout) = 75min worst case, well inside the
                                             # 4h gap between scheduled runs
 
+# Found via a live-data audit: a DGA-shaped domain pattern (identical prefix, rotating
+# numeric suffix -- e.g. "xkqz289dfj10dj-NNN.ru") fired the same signature on 9 different
+# devices over 47 hours. Ollama analyzes one device+target+signature group at a time with
+# no visibility into what's happening on other devices, so it confidently (1.0 confidence)
+# classified two instances on the device seeing it MOST as benign/suppress -- while a
+# different device's instance of the identical pattern was classified malicious/block in
+# the same run. A per-alert LLM call structurally cannot see a cross-device campaign; only
+# the batch driver (this script) has that visibility, since it already reads every alert
+# in the window. If the same signature is independently firing on this many *distinct*
+# devices right now, that is exactly the situation that deserves a human look, not a
+# same-day autonomous immunization -- so auto-suppress is withheld (not skipped outright:
+# it's still logged, still reported) and the pattern falls through to the next run
+# unactioned, where it'll be reconsidered against then-current device spread.
+DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD = 3
+
 
 def _target_for_key(payload: dict) -> str:
     """Best available identifier for 'what was this alert about' -- prefers the resolved
@@ -237,6 +252,18 @@ def main():
     # patterns are the ones that actually got analyzed this run.
     ordered_keys = sorted(groups.keys(), key=lambda k: len(groups[k]), reverse=True)
 
+    # Multi-device spread guard (see DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD above): same
+    # signature -> the set of distinct device IDs that fired it anywhere in this run's
+    # window, independent of the exact target domain string (a rotating-suffix DGA domain
+    # never repeats exactly, so this must key on signature alone, not on _cache_key()).
+    signature_device_counts: dict = defaultdict(set)
+    for payload in alerts_to_analyze:
+        sig = payload.get("signature", "unknown")
+        dev = payload.get("device", {}).get("id", "unknown")
+        if dev and dev != "unknown":
+            signature_device_counts[sig].add(dev)
+    multi_device_suppress_guard = int(config.get("ollama_multi_device_suppress_guard", DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD))
+
     LOGGER.info(
         f"{len(alerts_to_analyze)} alert(s) collapsed into {len(groups)} distinct threat "
         f"pattern(s) (device+target+signature). Cache TTL={cache_ttl_seconds/3600:.1f}h, "
@@ -384,7 +411,23 @@ def main():
         # every 4 hours for the identical verdict is exactly the kind of redundant repeat
         # work this whole rewrite exists to eliminate.
         already_actioned = bool(cache.get(key, {}).get("action_taken"))
-        if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
+        signature = representative.get("signature", "unknown")
+        spread = len(signature_device_counts.get(signature, ()))
+        if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned and spread >= multi_device_suppress_guard:
+            LOGGER.warning(
+                f"[MULTI-DEVICE GUARD] '{signature}' is independently firing on {spread} distinct "
+                f"devices right now (>= {multi_device_suppress_guard}) -- withholding the autonomous "
+                f"suppress/immunize action for {target!r} despite a benign LLM verdict. A pattern this "
+                f"widespread deserves a human look, not a same-day auto-immunization; not marking "
+                f"action_taken so it's reconsidered next run against then-current device spread."
+            )
+            report_lines.append(
+                f"- **Autonomous Action Withheld:** LLM recommended suppress, but signature "
+                f"`{signature}` is independently firing on {spread} distinct devices right now "
+                f"(guard threshold {multi_device_suppress_guard}) -- deferred to human review "
+                f"instead of auto-immunizing."
+            )
+        elif is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
             target_domain = representative.get("network_context", {}).get("queried_domain", "") or ""
             if target_domain and target_domain != "unknown":
                 alert_hostname = representative.get("device", {}).get("hostname", "unknown")

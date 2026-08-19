@@ -949,7 +949,14 @@ class EnginePipeline:
                                     f"🧠 *THREAT:* {threat_name} ({threat_conf_pct}% Confidence)\n"
                                     f"↳ Trigger: `{primary_sig}`\n"
                                     f"↳ Risk Score: `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n\n"
-                                    f"🔍 *CAUSE / EVIDENCE*\n"
+                                    # PHASE 20 FIX: a live-data audit found operators (and Ollama's own
+                                    # LLM analysis) reading the raw per-signal value below (e.g.
+                                    # "dns_tunnel_v2 (63.0)") as if it were on the same 0-100 scale as
+                                    # the THREAT confidence % above it -- it isn't; it's each detector's
+                                    # own internal magnitude (a count, an entropy score, a byte z-score,
+                                    # ...), never normalized across detectors. Labeled explicitly so the
+                                    # two numbers can't be read as comparable.
+                                    f"🔍 *CAUSE / EVIDENCE* _(raw per-signal values, not probabilities — only the % above is a confidence)_\n"
                                 )
                             
                                 # PHASE 6: clear counters for every known address of this device — leaving
@@ -965,7 +972,18 @@ class EnginePipeline:
                                         grouped_evidence[ev.independence_group] = ev
                                     
                                 for group, ev in grouped_evidence.items():
-                                    alert_msg += f"- `{group}`: {ev.type} ({ev.value:.1f})\n"
+                                    # PHASE 20 FIX: `group` and `ev.type` are frequently the identical
+                                    # string (e.g. "dns_tunnel_v2: dns_tunnel_v2") -- drop the stutter.
+                                    # When the detector attached a specific domain (Evidence.domain,
+                                    # populated by threat_signals.py for dns_tunnel_v2's sub-signals),
+                                    # show it here: this is the domain THIS evidence actually came from,
+                                    # which the alert's own "Target" line below is NOT guaranteed to be
+                                    # (Target is "most notable domain in the window," picked
+                                    # independently of which evidence fired -- a live-data audit found
+                                    # these can be two different domains in the same alert).
+                                    label = ev.type if group == ev.type else f"{group}: {ev.type}"
+                                    domain_suffix = f" [domain: `{ev.domain}`]" if getattr(ev, "domain", None) else ""
+                                    alert_msg += f"- `{label}` ({ev.value:.1f}){domain_suffix}\n"
                                 
                                 active_evidence.clear()
                                 

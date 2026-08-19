@@ -59,7 +59,7 @@ class ThreatSignalDetector:
         is_vendor_cloud_api = bool(top_domain) and any(top_domain.endswith(d) for d in _VENDOR_CLOUD_API_DOMAINS)
 
         def add(etype: str, value: float, confidence: float, group: str, note: str,
-                subtag: Optional[str] = None) -> None:
+                subtag: Optional[str] = None, domain: Optional[str] = None) -> None:
             # `subtag` is a STABLE category tag (e.g. "txt_null_abuse") distinct from the
             # free-text `note`, which contains cycle-to-cycle-varying numbers. Hypotheses
             # that need to count how many *distinct signal categories* fired (e.g.
@@ -74,6 +74,7 @@ class ThreatSignalDetector:
                 type=etype, source="threat_signals", timestamp=now, device=device,
                 value=value, confidence=max(0.0, min(1.0, confidence)),
                 independence_group=group, provenance=f"detector:threat_signals:{etype}:{tag}:{note}",
+                domain=domain,
             ))
 
         # ── DGA / algorithmic-domain burst ──────────────────────────────────────────
@@ -95,14 +96,37 @@ class ThreatSignalDetector:
         #    "DNS_TUNNELING" hypothesis, which is really a burst detector) ────────────
         if not is_telemetry:
             max_label = float(features.get("max_label_length", 0.0) or 0.0)
+            max_label_domain = str(features.get("max_label_domain", "") or "")
             tunnel_domains = float(features.get("dns_tunneling_domains", 0.0) or 0.0)
+            tunnel_domain_examples = features.get("dns_tunneling_domain_examples", []) or []
             txt_null_ratio = float(features.get("dns_txt_null_ratio", 0.0) or 0.0)
             susp_tld_ratio = float(features.get("suspicious_tld_ratio", 0.0) or 0.0)
+            fanout_count = float(features.get("subdomain_fanout_count", 0.0) or 0.0)
+            fanout_domain = str(features.get("subdomain_fanout_domain", "") or "")
 
+            # A live-data audit found the alert's displayed "Target" domain often has no
+            # causal relationship to which domain actually produced this evidence (e.g. a
+            # 19-char domain reported alongside "max_label=57" measured on a DIFFERENT
+            # domain elsewhere in the same window) -- pipeline.py's target-domain picker
+            # scans the whole window for "most notable," independent of which evidence
+            # fired. Attaching the real domain here (Evidence.domain, always present on
+            # the dataclass but never previously populated) lets the alert/reasoning trail
+            # show the domain this specific evidence actually came from.
             if (tunnel_domains >= 2 or max_label > 55) and not (top_domain and _is_cdn_or_cloud_domain(top_domain)):
+                evidence_domain = max_label_domain if max_label > 55 else (tunnel_domain_examples[0] if tunnel_domain_examples else None)
+                examples_note = f" e.g.={','.join(tunnel_domain_examples)}" if tunnel_domain_examples else ""
                 add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15), "dns_tunnel_v2",
-                    f"encoded/long labels max={int(max_label)} count={int(tunnel_domains)}",
-                    subtag="encoded_labels")
+                    f"encoded/long labels max={int(max_label)} domain={max_label_domain or '?'} count={int(tunnel_domains)}{examples_note}",
+                    subtag="encoded_labels", domain=evidence_domain)
+            # Sliding-window subdomain fanout: many distinct labels sharing one registrable
+            # parent within the window is the classic tunneling shape (unlike the
+            # rotating-whole-domain DGA pattern above, which max_label/tunnel_domains
+            # already covers) -- distinct evidence, distinct subtag, so the hypothesis
+            # engine's "2+ corroborating categories" bonus can count it independently.
+            if fanout_count >= 8:
+                add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04), "dns_tunnel_v2",
+                    f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window",
+                    subtag="subdomain_fanout", domain=fanout_domain)
             if txt_null_ratio > 0.15:
                 add("dns_tunnel_v2", txt_null_ratio, min(1.0, txt_null_ratio * 2.0), "dns_tunnel_v2",
                     f"txt/null ratio {txt_null_ratio:.2f}", subtag="txt_null_abuse")

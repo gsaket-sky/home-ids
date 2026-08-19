@@ -21,7 +21,7 @@ import time
 import math
 from collections import Counter, defaultdict
 
-from utils import entropy, suspicious_dga, is_telemetry_domain, _is_cdn_or_cloud_domain
+from utils import entropy, suspicious_dga, is_telemetry_domain, _is_cdn_or_cloud_domain, etld1
 from config import CONFIG
 
 LOGGER = logging.getLogger("home_ids.dns_features")
@@ -296,9 +296,18 @@ class FeatureExtractor:
         min_jitter_cv = 999.0
 
         max_label_len = 0
+        max_label_domain = ""
         tunneling_domains = 0
+        tunneling_domain_examples = []
         suspicious_tld_count = 0
         txt_null_count = 0
+        # Sliding-window subdomain fanout: for real DNS tunneling, the tell isn't one
+        # domain's own label length, it's MANY distinct labels sharing the same
+        # registrable parent within the window (e.g. 1000s of encoded chunks under one
+        # attacker-controlled domain). CDN/telemetry parents legitimately do this too
+        # (many edge-node subdomains under one cloudfront.net/etc.), so those are excluded
+        # the same way the existing tunneling_domains/beaconing checks already are.
+        fanout_by_base = defaultdict(set)
 
         _SUSPICIOUS_TLDS = frozenset({"top", "xyz", "biz", "cc", "cfd", "buzz", "gq", "tk", "work", "rest", "country", "stream", "icu", "click", "live"})
         _TXT_NULL_QTYPES = frozenset({"TXT", "NULL", "ANY", "MX", "CNAME", 16, 10, 255, 15, 5})
@@ -314,10 +323,20 @@ class FeatureExtractor:
             sublabel_len = len(sublabel)
             if sublabel_len > max_label_len:
                 max_label_len = sublabel_len
+                max_label_domain = domain
 
             # Calibrated DNS tunneling check (excludes Apple Push, CloudFront, Akamai, Amazon, Google, Microsoft hashes)
             if sublabel_len > 28 and entropy(sublabel) > 3.6 and not _is_cdn_or_cloud_domain(domain) and not is_telemetry_domain(domain):
                 tunneling_domains += 1
+                if len(tunneling_domain_examples) < 3:
+                    tunneling_domain_examples.append(domain)
+
+            # Subdomain fanout: group by registrable parent, only when this domain is a
+            # genuine subdomain of that parent (not the base domain itself queried bare),
+            # and the parent isn't legitimate CDN/telemetry infrastructure.
+            base = etld1(domain)
+            if base and base != domain and not _is_cdn_or_cloud_domain(domain) and not is_telemetry_domain(domain):
+                fanout_by_base[base].add(domain)
 
             entropy_sum += entropy(sublabel)
             if suspicious_dga(domain):
@@ -377,6 +396,13 @@ class FeatureExtractor:
         top_domain_ratio = max(decayed_weights.values(), default=0.0) / max(decayed_total, 1e-9)
         new_domains = sum(1 for d in rw.domains if d not in state.seen_domains)
 
+        subdomain_fanout_count = 0
+        subdomain_fanout_domain = ""
+        for base, children in fanout_by_base.items():
+            if len(children) > subdomain_fanout_count:
+                subdomain_fanout_count = len(children)
+                subdomain_fanout_domain = base
+
         nxdomain_tld_conc = 0.0
         nx_events = [ev[1] for ev in rw.events if ev[2] in NXDOMAIN]
         if len(nx_events) >= 5:
@@ -402,13 +428,17 @@ class FeatureExtractor:
             "new_domains": new_domains,
             "deep_domains": deep_domains,
             "max_label_length": max_label_len,
+            "max_label_domain": max_label_domain,
             "dns_tunneling_domains": tunneling_domains,
+            "dns_tunneling_domain_examples": tunneling_domain_examples,
             "dns_txt_null_ratio": min(txt_null_count / max(len(rw.long_events), 1), 1.0),
             "suspicious_tld_ratio": min(suspicious_tld_count / max(n_events, n_long_events, 1), 1.0),
             "nxdomain_tld_conc": nxdomain_tld_conc,
             "beaconing_c2_count": beaconing_c2_count,
             "beaconing_c2_1h": beaconing_c2_1h,
-            "min_jitter_cv": min_jitter_cv if min_jitter_cv != 999.0 else 0.0
+            "min_jitter_cv": min_jitter_cv if min_jitter_cv != 999.0 else 0.0,
+            "subdomain_fanout_count": subdomain_fanout_count,
+            "subdomain_fanout_domain": subdomain_fanout_domain,
         }
         
         current_phase = self._determine_killchain_phase(state, extracted_features)
@@ -425,8 +455,10 @@ class FeatureExtractor:
             "nxdomain_ratio": 0.0, "entropy_avg": 0.0, "suspicious_domains": 0,
             "total": 0, "query_variance": 0.0, "events_per_second": 0.0,
             "top_domain_ratio": 0.0, "new_domains": 0, "deep_domains": 0,
-            "max_label_length": 0, "dns_tunneling_domains": 0, "nxdomain_tld_conc": 0.0,
+            "max_label_length": 0, "max_label_domain": "", "dns_tunneling_domains": 0,
+            "dns_tunneling_domain_examples": [], "nxdomain_tld_conc": 0.0,
             "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,
             "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
+            "subdomain_fanout_count": 0, "subdomain_fanout_domain": "",
             "killchain_phase": "NORMAL", "markov_anomaly": 0.0
         }
