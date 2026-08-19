@@ -236,11 +236,11 @@ class ZeekFeatureExtractor:
         self._wire_dns_resolutions = {}
         self._mac_bindings = {}
         # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
-        # recent DHCP transaction per IP/MAC, and a rolling per-device set of *all* JA3
+        # recent DHCP transaction per IP/MAC, and a rolling per-device set of *all* JA4
         # hashes seen (not just malicious ones) used as a benign behavioral fingerprint.
         self._dhcp_fingerprints = {}          # ip -> {"vendor_class","param_list","user_class","ts"}
         self._dhcp_fingerprints_by_mac = {}   # mac -> same dict, survives across an IP change
-        self._ja3_seen = defaultdict(set)     # ip -> set of ja3 hashes (capped per-device below)
+        self._ja4_seen = defaultdict(set)     # ip -> set of ja4 hashes (capped per-device below)
         self.ti_engine = ti_engine
         self.geoip_engine = geoip_engine
         self._reverse_dns_cache = {}
@@ -544,7 +544,7 @@ class ZeekFeatureExtractor:
     def get_wire_ip(self, domain: str) -> Optional[str]: return self._wire_dns_resolutions.get(str(domain).lower().strip("."))
     def get_mac(self, ip: str) -> Optional[str]: return self._mac_bindings.get(ip)
     def get_dhcp_fingerprint(self, ip: str) -> Optional[dict]: return self._dhcp_fingerprints.get(ip)
-    def get_ja3_set(self, ip: str) -> set: return set(self._ja3_seen.get(ip, set()))
+    def get_ja4_set(self, ip: str) -> set: return set(self._ja4_seen.get(ip, set()))
     def get_http_reqs(self, device_ip: str) -> set: return set(self._http_reqs.get(device_ip, {}).keys())
     def get_dest_ips(self, device_ip) -> set:
         out = set()
@@ -566,12 +566,15 @@ class ZeekFeatureExtractor:
         if is_malicious_ja3: self._ja3_hits[src].append({"ja3": ja3, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
         if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
 
-        # PHASE 4: track *every* JA3 seen (not just malicious ones) as a benign per-device
+        # PHASE 4: track *every* JA4 seen (not just malicious ones) as a benign per-device
         # behavioral fingerprint, used for MAC-rotation re-identification. Capped at 50
         # distinct hashes per device — this is meant to capture "the small stable set of
-        # TLS stacks this device's apps use," not a full unbounded history.
-        if ja3 and len(self._ja3_seen[src]) < 50:
-            self._ja3_seen[src].add(ja3)
+        # TLS stacks this device's apps use," not a full unbounded history. JA4 (not JA3):
+        # confirmed live that the old salesforce/ja3 zkg package's client-hello handler
+        # never fires on Zeek 8.x (unmaintained since 2020) -- FoxIO's JA4 package is the
+        # maintained replacement, see Documentation/INSTALL.md 3.3.2.
+        if ja4 and len(self._ja4_seen[src]) < 50:
+            self._ja4_seen[src].add(ja4)
 
         if not self._is_safe_device(src):
             sni = str(ev.get("server_name", "")).lower().strip(".")
@@ -709,6 +712,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja3_seen):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen):
                 if ip in d:
                     del d[ip]

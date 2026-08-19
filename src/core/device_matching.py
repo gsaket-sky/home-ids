@@ -14,7 +14,7 @@ Deliberately conservative, on purpose:
   present an IDENTICAL fingerprint (confirmed on this network — see the audit). So a DHCP
   fingerprint match alone is capped well below the auto-merge bar; it only clears that bar
   once corroborated by a second, independent signal.
-- The two corroborating signals are: JA3 TLS-fingerprint set overlap (a real behavioral
+- The two corroborating signals are: JA4 TLS-fingerprint set overlap (a real behavioral
   signal — which apps/services a device's TLS stack actually talks to over time), and an
   exact match on a non-generic hostname (generic names like "iphone" prove nothing, since
   many distinct physical iPhones share it).
@@ -32,8 +32,8 @@ MIN_CANDIDATE_CONFIDENCE = 0.45
 # At/above this (with corroboration baked into the scoring itself), auto-merge fires.
 AUTO_MERGE_CONFIDENCE = 0.75
 
-# Minimum Jaccard overlap on JA3 hash sets to count as "corroborating" at all.
-_JA3_CORROBORATION_FLOOR = 0.34
+# Minimum Jaccard overlap on JA4 hash sets to count as "corroborating" at all.
+_JA4_CORROBORATION_FLOOR = 0.34
 
 # Duplicated from core/identity.py's _GENERIC_HOSTNAMES on purpose: state_guard.py (which
 # calls into this module) is imported BY identity.py, so importing identity.py from here
@@ -73,8 +73,8 @@ def dhcp_fingerprint_match(fp_a: Optional[Dict[str, Any]], fp_b: Optional[Dict[s
     return 1.0
 
 
-def ja3_overlap(set_a: Set[str], set_b: Set[str]) -> float:
-    """Jaccard similarity of two benign JA3-hash sets. Requires both sides to have at
+def ja4_overlap(set_a: Set[str], set_b: Set[str]) -> float:
+    """Jaccard similarity of two benign JA4-hash sets. Requires both sides to have at
     least one entry — an empty set is "no data", not "definitely different"."""
     if not set_a or not set_b:
         return 0.0
@@ -92,28 +92,28 @@ def hostname_corroborates(host_a: str, host_b: str) -> bool:
     return not is_generic_hostname(host_a)
 
 
-def match_confidence(dhcp_score: float, ja3_sim: float, hostname_ok: bool) -> float:
+def match_confidence(dhcp_score: float, ja4_sim: float, hostname_ok: bool) -> float:
     """Combine the three independent signals into one 0.0-1.0 confidence score.
 
     A DHCP fingerprint match alone tops out at 0.40 (below both thresholds) because it's a
     device-*class* signal on this network (identical across same-model ESP32s etc). It only
-    climbs into merge territory once corroborated by decent JA3 overlap or a matching
-    non-generic hostname. Strong JA3 overlap alone can also carry a match (useful for
+    climbs into merge territory once corroborated by decent JA4 overlap or a matching
+    non-generic hostname. Strong JA4 overlap alone can also carry a match (useful for
     devices that don't send fresh DHCP traffic during the observation window).
     """
-    if dhcp_score <= 0.0 and ja3_sim <= 0.0 and not hostname_ok:
+    if dhcp_score <= 0.0 and ja4_sim <= 0.0 and not hostname_ok:
         return 0.0
 
-    corroborated = (ja3_sim >= _JA3_CORROBORATION_FLOOR) or hostname_ok
+    corroborated = (ja4_sim >= _JA4_CORROBORATION_FLOOR) or hostname_ok
 
     if dhcp_score >= 1.0 and corroborated:
-        base = 0.55 + (0.35 * min(1.0, ja3_sim)) + (0.10 if hostname_ok else 0.0)
+        base = 0.55 + (0.35 * min(1.0, ja4_sim)) + (0.10 if hostname_ok else 0.0)
         return min(1.0, base)
     if dhcp_score >= 1.0:
         # Device-class match only (e.g. "some ESP32 with stock firmware") — not enough alone.
         return 0.40
-    if ja3_sim >= 0.5:
-        base = 0.45 + (0.35 * ja3_sim) + (0.10 if hostname_ok else 0.0)
+    if ja4_sim >= 0.5:
+        base = 0.45 + (0.35 * ja4_sim) + (0.10 if hostname_ok else 0.0)
         return min(1.0, base)
     if hostname_ok:
         return 0.50

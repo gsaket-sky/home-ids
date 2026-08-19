@@ -21,7 +21,7 @@ from typing import Generator, Optional, Dict, List, Any
 from core.state import DeviceState
 from core.device_matching import (
     dhcp_fingerprint_match,
-    ja3_overlap,
+    ja4_overlap,
     hostname_corroborates,
     match_confidence,
     MIN_CANDIDATE_CONFIDENCE,
@@ -106,7 +106,7 @@ class StateManager:
             yield state
 
     def get_or_create(self, device_id: str, client_ip: str, hostname: str, alpha: float = 0.05,
-                       dhcp_fingerprint: Optional[Dict[str, Any]] = None, ja3_set: Optional[set] = None,
+                       dhcp_fingerprint: Optional[Dict[str, Any]] = None, ja4_set: Optional[set] = None,
                        reidentify: bool = True, min_confidence: float = AUTO_MERGE_CONFIDENCE,
                        candidate_window: float = 1800.0) -> DeviceState:
         with self._global_lock:
@@ -131,10 +131,10 @@ class StateManager:
             # device. Only attempts this when the caller supplied a fresh fingerprint to
             # compare — callers that don't care about re-identification (or that predate
             # this feature) get identical cold-start behavior to before.
-            if reidentify and (dhcp_fingerprint or ja3_set):
+            if reidentify and (dhcp_fingerprint or ja4_set):
                 matched_old_id = self._find_reidentify_candidate(
                     exclude_ip=client_ip, hostname=hostname,
-                    dhcp_fingerprint=dhcp_fingerprint, ja3_set=ja3_set,
+                    dhcp_fingerprint=dhcp_fingerprint, ja4_set=ja4_set,
                     min_confidence=min_confidence, candidate_window=candidate_window,
                 )
                 if matched_old_id:
@@ -146,7 +146,7 @@ class StateManager:
                     self._ip_to_device_id[client_ip] = device_id
                     LOGGER.warning(
                         "🔗 IDENTITY RE-LINKED: %s -> %s (hostname=%s, ip=%s) — matched via "
-                        "DHCP/JA3/hostname fingerprint, treating as a MAC rotation of a known "
+                        "DHCP/JA4/hostname fingerprint, treating as a MAC rotation of a known "
                         "device rather than a cold start.", matched_old_id, device_id, hostname, client_ip
                     )
                     self._prune_lru_capacity()
@@ -184,18 +184,18 @@ class StateManager:
             return state
 
     def _find_reidentify_candidate(self, exclude_ip: str, hostname: str,
-                                     dhcp_fingerprint: Optional[Dict[str, Any]], ja3_set: Optional[set],
+                                     dhcp_fingerprint: Optional[Dict[str, Any]], ja4_set: Optional[set],
                                      min_confidence: float, candidate_window: float) -> Optional[str]:
         """Scans currently-tracked devices for one that plausibly IS the new device under
         its old identity — i.e. it just went quiet (not still active, not ancient history;
-        that's what the weekly prune sweep is for) and its DHCP/JA3/hostname fingerprint
+        that's what the weekly prune sweep is for) and its DHCP/JA4/hostname fingerprint
         matches. Must be called with self._global_lock already held (it iterates
         self._states without re-locking). O(N) in device count — only runs on the
         cold-start path, never per-packet, so this is cheap even at max_devices capacity.
         """
         now = time.time()
         best_id, best_conf = None, 0.0
-        ja3_set = ja3_set or set()
+        ja4_set = ja4_set or set()
 
         for cand_id, cand_state in self._states.items():
             cand_ip = getattr(cand_state, "client_ip", "")
@@ -210,15 +210,15 @@ class StateManager:
                 continue
 
             dhcp_score = dhcp_fingerprint_match(dhcp_fingerprint, getattr(cand_state, "dhcp_fingerprint", None))
-            ja3_sim = ja3_overlap(ja3_set, set(getattr(cand_state, "ja3_seen", []) or []))
+            ja4_sim = ja4_overlap(ja4_set, set(getattr(cand_state, "ja4_seen", []) or []))
             host_ok = hostname_corroborates(hostname, getattr(cand_state, "hostname", ""))
 
-            conf = match_confidence(dhcp_score, ja3_sim, host_ok)
+            conf = match_confidence(dhcp_score, ja4_sim, host_ok)
             if conf >= MIN_CANDIDATE_CONFIDENCE:
                 LOGGER.info(
                     "🔎 Re-identification candidate: %s (hostname=%s) confidence=%.2f "
-                    "(dhcp=%.2f ja3_overlap=%.2f hostname_match=%s, idle=%.0fs)",
-                    cand_id, getattr(cand_state, "hostname", "?"), conf, dhcp_score, ja3_sim, host_ok, age
+                    "(dhcp=%.2f ja4_overlap=%.2f hostname_match=%s, idle=%.0fs)",
+                    cand_id, getattr(cand_state, "hostname", "?"), conf, dhcp_score, ja4_sim, host_ok, age
                 )
             if conf > best_conf:
                 best_conf, best_id = conf, cand_id

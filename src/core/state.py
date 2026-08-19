@@ -173,11 +173,11 @@ class DeviceState:
         self.fp_count = 0
 
         # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
-        # recent DHCP transaction seen for this device, a rolling set of benign JA3 TLS
+        # recent DHCP transaction seen for this device, a rolling set of benign JA4 TLS
         # fingerprints observed over time, and a "still active" heartbeat used by
         # StateManager to find recently-orphaned identity-migration candidates.
         self.dhcp_fingerprint: Optional[Dict[str, Any]] = None
-        self.ja3_seen = BoundedSet(max_size=50)
+        self.ja4_seen = BoundedSet(max_size=50)
         self.last_seen = time.time()
 
         # PHASE 6 (cross-address-family identity correlation): every IP address this
@@ -223,7 +223,7 @@ class DeviceState:
             "confirmed_threat_count": self.confirmed_threat_count,
             "fp_count": self.fp_count,
             "dhcp_fingerprint": self.dhcp_fingerprint,
-            "ja3_seen": self.ja3_seen.to_list(),
+            "ja4_seen": self.ja4_seen.to_list(),
             "last_seen": self.last_seen,
             "device_type_is_override": self.device_type_is_override,
             "known_ips": self.known_ips.to_list(),
@@ -261,7 +261,7 @@ class DeviceState:
         obj.confirmed_threat_count = data.get("confirmed_threat_count", 0)
         obj.fp_count = data.get("fp_count", 0)
         obj.dhcp_fingerprint = data.get("dhcp_fingerprint")
-        obj.ja3_seen = BoundedSet(max_size=50, initial=data.get("ja3_seen", []))
+        obj.ja4_seen = BoundedSet(max_size=50, initial=data.get("ja4_seen", []))
         obj.last_seen = data.get("last_seen", 0.0)
         obj.device_type_is_override = data.get("device_type_is_override", False)
         obj.known_ips = BoundedSet(max_size=8, initial=data.get("known_ips", []))

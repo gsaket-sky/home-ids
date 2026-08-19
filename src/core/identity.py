@@ -231,10 +231,10 @@ class DeviceIdentityManager:
         code change, once real-world confidence scores from the log lines have been
         observed (`identity_reidentify_*` keys)."""
         if not zeek_fx:
-            return {"dhcp_fingerprint": None, "ja3_set": None, "reidentify": False}
+            return {"dhcp_fingerprint": None, "ja4_set": None, "reidentify": False}
         return {
             "dhcp_fingerprint": zeek_fx.get_dhcp_fingerprint(client_ip),
-            "ja3_set": zeek_fx.get_ja3_set(client_ip),
+            "ja4_set": zeek_fx.get_ja4_set(client_ip),
             "reidentify": bool(self.config.get("identity_reidentify_enabled", True)),
             "min_confidence": float(self.config.get("identity_reidentify_min_confidence", AUTO_MERGE_CONFIDENCE)),
             "candidate_window": float(self.config.get("identity_reidentify_window_seconds", 1800.0)),
@@ -261,8 +261,8 @@ class DeviceIdentityManager:
             dhcp_fp = zeek_fx.get_dhcp_fingerprint(client_ip)
             if dhcp_fp:
                 locked_state.dhcp_fingerprint = dhcp_fp
-            for ja3_hash in zeek_fx.get_ja3_set(client_ip):
-                locked_state.ja3_seen.add(ja3_hash)
+            for ja4_hash in zeek_fx.get_ja4_set(client_ip):
+                locked_state.ja4_seen.add(ja4_hash)
 
     def process_zeek_identities(self, zeek_events: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None) -> List[str]:
         if not zeek_events:
