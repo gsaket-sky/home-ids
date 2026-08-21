@@ -946,6 +946,17 @@ class EnginePipeline:
                             elif fp_verdict["verdict"] == "CONFIRMED_THREAT":
                                 self.ml_registry.reject_threat(dev_id, features)
 
+                        # BUGFIX: containment_decision_state was previously only assigned
+                        # inside the `else:` branch below (fp_verdict["suppress"] is False) --
+                        # but telegram_worthy = containment_decision_state in (...) further
+                        # below runs unconditionally after this if/else, regardless of which
+                        # branch executed. Every autonomously-suppressed alert (the `if` branch
+                        # here) crashed with UnboundLocalError. Harmless default here: every
+                        # downstream use of telegram_worthy is itself gated on
+                        # `not fp_verdict["suppress"]`, so this value is never actually acted on
+                        # when suppressed -- the else branch's own PHASE 19 logic still computes
+                        # the real value whenever it matters.
+                        containment_decision_state = decision.get("state", "SUSPICIOUS")
                         if fp_verdict["suppress"]:
                             LOGGER.info(
                                 "✅ [PIPELINE] Alert for %s autonomously suppressed as FALSE POSITIVE "
