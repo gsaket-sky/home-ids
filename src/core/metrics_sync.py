@@ -33,6 +33,7 @@ from metrics import (
     ips_pihole_status, ips_router_status, ips_tarpit_status,
     ips_pihole_blocks_metric, ips_isolations_metric, ips_errors_metric,
     ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric,
+    ndr_arp_sweep_metric, ndr_dns_evasion_ratio_metric,
     ndr_lateral_events_total, geo_risk_metric,
     geo_beacon_metric, asn_risk_metric, country_density_metric,
     geo_traffic_total, geo_queries_per_minute, geo_unique_domains,
@@ -45,6 +46,8 @@ from metrics import (
     ips_router_isolated_active,
     autotune_global_threshold_effective, autotune_global_threshold_baseline,
     autotune_device_threshold_effective, autotune_calibration_total, autotune_evidence_count,
+    autotune_arp_sweep_threshold_effective, autotune_arp_sweep_calibration_total,
+    autotune_arp_sweep_evidence_count,
     ollama_last_run_timestamp, ollama_calls_last_run, ollama_cache_hits_last_run,
     ollama_deferred_last_run, ollama_validated_total,
     job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
@@ -70,7 +73,8 @@ _DEVICE_GAUGES = (
     ndr_doh_bypass_metric, ndr_lateral_moves_metric, ndr_jitter_c2_metric,
     ndr_exfil_z_metric, ndr_delta_exfil_metric, abuseipdb_risk_metric,
     virustotal_risk_metric, beaconing_volume_metric, jitter_cv_metric,
-    ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric
+    ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric,
+    ndr_arp_sweep_metric, ndr_dns_evasion_ratio_metric
 )
 
 
@@ -288,6 +292,8 @@ class MetricsExporter:
             ndr_tcp_scan_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_s0_rej_count", 0))
             ndr_max_duration_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_max_duration", 0.0))
             ndr_honeypot_hits_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_honeypot_hits", 0))
+            ndr_arp_sweep_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_arp_sweep_count", 0))
+            ndr_dns_evasion_ratio_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_dns_evasion_ratio", 0.0))
 
             beaconing_volume_metric.labels(str_dev_id, str_host, str_type).set(features.get("top_domain_ratio", 0.0))
             jitter_cv_metric.labels(str_dev_id, str_host, str_type).set(features.get("min_jitter_cv", 0.0))
@@ -453,6 +459,17 @@ class MetricsExporter:
                         autotune_calibration_total.labels(scope="device", outcome=outcome).set(count)
                     for kind, count in dev.get("evidence_counts", {}).items():
                         autotune_evidence_count.labels(scope="device", kind=kind).set(count)
+                    # PHASE 21-METRICS: arp_sweep_* keys are separate from the
+                    # suppress-threshold fields above (calibrate_arp_sweep_threshold()
+                    # is a genuinely different, bidirectional rule -- see
+                    # train_fp_classifier.py) and were written into
+                    # autotune_stats.json this session but never synced to Prometheus.
+                    if "arp_sweep_effective" in dev:
+                        autotune_arp_sweep_threshold_effective.labels(device=dev_id, hostname=hostname).set(dev["arp_sweep_effective"])
+                    for outcome, count in dev.get("arp_sweep_calibration_outcomes", {}).items():
+                        autotune_arp_sweep_calibration_total.labels(device=dev_id, outcome=outcome).set(count)
+                    for kind, count in dev.get("arp_sweep_evidence_counts", {}).items():
+                        autotune_arp_sweep_evidence_count.labels(device=dev_id, kind=kind).set(count)
             except Exception as exc:
                 LOGGER.debug("Failed to sync autotune relay metrics: %s", exc)
 

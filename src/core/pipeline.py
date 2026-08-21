@@ -26,7 +26,7 @@ from core.identity import DeviceIdentityManager
 from core.metrics_sync import MetricsExporter
 from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
-from extractors.fritzbox_capture import ReactiveCaptureDispatcher  # PHASE 21D
+from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
@@ -77,6 +77,51 @@ def classify_service(port: int, proto: str = "TCP") -> str:
         8443: "HTTPS Alternate", 123: "NTP", 67: "DHCP Server", 68: "DHCP Client", 1883: "MQTT", 853: "DoT",
     }
     return known_ports.get(port, "Control / ICMP Ping" if port == 0 else f"{proto.upper()} Service")
+
+
+# PHASE 21-ALERT-REDESIGN: plain-language descriptions for the Telegram "WHY" section --
+# the raw evidence dump this replaces ("`dns_tunnel_v2` (340.0)") forced an operator to
+# already know what each detector's internal magnitude means and what scale it's on, and
+# a live-data audit found operators (and Ollama's own LLM analysis) reading it as if it
+# were on the same 0-100 scale as the headline confidence percentage -- it never was. One
+# sentence per evidence type, no numbers, so there's nothing left to misread as a
+# probability. An unmapped type still degrades gracefully (de-snaked type name), never KeyErrors.
+_EVIDENCE_PLAIN_LANGUAGE = {
+    "dns_rate": "Unusually high DNS query rate for this device's own baseline",
+    "dns_entropy": "High-entropy, random-looking domain names queried",
+    "dns_unique_ratio": "Querying an unusually high number of distinct domains",
+    "dns_evasion_anomaly": "Real network traffic with no matching DNS lookup history",
+    "dns_dga_burst": "Burst of DGA-shaped (algorithm-generated) domain names",
+    "dns_tunnel_v2": "DNS tunneling signature (encoded or unusually long subdomain labels)",
+    "zeek_exfiltration": "Large outbound data transfer -- possible exfiltration",
+    "zeek_beaconing": "Regular, beacon-like connection interval -- possible C2 check-in",
+    "zeek_conn_abuse": "Abnormal connection pattern (many short-lived or rejected connections)",
+    "zeek_long_conn": "Unusually long-lived connection",
+    "arp_sweep": "ARP-swept many distinct hosts on the LAN (host-discovery behavior)",
+    "zeek_notice": "Zeek policy notice fired for this connection",
+    "arp_spoofing": "Layer-2 ARP spoofing detected (this device's MAC address changed)",
+    "ml_anomaly": "Flagged as statistically anomalous by the ML baseline model",
+    "honeypot_access": "Connected to the internal honeypot decoy server",
+    "zeek_lateral_scan": "Internal port scanning / lateral movement across the LAN",
+    "reputation": "Destination has a poor external reputation score",
+    "geofencing_violation": "Connection to a blocklisted country",
+    "domain": "Destination domain matches a known-malicious reputation list",
+    "ip": "Destination IP matches a known-malicious reputation list",
+    "mixed": "Mixed reputation signal on this connection",
+}
+
+
+def _describe_evidence(ev) -> str:
+    """One human-readable sentence for ONE piece of evidence -- see
+    _EVIDENCE_PLAIN_LANGUAGE's module comment for why this replaced showing the raw
+    per-signal magnitude directly. Appends the specific domain/IP this evidence came
+    from when the detector attached one (Evidence.domain) -- this is the domain THIS
+    evidence actually fired on, which is not guaranteed to be the alert's own "Target"
+    line (that's the most-notable domain in the window, picked independently of which
+    evidence fired -- a live-data audit found these can differ within one alert)."""
+    text = _EVIDENCE_PLAIN_LANGUAGE.get(ev.type, ev.type.replace("_", " ").capitalize())
+    domain_suffix = f" — `{ev.domain}`" if getattr(ev, "domain", None) else ""
+    return f"{text}{domain_suffix}"
 
 
 class EnginePipeline:
@@ -275,7 +320,21 @@ class EnginePipeline:
             interval = float(self.config.get("reactive_capture_spotcheck_interval_seconds", 1800.0))
             if now - self._last_reactive_spotcheck_ts >= interval:
                 self._last_reactive_spotcheck_ts = now
-                self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="spotcheck")
+                self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="spotcheck",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
+                # Disk-safety sweep, piggybacked on this same interval rather than a
+                # separate timer -- catches any raw pcap/Zeek scratch directory
+                # orphaned by a process crash mid-burst (capture_and_ingest()'s own
+                # try/finally handles the normal case; this is the defense-in-depth
+                # backstop for the abnormal one).
+                try:
+                    scratch_dir = Path(self.config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
+                    cleanup_stale_scratch_files(scratch_dir)
+                except Exception as exc:
+                    LOGGER.warning("Reactive-capture stale-file sweep failed (non-fatal): %s", exc)
 
         dns_rows = self.pihole_collector.poll()
         zeek_events = self.zeek_collector.poll()
@@ -294,7 +353,11 @@ class EnginePipeline:
             if new_probe_sources:
                 LOGGER.info("🔌 New source(s) contacting a wired-probe device this cycle: %s "
                             "-- dispatching a reactive capture.", new_probe_sources)
-                self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="wired_probe")
+                self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="wired_probe",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
         active_ids_dns = self.identity_manager.process_dns_identities(dns_rows, self.zeek_fx, self.ml_registry)
         active_ids_zeek = self.identity_manager.process_zeek_identities(zeek_events, self.zeek_fx, self.ml_registry)
@@ -331,7 +394,11 @@ class EnginePipeline:
                 # burst to establish a baseline JA4/connection fingerprint for it
                 # immediately, rather than waiting for it to look suspicious first.
                 if bool(self.config.get("reactive_capture_new_device_trigger_enabled", True)):
-                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="new_device")
+                    self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="new_device",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
                 # PHASE 21D trigger: get_or_create() just found a MAC-rotation candidate
                 # too weak to auto-merge on -- genuinely ambiguous, not "no match". Fresh
@@ -344,7 +411,11 @@ class EnginePipeline:
                         LOGGER.info("🔎 Ambiguous re-identification candidate (new=%s, candidate=%s, "
                                     "confidence=%.2f) -- dispatching a reactive capture to try to resolve it.",
                                     ambiguous["new_device_id"], ambiguous["candidate_id"], ambiguous["confidence"])
-                        self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="ambiguous_reidentify")
+                        self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="ambiguous_reidentify",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
             with self.state_manager.lock_device(dev_id) as state:
                 status_code = int(row.get("status", 0))
@@ -582,7 +653,11 @@ class EnginePipeline:
                 # not just DNS-shape evidence.
                 if bool(self.config.get("reactive_capture_arp_sweep_trigger_enabled", True)) \
                         and any(ev.type == "arp_sweep" for ev in threat_signal_ev):
-                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="arp_sweep")
+                    self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="arp_sweep",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
                 if ml_score > 0.90:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
@@ -714,7 +789,11 @@ class EnginePipeline:
                 # controls capture cost, not how eagerly any one source fires.
                 if bool(self.config.get("reactive_capture_dns_trigger_enabled", True)) \
                         and decision.get("decision_path", "benign") != "benign":
-                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="dns_suspicion")
+                    self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="dns_suspicion",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
 
@@ -1020,7 +1099,11 @@ class EnginePipeline:
                         # false positive, so there's no real incident window to capture.
                         if bool(self.config.get("reactive_capture_high_severity_trigger_enabled", True)) \
                                 and telegram_worthy and not fp_verdict["suppress"]:
-                            self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="high_severity")
+                            self.reactive_capture.try_dispatch(
+                        self.config, self.zeek_fx, trigger_reason="high_severity",
+                        state_manager=self.state_manager, evidence_store=self.evidence_store,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                    )
 
                         # PHASE 21D3: second feed point for the local confirmed-intel store
                         # (fp_engine.py's Stage-1 CONFIRMED_THREAT is the first) -- a HIGH/
@@ -1066,137 +1149,98 @@ class EnginePipeline:
                                 else:
                                     threat_dns_header = "🕒 *Threat-Filtered DNS Sequence:*"
 
-                                # Format FP Confidence % and Operator Recommendation
                                 fp_pct = int(fp_verdict.get("confidence", 0.0) * 100)
-                                threat_pct = 100 - fp_pct
 
-                                # PHASE 15 FIX: this badge used to be driven ENTIRELY by fp_verdict's
-                                # own confidence, with no reference to decision["state"] at all -- so a
-                                # SUSPICIOUS/monitor verdict (a single uncorroborated signal, never
-                                # eligible for containment -- see ips.py's decision_state gate) could
-                                # still show "High Threat Confidence - Immediate remedy recommended.",
-                                # directly contradicting both the verdict shown a few lines above AND
-                                # the fact that nothing was actually blocked. Decision state -- the
-                                # authoritative, corroborated verdict -- now takes precedence; CL-AFPE's
-                                # own confidence only refines within states it can't override.
+                                # PHASE 21-ALERT-REDESIGN: this whole block only runs inside
+                                # `if not fp_verdict["suppress"] and telegram_worthy:` (Phase A's
+                                # gate), so decision_state_for_rec here is ALWAYS HIGH or CRITICAL
+                                # -- the old 4-branch badge below this comment used to also handle
+                                # SUSPICIOUS/low-confidence cases that literally cannot reach this
+                                # code anymore since that gate landed. Two real cases remain: CL-AFPE
+                                # leans benign (>=0.75) despite the corroborated evidence still
+                                # reaching HIGH/CRITICAL -- genuinely worth flagging as tension, not
+                                # papering over -- or the normal case, where N independent evidence
+                                # groups corroborated before containment authorized. See
+                                # get_device_suppress_threshold()/mitigate() for why the SAME
+                                # decision_state -- not fp_verdict alone -- is what actually
+                                # authorizes containment (PHASE 15's original point, preserved here).
                                 decision_state_for_rec = decision.get("state", DecisionState.SUSPICIOUS)
-                                if fp_verdict["confidence"] >= 0.75:
-                                    rec_badge = "🟢 *Recommendation:* Likely False Positive – Safe to ignore."
-                                elif decision_state_for_rec in (DecisionState.HIGH, DecisionState.CRITICAL):
-                                    rec_badge = "🚨 *Recommendation:* High Threat Confidence – Immediate remedy recommended."
-                                elif fp_verdict["confidence"] >= 0.55:
-                                    rec_badge = "🟡 *Recommendation:* Low Confidence Alert – Monitor for repeated pattern."
-                                else:
-                                    rec_badge = "🟡 *Recommendation:* Monitor – Insufficient independent corroboration for containment."
+                                severity_badge = "🔴 CRITICAL" if decision_state_for_rec == DecisionState.CRITICAL else "🟠 HIGH"
 
-                                # PHASE 8 FIX: this used to read decision["hypotheses"]["attack"]["name"] —
-                                # the behavioral hypothesis engine's best guess, which falls back to the
-                                # generic label "DIRECT_IOC_HIT" whenever no attack hypothesis's own evidence
-                                # matched, even when the real trigger was a reputation-tier hard-stop or plain
-                                # decision-engine explanation. That's how one alert could headline "THREAT:
-                                # DIRECT_IOC_HIT (99% Confidence)" while the very next line said "Trigger:
-                                # Confirmed Malicious IOC" — two different sources describing the same
-                                # verdict. decision["explanation"] (== primary_sig) is what actually decided
-                                # the state below; use that for both so they can never disagree.
+                                # PHASE 8 FIX (still true): decision["explanation"] (== primary_sig) is
+                                # what actually decided the state, not the hypothesis engine's raw best
+                                # guess (which falls back to a generic label whenever no attack
+                                # hypothesis's own evidence matched) -- keeping this the single source
+                                # for the headline name prevents the alert from naming two different
+                                # "causes" in two different places.
                                 threat_name = decision.get("explanation", primary_sig)
                                 threat_conf_pct = int(decision.get('threat_confidence', 0) * 100)
 
-                                alert_msg = (
-                                    f"🚨 *[ALERT] {hostname} ({client_ip})*\n\n"
-                                    f"🧠 *THREAT:* {threat_name} ({threat_conf_pct}% Confidence)\n"
-                                    f"↳ Trigger: `{primary_sig}`\n"
-                                    f"↳ Risk Score: `{risk:.2f}` (Threshold: `{alert_threshold:.2f}`)\n\n"
-                                    # PHASE 20 FIX: a live-data audit found operators (and Ollama's own
-                                    # LLM analysis) reading the raw per-signal value below (e.g.
-                                    # "dns_tunnel_v2 (63.0)") as if it were on the same 0-100 scale as
-                                    # the THREAT confidence % above it -- it isn't; it's each detector's
-                                    # own internal magnitude (a count, an entropy score, a byte z-score,
-                                    # ...), never normalized across detectors. Labeled explicitly so the
-                                    # two numbers can't be read as comparable.
-                                    f"🔍 *CAUSE / EVIDENCE* _(raw per-signal values, not probabilities — only the % above is a confidence)_\n"
-                                )
-                            
                                 # PHASE 6: clear counters for every known address of this device — leaving
                                 # stale counters on the non-current address family would let it immediately
                                 # re-trigger from leftover state on its next cycle.
                                 self.zeek_fx.reset_client(known_ips_snapshot)
                                 state.rolling.reset()
                                 state.last_alert_time = now
-                            
+
+                                # One entry per INDEPENDENT evidence group (the strongest signal in
+                                # each), not one per raw evidence item -- this is also the exact
+                                # corroboration count the decision engine itself required to reach
+                                # HIGH/CRITICAL, so citing len(grouped_evidence) in the recommendation
+                                # below is the real number that authorized containment, not a guess.
                                 grouped_evidence = {}
                                 for ev in active_evidence:
                                     if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
                                         grouped_evidence[ev.independence_group] = ev
-                                    
-                                for group, ev in grouped_evidence.items():
-                                    # PHASE 20 FIX: `group` and `ev.type` are frequently the identical
-                                    # string (e.g. "dns_tunnel_v2: dns_tunnel_v2") -- drop the stutter.
-                                    # When the detector attached a specific domain (Evidence.domain,
-                                    # populated by threat_signals.py for dns_tunnel_v2's sub-signals),
-                                    # show it here: this is the domain THIS evidence actually came from,
-                                    # which the alert's own "Target" line below is NOT guaranteed to be
-                                    # (Target is "most notable domain in the window," picked
-                                    # independently of which evidence fired -- a live-data audit found
-                                    # these can be two different domains in the same alert).
-                                    label = ev.type if group == ev.type else f"{group}: {ev.type}"
-                                    domain_suffix = f" [domain: `{ev.domain}`]" if getattr(ev, "domain", None) else ""
-                                    alert_msg += f"- `{label}` ({ev.value:.1f}){domain_suffix}\n"
-                                
+                                why_lines = [_describe_evidence(ev) for ev in
+                                             sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
-                                
+
                                 target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
-                                alert_msg += (
-                                    f"- Target: `{target_display}` ({service_name} / Port {dest_port})\n"
+
+                                action_summary = ("auto-blocked" if "BLOCKED" in containment_status
+                                                   else "awaiting approval" if "WAITING FOR APPROVAL" in containment_status
+                                                   else "monitoring only")
+
+                                if fp_verdict["confidence"] >= 0.75:
+                                    recommendation = (
+                                        f"⚠️ *Possibly a false positive despite reaching {decision_state_for_rec}.* "
+                                        f"CL-AFPE's own check leans benign ({fp_pct}%) -- review before acting."
+                                    )
+                                else:
+                                    recommendation = (
+                                        f"➡️ *Investigate.* {len(grouped_evidence)} independent signal(s) "
+                                        f"corroborated before containment fired."
+                                    )
+
+                                alert_msg = (
+                                    f"🚨 *THREAT — {hostname}* ({client_ip})\n\n"
+                                    f"{severity_badge}  *{threat_name}* — {action_summary}\n"
+                                    f"{recommendation}\n"
+                                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📍 *WHAT HAPPENED* _(facts)_\n"
+                                    f"- Contacted `{target_display}` ({service_name} / Port {dest_port})\n"
                                     f"- Application: `{app_name}`\n"
                                 )
-                            
                                 if scanned_ports:
                                     alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}`\n"
+                                alert_msg += f"- Action taken: `{containment_status}`\n"
+
+                                alert_msg += "\n🧠 *WHY* _(evidence, strongest first)_\n"
+                                for line in why_lines:
+                                    alert_msg += f"- {line}\n"
+
+                                alert_msg += (
+                                    f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"📊 *CONFIDENCE* _(two different questions — not directly comparable)_\n"
+                                    f"- Is this really the attack pattern? → `{threat_conf_pct}%` "
+                                    f"_({len(grouped_evidence)} independent signal(s) agree)_\n"
+                                    f"- Could this still be a false positive? → `{fp_pct}%` "
+                                    f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})_\n"
+                                )
 
                                 if threat_dns_str and "No suspicious" not in threat_dns_str:
-                                    alert_msg += f"\n{threat_dns_header}\n{threat_dns_str}\n"
-
-                                alert_msg += (
-                                    f"\n🛡️ *RESPONSE*\n"
-                                    f"- Action: `{containment_status}`\n"
-                                )
-
-                                # PHASE 8 FIX: this section used to append a standalone
-                                # "AI Analysis: X% FP / Y% Threat" line plus an unrelated
-                                # "Verification: Required" flag — two independently-computed
-                                # subsystems (decision_engine's hypothesis/reputation verdict
-                                # above, and fp_engine's own 3-stage ML verdict) concatenated
-                                # with zero reconciliation. That's mechanically how one event
-                                # read "99% Confirmed" + "32% Threat" + "Low Confidence Alert"
-                                # in the same message. Both are now shown as an explicit,
-                                # ordered trail — what was checked, at each stage, and why —
-                                # instead of two bare, sometimes-disagreeing percentages.
-                                alert_msg += "\n🧭 *REASONING (Decision Engine)*\n"
-                                for step in decision.get("reasoning_trail", []):
-                                    alert_msg += f"- {step}\n"
-
-                                fp_reasons = fp_verdict.get("reasons", [])
-                                if fp_reasons:
-                                    alert_msg += (
-                                        f"\n🩺 *FALSE-POSITIVE CHECK "
-                                        f"(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})*\n"
-                                    )
-                                    for reason in fp_reasons:
-                                        alert_msg += f"- {reason}\n"
-
-                                # PHASE 10 FIX: labeled explicitly per third-party review feedback
-                                # — this and the headline "{threat_conf_pct}% Confidence" are two
-                                # independently-computed numbers measuring different things (the
-                                # decision engine's evidence-based verdict vs. CL-AFPE's statistical
-                                # benign-context estimate). Printing them side by side as bare
-                                # percentages with no labels read as a contradiction; naming which
-                                # is which removes the ambiguity without changing either number.
-                                alert_msg += (
-                                    f"\n- CL-AFPE benign-context estimate: `{fp_pct}%` "
-                                    f"(independent ML/embedding score — not the same measurement "
-                                    f"as the {threat_conf_pct}% threat confidence above)\n"
-                                )
-                                alert_msg += f"\n{rec_badge}"
+                                    alert_msg += f"\n━━━━━━━━━━━━━━━━━━━━\n{threat_dns_header}\n{threat_dns_str}\n"
 
 
                                 reply_markup = None

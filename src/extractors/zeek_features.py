@@ -258,6 +258,16 @@ class ZeekFeatureExtractor:
         self.wired_probe_ips = wired_probe_ips if wired_probe_ips is not None else set()
         self._known_sources_per_wired_ip = defaultdict(set)
         self._new_wired_probe_sources = []
+        # PHASE 21-LGBM-EXTEND: the most recent dns_evasion.py blind-spot-audit
+        # unexplained-connection ratio per IP (0.0-1.0), so LightGBM's feature vector
+        # (train_fp_classifier.py) has something to actually learn from -- previously
+        # dns_evasion_anomaly evidence reached the evidence store/decision engine but
+        # never touched the `features` dict the FP classifier is trained on at all. A
+        # plain dict, not a rolling window: a burst-audit result is a discrete "as of
+        # the last capture" fact, not a continuous per-packet stream, so it's simply
+        # overwritten by the next burst (or cleared on reset_client()) rather than
+        # aged out on a timer the way _arp_targets/_conn_ts are.
+        self._dns_evasion_ratio = {}   # ip -> most recent unexplained-connection ratio [0.0, 1.0]
         self._wire_dns_resolutions = {}
         self._mac_bindings = {}
         # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
@@ -618,6 +628,15 @@ class ZeekFeatureExtractor:
         self._new_wired_probe_sources = []
         return out
 
+    def set_dns_evasion_ratio(self, ip: str, ratio: float) -> None:
+        """Records the most recent dns_evasion.py blind-spot-audit result for one IP --
+        see _dns_evasion_ratio's __init__ comment for why this is a plain overwrite,
+        not a rolling structure. Called by fritzbox_capture.py's
+        run_dns_evasion_audit() right after a burst produces (or clears) a finding."""
+        if not ip or ip == "unknown":
+            return
+        self._dns_evasion_ratio[ip] = max(0.0, min(1.0, float(ratio)))
+
     def _process_ssl(self, src: str, ev: dict) -> None:
         ja3, ja4, ts = ev.get("ja3", ""), ev.get("ja4", ""), ev.get("ts", time.time())
         is_malicious_ja3, is_malicious_ja4 = False, False
@@ -758,6 +777,11 @@ class ZeekFeatureExtractor:
             # (pruned by prune()) -- host-discovery-sweep signal, broadcast so it reaches
             # WiFi devices already.
             "zeek_arp_sweep_count": len({tpa for ip in ips for _ts, tpa in self._arp_targets.get(ip, [])}),
+            # PHASE 21-LGBM-EXTEND: most recent dns_evasion.py finding across this
+            # device's known addresses (max, not sum -- it's a ratio per burst, not an
+            # accumulating count). 0.0 for a device with no reactive-capture burst yet,
+            # same "no data yet" semantics every other zero-default here already has.
+            "zeek_dns_evasion_ratio": max((self._dns_evasion_ratio.get(ip, 0.0) for ip in ips), default=0.0),
             "zeek_app_protocol_weight": app_weight,
             "last_dest_ip": meta.get("last_dest_ip", "unknown"),
             "last_dest_port": port,
@@ -783,6 +807,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
                 if ip in d:
                     del d[ip]

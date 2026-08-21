@@ -21,7 +21,7 @@ INPUT DATA SOURCES:
   2. state/alerts.json (legacy fallback)
   3. state/autonomous_muted.jsonl (auto-suppressed false positives)
 
-FEATURE MATRIX EXTRACTED (9 normalized dimensions):
+FEATURE MATRIX EXTRACTED (11 normalized dimensions):
   [0] Tranco global rank score
   [1] First label entropy score
   [2] Max subdomain label length
@@ -31,6 +31,8 @@ FEATURE MATRIX EXTRACTED (9 normalized dimensions):
   [6] Lateral movement normalized
   [7] Port scan intensity normalized
   [8] Application protocol weight
+  [9] ARP-sweep intensity normalized (PHASE 21-LGBM-EXTEND)
+  [10] DNS-evasion unexplained-connection ratio (PHASE 21-LGBM-EXTEND)
 
 USAGE:
   Manual run:      python src/scripts/train_fp_classifier.py
@@ -66,7 +68,7 @@ DEV_TYPE_WEIGHTS = {
     "unknown": 0.3,
 }
 
-FP_FEATURE_DIM = 9
+FP_FEATURE_DIM = 11
 FP_FEATURE_NAMES = (
     "tranco_rank_norm",
     "label_entropy_norm",
@@ -77,26 +79,36 @@ FP_FEATURE_NAMES = (
     "lateral_moves_norm",
     "port_scans_norm",
     "app_protocol_norm",
+    "arp_sweep_norm",
+    "dns_evasion_ratio",
 )
 
 MAX_REAL_SAMPLES_PER_CLASS = 5000
 
-# Synthetic baseline samples used to seed training if historical dataset is small (9 features)
+# Synthetic baseline samples used to seed training if historical dataset is small
+# (11 features -- PHASE 21-LGBM-EXTEND added arp_sweep_norm/dns_evasion_ratio; existing
+# rows keep their original 9 values and simply carry 0.0 for both new columns, since
+# none of the original illustrative scenarios involved an ARP sweep or a DNS-evasion
+# finding -- only the two new rows below actually exercise the new dimensions).
 SYNTHETIC_X = [
-    [0.0, 0.90, 0.90, 0.80, 0.1, 0.0, 0.0, 0.0, 0.2],  # Threat: IoT, DGA domain
-    [0.1, 0.85, 0.80, 0.70, 0.1, 0.0, 0.0, 0.0, 0.2],  # Threat: IoT, suspicious C2
-    [0.0, 0.88, 0.85, 0.90, 0.3, 0.0, 0.0, 0.0, 0.4],  # Threat: Unknown device, tunneling
-    [0.2, 0.75, 0.70, 0.60, 0.2, 0.0, 0.8, 0.9, 0.6],  # Threat: Printer, unusual scan
-    [0.9, 0.20, 0.30, 0.00, 0.5, 0.0, 0.0, 0.0, 0.2],  # FP: Laptop, google.com
-    [0.8, 0.30, 0.40, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2],  # FP: Laptop, apple.com
-    [0.7, 0.35, 0.50, 0.00, 0.5, 1.0, 0.0, 0.0, 0.2],  # FP: Laptop, trusted FP domain
-    [0.6, 0.40, 0.50, 0.10, 0.4, 0.0, 0.0, 0.0, 0.2],  # FP: Phone, normal telemetry
-    [0.5, 0.30, 0.30, 0.00, 0.4, 1.0, 0.0, 0.0, 0.2],  # FP: Phone, trusted FP domain
-    [0.85, 0.25, 0.35, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2], # FP: Laptop, Microsoft CDN
-    [0.75, 0.30, 0.60, 0.00, 0.5, 0.0, 0.0, 0.0, 0.2], # FP: Laptop, sentry.io ingest
-    [0.65, 0.28, 0.55, 0.02, 0.5, 0.0, 0.1, 0.0, 0.2], # FP: Laptop, bitdefender nimbus
+    [0.0, 0.90, 0.90, 0.80, 0.1, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # Threat: IoT, DGA domain
+    [0.1, 0.85, 0.80, 0.70, 0.1, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # Threat: IoT, suspicious C2
+    [0.0, 0.88, 0.85, 0.90, 0.3, 0.0, 0.0, 0.0, 0.4, 0.0, 0.0],  # Threat: Unknown device, tunneling
+    [0.2, 0.75, 0.70, 0.60, 0.2, 0.0, 0.8, 0.9, 0.6, 0.0, 0.0],  # Threat: Printer, unusual scan
+    [0.3, 0.40, 0.30, 0.10, 0.3, 0.0, 0.0, 0.0, 0.2, 0.9, 0.0],  # Threat: unknown device, ARP host-discovery sweep
+    [0.4, 0.30, 0.30, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.8],  # Threat: laptop, real traffic with no matching DNS history
+    [0.9, 0.20, 0.30, 0.00, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # FP: Laptop, google.com
+    [0.8, 0.30, 0.40, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # FP: Laptop, apple.com
+    [0.7, 0.35, 0.50, 0.00, 0.5, 1.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # FP: Laptop, trusted FP domain
+    [0.6, 0.40, 0.50, 0.10, 0.4, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # FP: Phone, normal telemetry
+    [0.5, 0.30, 0.30, 0.00, 0.4, 1.0, 0.0, 0.0, 0.2, 0.0, 0.0],  # FP: Phone, trusted FP domain
+    [0.85, 0.25, 0.35, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0], # FP: Laptop, Microsoft CDN
+    [0.75, 0.30, 0.60, 0.00, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.0], # FP: Laptop, sentry.io ingest
+    [0.65, 0.28, 0.55, 0.02, 0.5, 0.0, 0.1, 0.0, 0.2, 0.0, 0.0], # FP: Laptop, bitdefender nimbus
+    [0.6, 0.35, 0.40, 0.05, 0.2, 0.0, 0.0, 0.0, 0.2, 0.3, 0.0],  # FP: IoT hub, legitimate startup ARP scan (low sweep count)
+    [0.7, 0.30, 0.35, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.2],  # FP: laptop on a recognized VPN, low unexplained ratio
 ]
-SYNTHETIC_Y = [0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1]
+SYNTHETIC_Y = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
 
 
 def _safe_float(val, default=0.0) -> float:
@@ -151,7 +163,7 @@ def _extract_payload(doc: dict) -> dict:
 
 
 def extract_features_from_alert(doc: dict) -> list:
-    """Extracts the normalized 9 feature dimensions from an alert payload."""
+    """Extracts the normalized 11 feature dimensions from an alert payload."""
     src = _extract_payload(doc)
     features = src.get("features", {})
     context = src.get("network_context", {})
@@ -188,7 +200,21 @@ def extract_features_from_alert(doc: dict) -> list:
     f7_port_scans = min(_safe_float(features.get("zeek_s0_rej_count", 0), 0.0) / 50.0, 1.0)
     f8_app_proto = min(max(_safe_float(features.get("zeek_app_protocol_weight", 0.2), 0.2), 0.0), 1.0)
 
-    row = [f0_tranco, f1_entropy, f2_label_len, f3_out_z, f4_dev_type, f5_hist_fp, f6_lateral, f7_port_scans, f8_app_proto]
+    # PHASE 21-LGBM-EXTEND: features 9, 10 -- ARP-sweep and DNS-evasion signals. Both
+    # previously reached alerts.json's `features` dict (zeek_arp_sweep_count/
+    # zeek_dns_evasion_ratio) but were invisible to LightGBM specifically, since this
+    # 9-dim vector never read those keys -- an earlier session claim that they were
+    # "inherited for free" by the classifier was wrong for this stage; true only for
+    # Ollama (which sees the full raw payload) and the training-SET inclusion, not the
+    # fixed-shape feature vector itself. 20.0 ceiling on the sweep count is roughly 2.5x
+    # the default arp_sweep_unique_targets_threshold (8), so a device right at the
+    # detection threshold sits near the low end of this feature's range, not already
+    # saturated at 1.0.
+    f9_arp_sweep = min(_safe_float(features.get("zeek_arp_sweep_count", 0), 0.0) / 20.0, 1.0)
+    f10_dns_evasion = min(max(_safe_float(features.get("zeek_dns_evasion_ratio", 0.0), 0.0), 0.0), 1.0)
+
+    row = [f0_tranco, f1_entropy, f2_label_len, f3_out_z, f4_dev_type, f5_hist_fp, f6_lateral, f7_port_scans,
+           f8_app_proto, f9_arp_sweep, f10_dns_evasion]
     if len(row) != FP_FEATURE_DIM:
         raise ValueError(f"Feature row dimension mismatch: got {len(row)}, expected {FP_FEATURE_DIM}")
     return row
@@ -841,7 +867,7 @@ def load_dataset(state_dir: Path) -> tuple:
 
 
 def train_and_export_onnx(state_dir: Path) -> bool:
-    """Trains GradientBoostingClassifier on 9 features and exports to state/models/fp_classifier.onnx."""
+    """Trains GradientBoostingClassifier on 11 features and exports to state/models/fp_classifier.onnx."""
     X, y, stats = load_dataset(state_dir)
     LOGGER.info(
         "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d "

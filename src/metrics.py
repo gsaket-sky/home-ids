@@ -154,6 +154,12 @@ jitter_cv_metric = Gauge("home_ids_jitter_cv_score", "Timing uniformity coeffici
 ndr_tcp_scan_metric = Gauge("home_ids_zeek_s0_rej_count", "Rejected or unanswered TCP connection attempts (Port Scans)", _DEV_LABELS)
 ndr_max_duration_metric = Gauge("home_ids_zeek_max_duration", "Maximum continuous connection session duration in seconds", _DEV_LABELS)
 ndr_honeypot_hits_metric = Gauge("home_ids_zeek_honeypot_hits", "Connections to internal deception honeypots", _DEV_LABELS)
+# PHASE 21-METRICS: ARP host-discovery sweep count and DNS-evasion unexplained-connection
+# ratio were computed and fed into detection (threat_signals.py's arp_sweep evidence,
+# fp_engine's LightGBM feature 9/10) but had no Prometheus visibility at all -- an
+# operator watching Grafana had no way to see either signal for any device, ever.
+ndr_arp_sweep_metric = Gauge("home_ids_zeek_arp_sweep_count", "Distinct hosts ARP-requested by this device in the current window (host-discovery sweep signal)", _DEV_LABELS)
+ndr_dns_evasion_ratio_metric = Gauge("home_ids_zeek_dns_evasion_ratio", "Most recent reactive-capture blind-spot-audit unexplained-connection ratio [0.0-1.0] for this device", _DEV_LABELS)
 # PHASE 18 FIX (CARDINALITY + mislabel): dropped "attacker_ip" -- unbounded, and the
 # only call site was actually passing the local device_id there, not a real attacker IP
 # (a pre-existing mislabel, independent of the cardinality fix). Detail on which IP
@@ -270,6 +276,41 @@ autotune_calibration_total = Gauge(
     ["scope", "outcome"]
 )
 autotune_evidence_count = Gauge("home_ids_autotune_evidence_count", "Pooled correction sample count feeding the next calibration pass", ["scope", "kind"])
+# PHASE 21-METRICS: ARP-sweep threshold calibration (train_fp_classifier.py's
+# calibrate_arp_sweep_threshold()) is a SEPARATE bidirectional rule from the suppress-
+# threshold one above -- kept as its own metrics rather than overloading the existing
+# gauges' label shape (which would force every existing suppress-threshold call site to
+# also start supplying a new disambiguating label, a bigger and riskier blast radius
+# than three small parallel metrics).
+autotune_arp_sweep_threshold_effective = Gauge("home_ids_autotune_arp_sweep_threshold_effective", "Live effective per-device arp_sweep_unique_targets_threshold, only set for devices with their own calibrated profile", ["device", "hostname"])
+autotune_arp_sweep_calibration_total = Gauge("home_ids_autotune_arp_sweep_calibration_total", "Cumulative arp-sweep-threshold calibration pass outcomes per device (applied/no_change_needed/insufficient_samples)", ["device", "outcome"])
+autotune_arp_sweep_evidence_count = Gauge("home_ids_autotune_arp_sweep_evidence_count", "Per-device CONNECTION_ABUSE correction/confirmation counts feeding arp-sweep threshold calibration", ["device", "kind"])
+
+# ===========================================================================
+# PHASE 21-METRICS: Reactive Capture (Fritzbox burst) Transparency
+# ===========================================================================
+# The whole reactive-capture subsystem (Phase C/D of the reactive-capture plan) had
+# ZERO Prometheus visibility before this -- an operator watching Grafana had no way to
+# see whether triggers were firing, being deferred by the shared hourly budget,
+# succeeding, or failing at any stage.
+reactive_capture_bursts_total = Counter(
+    "home_ids_reactive_capture_bursts_total",
+    "Reactive-capture trigger attempts (outcome=dispatched: budget allowed it and a "
+    "burst actually ran in the background; outcome=deferred: shared hourly budget was "
+    "exhausted)",
+    ["trigger_reason", "outcome"]
+)
+reactive_capture_bytes_total = Counter("home_ids_reactive_capture_bytes_total", "Cumulative raw AVM pcap bytes captured per radio", ["radio"])
+reactive_capture_errors_total = Counter("home_ids_reactive_capture_errors_total", "Reactive-capture burst failures by stage", ["stage"])
+reactive_capture_last_burst_timestamp = Gauge("home_ids_reactive_capture_last_burst_timestamp", "Unix timestamp of the most recently completed reactive-capture burst")
+reactive_capture_dns_evasion_findings_total = Counter("home_ids_reactive_capture_dns_evasion_findings_total", "Total dns_evasion_anomaly findings produced across all devices by reactive-capture bursts")
+reactive_capture_stale_files_removed_total = Counter("home_ids_reactive_capture_stale_files_removed_total", "Orphaned capture files/directories removed by the periodic disk-safety sweep (process-crash recovery, not the normal per-burst cleanup path)")
+
+# ===========================================================================
+# PHASE 21-METRICS: Local Confirmed-Intel Store Transparency (Phase D3)
+# ===========================================================================
+local_confirmed_intel_size = Gauge("home_ids_local_confirmed_intel_size", "Current non-expired entry count in the self-growing local confirmed-threat store", ["kind"])
+local_confirmed_intel_hits_total = Counter("home_ids_local_confirmed_intel_hits_total", "Stage-1 hard-stops fired by a match against a PREVIOUSLY-confirmed IOC (a different device benefiting from another device's confirmed threat)")
 
 # ===========================================================================
 # PHASE 18: Ollama (Brain 3) Run Transparency

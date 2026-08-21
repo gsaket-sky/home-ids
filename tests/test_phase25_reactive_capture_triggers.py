@@ -62,7 +62,7 @@ check("budget resets once the hourly window has elapsed, even if the prior windo
 # Section B: ReactiveCaptureDispatcher.try_dispatch -- actually fires the capture fn
 # ═══════════════════════════════════════════════════════════════════════════════════
 calls = []
-def fake_capture(config, zeek_fx, out_dir, zeek_bin="/opt/zeek/bin/zeek", trigger_reason="unspecified"):
+def fake_capture(config, zeek_fx, out_dir, zeek_bin="/opt/zeek/bin/zeek", trigger_reason="unspecified", **kwargs):
     calls.append({"trigger_reason": trigger_reason, "out_dir": out_dir, "zeek_bin": zeek_bin})
 
 d4 = ReactiveCaptureDispatcher(capture_fn=fake_capture)
@@ -269,6 +269,16 @@ check("wired-probe trigger call site exists with the correct trigger_reason",
       'trigger_reason="wired_probe"' in pipeline_src)
 check("reactive_capture_wired_probe_trigger_enabled gates the wired-probe trigger",
       "reactive_capture_wired_probe_trigger_enabled" in pipeline_src)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section G: pipeline.py wires the disk-safety stale-file sweep into the same periodic
+# spot-check interval (piggybacked, not a separate timer).
+# ═══════════════════════════════════════════════════════════════════════════════════
+check("cleanup_stale_scratch_files is imported from fritzbox_capture.py",
+      "from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files" in pipeline_src)
+check("the stale-file sweep is actually invoked, not just imported",
+      "cleanup_stale_scratch_files(scratch_dir)" in pipeline_src)
 
 
 if FAILURES:

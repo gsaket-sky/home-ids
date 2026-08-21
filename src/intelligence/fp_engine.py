@@ -70,6 +70,8 @@ from metrics import (
     fp_engine_stage3_embed_hits,
     fp_engine_domains_immunized_total,
     fp_engine_sigma_shifts_total,
+    local_confirmed_intel_size,
+    local_confirmed_intel_hits_total,
 )
 from intelligence.local_intel import LocalConfirmedIntel
 
@@ -687,6 +689,11 @@ class AutonomousFPEngine:
                 self.local_intel.record("domain", base_domain, device_id, reason=reason)
             if dest_ip and dest_ip != "unknown":
                 self.local_intel.record("ip", dest_ip, device_id, reason=reason)
+            # PHASE 21-METRICS: this subsystem had zero Prometheus visibility before --
+            # cheap to just re-set both gauges from the store's own current size every
+            # call rather than trying to track deltas separately.
+            local_confirmed_intel_size.labels(kind="ip").set(len(self.local_intel.all_confirmed("ip")))
+            local_confirmed_intel_size.labels(kind="domain").set(len(self.local_intel.all_confirmed("domain")))
         except Exception as exc:
             LOGGER.error("Failed to record confirmed intel: %s", exc)
 
@@ -820,6 +827,7 @@ class AutonomousFPEngine:
                 f"{time.strftime('%Y-%m-%d', time.localtime(hit_entry['first_confirmed']))})"
             )
             LOGGER.warning("[Stage 1] %s: local confirmed-intel match on '%s'", hostname, hit_target)
+            local_confirmed_intel_hits_total.inc()
 
         return triggers if triggers else None
 
@@ -833,7 +841,12 @@ class AutonomousFPEngine:
         """
         Run the LightGBM ONNX model to produce P(False Positive).
 
-        Feature vector construction (9 dimensions):
+        Feature vector construction (11 dimensions -- PHASE 21-LGBM-EXTEND added [9]/[10];
+        this MUST stay in lockstep with train_fp_classifier.py's
+        extract_features_from_alert(), which builds the exact same 11 values at
+        training time -- there is no shared helper between the two, by design (this
+        one runs in the always-on pipeline process, the other in a separate weekly
+        retrain script), so a change to one without the other silently skews inference):
           [0] tranco_rank_norm    : 0.0 (unknown domain) → 1.0 (rank #1 globally)
           [1] label_entropy_norm  : 0.0 (low entropy, human-readable) → 1.0 (high entropy)
           [2] label_len_norm      : 0.0 (short, normal label) → 1.0 (>60 chars, tunneling)
@@ -843,6 +856,8 @@ class AutonomousFPEngine:
           [6] lateral_moves_norm  : min(zeek_lateral_moves / 10.0, 1.0)
           [7] port_scans_norm     : min(zeek_s0_rej_count / 50.0, 1.0)
           [8] app_proto_norm      : application protocol weight [0.2, 1.0]
+          [9] arp_sweep_norm      : min(zeek_arp_sweep_count / 20.0, 1.0)
+          [10] dns_evasion_ratio  : zeek_dns_evasion_ratio, clamped [0.0, 1.0]
 
         Returns:
             float P(FP) in [0, 1] if model is loaded.
@@ -893,7 +908,16 @@ class AutonomousFPEngine:
             f7_port_scans = min(float(features.get("zeek_s0_rej_count", 0) or 0) / 50.0, 1.0)
             f8_app_proto = min(max(float(features.get("zeek_app_protocol_weight", 0.2) or 0.2), 0.0), 1.0)
 
-            # Check ONNX model expected input shape (6-feature legacy vs 9-feature multi-threat)
+            # PHASE 21-LGBM-EXTEND Features 9, 10: ARP-sweep intensity, DNS-evasion ratio
+            # -- must exactly match train_fp_classifier.py's extract_features_from_alert(),
+            # see this method's docstring.
+            f9_arp_sweep = min(float(features.get("zeek_arp_sweep_count", 0) or 0) / 20.0, 1.0)
+            f10_dns_evasion = min(max(float(features.get("zeek_dns_evasion_ratio", 0.0) or 0.0), 0.0), 1.0)
+
+            # Check ONNX model expected input shape (6-feature legacy / 9-feature
+            # multi-threat / 11-feature ARP-sweep+DNS-evasion -- an older exported model
+            # still loads and runs correctly on whichever shape it was actually trained
+            # with, it just won't have the new-dimension signal until retrained).
             input_spec = self._lgbm_session.get_inputs()[0]
             input_name = input_spec.name
             expected_feats = input_spec.shape[1] if (len(input_spec.shape) > 1 and isinstance(input_spec.shape[1], int)) else 6
@@ -901,6 +925,11 @@ class AutonomousFPEngine:
             if expected_feats == 6:
                 feat_vec = np.array([[f0_tranco, f1_entropy, f2_label_len,
                                       f3_out_z, f4_dev_type, f5_hist_fp]], dtype=np.float32)
+            elif expected_feats == 11:
+                feat_vec = np.array([[f0_tranco, f1_entropy, f2_label_len,
+                                      f3_out_z, f4_dev_type, f5_hist_fp,
+                                      f6_lateral, f7_port_scans, f8_app_proto,
+                                      f9_arp_sweep, f10_dns_evasion]], dtype=np.float32)
             else:
                 feat_vec = np.array([[f0_tranco, f1_entropy, f2_label_len,
                                       f3_out_z, f4_dev_type, f5_hist_fp,

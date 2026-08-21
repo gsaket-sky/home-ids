@@ -66,15 +66,11 @@ paths:
   # "unknown" (same as leaving this blank). [RESTART]
   geoip_asn_db: models/GeoLite2-ASN.mmdb
 
-  # Pi-hole's own SQLite FTL database, read directly for DNS query telemetry.
-  # This is Pi-hole's system path, not something you control — leave as-is
-  # unless your Pi-hole installation is nonstandard. [RESTART]
-  pihole_db: /etc/pihole/pihole-FTL.db
-
-  # Directory Zeek writes its live logs (conn.log, dns.log, etc.) into. Zeek's
-  # system path — leave as-is unless your Zeek deployment is nonstandard.
-  # [RESTART]
-  zeek_log_dir: /opt/zeek/logs/current
+  # pihole_db and zeek_log_dir moved to the "external_system_paths" section at the
+  # very bottom of this file (with reactive_capture_zeek_bin) -- they describe OTHER
+  # software's installation layout on this machine, not this app's own data, and
+  # getting them wrong is a genuinely different kind of mistake than relocating one
+  # of THIS app's own relative files. See that section's warning banner.
 
   # Every evaluated alert is appended here (also the training data source for
   # the weekly false-positive classifier retrain). [RESTART]
@@ -492,11 +488,18 @@ reactive_capture:
   # [LIVE]
   reactive_capture_scratch_dir: state/reactive_capture
 
-  # Path to the zeek binary used to reprocess a burst -- must be the SAME Zeek
-  # install/local.zeek policy the live deployment runs (JSON logging, mac-logging,
-  # ja3/ja4), or the burst won't get the same signals live traffic does. Default
-  # matches this repo's own INSTALL.md for a security:zeek/zeekctl install. [LIVE]
-  reactive_capture_zeek_bin: /opt/zeek/bin/zeek
+  # Disk safety: delete each burst's raw/converted pcaps and Zeek scratch logs right
+  # after ingestion (~100MB+ per burst; continuous dual-radio capture measured at
+  # ~3GB/hour live this session -- unbounded retention fills a disk over weeks). A
+  # compact permanent JSONL summary (reactive_capture_history.jsonl, in the scratch
+  # dir above) is kept regardless of this setting. Set false only if you specifically
+  # want raw pcaps retained for manual forensic analysis -- you'll need to manage
+  # their disk usage yourself. [LIVE]
+  reactive_capture_delete_after_ingest: true
+
+  # reactive_capture_zeek_bin moved to the "external_system_paths" section at the
+  # very bottom of this file, alongside pihole_db/zeek_log_dir -- same reasoning
+  # (describes YOUR Zeek installation's layout, not this app's own data).
 
 
 # -----------------------------------------------------------------------------
@@ -535,7 +538,7 @@ scheduled_jobs:
     # LLM-based alert triage summaries, every 4 hours starting at midnight.
     ollama_soc:
       enabled: true
-      cron: "0 */4 * * *"
+      cron: "30 4 * * *"
 
     # Retroactive threat-intel re-scan of recent history. 2am.
     retro_hunter:
@@ -581,3 +584,49 @@ scheduled_jobs:
 # particular, .env's HOME_SUBNET does NOT override this file's
 # network_and_devices.home_subnet, despite the similar name — to change your
 # tracked LAN subnet, edit THIS file, not .env.
+
+
+# =============================================================================
+# ⚠️  external_system_paths — DO NOT TOUCH unless you know what you are doing  ⚠️
+# =============================================================================
+# Every key above this banner is either an ordinary detection-tuning knob, or one
+# of THIS app's own relative data files (state/, models/, .env) — safe to relocate
+# freely, no outside knowledge required.
+#
+# The three keys below are DIFFERENT: they point at OTHER software's installation
+# layout on THIS specific machine (your Pi-hole install, your Zeek install) — not
+# anything Home-IDS controls or creates. They were deliberately pulled out of the
+# normal "paths" section above and placed down here, alone, so they can't be
+# casually edited alongside an ordinary tuning change.
+#
+# Get one of these wrong and the failure mode is NOT an error message pointing at
+# this file — it's DNS telemetry silently going empty (pihole_db), Zeek features
+# silently staying at zero for every device (zeek_log_dir), or every reactive-
+# capture burst silently failing (reactive_capture_zeek_bin). Confirm the REAL path
+# on your own system first (see each key's own comment for the exact command),
+# then change it here — don't guess.
+# =============================================================================
+external_system_paths:
+  # Pi-hole's own SQLite FTL database, read directly for DNS query telemetry.
+  # This is Pi-hole's system path, not something Home-IDS creates or owns.
+  # Standard for any Pi-hole install; leave as-is unless yours is nonstandard.
+  # Verify: `ls -la /etc/pihole/pihole-FTL.db` on the box actually running Pi-hole.
+  # [RESTART]
+  pihole_db: /etc/pihole/pihole-FTL.db
+
+  # Directory Zeek writes its live logs (conn.log, dns.log, etc.) into. Zeek's own
+  # system path, driven by YOUR zeekctl/node.cfg LogDir setting, not this file.
+  # Verify: `grep -i '^LogDir' /opt/zeek/etc/zeekctl.cfg` (see INSTALL.md §3
+  # for the full zeekctl-managed-install path-discovery walkthrough — the
+  # security:zeek OBS package does NOT use /etc/zeek/, a common wrong assumption
+  # from other Zeek packaging). [RESTART]
+  zeek_log_dir: /opt/zeek/logs/current
+
+  # Path to the zeek BINARY (not the log dir above) used to reprocess a reactive-
+  # capture burst offline (`<this> -r burst.pcap local`) -- must be the SAME
+  # install/local.zeek policy the live deployment runs (JSON logging, mac-logging,
+  # ja3/ja4), or a burst won't get the same signals live traffic does.
+  # Verify: `which zeek` or `zeek-config --bin_dir` on the box running the capture
+  # client. Default matches this repo's own INSTALL.md for a security:zeek/zeekctl
+  # install. [LIVE]
+  reactive_capture_zeek_bin: /opt/zeek/bin/zeek

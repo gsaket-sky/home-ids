@@ -50,6 +50,13 @@ from typing import Dict, List, Optional
 
 import requests
 
+from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
+from metrics import (
+    reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
+    reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
+    reactive_capture_stale_files_removed_total,
+)
+
 LOGGER = logging.getLogger("home_ids.fritzbox_capture")
 
 _AVM_MAGIC = 0xA1B2CD34
@@ -208,6 +215,7 @@ def run_burst(fritz_ip: str, user: str, password: str, radios: List[str], burst_
             LOGGER.warning("Capture on %s produced an empty file, skipping.", iface)
             continue
         out[iface] = paths[iface]
+        reactive_capture_bytes_total.labels(radio=iface).inc(r["bytes"])
         LOGGER.info("Capture burst on %s: %d bytes -> %s", iface, r["bytes"], paths[iface])
     return out
 
@@ -298,12 +306,18 @@ def reprocess_with_zeek(pcap_path: Path, scratch_dir: Path, zeek_bin: str = "/op
     return scratch_dir
 
 
-def ingest_zeek_logs(log_dir: Path, zeek_fx) -> Dict[str, int]:
+def ingest_zeek_logs(log_dir: Path, zeek_fx, collect_sources: set = None) -> Dict[str, int]:
     """Reads every *.log JSON-lines file zeek -r produced and feeds each event through
     zeek_fx.ingest(), tagging `_zeek_type` from the filename -- the exact same
     dispatch convention ZeekCollector._on_event uses for live tailing (see
     zeek_features.py), so a reprocessed burst flows through the identical code path
-    live traffic does. Returns {log_type: event_count} for observability/logging."""
+    live traffic does. Returns {log_type: event_count} for observability/logging.
+
+    collect_sources: optional mutable set -- when given, every conn.log event's
+    id.orig_h is added to it, so a caller can discover which devices were actually
+    present in this burst without a second pass over the logs (used by
+    capture_and_ingest() to know which devices to run the DNS-evasion blind-spot audit
+    against). Return type is unchanged either way -- purely additive."""
     counts: Dict[str, int] = {}
     for log_path in sorted(log_dir.glob("*.log")):
         etype = log_path.stem
@@ -321,6 +335,10 @@ def ingest_zeek_logs(log_dir: Path, zeek_fx) -> Dict[str, int]:
                     event["_zeek_type"] = etype
                     zeek_fx.ingest(event)
                     n += 1
+                    if collect_sources is not None and etype == "conn":
+                        src = event.get("id.orig_h")
+                        if src:
+                            collect_sources.add(src)
         except OSError as e:
             LOGGER.warning("Could not read %s: %s", log_path, e)
             continue
@@ -331,8 +349,139 @@ def ingest_zeek_logs(log_dir: Path, zeek_fx) -> Dict[str, int]:
 
 # --- Orchestration -------------------------------------------------------------------
 
+def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_ips: set,
+                           capture_ts: float, geoip_engine=None, ti_engine=None) -> Dict[str, int]:
+    """Runs dns_evasion.py's blind-spot audit for every tracked device whose client_ip
+    was actually seen in this burst -- the piece Phase C2 built and tested but never
+    actually wired into a live capture flow (found while scoping the LightGBM feature
+    extension this session; capture_and_ingest() previously stopped at ingest_zeek_logs(),
+    so dns_evasion_anomaly evidence never reached the evidence store in production
+    despite the detector and its hypothesis existing).
+
+    O(N) over tracked devices (N = get_all_device_ids()), not over burst_source_ips --
+    there's no public IP->device_id lookup on StateManager, and N is small (dozens, not
+    millions) and this only runs on a rate-limited reactive-capture budget (a handful of
+    times per hour at most), so a full scan per burst is cheap. Returns
+    {device_id: evidence_count} for observability/logging.
+    """
+    if not burst_source_ips or state_manager is None or evidence_store is None:
+        return {}
+
+    devices: Dict[str, DeviceBurstAudit] = {}
+    device_ips: Dict[str, str] = {}  # dev_id -> client_ip, so results can feed set_dns_evasion_ratio()
+    for dev_id in state_manager.get_all_device_ids():
+        try:
+            with state_manager.lock_device(dev_id) as state:
+                client_ip = getattr(state, "client_ip", "")
+                if client_ip not in burst_source_ips:
+                    continue
+                dest_ips = zeek_fx.get_dest_ips(client_ip)
+                if not dest_ips:
+                    continue
+                queried_domains = set(getattr(state.rolling, "domain_timestamps", {}).keys())
+        except KeyError:
+            continue  # device pruned between get_all_device_ids() and lock_device()
+        devices[dev_id] = DeviceBurstAudit(dest_ips=dest_ips, queried_domains=queried_domains)
+        device_ips[dev_id] = client_ip
+
+    if not devices:
+        return {}
+
+    results = audit_burst(devices, capture_ts, geoip_engine=geoip_engine, ti_engine=ti_engine)
+    counts: Dict[str, int] = {}
+    for dev_id, audit in devices.items():
+        evidence_list = results.get(dev_id, [])
+        for ev in evidence_list:
+            evidence_store.add(ev)
+        counts[dev_id] = len(evidence_list)
+        if evidence_list:
+            LOGGER.warning("🕵️ [DNS-EVASION AUDIT] %s: %d finding(s) from this capture burst.",
+                            dev_id, len(evidence_list))
+        # PHASE 21-LGBM-EXTEND: feed zeek_fx's LightGBM-consumable signal regardless of
+        # outcome -- a device with a stale nonzero ratio from an EARLIER evasive burst
+        # needs to be reset back to 0.0 once a later burst finds it clean, not left
+        # stuck at the old value forever.
+        total = len(audit.dest_ips) or 1
+        unexplained_count = evidence_list[0].value if evidence_list else 0.0
+        zeek_fx.set_dns_evasion_ratio(device_ips[dev_id], unexplained_count / total)
+    return counts
+
+
+def _cleanup_burst_files(avm_path: Path, std_path: Path, scratch: Optional[Path]) -> None:
+    """Deletes the raw/converted pcaps and Zeek scratch reprocessing directory for one
+    radio's capture, once its data is already folded into zeek_fx's rolling state (or
+    the attempt failed and there's nothing further to salvage from the raw file
+    anyway). A single burst runs ~100MB+ (continuous dual-radio capture measured at
+    ~3GB/hour live this session) -- even the budget-limited reactive design fills a
+    disk over weeks if nothing ever deletes the raw files, which nothing did before
+    this. Called unconditionally (success or failure) via a try/finally at the call
+    site. Never raises -- a cleanup failure must not fail the whole capture."""
+    for p in (avm_path, std_path):
+        try:
+            if p and p.exists():
+                p.unlink()
+        except OSError as e:
+            LOGGER.warning("Could not delete %s: %s", p, e)
+    if scratch is not None:
+        try:
+            if scratch.exists():
+                shutil.rmtree(scratch, ignore_errors=True)
+        except OSError as e:
+            LOGGER.warning("Could not delete %s: %s", scratch, e)
+
+
+def _append_burst_history(out_dir: Path, record: dict) -> None:
+    """Compact, permanent record of one burst. The raw pcaps/Zeek scratch logs
+    _cleanup_burst_files() just deleted are gone, but a KB-scale JSONL line
+    (timestamp, trigger, radios, bytes captured, zeek event counts, dns-evasion
+    findings, errors) is kept indefinitely in reactive_capture_history.jsonl for
+    historical/audit reference -- the "more compact form for future reference"
+    alternative to keeping multi-hundred-MB pcaps around."""
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        history_path = out_dir / "reactive_capture_history.jsonl"
+        with open(history_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError as e:
+        LOGGER.warning("Could not append to reactive_capture_history.jsonl: %s", e)
+
+
+def cleanup_stale_scratch_files(out_dir: Path, max_age_seconds: float = 3600.0) -> int:
+    """Defense-in-depth against capture_and_ingest()'s normal try/finally cleanup: if
+    the whole process dies mid-burst (crash, power loss, `kill -9`), the finally block
+    never runs and a raw pcap or Zeek scratch directory can be orphaned. This sweeps
+    out_dir for entries older than max_age_seconds and removes them -- a burst never
+    legitimately takes anywhere close to an hour, so anything that old is orphaned, not
+    in-progress. Returns the count removed. Meant to be called periodically (e.g.
+    alongside pipeline.py's existing spot-check interval) rather than after every
+    burst, since the normal path already handles that case."""
+    if not out_dir.exists():
+        return 0
+    now = time.time()
+    removed = 0
+    for entry in out_dir.iterdir():
+        if entry.name == "reactive_capture_history.jsonl":
+            continue  # the one thing in here meant to last forever
+        try:
+            age = now - entry.stat().st_mtime
+            if age < max_age_seconds:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+            removed += 1
+        except OSError as e:
+            LOGGER.warning("Could not remove stale reactive-capture file %s: %s", entry, e)
+    if removed:
+        reactive_capture_stale_files_removed_total.inc(removed)
+        LOGGER.info("Reactive-capture stale-file sweep removed %d orphaned item(s) from %s.", removed, out_dir)
+    return removed
+
+
 def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/opt/zeek/bin/zeek",
-                        trigger_reason: str = "unspecified") -> Dict[str, object]:
+                        trigger_reason: str = "unspecified", state_manager=None, evidence_store=None,
+                        geoip_engine=None, ti_engine=None) -> Dict[str, object]:
     """Top-level entry point for a single reactive-capture burst: authenticate, capture
     all configured radios, convert each from AVM's modified pcap format to standard
     pcap, reprocess through real Zeek, and ingest the resulting logs into the SAME
@@ -341,9 +490,17 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     zeek_lateral_moves/zeek_ja3_malicious/zeek_ja4_malicious/etc. features, exactly as
     if a wired Zeek tap had seen them the whole time.
 
-    Not wired to any trigger yet (that's Phase D) -- this is the capture+ingest
-    mechanism on its own, callable directly (e.g. for a manual/operator-triggered
-    burst) once reactive_capture_enabled is true in config.yaml.
+    state_manager/evidence_store are optional (default None, matching this function's
+    original signature so existing callers/tests keep working unchanged) -- when BOTH
+    are supplied, also runs dns_evasion.py's blind-spot audit (see
+    run_dns_evasion_audit()) against every device actually seen in the burst, feeding
+    any dns_evasion_anomaly evidence straight into the live evidence store.
+
+    Disk safety: raw/converted pcaps and Zeek's scratch reprocessing output are deleted
+    once each radio's data has been ingested (or once an attempt fails, since a partial/
+    corrupt raw file has no further salvage value either) -- gated by
+    reactive_capture_delete_after_ingest (default true). A compact permanent JSONL
+    history record survives regardless (see _append_burst_history()).
     """
     fritz_ip = config.get("fritz_ip", "192.168.1.1")
     fritz_user = config.get("fritz_user", "admin")
@@ -351,47 +508,75 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     radios = config.get("reactive_capture_radios", ["ath0", "ath1"])
     burst_seconds = float(config.get("reactive_capture_burst_seconds", 120.0))
     snaplen = int(config.get("reactive_capture_snaplen", 1600))
+    delete_after_ingest = bool(config.get("reactive_capture_delete_after_ingest", True))
 
     if not fritz_pass:
         raise FritzboxCaptureError("fritz_password is empty in configuration; cannot authenticate.")
 
     summary: Dict[str, object] = {
         "trigger_reason": trigger_reason,
+        "timestamp": time.time(),
         "radios_requested": list(radios),
         "radios_captured": {},
         "zeek_event_counts": {},
+        "dns_evasion_findings": {},
         "errors": [],
     }
 
     raw_pcaps = run_burst(fritz_ip, fritz_user, fritz_pass, radios, burst_seconds, out_dir, snaplen=snaplen)
     if not raw_pcaps:
         summary["errors"].append("No radio produced a non-empty capture.")
+        reactive_capture_errors_total.labels(stage="capture").inc()
+        _append_burst_history(out_dir, summary)
         return summary
+
+    burst_source_ips: set = set()
+    capture_ts = time.time()
 
     for iface, avm_path in raw_pcaps.items():
         std_path = avm_path.with_suffix(".std.pcap")
+        scratch: Optional[Path] = None
         try:
-            n_records = avm_pcap_to_standard(avm_path, std_path)
-        except FritzboxCaptureError as e:
-            LOGGER.error("Conversion failed for %s: %s", iface, e)
-            summary["errors"].append(f"{iface}: conversion failed -- {e}")
-            continue
+            try:
+                n_records = avm_pcap_to_standard(avm_path, std_path)
+            except FritzboxCaptureError as e:
+                LOGGER.error("Conversion failed for %s: %s", iface, e)
+                summary["errors"].append(f"{iface}: conversion failed -- {e}")
+                reactive_capture_errors_total.labels(stage="conversion").inc()
+                continue
 
-        summary["radios_captured"][iface] = {"bytes": avm_path.stat().st_size, "records": n_records}
+            summary["radios_captured"][iface] = {"bytes": avm_path.stat().st_size, "records": n_records}
 
-        scratch = out_dir / f"zeek_scratch_{iface}_{int(time.time())}"
-        try:
-            reprocess_with_zeek(std_path, scratch, zeek_bin=zeek_bin)
-        except FritzboxCaptureError as e:
-            LOGGER.error("Zeek reprocessing failed for %s: %s", iface, e)
-            summary["errors"].append(f"{iface}: zeek reprocessing failed -- {e}")
-            continue
+            scratch = out_dir / f"zeek_scratch_{iface}_{int(time.time())}"
+            try:
+                reprocess_with_zeek(std_path, scratch, zeek_bin=zeek_bin)
+            except FritzboxCaptureError as e:
+                LOGGER.error("Zeek reprocessing failed for %s: %s", iface, e)
+                summary["errors"].append(f"{iface}: zeek reprocessing failed -- {e}")
+                reactive_capture_errors_total.labels(stage="zeek_reprocess").inc()
+                continue
 
-        counts = ingest_zeek_logs(scratch, zeek_fx)
-        for etype, n in counts.items():
-            summary["zeek_event_counts"][etype] = summary["zeek_event_counts"].get(etype, 0) + n
+            counts = ingest_zeek_logs(scratch, zeek_fx, collect_sources=burst_source_ips)
+            for etype, n in counts.items():
+                summary["zeek_event_counts"][etype] = summary["zeek_event_counts"].get(etype, 0) + n
+        finally:
+            if delete_after_ingest:
+                _cleanup_burst_files(avm_path, std_path, scratch)
 
+    try:
+        summary["dns_evasion_findings"] = run_dns_evasion_audit(
+            zeek_fx, state_manager, evidence_store, burst_source_ips, capture_ts,
+            geoip_engine=geoip_engine, ti_engine=ti_engine,
+        )
+        reactive_capture_dns_evasion_findings_total.inc(sum(summary["dns_evasion_findings"].values()))
+    except Exception as exc:
+        LOGGER.error("DNS-evasion audit failed for this burst (non-fatal): %s", exc)
+        summary["errors"].append(f"dns_evasion_audit: {exc}")
+        reactive_capture_errors_total.labels(stage="dns_evasion_audit").inc()
+
+    reactive_capture_last_burst_timestamp.set(time.time())
     LOGGER.info("Reactive capture burst (trigger=%s) complete: %s", trigger_reason, summary)
+    _append_burst_history(out_dir, summary)
     return summary
 
 
@@ -431,18 +616,28 @@ class ReactiveCaptureDispatcher:
             self._count += 1
             return True
 
-    def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str) -> bool:
+    def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str, state_manager=None,
+                      evidence_store=None, geoip_engine=None, ti_engine=None) -> bool:
         """Attempts to fire one capture burst asynchronously. Returns True if
         dispatched (the actual capture runs in a daemon thread and this call never
         blocks), False if reactive_capture_enabled is false or the shared hourly
         budget is exhausted -- logged as [DEFERRED], matching ollama_soc.py's
-        per-run-query-cap convention, rather than silently dropping the trigger."""
+        per-run-query-cap convention, rather than silently dropping the trigger.
+
+        state_manager/evidence_store/geoip_engine/ti_engine are optional and passed
+        straight through to capture_and_ingest() -- when state_manager and
+        evidence_store are both supplied, the burst also runs dns_evasion.py's
+        blind-spot audit and feeds any findings into the live evidence store (see
+        capture_and_ingest()'s docstring). Omitting them keeps the old
+        capture-and-ingest-only behavior, e.g. for a caller with no evidence store to
+        feed."""
         if not self._check_and_consume_budget(config):
             if config.get("reactive_capture_enabled", False):
                 max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
                 LOGGER.info("[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
                             "deferring trigger '%s' -- will be reconsidered once the hourly "
                             "window resets.", max_per_hour, trigger_reason)
+                reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred").inc()
             return False
 
         out_dir = Path(config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
@@ -451,10 +646,13 @@ class ReactiveCaptureDispatcher:
 
         def _run():
             try:
-                capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason)
+                capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason,
+                           state_manager=state_manager, evidence_store=evidence_store,
+                           geoip_engine=geoip_engine, ti_engine=ti_engine)
             except Exception as exc:
                 LOGGER.error("Reactive capture burst (trigger=%s) failed: %s", trigger_reason, exc)
 
         threading.Thread(target=_run, daemon=True, name=f"reactive-capture-{trigger_reason}").start()
+        reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="dispatched").inc()
         LOGGER.info("Reactive capture burst dispatched (trigger=%s).", trigger_reason)
         return True

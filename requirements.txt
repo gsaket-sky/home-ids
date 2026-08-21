@@ -15,6 +15,16 @@ tldextract>=3.4.0    # utils.etld1() / fp_engine._extract_base_domain() import t
                      # public-suffix-aware base-domain extraction; without it, domain
                      # auto-immunization fails closed (silently inert) per the Phase 0 fix
 
+# Found missing from this file during a full import-vs-requirements audit this
+# session -- all four are genuinely imported (not transitive-only), so `pip install -r`
+# alone was never actually sufficient to run this codebase before now:
+skl2onnx>=1.15.0     # scripts/train_fp_classifier.py's ONNX export AND
+                     # fp_engine.py's _generate_placeholder_lgbm() (first-boot model)
+geoip2>=4.7.0        # intelligence/geoip.py -- City/ASN MaxMind database lookups
+joblib>=1.3.0        # intelligence/ml_engine.py
+urllib3>=1.26.0      # mitigation/alerts.py imports urllib3.util.retry.Retry directly
+                     # (not just relying on it transitively via requests)
+
 # Added 2026-08-17 for the config.json -> config.yaml migration:
 pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py /
                       # scripts/retro_hunter.py read config.yaml

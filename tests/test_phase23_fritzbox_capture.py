@@ -27,6 +27,7 @@ from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
 import shutil
 import struct
+import time
 import tempfile
 
 FAILURES = []
@@ -181,6 +182,178 @@ check("THE CORE INTEGRATION: an event ingested via ingest_zeek_logs() is visible
       "the real feature pipeline, not a side channel)",
       feats.get("zeek_conn_count", 0) >= 1 or feats.get("zeek_outbound_bytes", 0) > 0,
       f"got features={feats}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section E (added later this session): run_dns_evasion_audit() -- the wiring gap fix.
+# dns_evasion.py's blind-spot audit (Phase C2) was fully built and tested but NEVER
+# actually invoked from capture_and_ingest() -- found while scoping a LightGBM feature
+# extension. Real StateManager + real ZeekFeatureExtractor + real EvidenceStore, no
+# mocks -- proves a burst's findings actually reach the live evidence store, not just
+# that the standalone dns_evasion functions work in isolation (already covered by
+# test_phase24).
+# ═══════════════════════════════════════════════════════════════════════════════════
+from core.state_guard import StateManager
+from intelligence.hypotheses.evidence import EvidenceStore
+from extractors.fritzbox_capture import run_dns_evasion_audit
+
+with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "extractors" / "fritzbox_capture.py",
+          "r", encoding="utf-8") as f:
+    _CAPTURE_SRC = f.read()
+
+class _FakeGeoIPForAudit:
+    """Minimal stand-in matching dns_evasion.py's expected interface (reverse_dns,
+    lookup_asn) -- without SOME geoip_engine, _reverse_dns_explains()/_vpn_explains()
+    can never mark anything as explained at all (both immediately return False when
+    geoip_engine is None), so a genuine "explained, no evidence" case needs a real
+    (fake) engine, not just an absent one."""
+    def reverse_dns(self, ip):
+        return {"1.1.1.1": "server.example.com"}.get(ip)
+
+    def lookup_asn(self, ip):
+        return None
+
+
+EVASIVE_IP = "192.168.1.70"
+CLEAN_IP = "192.168.1.71"
+
+sm = StateManager()
+sm.get_or_create("dev_evasive", EVASIVE_IP, "evasive-host", alpha=0.05)
+sm.get_or_create("dev_clean", CLEAN_IP, "clean-host", alpha=0.05)
+with sm.lock_device("dev_clean") as st:
+    st.rolling.domain_timestamps["example.com"].append(time.time())
+
+zfx2 = ZeekFeatureExtractor(home_subnets=["192.168.1.0/24"])
+# The evasive device has a real connection to an IP with no matching DNS history.
+zfx2.ingest({"_zeek_type": "conn", "id.orig_h": EVASIVE_IP, "id.resp_h": "9.9.9.9",
+             "id.resp_p": 443, "proto": "tcp", "orig_bytes": 100, "uid": "CX1", "ts": time.time()})
+# The clean device's connection resolves (via reverse-DNS) to a host under the same
+# base domain it queried -- genuinely explained.
+zfx2.ingest({"_zeek_type": "conn", "id.orig_h": CLEAN_IP, "id.resp_h": "1.1.1.1",
+             "id.resp_p": 443, "proto": "tcp", "orig_bytes": 100, "uid": "CX2", "ts": time.time()})
+
+es = EvidenceStore()
+counts = run_dns_evasion_audit(zfx2, sm, es, burst_source_ips={EVASIVE_IP, CLEAN_IP},
+                                capture_ts=time.time(), geoip_engine=_FakeGeoIPForAudit())
+
+check("THE CORE FIX: run_dns_evasion_audit() finds the evasive device and produces evidence",
+      counts.get("dev_evasive", 0) >= 1, f"got counts={counts}")
+check("the evidence actually lands in the live EvidenceStore, retrievable by device_id "
+      "(proves the wiring reaches evaluate()'s real input, not a side channel)",
+      any(e.type == "dns_evasion_anomaly" for e in es.get_for_device("dev_evasive")),
+      f"got={es.get_for_device('dev_evasive')}")
+check("a device with no unexplained connections produces NO evidence (no false positive "
+      "just from being included in the scan)",
+      "dev_clean" not in counts or counts.get("dev_clean", 0) == 0, f"got counts={counts}")
+
+check("THE POINT OF THIS WIRING: the evasive device's unexplained ratio actually lands "
+      "on zeek_fx, where LightGBM's feature extraction can read it via get_features() "
+      "(the whole reason this gap mattered for the LightGBM feature-vector extension)",
+      zfx2.get_features(EVASIVE_IP)["zeek_dns_evasion_ratio"] > 0.0,
+      f"got={zfx2.get_features(EVASIVE_IP)}")
+check("the clean device's ratio is explicitly 0.0, not just absent",
+      zfx2.get_features(CLEAN_IP)["zeek_dns_evasion_ratio"] == 0.0)
+
+check("a device whose client_ip is NOT in burst_source_ips is skipped entirely",
+      run_dns_evasion_audit(zfx2, sm, es, burst_source_ips=set(), capture_ts=time.time()) == {})
+check("missing state_manager degrades gracefully to a no-op, not a crash",
+      run_dns_evasion_audit(zfx2, None, es, burst_source_ips={EVASIVE_IP}, capture_ts=time.time()) == {})
+check("missing evidence_store degrades gracefully to a no-op, not a crash",
+      run_dns_evasion_audit(zfx2, sm, None, burst_source_ips={EVASIVE_IP}, capture_ts=time.time()) == {})
+
+check("capture_and_ingest() now accepts state_manager/evidence_store/geoip_engine/ti_engine "
+      "as optional keyword arguments (source guard -- signature check)",
+      "state_manager=None, evidence_store=None" in _CAPTURE_SRC)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section F: disk-safety cleanup -- _cleanup_burst_files / _append_burst_history /
+# cleanup_stale_scratch_files. Real filesystem operations against a real temp dir, no
+# mocks -- raw pcaps and Zeek scratch dirs run ~100MB+ per burst and nothing deleted
+# them before this.
+# ═══════════════════════════════════════════════════════════════════════════════════
+from extractors.fritzbox_capture import _cleanup_burst_files, _append_burst_history, cleanup_stale_scratch_files
+
+CLEAN_TMP = TMP / "cleanup_section"
+CLEAN_TMP.mkdir(parents=True, exist_ok=True)
+
+avm_f = CLEAN_TMP / "burst_ath0_123.avm.pcap"
+std_f = CLEAN_TMP / "burst_ath0_123.std.pcap"
+scratch_d = CLEAN_TMP / "zeek_scratch_ath0_123"
+avm_f.write_bytes(b"fake avm pcap data")
+std_f.write_bytes(b"fake std pcap data")
+scratch_d.mkdir()
+(scratch_d / "conn.log").write_text('{"fake": "log"}\n')
+
+_cleanup_burst_files(avm_f, std_f, scratch_d)
+check("_cleanup_burst_files() deletes the raw AVM pcap", not avm_f.exists())
+check("_cleanup_burst_files() deletes the converted standard pcap", not std_f.exists())
+check("_cleanup_burst_files() deletes the entire Zeek scratch directory, not just its contents",
+      not scratch_d.exists())
+
+# Must never raise on already-missing files (e.g. a conversion failure meant std_path
+# was never created at all).
+try:
+    _cleanup_burst_files(CLEAN_TMP / "never_existed.pcap", CLEAN_TMP / "also_never.pcap", None)
+    check("_cleanup_burst_files() never raises on already-missing files/None scratch", True)
+except Exception as e:
+    check("_cleanup_burst_files() never raises on already-missing files/None scratch", False, f"raised {e}")
+
+history_dir = CLEAN_TMP / "history_test"
+_append_burst_history(history_dir, {"trigger_reason": "unit_test", "timestamp": time.time()})
+_append_burst_history(history_dir, {"trigger_reason": "unit_test_2", "timestamp": time.time()})
+history_path = history_dir / "reactive_capture_history.jsonl"
+check("_append_burst_history() creates the history file and the target directory if needed",
+      history_path.exists())
+history_lines = [json.loads(l) for l in history_path.read_text().splitlines() if l.strip()]
+check("_append_burst_history() appends (2 calls -> 2 lines), never overwrites",
+      len(history_lines) == 2, f"got {len(history_lines)} lines")
+
+# cleanup_stale_scratch_files: an old orphaned file gets removed, a fresh one and the
+# permanent history file are both left alone.
+stale_dir = CLEAN_TMP / "stale_sweep_test"
+stale_dir.mkdir()
+old_file = stale_dir / "orphaned_burst.avm.pcap"
+old_file.write_bytes(b"orphaned")
+old_scratch = stale_dir / "zeek_scratch_orphaned"
+old_scratch.mkdir()
+fresh_file = stale_dir / "fresh_burst.avm.pcap"
+fresh_file.write_bytes(b"fresh")
+history_in_stale_dir = stale_dir / "reactive_capture_history.jsonl"
+history_in_stale_dir.write_text('{"old": "record"}\n')
+
+old_ts = time.time() - 7200  # 2 hours ago, older than the default 3600s max_age
+import os
+os.utime(old_file, (old_ts, old_ts))
+os.utime(old_scratch, (old_ts, old_ts))
+os.utime(history_in_stale_dir, (old_ts, old_ts))  # even an OLD history file must survive
+
+removed_count = cleanup_stale_scratch_files(stale_dir, max_age_seconds=3600.0)
+check("cleanup_stale_scratch_files() removes an orphaned file older than max_age_seconds",
+      not old_file.exists())
+check("cleanup_stale_scratch_files() removes an orphaned scratch DIRECTORY older than max_age_seconds",
+      not old_scratch.exists())
+check("cleanup_stale_scratch_files() leaves a FRESH file alone (not orphaned, still in-progress)",
+      fresh_file.exists())
+check("cleanup_stale_scratch_files() NEVER removes reactive_capture_history.jsonl, "
+      "regardless of its age -- it's the one thing meant to last forever",
+      history_in_stale_dir.exists())
+check("cleanup_stale_scratch_files() reports the correct removed count",
+      removed_count == 2, f"got {removed_count}")
+
+check("cleanup_stale_scratch_files() on a nonexistent directory is a safe no-op",
+      cleanup_stale_scratch_files(CLEAN_TMP / "does_not_exist", max_age_seconds=3600.0) == 0)
+
+# Source guards: capture_and_ingest() actually calls the cleanup, gated by config.
+check("capture_and_ingest() cleans up via a try/finally so a mid-burst exception still "
+      "triggers cleanup, not just the success path",
+      "finally:\n            if delete_after_ingest:" in _CAPTURE_SRC)
+check("cleanup is gated by reactive_capture_delete_after_ingest (default true), not "
+      "unconditional -- an operator can opt out for manual forensic retention",
+      'delete_after_ingest = bool(config.get("reactive_capture_delete_after_ingest", True))' in _CAPTURE_SRC)
+check("every burst writes a permanent history record via _append_burst_history(), "
+      "regardless of the delete setting",
+      "_append_burst_history(out_dir, summary)" in _CAPTURE_SRC)
 
 
 shutil.rmtree(TMP, ignore_errors=True)

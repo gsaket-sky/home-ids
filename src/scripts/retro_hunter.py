@@ -165,7 +165,10 @@ def run_retro_hunt(days: int = 14) -> None:
     state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
     # Load Active Intelligence Engine (Updated for Modular Architecture)
     ti = ThreatIntel(
-        cache_dir        = str(Path(CONFIG.get("state_path", "/app/state/ids_state.json")).parent / "ti_cache"),
+        # Same stale "/app/state/..." Docker-era fallback as main.py's ti_cache --
+        # inconsistent with this very function's OWN state_dir line just above, which
+        # already uses the correct "state/ids_state.json" default.
+        cache_dir        = str(Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "ti_cache"),
         otx_api_key      = CONFIG.get("otx_api_key", ""),
         refresh_interval = 3600
     )

@@ -121,7 +121,13 @@ def main():
     # 2. INITIALIZE INTELLIGENCE ENGINES
     # =====================================================================
     LOGGER.debug("Initializing Intelligence Engines...")
-    ti_cache = Path(CONFIG.get("state_path", "/app/state/ids_state.json")).parent / "ti_cache"
+    # PHASE 21-PATH-AUDIT: "/app/state/..." was a leftover Docker-era fallback (the
+    # project dropped that layout well before this comment -- see retro_hunter.py's own
+    # PHASE 9 fix for the sibling alert_json_path case). CONFIG.get() always resolves
+    # the real config.yaml/DEFAULT_CONFIG value first ("state/ids_state.json") so this
+    # fallback was realistically unreachable either way -- corrected to match
+    # config.py's actual DEFAULT_CONFIG value for clarity, not because it ever fired.
+    ti_cache = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "ti_cache"
     
     LOGGER.debug("Booting ThreatIntel engine (Cache: %s)...", ti_cache)
     ti_engine = ThreatIntel(
@@ -133,8 +139,10 @@ def main():
 
     LOGGER.debug("Booting MLRegistry...")
     ml_registry = MLRegistry(
-        model_dir=Path(CONFIG.get("model_path", "/app/state/ids_model.pkl")).parent / "devices",
-        global_model_path=Path(CONFIG.get("model_path", "/app/state/ids_model.pkl")),
+        # Same stale-fallback cleanup as ti_cache above -- config.py's real default is
+        # "models/ids_model.pkl", not the old Docker-layout path.
+        model_dir=Path(CONFIG.get("model_path", "models/ids_model.pkl")).parent / "devices",
+        global_model_path=Path(CONFIG.get("model_path", "models/ids_model.pkl")),
     )
 
     try:

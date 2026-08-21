@@ -153,13 +153,23 @@ check("spread exactly AT the threshold withholds (>=, not >)",
 
 
 # ── Test 7: pipeline.py alert-text source guards (Phase 20 cosmetic + transparency fixes) ──
+# PHASE 21-ALERT-REDESIGN superseded the original mechanism these three checks targeted
+# (a raw "`group: type` (value)" evidence dump) with _describe_evidence() -- a
+# plain-language sentence per evidence group, with no raw magnitude to mislabel as a
+# probability in the first place, and Evidence.domain still surfaced when present.
+# Updated to assert the CURRENT implementation of the same underlying Phase 20 intent
+# (no group/type stutter, domain surfaced, no raw-value-as-probability confusion)
+# rather than the specific old code that implemented it.
 pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
-check("pipeline.py's evidence line drops the group==type stutter",
-      'label = ev.type if group == ev.type else f"{group}: {ev.type}"' in pipeline_src)
-check("pipeline.py's evidence line surfaces Evidence.domain when the detector attached one",
-      'domain_suffix = f" [domain: `{ev.domain}`]"' in pipeline_src)
-check("pipeline.py's evidence header clarifies raw values are not probabilities",
-      "not probabilities" in pipeline_src)
+check("pipeline.py's WHY section uses plain-language evidence descriptions, not a raw "
+      "'group: type (value)' stutter-prone dump",
+      "why_lines = [_describe_evidence(ev) for ev in" in pipeline_src)
+check("_describe_evidence() surfaces Evidence.domain when the detector attached one",
+      'domain_suffix = f" — `{ev.domain}`" if getattr(ev, "domain", None) else ""' in pipeline_src)
+check("the WHY section shows plain-language sentences with no raw per-signal magnitude at "
+      "all, so there's no number left to misread as a probability (Phase 20's underlying "
+      "concern, now structurally impossible rather than just labeled)",
+      "text = _EVIDENCE_PLAIN_LANGUAGE.get(ev.type" in pipeline_src)
 
 print()
 if FAILURES:
