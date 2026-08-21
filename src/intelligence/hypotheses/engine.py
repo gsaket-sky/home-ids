@@ -235,14 +235,27 @@ class ConnectionAbuseHypothesis(Hypothesis):
         self._reset_eval_state()
         scan_hits = [e for e in ev_store if e.type == "zeek_conn_abuse"]
         long_hits = [e for e in ev_store if e.type == "zeek_long_conn"]
-        self.required_satisfied = bool(scan_hits or long_hits)
+        # PHASE 21B: ARP host-discovery sweeps are a real recon precursor to the same
+        # attack shape this hypothesis already covers -- accepted here as an alternate
+        # required trigger rather than a whole separate hypothesis class, since it
+        # corroborates the same "device is scanning the LAN" story. Broadcast-visible,
+        # so this fires for WiFi devices too, unlike scan_hits/long_hits which currently
+        # only have real data for wired devices (see PRODUCT_ARCHITECTURE.md/this
+        # session's live testing on why).
+        arp_hits = [e for e in ev_store if e.type == "arp_sweep"]
+        self.required_satisfied = bool(scan_hits or long_hits or arp_hits)
         if not self.required_satisfied:
             return 0.0
-        best = max(e.effective_weight() for e in (scan_hits + long_hits))
+        best = max(e.effective_weight() for e in (scan_hits + long_hits + arp_hits))
 
         if rep_vector.tier in (1, 2):
             self.contradicting_score += 1.0
-        if scan_hits and long_hits:
+        # Two DISTINCT signal categories corroborating each other (not just two hits of
+        # the same type) is what should count as "strong" -- an ARP sweep alone, or a
+        # port-scan alone, stays at the base score; ARP sweep + subsequent port scan is
+        # the real multi-stage recon pattern.
+        distinct_categories = sum(bool(x) for x in (scan_hits, long_hits, arp_hits))
+        if distinct_categories >= 2:
             self.strong_score += 1.0
 
         score = 2.0

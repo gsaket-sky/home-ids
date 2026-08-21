@@ -50,7 +50,8 @@ def _is_local_dest(ip: str) -> bool:
 
 
 class ThreatSignalDetector:
-    def detect(self, device: str, features: Dict[str, Any], top_domain: Optional[str] = None) -> List[Evidence]:
+    def detect(self, device: str, features: Dict[str, Any], top_domain: Optional[str] = None,
+               arp_sweep_threshold: int = 8) -> List[Evidence]:
         ev_list: List[Evidence] = []
         now = time.time()
 
@@ -175,6 +176,18 @@ class ThreatSignalDetector:
             conf = 0.9 if s0_rej_unique > 15 else 0.6
             add("zeek_conn_abuse", s0_rej, conf, "zeek_network",
                 f"rejected connections {int(s0_rej)} across {int(s0_rej_unique)} unique IPs")
+
+        # ── ARP host-discovery sweep (recon precursor) ───────────────────────────────
+        # PHASE 21B: broadcast-visible, so this reaches WiFi devices the same way MAC
+        # correlation already does -- doesn't need the reactive Fritzbox capture at all.
+        # Deliberately NOT a hard-stop (some IoT discovery protocols behave similarly) --
+        # corroborates ConnectionAbuseHypothesis, needs a second independent source to
+        # reach HIGH.
+        arp_sweep_count = float(features.get("zeek_arp_sweep_count", 0.0) or 0.0)
+        if arp_sweep_count >= arp_sweep_threshold:
+            conf = min(1.0, 0.5 + (arp_sweep_count - arp_sweep_threshold) * 0.05)
+            add("arp_sweep", arp_sweep_count, conf, "lan_recon",
+                f"ARP-requested {int(arp_sweep_count)} distinct targets (host-discovery sweep)")
 
         # ── Long-lived / covert-tunnel connections ───────────────────────────────────
         max_dur = float(features.get("zeek_max_duration", 0.0) or 0.0)

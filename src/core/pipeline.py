@@ -490,7 +490,10 @@ class EnginePipeline:
                 # PHASE 1: DGA/exfiltration/beaconing/tunneling-v2/connection-abuse — the
                 # scoring.py-derived categories that previously had no path into the live
                 # evidence/hypothesis pipeline at all (scoring.py itself is dead code).
-                threat_signal_ev = self.threat_signal_detector.detect(dev_id, features, top_domain=top_domain)
+                arp_sweep_threshold = int(self.config.get("arp_sweep_unique_targets_threshold", 8))
+                threat_signal_ev = self.threat_signal_detector.detect(
+                    dev_id, features, top_domain=top_domain, arp_sweep_threshold=arp_sweep_threshold
+                )
                 for ev in threat_signal_ev: self.evidence_store.add(ev)
 
                 if ml_score > 0.90:

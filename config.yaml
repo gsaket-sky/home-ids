@@ -214,6 +214,14 @@ detection_engine:
   # same signature before it's escalated to HIGH. [LIVE]
   suspicious_escalation_seconds: 600.0
 
+  # Distinct IPs a device must ARP-request within one window_seconds window to
+  # be flagged as a host-discovery sweep (arp_sweep evidence, threat_signals.py).
+  # Broadcast-visible, so this reaches WiFi devices the same way MAC correlation
+  # already does. Not a hard-stop on its own -- corroborates
+  # ConnectionAbuseHypothesis, needs a second independent source to reach HIGH.
+  # [LIVE]
+  arp_sweep_unique_targets_threshold: 8
+
 
 # -----------------------------------------------------------------------------
 # false_positive_engine — CL-AFPE (autonomous false-positive suppression)

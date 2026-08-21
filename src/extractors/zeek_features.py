@@ -161,6 +161,19 @@ class ZeekCollector:
                         "ssl": ZeekLogTailer(self.log_dir / "ssl.log", "ssl", self._on_event, self.state_dir),
                         "notice": ZeekLogTailer(self.log_dir / "notice.log", "notice", self._on_event, self.state_dir),
                         "dhcp": ZeekLogTailer(self.log_dir / "dhcp.log", "dhcp", self._on_event, self.state_dir),
+                        # PHASE 21B: ARP requests are broadcast, so they reach this tailer
+                        # for every device regardless of WiFi/wired -- the same mechanism
+                        # that already makes MAC correlation work for WiFi devices via
+                        # conn.log's orig_l2_addr (confirmed live this session). Whether
+                        # arp.log itself is produced by a stock Zeek install without an
+                        # extra @load (unlike mac-logging.zeek/the DHCP script, which are
+                        # confirmed to need one) has NOT been verified live -- treat this
+                        # tailer as safe-but-unconfirmed until checked against a real
+                        # deployment: `tail -f <log_dir>/arp.log` after a device does a
+                        # fresh ARP request. If the file never appears, check whether ARP
+                        # logging needs its own @load (e.g. `@load base/protocols/arp`) the
+                        # same way the other Phase-4/6 dependencies did.
+                        "arp": ZeekLogTailer(self.log_dir / "arp.log", "arp", self._on_event, self.state_dir),
                         "test_conn": ZeekLogTailer(self.log_dir / "test_conn.log", "conn", self._on_event, self.state_dir),
                         "test_dhcp": ZeekLogTailer(self.log_dir / "test_dhcp.log", "dhcp", self._on_event, self.state_dir),
                     }
@@ -241,6 +254,13 @@ class ZeekFeatureExtractor:
         self._dhcp_fingerprints = {}          # ip -> {"vendor_class","param_list","user_class","ts"}
         self._dhcp_fingerprints_by_mac = {}   # mac -> same dict, survives across an IP change
         self._ja4_seen = defaultdict(set)     # ip -> set of ja4 hashes (capped per-device below)
+        # PHASE 21B: rolling (ts, target_ip) pairs per ARP-requesting source, for
+        # host-discovery-sweep detection -- broadcast, so this reaches WiFi devices the
+        # same way MAC correlation already does. REQUEST operations only (a REPLY is a
+        # device announcing itself, not probing); pruned by prune() via the same shared
+        # window_seconds as every other rolling structure (see prune()'s
+        # prune_tuple_deque_dict call) -- there is no separate per-signal window.
+        self._arp_targets = defaultdict(lambda: deque(maxlen=2000))
         self.ti_engine = ti_engine
         self.geoip_engine = geoip_engine
         self._reverse_dns_cache = {}
@@ -358,6 +378,7 @@ class ZeekFeatureExtractor:
         prune_tuple_deque_dict(self._conn_durations)
         prune_tuple_deque_dict(self._rejected_ips)
         prune_deque_dict(self._honeypot_hits)
+        prune_tuple_deque_dict(self._arp_targets)
         
         prune_ts_dict(self._new_ips)
         prune_ts_dict(self._doh_bypass_uids)
@@ -450,7 +471,20 @@ class ZeekFeatureExtractor:
                     if len(self._dhcp_fingerprints) > 5000: self._dhcp_fingerprints.clear()
                     if len(self._dhcp_fingerprints_by_mac) > 5000: self._dhcp_fingerprints_by_mac.clear()
             return
-            
+
+        if etype == "arp":
+            # PHASE 21B: arp.log uses spa/tpa (sender/target protocol address), not
+            # id.orig_h/orig_h like every other log type -- has to be handled before the
+            # generic `src` extraction below, same reason "dhcp" is a special early-return
+            # case. Field names (spa/tpa/operation) match Zeek's documented ARP::Info
+            # record; not yet verified against a live arp.log -- see the _init_tailers()
+            # comment on this same phase for the live-verification step.
+            operation = str(event.get("operation", "")).upper()
+            spa, tpa = event.get("spa"), event.get("tpa")
+            if operation == "REQUEST" and spa and tpa:
+                self._arp_targets[spa].append((event.get("ts", time.time()), tpa))
+            return
+
         src = event.get("id.orig_h", event.get("orig_h", ""))
         if not src: return
         self._enrich_ptr(src)
@@ -687,6 +721,11 @@ class ZeekFeatureExtractor:
             "zeek_s0_rej_unique_ips": len(rejected_ips),
             "zeek_max_duration": max(durations) if durations else 0.0,
             "zeek_honeypot_hits": sum(len(self._honeypot_hits.get(ip, [])) for ip in ips),
+            # PHASE 21B: distinct ARP-requested targets across this device's known
+            # addresses, within the same shared rolling window as everything else above
+            # (pruned by prune()) -- host-discovery-sweep signal, broadcast so it reaches
+            # WiFi devices already.
+            "zeek_arp_sweep_count": len({tpa for ip in ips for _ts, tpa in self._arp_targets.get(ip, [])}),
             "zeek_app_protocol_weight": app_weight,
             "last_dest_ip": meta.get("last_dest_ip", "unknown"),
             "last_dest_port": port,
@@ -712,6 +751,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets):
                 if ip in d:
                     del d[ip]
