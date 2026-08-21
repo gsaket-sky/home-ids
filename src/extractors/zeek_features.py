@@ -164,15 +164,17 @@ class ZeekCollector:
                         # PHASE 21B: ARP requests are broadcast, so they reach this tailer
                         # for every device regardless of WiFi/wired -- the same mechanism
                         # that already makes MAC correlation work for WiFi devices via
-                        # conn.log's orig_l2_addr (confirmed live this session). Whether
-                        # arp.log itself is produced by a stock Zeek install without an
-                        # extra @load (unlike mac-logging.zeek/the DHCP script, which are
-                        # confirmed to need one) has NOT been verified live -- treat this
-                        # tailer as safe-but-unconfirmed until checked against a real
-                        # deployment: `tail -f <log_dir>/arp.log` after a device does a
-                        # fresh ARP request. If the file never appears, check whether ARP
-                        # logging needs its own @load (e.g. `@load base/protocols/arp`) the
-                        # same way the other Phase-4/6 dependencies did.
+                        # conn.log's orig_l2_addr (confirmed live this session).
+                        # REQUIRES a deployment step: confirmed live against a real Zeek
+                        # 8.0.8 install (with zeek/foxio/ja4 + zeek/salesforce/ja3) that
+                        # stock Zeek does NOT ship a base/protocols/arp module -- only the
+                        # low-level arp_request/arp_reply events exist
+                        # (base/bif/plugins/Zeek_ARP.events.bif.zeek), with no script
+                        # subscribing to them to actually write arp.log. This tailer stays
+                        # silent forever without zeek_scripts/local-arp-log.zeek (added
+                        # this session, verified live end-to-end against a real captured
+                        # burst -- see INSTALL.md's ARP-log deployment step) copied into
+                        # the site dir and @load'd from local.zeek.
                         "arp": ZeekLogTailer(self.log_dir / "arp.log", "arp", self._on_event, self.state_dir),
                         "test_conn": ZeekLogTailer(self.log_dir / "test_conn.log", "conn", self._on_event, self.state_dir),
                         "test_dhcp": ZeekLogTailer(self.log_dir / "test_dhcp.log", "dhcp", self._on_event, self.state_dir),
@@ -476,9 +478,10 @@ class ZeekFeatureExtractor:
             # PHASE 21B: arp.log uses spa/tpa (sender/target protocol address), not
             # id.orig_h/orig_h like every other log type -- has to be handled before the
             # generic `src` extraction below, same reason "dhcp" is a special early-return
-            # case. Field names (spa/tpa/operation) match Zeek's documented ARP::Info
-            # record; not yet verified against a live arp.log -- see the _init_tailers()
-            # comment on this same phase for the live-verification step.
+            # case. Field names (spa/tpa/operation) match zeek_scripts/local-arp-log.zeek's
+            # ARP::Info record exactly -- confirmed live end-to-end against a real captured
+            # burst (see _init_tailers()'s comment on this same phase: stock Zeek has no
+            # arp.log writer at all, this repo's own script provides one).
             operation = str(event.get("operation", "")).upper()
             spa, tpa = event.get("spa"), event.get("tpa")
             if operation == "REQUEST" and spa and tpa:
