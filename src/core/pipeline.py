@@ -877,8 +877,21 @@ class EnginePipeline:
 
                         self.alert_writer.write(alert_payload)
                         alerts_total.labels(client_ip, getattr(state, "hostname", "unknown"), getattr(state, "device_type", "unknown")).inc()
-                        
-                        if not fp_verdict["suppress"]:
+
+                        # PHASE 21 FIX (Telegram volume reduction, explicit operator direction:
+                        # "no alert for suspicion"): a Telegram notification now requires the SAME
+                        # genuinely-corroborated HIGH/CRITICAL bar that already authorizes a Pi-hole
+                        # block (containment_decision_state, computed above at the mitigate() call
+                        # site -- already downgraded from a persistence-escalated HIGH back to
+                        # SUSPICIOUS, see the PHASE 19 comment above). A SUSPICIOUS/monitor-only
+                        # decision still writes to alerts.json (line above, unconditional), still
+                        # trains CL-AFPE, still shows in Grafana -- it just no longer pages the
+                        # operator. This does not touch mitigate() or the router/tarpit escalation
+                        # paths above, which already have their own independent risk_score/
+                        # lateral_threat gates unrelated to Telegram.
+                        telegram_worthy = containment_decision_state in (DecisionState.HIGH, DecisionState.CRITICAL)
+
+                        if not fp_verdict["suppress"] and telegram_worthy:
 
                                 # Extract Application / Process Name & Scanned Ports
                                 app_name = self.zeek_fx.get_app_context(client_ip) if self.zeek_fx else "Network Socket"
@@ -1085,6 +1098,13 @@ class EnginePipeline:
                                     reply_markup = {"inline_keyboard": inline_keyboard}
 
                                 self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
+
+                elif not fp_verdict["suppress"]:
+                    LOGGER.info(
+                        "Alert for %s held below Telegram threshold (state=%s, risk=%.2f) — "
+                        "logged to alerts.json and CL-AFPE, not sent to Telegram.",
+                        hostname, containment_decision_state, risk
+                    )
 
                 elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
                     LOGGER.debug("Device %s risk subsided below threshold.", hostname)
