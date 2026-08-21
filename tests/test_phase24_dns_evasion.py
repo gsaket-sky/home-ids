@@ -132,6 +132,29 @@ ev_mixed = audit_device(DEV, audit_mixed, geoip_engine=geoip_mixed)
 check("mixed case: 1 explained + 1 unexplained out of 2 total -> evidence value is 1 (only the unexplained one)",
       len(ev_mixed) == 1 and ev_mixed[0].value == 1.0, f"got {ev_mixed}")
 
+# B9-B11: Evidence.domain carries a REPRESENTATIVE unexplained IP -- this is what lets
+# pipeline.py's DNS_EVASION alert-building put the actual flagged destination into
+# network_context.destination_ip, instead of falling back to the device's unrelated
+# last-known dest_ip (the fix for the "wrong IP got immunized on correction" gap).
+geoip_unknown2 = _FakeGeoIP()
+audit_single = DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains=set())
+ev_single = audit_device(DEV, audit_single, geoip_engine=geoip_unknown2)
+check("a single unexplained IP is carried as Evidence.domain",
+      ev_single[0].domain == "9.9.9.9", f"got {ev_single[0].domain}")
+
+audit_multi = DeviceBurstAudit(dest_ips={"9.9.9.9", "5.5.5.5", "7.7.7.7"}, queried_domains=set())
+ev_multi = audit_device(DEV, audit_multi, geoip_engine=geoip_unknown2)
+check("with multiple unexplained IPs and no reputation hits, the representative IP is "
+      "chosen deterministically (sorted first) -- same input always yields the same evidence",
+      ev_multi[0].domain == "5.5.5.5", f"got {ev_multi[0].domain}")
+
+ti_with_hit = _FakeTI(bad_ips={"7.7.7.7"})
+ev_multi_rep = audit_device(DEV, audit_multi, geoip_engine=geoip_unknown2, ti_engine=ti_with_hit)
+check("THE CORE FIX: when one of several unexplained IPs carries threat-intel reputation "
+      "data, THAT one is preferred as the representative IP over a plain sorted pick "
+      "(the most actionable one is worth surfacing/immunizing-correctly specifically)",
+      ev_multi_rep[0].domain == "7.7.7.7", f"got {ev_multi_rep[0].domain}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: audit_burst -- multi-device orchestration
@@ -181,6 +204,21 @@ check("a tier-1/2 trusted reputation context dampens the score below the untrust
 
 check("DNSEvasionHypothesis is registered in HypothesisEngine.attack_hypotheses",
       any(isinstance(h, DNSEvasionHypothesis) for h in HypothesisEngine().attack_hypotheses))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section E: pipeline.py -- source-level guard for the destination_ip precision fix
+# ═══════════════════════════════════════════════════════════════════════════════════
+with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
+    pipeline_src = f.read()
+
+check("pipeline.py prefers a DNS_EVASION evidence's own flagged IP over the generic "
+      "last-known dest_ip when building that alert's network_context",
+      'if primary_sig == "DNS_EVASION":' in pipeline_src and
+      'if ev.type == "dns_evasion_anomaly" and ev.domain:' in pipeline_src)
+check("the alert_payload's destination_ip uses the corrected alert_dest_ip variable, "
+      "not the raw generic dest_ip, for every alert (not just DNS_EVASION ones)",
+      '"destination_ip": alert_dest_ip,' in pipeline_src)
 
 
 if FAILURES:

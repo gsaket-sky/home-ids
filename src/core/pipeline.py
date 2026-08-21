@@ -796,12 +796,32 @@ class EnginePipeline:
 
                         dns_seq_str = "\n".join(dns_seq_lines) if dns_seq_lines else "  No recent DNS events"
 
+                        # PHASE 21D2 FIX: `dest_ip` above is generically "this device's
+                        # most recent real connection" (features["last_dest_ip"]),
+                        # tracked independently of which detector actually fired -- fine
+                        # for a normal DNS-driven alert (the decision engine selects the
+                        # triggering domain/IP together via _select_target_domain()), but
+                        # DNS_EVASION has no domain and can flag SEVERAL unexplained IPs
+                        # at once, so "most recent connection" isn't necessarily one of
+                        # them. Without this, mark_false_positive()'s IP-immunization
+                        # routing (fp_engine.py) could immunize the wrong IP on a
+                        # DNS_EVASION correction -- the actual unexplained one stays
+                        # unaddressed and can keep re-firing. dns_evasion.py attaches one
+                        # representative unexplained IP onto its Evidence.domain field
+                        # specifically so this alert-building step can prefer it here.
+                        alert_dest_ip = dest_ip
+                        if primary_sig == "DNS_EVASION":
+                            for ev in active_evidence:
+                                if ev.type == "dns_evasion_anomaly" and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    break
+
                         alert_payload = {
                             "type": "ids_alert",
                             "timestamp": now,
                             "device": {"id": dev_id, "ip": client_ip, "hostname": hostname, "type": state.device_type},
                             "network_context": {
-                                "destination_ip": dest_ip, "destination_port": dest_port, "service_name": service_name,
+                                "destination_ip": alert_dest_ip, "destination_port": dest_port, "service_name": service_name,
                                 "data_type": dest_proto, "payload_size_bytes": outbound_bytes, "payload_classification": data_classification,
                                 "queried_domain": target_malicious_domain,
                             },

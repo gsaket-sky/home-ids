@@ -135,6 +135,19 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     if no_dns_at_all:
         note += " (device has NO DNS history at all in this window)"
 
+    # One representative unexplained IP, so downstream alert-building
+    # (pipeline.py's DNS_EVASION-signature branch) can put the ACTUAL flagged
+    # destination in network_context.destination_ip instead of falling back to
+    # whatever this device's most recent unrelated connection happened to be --
+    # otherwise an operator/LLM correction on this alert could immunize the wrong
+    # IP entirely. Prefer a reputation-hit IP when one exists (the most actionable
+    # one, worth surfacing specifically); otherwise pick deterministically (sorted)
+    # so the same audit input always yields the same evidence. When there's more
+    # than one unexplained IP, this still only carries ONE forward -- a real
+    # narrowing, not a complete list; a persisting alert on the same device after a
+    # correction is expected if multiple distinct unexplained IPs are involved.
+    representative_ip = sorted(reputation_hits)[0] if reputation_hits else sorted(unexplained)[0]
+
     return [Evidence(
         type="dns_evasion_anomaly",
         source="dns_evasion",
@@ -144,6 +157,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         confidence=confidence,
         independence_group="blindspot_audit",
         provenance="detector:dns_evasion",
+        domain=representative_ip,
     )]
 
 
