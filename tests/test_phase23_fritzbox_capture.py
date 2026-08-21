@@ -154,6 +154,68 @@ except FritzboxCaptureError:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section C2 (BUGFIX regression guard): reprocess_with_zeek() must resolve pcap_path to
+# an ABSOLUTE path before invoking zeek. Found in production -- reactive_capture_scratch_dir
+# is a RELATIVE path by default ("state/reactive_capture"), same as every other data path
+# in this app. Fine for plain Python file I/O (resolved against this process's cwd), but
+# pcap_path here is handed to zeek as a COMMAND-LINE ARGUMENT while the subprocess's own
+# cwd is set to scratch_dir -- a DIFFERENT directory. Without .resolve(), zeek looks for
+# the pcap relative to scratch_dir instead of this process's cwd and never finds it: a
+# 100% reproducible "unable to open ... No such file or directory" on every single burst,
+# regardless of concurrency. A fake "zeek" (this interpreter + a tiny script) that checks
+# whether its -r argument is a real file stands in for real Zeek, which isn't installed in
+# this dev environment (see this file's own module docstring).
+# ═══════════════════════════════════════════════════════════════════════════════════
+import os
+import stat
+
+relpath_root = TMP / "relpath_repro"
+(relpath_root / "state" / "reactive_capture").mkdir(parents=True)
+relpath_pcap = relpath_root / "state" / "reactive_capture" / "burst_ath0_relpath_test.avm.std.pcap"
+relpath_pcap.write_bytes(b"fake pcap bytes for relpath regression test")
+relpath_scratch = relpath_root / "state" / "reactive_capture" / "zeek_scratch_ath0_relpath_test"
+
+fake_zeek_script = TMP / "fake_zeek_check_r_path.py"
+fake_zeek_script.write_text(
+    "import sys, os\n"
+    "pcap_arg = sys.argv[2]\n"
+    "if os.path.isfile(pcap_arg):\n"
+    "    sys.exit(0)\n"
+    "sys.stderr.write(\n"
+    "    'fatal error: problem with trace file %s (unable to open %s: No such file or directory)\\n'\n"
+    "    % (pcap_arg, pcap_arg)\n"
+    ")\n"
+    "sys.exit(1)\n",
+    encoding="utf-8",
+)
+
+if os.name == "nt":
+    fake_zeek_bin = TMP / "fake_zeek.bat"
+    fake_zeek_bin.write_text(f'@echo off\r\n"{sys.executable}" "{fake_zeek_script}" %*\r\n', encoding="utf-8")
+else:
+    fake_zeek_bin = TMP / "fake_zeek.sh"
+    fake_zeek_bin.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{fake_zeek_script}" "$@"\n', encoding="utf-8")
+    fake_zeek_bin.chmod(fake_zeek_bin.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+# Relative pcap path (matches production exactly), invoked with the process's cwd
+# temporarily changed to relpath_root -- reprocess_with_zeek() must still find it even
+# though the subprocess's own cwd is set to a totally different directory (relpath_scratch).
+_orig_cwd = os.getcwd()
+os.chdir(relpath_root)
+try:
+    relative_pcap_arg = _PathForSysPath("state/reactive_capture/burst_ath0_relpath_test.avm.std.pcap")
+    try:
+        reprocess_with_zeek(relative_pcap_arg, relpath_scratch, zeek_bin=str(fake_zeek_bin), timeout=15.0)
+        check("THE CORE FIX: reprocess_with_zeek() finds a RELATIVE pcap path even though "
+              "the zeek subprocess's own cwd is a different directory", True)
+    except FritzboxCaptureError as e:
+        check("THE CORE FIX: reprocess_with_zeek() finds a RELATIVE pcap path even though "
+              "the zeek subprocess's own cwd is a different directory", False, str(e))
+finally:
+    os.chdir(_orig_cwd)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section D: ingest_zeek_logs -- dispatch convention matches ZeekLogTailer's live path
 # ═══════════════════════════════════════════════════════════════════════════════════
 log_dir = TMP / "zeek_logs"

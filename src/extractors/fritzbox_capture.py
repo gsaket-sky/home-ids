@@ -288,6 +288,18 @@ def reprocess_with_zeek(pcap_path: Path, scratch_dir: Path, zeek_bin: str = "/op
     if shutil.which(zeek_bin) is None and not Path(zeek_bin).exists():
         raise FritzboxCaptureError(f"Zeek binary not found at {zeek_bin!r}.")
 
+    # BUGFIX: reactive_capture_scratch_dir (config.yaml) is a RELATIVE path
+    # ("state/reactive_capture") by default, same as every other data path in this
+    # app -- fine for plain Python file I/O (always resolved against THIS process's
+    # cwd), but pcap_path here is handed to zeek as a COMMAND-LINE ARGUMENT while the
+    # subprocess's own cwd is set to scratch_dir (below) -- a DIFFERENT directory. A
+    # relative pcap_path would then get resolved by zeek relative to scratch_dir, not
+    # this process's cwd, so it never finds the file: 100% reproducible "unable to
+    # open ... No such file or directory" on every single burst, regardless of
+    # concurrency. Resolving to an absolute path here makes it correct no matter what
+    # the subprocess's cwd is.
+    pcap_path = pcap_path.resolve()
+
     try:
         proc = subprocess.run(
             [zeek_bin, "-r", str(pcap_path), "local"],
