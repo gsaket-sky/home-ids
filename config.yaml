@@ -460,10 +460,10 @@ reactive_capture:
   reactive_capture_wired_probe_trigger_enabled: true
 
   # The wired device IP(s) reactive_capture_wired_probe_trigger_enabled watches for a
-  # new source -- typically your NAS and/or the Ubuntu server itself. Empty by default
-  # (opt-in, since it names specific real device IPs on your LAN -- fill in your own).
-  # [LIVE]
-  reactive_capture_wired_probe_ips: []
+  # new source -- your NAS and the Ubuntu server itself. [LIVE]
+  reactive_capture_wired_probe_ips:
+    - 192.168.1.28   # NAS
+    - 192.168.1.94   # Ubuntu server
 
   # Periodic baseline spot-check, in-process (not a separate scheduled script -- see
   # pipeline.py's PHASE 21D comment on why: a burst's findings only reach live
