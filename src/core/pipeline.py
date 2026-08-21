@@ -1287,12 +1287,24 @@ class EnginePipeline:
 
                                 self.alert_manager.send(alert_msg, raw_payload=alert_payload, reply_markup=reply_markup)
 
-                elif not fp_verdict["suppress"]:
-                    LOGGER.info(
-                        "Alert for %s held below Telegram threshold (state=%s, risk=%.2f) — "
-                        "logged to alerts.json and CL-AFPE, not sent to Telegram.",
-                        hostname, containment_decision_state, risk
-                    )
+                        # BUGFIX: this elif was previously mis-indented to attach to the OUTER
+                        # `if decision["state"] in (...)` (16-indent) instead of the inner
+                        # `if not fp_verdict["suppress"] and telegram_worthy:` above it (24-indent)
+                        # it was actually meant to pair with. At 16-indent it only ran when
+                        # decision["state"] was NOT in (HIGH, CRITICAL, SUSPICIOUS) at all -- i.e.
+                        # almost every cycle for almost every device -- a branch where fp_verdict
+                        # is never computed, crashing every _step() call in production with
+                        # UnboundLocalError. Attaching it here means it correctly fires only when
+                        # we're actually inside the elevated-decision-state branch, fp_verdict was
+                        # computed, CL-AFPE didn't suppress it, but the decision wasn't
+                        # telegram_worthy (SUSPICIOUS, not HIGH/CRITICAL) -- exactly what the log
+                        # message below describes.
+                        elif not fp_verdict["suppress"]:
+                            LOGGER.info(
+                                "Alert for %s held below Telegram threshold (state=%s, risk=%.2f) — "
+                                "logged to alerts.json and CL-AFPE, not sent to Telegram.",
+                                hostname, containment_decision_state, risk
+                            )
 
                 elif getattr(state, "last_alert_confidence", 0.0) >= alert_threshold and risk <= (alert_threshold - 1.0):
                     LOGGER.debug("Device %s risk subsided below threshold.", hostname)
