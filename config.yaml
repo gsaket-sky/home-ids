@@ -407,6 +407,50 @@ fritzbox_router:
 
 
 # -----------------------------------------------------------------------------
+# reactive_capture — Fritzbox diagnostic-capture burst client (Phase C).
+# Auth is the router's login_sid.lua challenge-response flow -- a separate mechanism
+# from the TR-064 auth fritzbox_router above uses, confirmed via live testing this
+# session; reuses the same fritz_ip/fritz_user/fritz_password. See
+# src/extractors/fritzbox_capture.py's module docstring for the confirmed capture
+# mechanism (the Start request's response body IS the live pcap stream).
+# NOT wired to any automatic trigger yet (that's Phase D) -- this only controls the
+# capture+ingest mechanism itself, callable directly today for a manual/operator burst.
+# -----------------------------------------------------------------------------
+reactive_capture:
+  # Master switch. False until the end-to-end flow (capture -> convert -> zeek -r ->
+  # ingest) has been verified live on the real Ubuntu deployment with a real Zeek
+  # install -- flipping this on before then does nothing today since Phase D hasn't
+  # wired any trigger to call capture_and_ingest() yet. [LIVE]
+  reactive_capture_enabled: false
+
+  # Which Fritzbox diagnostic interfaces to capture per burst. ath0/ath1 are this
+  # router's 2.4GHz/5GHz radios -- confirmed via live testing to be the only
+  # interfaces that see WiFi-to-WiFi traffic (see PRODUCT_ARCHITECTURE.md). A burst
+  # captures all configured radios simultaneously in one shared window. [LIVE]
+  reactive_capture_radios:
+    - ath0
+    - ath1
+
+  # How long one capture burst runs, in seconds. ~3GB/hour combined dual-radio cost
+  # measured live this session -> a 120s burst is roughly 100MB. [LIVE]
+  reactive_capture_burst_seconds: 120.0
+
+  # Per-packet snapshot length (bytes) requested from the router -- matches the
+  # default the browser UI itself uses. [LIVE]
+  reactive_capture_snaplen: 1600
+
+  # Where raw/converted pcaps and Zeek's scratch reprocessing output are written.
+  # [LIVE]
+  reactive_capture_scratch_dir: state/reactive_capture
+
+  # Path to the zeek binary used to reprocess a burst -- must be the SAME Zeek
+  # install/local.zeek policy the live deployment runs (JSON logging, mac-logging,
+  # ja3/ja4), or the burst won't get the same signals live traffic does. Default
+  # matches this repo's own INSTALL.md for a security:zeek/zeekctl install. [LIVE]
+  reactive_capture_zeek_bin: /opt/zeek/bin/zeek
+
+
+# -----------------------------------------------------------------------------
 # telegram — bot notification behavior (token/chat ID come from .env)
 # -----------------------------------------------------------------------------
 telegram:
