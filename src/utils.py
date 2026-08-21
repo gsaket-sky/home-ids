@@ -253,6 +253,30 @@ def _is_cdn_or_cloud_domain(domain: str) -> bool:
     base = etld1(norm)
     return base in _SYSTEM_SAFE_BASE_DOMAINS
 
+# PHASE 21C2: recognized commercial VPN provider ASN organization-name substrings.
+# Used by dns_evasion.py's blind-spot audit to avoid flagging legitimate VPN traffic as
+# an unexplained connection -- the exact false-positive case found live this session
+# (an iPhone running NordVPN showed real traffic to an IP with no matching DNS history,
+# which without this check would look identical to a device deliberately evading DNS).
+# Matched case-insensitively as a substring against GeoIP ASN org names, deliberately
+# NOT a CIDR/IP-range list -- published VPN IP ranges change too often to hand-maintain,
+# while an ASN org name is far more stable and refreshes automatically with MaxMind's
+# own database updates.
+_VPN_PROVIDER_ORG_KEYWORDS = frozenset({
+    "nordvpn", "nord vpn", "expressvpn", "express vpn", "mullvad", "surfshark",
+    "protonvpn", "proton vpn", "private internet access", "cyberghost",
+    "windscribe", "ivpn", "torguard", "privatevpn", "purevpn", "hidemyass",
+    "hotspot shield", "tunnelbear", "vyprvpn", "perfect privacy",
+})
+
+def is_vpn_provider_org(org_name: str) -> bool:
+    """True if a GeoIP ASN organization name matches a known commercial VPN provider.
+    Deliberately name-based, not IP/CIDR-based -- see the constant's comment above."""
+    if not org_name:
+        return False
+    norm = org_name.lower()
+    return any(kw in norm for kw in _VPN_PROVIDER_ORG_KEYWORDS)
+
 def suspicious_dga(domain):
     """
     Heuristic DGA (Domain Generation Algorithm) detector.

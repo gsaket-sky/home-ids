@@ -266,12 +266,49 @@ class ConnectionAbuseHypothesis(Hypothesis):
         return score
 
 
+class DNSEvasionHypothesis(Hypothesis):
+    """PHASE 21C2: fires on dns_evasion.py's blind-spot audit finding -- real captured
+    connections a device's own DNS history can't explain. Distinct from every other
+    hypothesis here, which reasons over DNS-query SHAPE (entropy/rate/tunneling
+    signatures); this one reasons over ground-truth connections from a reactive
+    Fritzbox capture burst versus DNS history, so it can catch a device that's simply
+    not using DNS to look things up at all -- structurally invisible to the others by
+    design. An unexplained connection alone proves a detection GAP existed, not that
+    the device is compromised -- deliberately requires a second independent source
+    (another hypothesis's evidence on the same device) to reach 'strong', consistent
+    with every other hypothesis's corroboration bar here and with Phase A's tightened
+    Telegram gate."""
+    def __init__(self):
+        super().__init__("DNS_EVASION")
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        self._reset_eval_state()
+        hits = [e for e in ev_store if e.type == "dns_evasion_anomaly"]
+        self.required_satisfied = bool(hits)
+        if not self.required_satisfied:
+            return 0.0
+        best = max(e.effective_weight() for e in hits)
+
+        if rep_vector.tier in (1, 2):
+            self.contradicting_score += 1.0
+        if any(e.type != "dns_evasion_anomaly" for e in ev_store):
+            self.strong_score += 1.0
+
+        score = 2.0
+        if best >= 0.6 and self.contradicting_score == 0:
+            score = 3.0
+        if self.strong_score > 0 and self.contradicting_score == 0:
+            score = 4.0
+        return score
+
+
 class HypothesisEngine:
     def __init__(self):
         self.attack_hypotheses = [
             DNSTunnelingHypothesis(), NetworkIntrusionHypothesis(),
             DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
+            DNSEvasionHypothesis(),
         ]
         self.benign_hypotheses = [AdvertisingBurstHypothesis()]
 
