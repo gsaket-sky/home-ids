@@ -393,3 +393,68 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
 
     LOGGER.info("Reactive capture burst (trigger=%s) complete: %s", trigger_reason, summary)
     return summary
+
+
+# --- Trigger dispatch (Phase D) -----------------------------------------------------
+
+class ReactiveCaptureDispatcher:
+    """Shared hourly-budget gate for every reactive-capture trigger. One instance is
+    shared across all trigger sources in pipeline.py so the thing actually being rate
+    limited is BURST EXECUTIONS overall, not any one trigger type -- a single burst
+    captures the whole radio regardless of which source fired it, so trigger-source
+    COUNT doesn't multiply capture cost, only actual burst-EXECUTION count does. See
+    the reactive-capture plan's Phase D design note on this.
+
+    capture_fn is injectable (defaults to capture_and_ingest) so tests can substitute a
+    fast stub instead of making real network calls."""
+
+    def __init__(self, capture_fn=None):
+        self._lock = threading.Lock()
+        self._window_start = time.time()
+        self._count = 0
+        self._capture_fn = capture_fn or capture_and_ingest
+
+    def _check_and_consume_budget(self, config: dict) -> bool:
+        """Pure budget bookkeeping, no threading -- kept separate from try_dispatch()
+        so the hourly-window/count logic can be unit tested directly without spinning
+        real threads."""
+        if not config.get("reactive_capture_enabled", False):
+            return False
+        max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
+        with self._lock:
+            now = time.time()
+            if now - self._window_start >= 3600:
+                self._window_start = now
+                self._count = 0
+            if self._count >= max_per_hour:
+                return False
+            self._count += 1
+            return True
+
+    def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str) -> bool:
+        """Attempts to fire one capture burst asynchronously. Returns True if
+        dispatched (the actual capture runs in a daemon thread and this call never
+        blocks), False if reactive_capture_enabled is false or the shared hourly
+        budget is exhausted -- logged as [DEFERRED], matching ollama_soc.py's
+        per-run-query-cap convention, rather than silently dropping the trigger."""
+        if not self._check_and_consume_budget(config):
+            if config.get("reactive_capture_enabled", False):
+                max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
+                LOGGER.info("[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
+                            "deferring trigger '%s' -- will be reconsidered once the hourly "
+                            "window resets.", max_per_hour, trigger_reason)
+            return False
+
+        out_dir = Path(config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
+        zeek_bin = config.get("reactive_capture_zeek_bin", "/opt/zeek/bin/zeek")
+        capture_fn = self._capture_fn
+
+        def _run():
+            try:
+                capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason)
+            except Exception as exc:
+                LOGGER.error("Reactive capture burst (trigger=%s) failed: %s", trigger_reason, exc)
+
+        threading.Thread(target=_run, daemon=True, name=f"reactive-capture-{trigger_reason}").start()
+        LOGGER.info("Reactive capture burst dispatched (trigger=%s).", trigger_reason)
+        return True

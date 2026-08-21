@@ -417,11 +417,33 @@ fritzbox_router:
 # capture+ingest mechanism itself, callable directly today for a manual/operator burst.
 # -----------------------------------------------------------------------------
 reactive_capture:
-  # Master switch. False until the end-to-end flow (capture -> convert -> zeek -r ->
-  # ingest) has been verified live on the real Ubuntu deployment with a real Zeek
-  # install -- flipping this on before then does nothing today since Phase D hasn't
-  # wired any trigger to call capture_and_ingest() yet. [LIVE]
+  # Master switch. False by default -- flip to true once you're ready for the live
+  # deployment to actually fire capture bursts (Phase D's triggers below are wired and
+  # live-verified as of this session, see zeek_scripts/local-arp-log.zeek's deployment
+  # notes and this phase's commit message). [LIVE]
   reactive_capture_enabled: false
+
+  # The ONE shared aggressiveness knob (Phase D design): every trigger below draws
+  # from this single hourly budget instead of a per-trigger-type cooldown, since a
+  # single burst captures the WHOLE radio regardless of which source fired it --
+  # trigger-source count doesn't multiply capture cost, only actual burst-execution
+  # count does. Default ~1 every 10 minutes at full utilization. [LIVE]
+  reactive_capture_max_bursts_per_hour: 6
+
+  # Per-trigger enable flags -- each source can be individually disabled without
+  # touching the shared budget above. All default on, per explicit operator direction
+  # ("more trigger rather than conservative"). [LIVE]
+  reactive_capture_new_device_trigger_enabled: true
+  reactive_capture_arp_sweep_trigger_enabled: true
+  reactive_capture_dns_trigger_enabled: true
+  reactive_capture_high_severity_trigger_enabled: true
+
+  # Periodic baseline spot-check, in-process (not a separate scheduled script -- see
+  # pipeline.py's PHASE 21D comment on why: a burst's findings only reach live
+  # detection by ingesting into the SAME long-running ZeekFeatureExtractor instance
+  # the pipeline already holds, which a separate subprocess couldn't share). [LIVE]
+  reactive_capture_spotcheck_enabled: true
+  reactive_capture_spotcheck_interval_seconds: 1800.0
 
   # Which Fritzbox diagnostic interfaces to capture per burst. ath0/ath1 are this
   # router's 2.4GHz/5GHz radios -- confirmed via live testing to be the only

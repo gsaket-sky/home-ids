@@ -26,6 +26,7 @@ from core.identity import DeviceIdentityManager
 from core.metrics_sync import MetricsExporter
 from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
+from extractors.fritzbox_capture import ReactiveCaptureDispatcher  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
@@ -174,6 +175,16 @@ class EnginePipeline:
         
         self.metrics_exporter = MetricsExporter()
 
+        # PHASE 21D: shared hourly-budget gate for every reactive-capture trigger below
+        # (new device, ARP-sweep, DNS-suspicion, HIGH/CRITICAL, periodic spot-check) --
+        # one instance so the budget is genuinely shared, not per-trigger-type. See
+        # ReactiveCaptureDispatcher's docstring in extractors/fritzbox_capture.py.
+        self.reactive_capture = ReactiveCaptureDispatcher()
+        # Seeded to "now", not 0 -- avoids firing a spot-check burst immediately on
+        # every process restart; the first one fires after a full interval has
+        # elapsed, same as a cron-scheduled job would behave.
+        self._last_reactive_spotcheck_ts = time.time()
+
         # -----------------------------------------------------------------------
         # Closed-Loop Autonomous FP Engine (CL-AFPE)
         # Instantiated here so it boots its background ML loader threads immediately.
@@ -243,6 +254,23 @@ class EnginePipeline:
         ips_tarpit_status.set(1.0 if self.config.get("ips_tarpit_enabled", True) else 0.0)
         ti_engine_ready_status.set(1.0 if (self.ti_engine and self.ti_engine.is_ready()) else 0.0)  # PHASE 5 FIX
 
+        # PHASE 21D trigger: periodic spot-check, deliberately kept IN-PROCESS rather
+        # than a separate scheduled subprocess script (unlike retro_hunter.py/
+        # ollama_soc.py) -- capture_and_ingest() reprocesses each burst into an
+        # isolated scratch directory, not the live zeek_log_dir ZeekCollector tails, so
+        # the ONLY way a burst's findings reach the live pipeline's detection state is
+        # by ingesting into this SAME self.zeek_fx instance. A separate subprocess
+        # would need its own throwaway ZeekFeatureExtractor, and its findings would
+        # never reach live detection at all -- silently defeating the entire point of
+        # this phase's design (see fritzbox_capture.py's module docstring). Not gated
+        # by a device-specific condition, so it's a plain elapsed-time check, not part
+        # of the per-device loop below.
+        if bool(self.config.get("reactive_capture_spotcheck_enabled", True)):
+            interval = float(self.config.get("reactive_capture_spotcheck_interval_seconds", 1800.0))
+            if now - self._last_reactive_spotcheck_ts >= interval:
+                self._last_reactive_spotcheck_ts = now
+                self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="spotcheck")
+
         dns_rows = self.pihole_collector.poll()
         zeek_events = self.zeek_collector.poll()
 
@@ -272,6 +300,11 @@ class EnginePipeline:
 
             if not self.state_manager.has_device(dev_id):
                 self.state_manager.get_or_create(dev_id, client_ip, hostname, float(self.config.get("baseline_alpha", 0.05)))
+                # PHASE 21D trigger: a brand-new device cold-starting fires one capture
+                # burst to establish a baseline JA4/connection fingerprint for it
+                # immediately, rather than waiting for it to look suspicious first.
+                if bool(self.config.get("reactive_capture_new_device_trigger_enabled", True)):
+                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="new_device")
 
             with self.state_manager.lock_device(dev_id) as state:
                 status_code = int(row.get("status", 0))
@@ -496,6 +529,13 @@ class EnginePipeline:
                 )
                 for ev in threat_signal_ev: self.evidence_store.add(ev)
 
+                # PHASE 21D trigger: an ARP host-discovery sweep is exactly the kind of
+                # LAN-recon precursor a capture burst should confirm with real traffic,
+                # not just DNS-shape evidence.
+                if bool(self.config.get("reactive_capture_arp_sweep_trigger_enabled", True)) \
+                        and any(ev.type == "arp_sweep" for ev in threat_signal_ev):
+                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="arp_sweep")
+
                 if ml_score > 0.90:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
                 
@@ -618,6 +658,15 @@ class EnginePipeline:
                     decision_path_total.labels(device=dev_id, hostname=hostname, path=decision.get("decision_path", "benign")).inc()
                 except Exception:
                     pass
+
+                # PHASE 21D trigger: widened to ANY non-benign decision_path (not just
+                # SUSPICIOUS+) -- per explicit operator direction ("more trigger rather
+                # than conservative"), since one burst captures the whole radio and a
+                # shared hourly budget (not per-source cooldowns) is what actually
+                # controls capture cost, not how eagerly any one source fires.
+                if bool(self.config.get("reactive_capture_dns_trigger_enabled", True)) \
+                        and decision.get("decision_path", "benign") != "benign":
+                    self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="dns_suspicion")
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
 
@@ -893,6 +942,17 @@ class EnginePipeline:
                         # paths above, which already have their own independent risk_score/
                         # lateral_threat gates unrelated to Telegram.
                         telegram_worthy = containment_decision_state in (DecisionState.HIGH, DecisionState.CRITICAL)
+
+                        # PHASE 21D trigger: even though a HIGH/CRITICAL decision already
+                        # alerts/blocks via the paths above, also firing a capture burst
+                        # gives full radio-wide context for that specific incident window,
+                        # not just the flagged device's own (WiFi-blind, absent this) view.
+                        # Gated on the same not-suppressed condition as the Telegram send
+                        # below -- CL-AFPE already decided this specific decision was a
+                        # false positive, so there's no real incident window to capture.
+                        if bool(self.config.get("reactive_capture_high_severity_trigger_enabled", True)) \
+                                and telegram_worthy and not fp_verdict["suppress"]:
+                            self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="high_severity")
 
                         if not fp_verdict["suppress"] and telegram_worthy:
 
