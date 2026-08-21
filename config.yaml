@@ -231,6 +231,14 @@ detection_engine:
 # these is a fresh self.config.get() call on every alert evaluation).
 # -----------------------------------------------------------------------------
 false_positive_engine:
+  # PHASE 21D3: how long a network-confirmed threat IOC (IP/domain) stays a hard-stop
+  # for OTHER devices touching it (local_intel.py). Confirmed-malicious infrastructure
+  # from months ago may be repurposed or abandoned, so this is deliberately
+  # TTL-bounded, not permanent -- same reasoning as fp_trust_cache's 14-day TTL, just a
+  # longer window since this is confirmed-threat evidence, not confirmed-safe.
+  # [RESTART] (read once at AutonomousFPEngine construction)
+  local_confirmed_intel_ttl_seconds: 2592000.0  # 30 days
+
   # Stage 2: minimum LightGBM P(false positive) to lean towards suppression.
   # Lower = engine trusts the tabular model more readily. [LIVE]
   fp_lgbm_threshold: 0.75

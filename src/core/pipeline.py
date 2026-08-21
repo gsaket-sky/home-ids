@@ -18,7 +18,7 @@ import uuid
 from pathlib import Path
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -1001,6 +1001,19 @@ class EnginePipeline:
                         if bool(self.config.get("reactive_capture_high_severity_trigger_enabled", True)) \
                                 and telegram_worthy and not fp_verdict["suppress"]:
                             self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="high_severity")
+
+                        # PHASE 21D3: second feed point for the local confirmed-intel store
+                        # (fp_engine.py's Stage-1 CONFIRMED_THREAT is the first) -- a HIGH/
+                        # CRITICAL decision here can come from 2+ independent hypothesis
+                        # evidence sources WITHOUT any single Stage-1 hard-stop signal ever
+                        # firing (e.g. DGA + reputation combined), so this is genuinely a
+                        # second, non-redundant confirmation path, not a duplicate of the one
+                        # inside fp_engine.py. Same not-suppressed gate as the trigger above.
+                        if telegram_worthy and not fp_verdict["suppress"] and self.fp_engine:
+                            self.fp_engine.record_confirmed_threat(
+                                dev_id, etld1(target_malicious_domain), dest_ip, reason="HIGH_CRITICAL_DECISION",
+                                signature=primary_sig,
+                            )
 
                         if not fp_verdict["suppress"] and telegram_worthy:
 

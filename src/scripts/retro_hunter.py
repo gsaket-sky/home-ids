@@ -24,6 +24,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
+from intelligence.local_intel import LocalConfirmedIntel
 from utils import write_job_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [RETRO-HUNTER] %(message)s")
@@ -102,6 +103,62 @@ def load_historical_domains(log_path: Path, days_back: int) -> set:
         
     return unique_domains
 
+
+def check_local_intel_history(log_path: Path, local_intel: LocalConfirmedIntel, days_back: int) -> list:
+    """PHASE 21D3: retroactive cross-device check against the LOCAL confirmed-intel
+    store (local_intel.py), not the external ThreatIntel feeds load_historical_domains()
+    /the rest of this module checks against. When any device gets confirmed touching a
+    malicious IP/domain (fp_engine.py's Stage-1 hard-stop, or pipeline.py's HIGH/
+    CRITICAL bar), that IOC only hard-stops FUTURE connections from other devices --
+    this catches "device B also touched this IOC three days ago but wasn't over its own
+    detection threshold at the time," using intel the network only just learned.
+
+    Returns a list of {device_id, hostname, matched_kind, matched_value, ts,
+    confirmed_by} dicts -- one per historical alert whose domain/destination_ip matches
+    a confirmed IOC, EXCLUDING alerts from a device that's already one of that IOC's own
+    confirmed sources (that device already triggered its own hard-stop at the time; the
+    genuinely new finding here is a DIFFERENT, not-yet-flagged device)."""
+    cutoff_time = (datetime.now() - timedelta(days=days_back)).timestamp()
+    matches = []
+
+    if not log_path.exists():
+        return matches
+
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = float(record.get("timestamp", 0) or 0)
+                if ts < cutoff_time:
+                    continue
+                device_id = record.get("device", {}).get("id", "unknown")
+                hostname = record.get("device", {}).get("hostname", "unknown")
+                network_context = record.get("network_context", {}) or {}
+                domain = str(network_context.get("queried_domain") or "").lower().strip(".")
+                dest_ip = str(network_context.get("destination_ip") or "")
+
+                for kind, value in (("domain", domain), ("ip", dest_ip)):
+                    if not value or value == "unknown":
+                        continue
+                    entry = local_intel.check(kind, value)
+                    if not entry:
+                        continue
+                    if device_id in entry.get("sources", []):
+                        continue  # this device already confirmed it itself -- not a new finding
+                    matches.append({
+                        "device_id": device_id, "hostname": hostname,
+                        "matched_kind": kind, "matched_value": value, "ts": ts,
+                        "confirmed_by": entry.get("sources", []),
+                    })
+    except Exception as e:
+        LOGGER.error("Failed to parse historical stream for local-intel cross-reference: %s", e)
+
+    return matches
+
+
 def run_retro_hunt(days: int = 14) -> None:
     """Executes the retroactive threat hunt for a given number of days."""
     run_start = time.time()
@@ -130,25 +187,22 @@ def run_retro_hunt(days: int = 14) -> None:
     alert_path_cfg = Path(CONFIG.get("alert_json_path", "state/alerts.json"))
     log_path = alert_path_cfg if alert_path_cfg.exists() else alert_path_cfg.with_name("alerts.json")
     historical_domains = load_historical_domains(log_path, days)
-    
-    if not historical_domains:
-        LOGGER.info("No historical domains found to scan. Exiting.")
-        write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={"findings_count": _count_findings(state_dir)})
-        return
-        
-    LOGGER.info("Extracted %d unique historical domains. Commencing Threat Intel detonation...", len(historical_domains))
-    
+
     matches = []
-    for domain in historical_domains:
-        ti_result = ti.lookup_domain(domain)
-        if ti_result:
-            matches.append({
-                "domain": domain,
-                "confidence": ti_result.get("confidence", 0.0),
-                "tags": ti_result.get("tags", []),
-                "source": ti_result.get("source", "unknown")
-            })
-            
+    if not historical_domains:
+        LOGGER.info("No historical domains found to scan against external Threat Intel.")
+    else:
+        LOGGER.info("Extracted %d unique historical domains. Commencing Threat Intel detonation...", len(historical_domains))
+        for domain in historical_domains:
+            ti_result = ti.lookup_domain(domain)
+            if ti_result:
+                matches.append({
+                    "domain": domain,
+                    "confidence": ti_result.get("confidence", 0.0),
+                    "tags": ti_result.get("tags", []),
+                    "source": ti_result.get("source", "unknown")
+                })
+
     if matches:
         matches_sorted = sorted(matches, key=lambda x: x["confidence"], reverse=True)
         LOGGER.critical("🚨 RETROACTIVE THREATS DISCOVERED 🚨")
@@ -187,6 +241,42 @@ def run_retro_hunt(days: int = 14) -> None:
         _send_telegram("\n".join(lines)[:4000])
     else:
         LOGGER.info("✅ Retroactive hunt complete. Zero historical compromises detected against fresh intel.")
+
+    # PHASE 21D3: separate cross-reference against the LOCAL confirmed-intel store --
+    # catches "device B also touched this IOC three days ago but wasn't over ITS OWN
+    # detection threshold at the time," using intel the network only just learned from
+    # a DIFFERENT device's confirmed threat. See check_local_intel_history()'s
+    # docstring. Independent of the external-ThreatIntel pass above -- runs even when
+    # historical_domains was empty, since it also checks destination_ip, not just domain.
+    local_intel = LocalConfirmedIntel(state_dir)
+    local_matches = check_local_intel_history(log_path, local_intel, days)
+    if local_matches:
+        LOGGER.critical("🌐 RETROACTIVE LOCAL-INTEL MATCHES: %d historical connection(s) from a "
+                         "device match an IOC confirmed by a DIFFERENT device since then.", len(local_matches))
+        try:
+            findings_path = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "retro_hunt_findings.jsonl"
+            with open(findings_path, "a", encoding="utf-8") as f:
+                for m in local_matches:
+                    f.write(json.dumps({
+                        "type": "local_intel_retro_match", "ts_unix": time.time(),
+                        "ts_human": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "lookback_days": days, **m,
+                    }) + "\n")
+        except Exception as e:
+            LOGGER.error("Failed to write local-intel retro findings: %s", e)
+
+        top_local = local_matches[:10]
+        lines = [f"🌐 <b>Retroactive Local-Intel Cross-Reference: {len(local_matches)} match(es)</b>",
+                 f"Devices that touched a since-confirmed-malicious IP/domain in the past {days}d:", ""]
+        for m in top_local:
+            lines.append(f"• <code>{m['hostname']}</code> ({m['device_id']}) → {m['matched_kind']} "
+                          f"<code>{m['matched_value']}</code>, confirmed by {m['confirmed_by']}")
+        if len(local_matches) > len(top_local):
+            lines.append(f"...and {len(local_matches) - len(top_local)} more (see retro_hunt_findings.jsonl)")
+        _send_telegram("\n".join(lines)[:4000])
+    else:
+        LOGGER.info("✅ No historical connections match the local confirmed-intel store.")
+    local_intel.prune_expired()
 
     write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={"findings_count": _count_findings(state_dir)})
 

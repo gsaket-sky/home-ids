@@ -388,6 +388,99 @@ def calibrate_suppress_threshold(corrected_fp_scores: list, uncorrected_uncertai
     return candidate, reason
 
 
+def _collect_connection_abuse_corrections(state_dir: Path) -> dict:
+    """PHASE 21D3 ('enable per device tuning'): independently scans
+    autonomous_muted.jsonl for CONNECTION_ABUSE-signature corrections (covers
+    arp_sweep evidence among others), grouped by device -- separate from
+    _collect_calibration_evidence() above, since arp_sweep_unique_targets_threshold
+    calibration needs a per-device correction COUNT, not the pooled fp_verdict
+    confidence-score distribution that function computes (arp_sweep has no comparable
+    0-1 confidence score to calibrate against). Returns {device_id: corrected_count}."""
+    counts: dict = {}
+    muted_path = state_dir / "autonomous_muted.jsonl"
+    if not muted_path.exists():
+        return counts
+    try:
+        for line in muted_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                doc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if doc.get("type") not in _FP_CORRECTION_TYPES:
+                continue
+            original = doc.get("original_alert", {}) or {}
+            if original.get("signature") != "CONNECTION_ABUSE":
+                continue
+            device_id = original.get("device", {}).get("id", "unknown")
+            counts[device_id] = counts.get(device_id, 0) + 1
+    except Exception as exc:
+        LOGGER.warning(f"[AUTOTUNE] Could not read autonomous_muted.jsonl for CONNECTION_ABUSE evidence: {exc}")
+    return counts
+
+
+ARP_SWEEP_MIN_CORRECTED_SAMPLES = 2   # a device needs at least this many confirmed FPs
+                                       # before its threshold gets raised automatically
+ARP_SWEEP_MIN_CONFIRMED_SAMPLES = 5   # ...and this many confirmed THREATS (zero
+                                       # corrections) before it gets tightened instead
+ARP_SWEEP_RAISE_STEP = 4.0
+ARP_SWEEP_LOWER_STEP = 1.0
+ARP_SWEEP_MIN_THRESHOLD = 4.0
+ARP_SWEEP_MAX_THRESHOLD = 40.0
+
+
+def calibrate_arp_sweep_threshold(corrected_count: int, confirmed_count: int, current: float) -> tuple:
+    """Bidirectional per-device calibration of arp_sweep_unique_targets_threshold --
+    deliberately NOT the same one-directional-only rule calibrate_suppress_threshold()
+    uses above. A suppress-CONFIDENCE threshold has a safe default direction (lowering
+    it only ever means MORE suppression, so evidence-gated lowering is conservative by
+    construction); a raw COUNT threshold like this one has a genuine two-sided
+    precision/recall tradeoff -- too low false-positives on a device that legitimately
+    ARP-scans, too high misses real recon sweeps. Requiring evidence on only ONE side
+    (corrections with zero confirmations, or confirmations with zero corrections) for a
+    given device is what keeps each direction safe to act on automatically -- mixed/
+    contradictory evidence is left for a human to look at rather than auto-resolved.
+
+    Returns (new_value_or_None, reason_string), same shape as
+    calibrate_suppress_threshold()."""
+    if corrected_count >= ARP_SWEEP_MIN_CORRECTED_SAMPLES and confirmed_count == 0:
+        new_value = min(current + ARP_SWEEP_RAISE_STEP, ARP_SWEEP_MAX_THRESHOLD)
+        if new_value <= current:
+            return None, (
+                f"{corrected_count} CONNECTION_ABUSE correction(s) observed, but the threshold "
+                f"is already at its ceiling ({ARP_SWEEP_MAX_THRESHOLD:.0f}) -- no further change."
+            )
+        return new_value, (
+            f"{corrected_count} CONNECTION_ABUSE correction(s) confirmed as false positives, "
+            f"with zero confirmed real threats to contradict -- raised "
+            f"arp_sweep_unique_targets_threshold from {current:.1f} to {new_value:.1f} "
+            f"(less sensitive for this device)."
+        )
+
+    if confirmed_count >= ARP_SWEEP_MIN_CONFIRMED_SAMPLES and corrected_count == 0:
+        new_value = max(current - ARP_SWEEP_LOWER_STEP, ARP_SWEEP_MIN_THRESHOLD)
+        if new_value >= current:
+            return None, (
+                f"{confirmed_count} confirmed threat(s) observed, but the threshold is already "
+                f"at its floor ({ARP_SWEEP_MIN_THRESHOLD:.0f}) -- no further change."
+            )
+        return new_value, (
+            f"{confirmed_count} confirmed real threat(s) for this device with zero corrected "
+            f"false positives -- tightened arp_sweep_unique_targets_threshold from "
+            f"{current:.1f} to {new_value:.1f} (this detector has a strong confirmed track "
+            f"record here, worth more sensitivity, not less)."
+        )
+
+    return None, (
+        f"{corrected_count} correction(s), {confirmed_count} confirmation(s) -- not enough "
+        f"one-sided evidence yet to calibrate (need >= {ARP_SWEEP_MIN_CORRECTED_SAMPLES:.0f} "
+        f"corrections with zero confirmations, or >= {ARP_SWEEP_MIN_CONFIRMED_SAMPLES:.0f} "
+        f"confirmations with zero corrections)."
+    )
+
+
 def _write_config_override(state_dir: Path, key: str, value, baseline, set_by: str, reason: str) -> None:
     """Writes ONE key into state/config_overrides.json, preserving every other key already
     present — this file may hold overrides from other mechanisms later, and this must never
@@ -420,7 +513,9 @@ def _classify_outcome(new_value, reason: str) -> str:
 
 
 def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcome: str,
-                                 global_evidence: tuple, device_outcomes: dict, device_evidence: dict) -> None:
+                                 global_evidence: tuple, device_outcomes: dict, device_evidence: dict,
+                                 device_confirmed_counts: dict = None,
+                                 arp_sweep_outcomes: dict = None, arp_sweep_evidence: dict = None) -> None:
     """Writes state/autotune_stats.json -- synced into Prometheus gauges by the
     long-running pipeline process's sync_relay_metrics() (this script is a separate
     cron/thread-triggered process with no HTTP server of its own). Reads back
@@ -429,7 +524,20 @@ def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcom
     apply_device_fp_profile() already recorded that pairing at the moment they wrote it.
     calibration_outcomes counts are cumulative across runs (read-modify-write), matching
     the metric's own documented semantics.
+
+    PHASE 21D3: device_confirmed_counts adds a "confirmed" figure alongside the existing
+    "corrected"/"uncorrected" evidence_counts -- not just how often a detector was WRONG
+    (corrected), but how often it was RIGHT (confirmed), so a detector with a strong
+    confirmed track record can eventually be tightened, not just loosened on correction.
+    arp_sweep_outcomes/arp_sweep_evidence are the SEPARATE per-device ARP-sweep-threshold
+    calibration pass's own outcome/evidence, written alongside (not merged into) the
+    existing fp_combined_suppress_threshold figures, since they calibrate a different key
+    with a different (bidirectional) rule -- see calibrate_arp_sweep_threshold().
     """
+    device_confirmed_counts = device_confirmed_counts or {}
+    arp_sweep_outcomes = arp_sweep_outcomes or {}
+    arp_sweep_evidence = arp_sweep_evidence or {}
+
     stats_path = state_dir / "autotune_stats.json"
     try:
         existing = json.loads(stats_path.read_text(encoding="utf-8")) if stats_path.exists() else {}
@@ -465,7 +573,22 @@ def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcom
         if "value" in dev_profile:
             dev_entry["effective"] = dev_profile["value"]
         corrected, uncorrected = device_evidence.get(device_id, (0, 0))
-        dev_entry["evidence_counts"] = {"corrected": corrected, "uncorrected": uncorrected}
+        dev_entry["evidence_counts"] = {
+            "corrected": corrected, "uncorrected": uncorrected,
+            "confirmed": device_confirmed_counts.get(device_id, 0),
+        }
+        dev_entry.setdefault("hostname", "unknown")
+
+    for device_id, outcome in arp_sweep_outcomes.items():
+        dev_entry = devices.setdefault(device_id, {})
+        dev_arp_outcomes = dev_entry.get("arp_sweep_calibration_outcomes", {})
+        dev_arp_outcomes[outcome] = dev_arp_outcomes.get(outcome, 0) + 1
+        dev_entry["arp_sweep_calibration_outcomes"] = dev_arp_outcomes
+        dev_arp_profile = profiles.get(device_id, {}).get("arp_sweep_unique_targets_threshold", {})
+        if "value" in dev_arp_profile:
+            dev_entry["arp_sweep_effective"] = dev_arp_profile["value"]
+        corrected, confirmed = arp_sweep_evidence.get(device_id, (0, 0))
+        dev_entry["arp_sweep_evidence_counts"] = {"corrected": corrected, "confirmed": confirmed}
         dev_entry.setdefault("hostname", "unknown")
 
     corrected, uncorrected = global_evidence
@@ -474,7 +597,10 @@ def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcom
             "effective": global_current,
             "baseline": global_baseline,
             "calibration_outcomes": prev_outcomes,
-            "evidence_counts": {"corrected": corrected, "uncorrected": uncorrected},
+            "evidence_counts": {
+                "corrected": corrected, "uncorrected": uncorrected,
+                "confirmed": sum(device_confirmed_counts.values()),
+            },
         },
         "devices": devices,
     }
@@ -508,6 +634,10 @@ def run_threshold_calibration(state_dir: Path) -> None:
     global_evidence = (0, 0)
     device_outcomes: dict = {}
     device_evidence: dict = {}
+    device_confirmed_counts: dict = {}
+    arp_sweep_outcomes: dict = {}
+    arp_sweep_evidence: dict = {}
+    fp_engine = None  # lazily created by whichever pass below needs it first
 
     try:
         corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected = \
@@ -548,11 +678,12 @@ def run_threshold_calibration(state_dir: Path) -> None:
             # CONFIG (config.py's LiveConfig singleton) already exposes .get(key, default) —
             # the exact interface AutonomousFPEngine's config properties expect — so it can be
             # passed directly, no need to reach into its internals.
-            fp_engine = AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
+            fp_engine = fp_engine or AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
             for device_id in sorted(device_ids):
                 dev_corrected = per_device_corrected.get(device_id, [])
                 dev_uncorrected = per_device_uncorrected.get(device_id, [])
                 device_evidence[device_id] = (len(dev_corrected), len(dev_uncorrected))
+                device_confirmed_counts[device_id] = fp_engine.get_confirmed_count(device_id)
                 dev_current = fp_engine.get_device_suppress_threshold(device_id)
                 new_value, reason = calibrate_suppress_threshold(
                     dev_corrected, dev_uncorrected,
@@ -571,8 +702,47 @@ def run_threshold_calibration(state_dir: Path) -> None:
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE » PER-DEVICE] Threshold calibration failed (non-fatal): {exc}")
 
+    # --- Per-device ARP-sweep threshold pass (PHASE 21D3, 'enable per device tuning') --
+    # Genuinely separate evidence/rule from the suppress-threshold pass above -- see
+    # calibrate_arp_sweep_threshold()'s docstring for why a count threshold needs a
+    # bidirectional rule instead of calibrate_suppress_threshold()'s one-directional one.
     try:
-        _write_autotune_relay_stats(state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence)
+        connection_abuse_corrections = _collect_connection_abuse_corrections(state_dir)
+        # Union with the suppress-threshold device set above so a device that ONLY ever
+        # had CONNECTION_ABUSE evidence (no UNCERTAIN-verdict alerts at all) still gets
+        # considered, not just devices already touched by the pass above.
+        arp_device_ids = set(connection_abuse_corrections.keys()) | set(device_ids)
+        arp_device_ids.discard("unknown")
+        if not arp_device_ids:
+            LOGGER.info("[AUTOTUNE » ARP-SWEEP] No per-device evidence this run.")
+        else:
+            fp_engine = fp_engine or AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
+            global_arp_sweep_default = float(CONFIG.get("arp_sweep_unique_targets_threshold", 8.0))
+            for device_id in sorted(arp_device_ids):
+                corrected_count = connection_abuse_corrections.get(device_id, 0)
+                confirmed_count = fp_engine.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
+                arp_sweep_evidence[device_id] = (corrected_count, confirmed_count)
+                dev_current = fp_engine.get_device_arp_sweep_threshold(device_id, default=global_arp_sweep_default)
+                new_value, reason = calibrate_arp_sweep_threshold(corrected_count, confirmed_count, dev_current)
+                arp_sweep_outcomes[device_id] = _classify_outcome(new_value, reason)
+                if new_value is not None:
+                    LOGGER.info(f"[AUTOTUNE » ARP-SWEEP {device_id}] arp_sweep_unique_targets_threshold: {reason}")
+                    fp_engine.apply_device_fp_profile(
+                        device_id, "arp_sweep_unique_targets_threshold", new_value, baseline=dev_current,
+                        set_by="train_fp_classifier.py:calibrate_arp_sweep_threshold",
+                        reason=reason, sample_count=corrected_count + confirmed_count,
+                    )
+                else:
+                    LOGGER.debug(f"[AUTOTUNE » ARP-SWEEP {device_id}] {reason}")
+    except Exception as exc:
+        LOGGER.error(f"[AUTOTUNE » ARP-SWEEP] Threshold calibration failed (non-fatal): {exc}")
+
+    try:
+        _write_autotune_relay_stats(
+            state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence,
+            device_confirmed_counts=device_confirmed_counts,
+            arp_sweep_outcomes=arp_sweep_outcomes, arp_sweep_evidence=arp_sweep_evidence,
+        )
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] Failed to write autotune relay stats (non-fatal): {exc}")
 

@@ -71,6 +71,7 @@ from metrics import (
     fp_engine_domains_immunized_total,
     fp_engine_sigma_shifts_total,
 )
+from intelligence.local_intel import LocalConfirmedIntel
 
 # ---------------------------------------------------------------------------
 # Logger: home_ids.fp_engine appears as its own channel in journalctl
@@ -153,6 +154,19 @@ class AutonomousFPEngine:
         self._state_dir = Path(state_dir)
         self._state_dir.mkdir(parents=True, exist_ok=True)
 
+        # PHASE 21D3: self-growing local confirmed-threat store -- once ANY device is
+        # confirmed talking to a malicious IP/domain, a DIFFERENT device touching the
+        # same IOC later gets an immediate Stage-1 hard-stop instead of re-earning
+        # evidence from scratch. See local_intel.py's module docstring.
+        self.local_intel = LocalConfirmedIntel(
+            self._state_dir,
+            ttl_seconds=float(config.get("local_confirmed_intel_ttl_seconds", 30 * 86400.0)) if config else 30 * 86400.0,
+        )
+        # Maps device_id -> cumulative confirmed-threat count (see record_confirmed_threat()).
+        # NOTE: _load_confirmed_counts() itself is called further below, alongside the
+        # other _load_*() calls -- it needs self._lock, which isn't set up yet here.
+        self._confirmed_counts: dict = {}
+
         # Every suppressed alert is written here with full context.
         # Novice users can inspect this file to see what the engine auto-resolved.
         self._muted_log_path = self._state_dir / "autonomous_muted.jsonl"
@@ -212,6 +226,7 @@ class AutonomousFPEngine:
         self._load_trust_cache()
         self._load_sigma_shifts()
         self._load_device_fp_profiles()
+        self._load_confirmed_counts()
 
         # Set model status Prometheus gauges to 0 until models are ready
         fp_engine_lgbm_model_status.set(0.0)
@@ -338,11 +353,14 @@ class AutonomousFPEngine:
             # already get, every time, even for immunized domains. This closes audit
             # Finding #2 outright.
             # ==============================================================
-            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain)
+            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip)
             if stage1_triggers:
                 fp_engine_confirmed_threats_total.inc()
                 fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
                 self._apply_sigma_shift(device_id, hostname, direction="TUNE_UP")
+                self.record_confirmed_threat(device_id, base_domain, dest_ip,
+                                              reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
+                                              signature=alert_payload.get("signature", ""))
                 LOGGER.warning(
                     "🚨 [FP ENGINE » Trust Cache OVERRIDDEN] %s: '%s' is immunized BUT hard-stop "
                     "signal(s) fired: %s → CONFIRMED THREAT despite trust cache hit.",
@@ -382,7 +400,7 @@ class AutonomousFPEngine:
         # Real malware C2, port scans and honeypot access CANNOT be FPs.
         # ==================================================================
         LOGGER.debug("[FP ENGINE » Stage 1] Running hard-stop security filter...")
-        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain)
+        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip)
 
         if stage1_triggers:
             # One or more hard-stop signals fired → this is a real threat
@@ -391,6 +409,16 @@ class AutonomousFPEngine:
             
             # Self-Strengthening Action: TUNE UP sensitivity for this device (tighten thresholds)
             self._apply_sigma_shift(device_id, hostname, direction="TUNE_UP")
+
+            # PHASE 21D3: feed the local confirmed-intel store -- a DIFFERENT device
+            # touching this same IP/domain later gets an immediate hard-stop via the
+            # new check inside _stage1_hard_stop(), instead of re-earning evidence
+            # from scratch. base_domain (not raw `domain`) so a subdomain variance
+            # doesn't prevent the match, same key shape the trust cache already uses.
+            # (base_domain was already computed once at the top of evaluate() and is
+            # still in scope here -- Python has no block scoping.)
+            self.record_confirmed_threat(device_id, base_domain, dest_ip, reason="STAGE_1_HARD_STOP",
+                                          signature=alert_payload.get("signature", ""))
 
             LOGGER.warning(
                 "🚨 [FP ENGINE » Stage 1] CONFIRMED THREAT for %s │ Triggers: %s │ Sensitivity tuned UP",
@@ -636,11 +664,82 @@ class AutonomousFPEngine:
             return self._sigma_shifts.get(device_id, 0.0)
 
     # ==========================================================================
+    # PHASE 21D3: local confirmed-threat store feed + confirmed-count tracking
+    # ==========================================================================
+
+    def record_confirmed_threat(self, device_id: str, base_domain: str, dest_ip: str, reason: str,
+                                 signature: str = "") -> None:
+        """Public: the ONE call BOTH confirmation paths use -- fp_engine's own Stage-1
+        hard-stop internally, and pipeline.py's HIGH/CRITICAL decision bar externally
+        (a HIGH/CRITICAL can come from 2+ independent hypothesis evidence sources with
+        no single Stage-1 hard-stop signal ever firing, e.g. DGA + reputation combined
+        -- genuinely a second, non-redundant confirmation path, not a duplicate of the
+        one below). Feeds local_intel.py (so a DIFFERENT device touching the same IOC
+        later gets an immediate hard-stop) AND increments this device's confirmed-threat
+        counter, both overall and (when `signature` is supplied) scoped to that
+        hypothesis/signature -- so train_fp_classifier.py's per-device autotune can
+        calibrate a SPECIFIC detector (e.g. arp_sweep_unique_targets_threshold, gated on
+        the CONNECTION_ABUSE signature) on a confirmed-vs-corrected RATIO, not just
+        corrected count. Never raises -- a bookkeeping failure must not take down the
+        confirmed-threat verdict itself."""
+        try:
+            if base_domain:
+                self.local_intel.record("domain", base_domain, device_id, reason=reason)
+            if dest_ip and dest_ip != "unknown":
+                self.local_intel.record("ip", dest_ip, device_id, reason=reason)
+        except Exception as exc:
+            LOGGER.error("Failed to record confirmed intel: %s", exc)
+
+        try:
+            with self._lock:
+                self._confirmed_counts[device_id] = self._confirmed_counts.get(device_id, 0) + 1
+                if signature:
+                    scoped_key = f"{device_id}||{signature}"
+                    self._confirmed_counts[scoped_key] = self._confirmed_counts.get(scoped_key, 0) + 1
+            self._save_confirmed_counts()
+        except Exception as exc:
+            LOGGER.error("Failed to increment confirmed-threat counter: %s", exc)
+
+    def get_confirmed_count(self, device_id: str, signature: str = "") -> int:
+        """Cumulative confirmed-threat count for ONE device (see
+        record_confirmed_threat()) -- how many times this device's own alerts reached
+        CONFIRMED_THREAT or the HIGH/CRITICAL bar, ever. Pass `signature` to scope this
+        to one specific hypothesis (e.g. "CONNECTION_ABUSE") instead of the device's
+        overall total. Used alongside the existing corrected/uncorrected counts to let
+        calibration TIGHTEN a detector with a strong confirmed track record, not just
+        loosen it on correction."""
+        key = f"{device_id}||{signature}" if signature else device_id
+        with self._lock:
+            return self._confirmed_counts.get(key, 0)
+
+    def _save_confirmed_counts(self) -> None:
+        try:
+            p = self._state_dir / "confirmed_threat_counts.json"
+            with self._lock:
+                snapshot = dict(self._confirmed_counts)
+            p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+        except Exception as exc:
+            LOGGER.error("Failed to save confirmed_threat_counts.json: %s", exc)
+
+    def _load_confirmed_counts(self) -> None:
+        path = self._state_dir / "confirmed_threat_counts.json"
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            with self._lock:
+                for device_id, count in raw.items():
+                    if isinstance(count, (int, float)):
+                        self._confirmed_counts[device_id] = int(count)
+        except Exception as exc:
+            LOGGER.error("Failed to load confirmed_threat_counts.json: %s", exc)
+
+    # ==========================================================================
     # STAGE 1: Hard-Stop Security Filter
     # ==========================================================================
 
     def _stage1_hard_stop(
-        self, features: dict, ti_engine, hostname: str, domain: str
+        self, features: dict, ti_engine, hostname: str, domain: str, dest_ip: str = ""
     ) -> Optional[list]:
         """
         Fast filter for definitive threat signals that cannot be false positives.
@@ -701,6 +800,26 @@ class AutonomousFPEngine:
         if out_z > 5.0:
             triggers.append(f"Exfiltration Payload Burst (outbound_bytes_z={out_z:.2f})")
             LOGGER.warning("[Stage 1] %s: Exfiltration Hard-Stop triggered (Z=%.2f)", hostname, out_z)
+
+        # Check 7 (PHASE 21D3): local confirmed-threat store. Once ANY device on this
+        # network was confirmed talking to this domain/IP (a prior CONFIRMED_THREAT
+        # verdict recorded it via record_confirmed_threat()), a DIFFERENT device
+        # touching the SAME IOC doesn't have to re-earn 2 independent sources from
+        # scratch -- the network gets collectively harder to compromise via the same
+        # infrastructure, the more it confirms. TTL-bounded (see local_intel.py), so
+        # months-stale infrastructure ages out rather than hard-stopping forever.
+        base_domain = self._extract_base_domain(domain)
+        local_domain_hit = self.local_intel.check("domain", base_domain) if base_domain else None
+        local_ip_hit = self.local_intel.check("ip", dest_ip) if dest_ip else None
+        if local_domain_hit or local_ip_hit:
+            hit_target = base_domain if local_domain_hit else dest_ip
+            hit_entry = local_domain_hit or local_ip_hit
+            triggers.append(
+                f"Local confirmed-threat match: '{hit_target}' previously confirmed malicious on "
+                f"this network ({hit_entry['count']} confirmation(s), first seen "
+                f"{time.strftime('%Y-%m-%d', time.localtime(hit_entry['first_confirmed']))})"
+            )
+            LOGGER.warning("[Stage 1] %s: local confirmed-intel match on '%s'", hostname, hit_target)
 
         return triggers if triggers else None
 
