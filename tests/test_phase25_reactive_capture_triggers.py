@@ -24,6 +24,7 @@ from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
 import re
 import time
+import threading
 
 FAILURES = []
 
@@ -91,6 +92,44 @@ check("a second dispatch within the same hour, over budget (max=1), is refused",
 time.sleep(0.1)
 check("a refused dispatch never calls the capture_fn at all",
       len(calls) == 1, f"got {len(calls)} calls (expected still 1)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section B2 (BUGFIX regression guard): concurrent bursts must never overlap. Found in
+# production -- the hourly budget only ever limited total COUNT, never CONCURRENT
+# execution, so rapid-fire triggers (dns_suspicion/arp_sweep/wired_probe all firing
+# within seconds of each other) spawned overlapping capture_and_ingest() calls against
+# the same physical radio, which can only sustain one real capture session at a time.
+# Symptom in the field: repeated "Capture on athX produced an empty file" and a
+# genuinely-written .std.pcap disappearing before Zeek could read it.
+# ═══════════════════════════════════════════════════════════════════════════════════
+_peak_concurrency = {"n": 0, "max": 0}
+_peak_lock = threading.Lock()
+
+def slow_capture(config, zeek_fx, out_dir, zeek_bin="/opt/zeek/bin/zeek", trigger_reason="unspecified", **kwargs):
+    with _peak_lock:
+        _peak_concurrency["n"] += 1
+        _peak_concurrency["max"] = max(_peak_concurrency["max"], _peak_concurrency["n"])
+    time.sleep(0.3)
+    with _peak_lock:
+        _peak_concurrency["n"] -= 1
+
+d5 = ReactiveCaptureDispatcher(capture_fn=slow_capture)
+cfg5 = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6}
+dispatch_results = []
+for i in range(4):
+    dispatch_results.append(d5.try_dispatch(cfg5, zeek_fx=object(), trigger_reason=f"burst_{i}"))
+    time.sleep(0.05)
+time.sleep(1.0)
+
+check("only the first of 4 rapid-fire triggers actually dispatches; the rest defer "
+      "(a burst is already in flight), not because the budget (6) was exhausted",
+      dispatch_results == [True, False, False, False], f"got {dispatch_results}")
+check("THE CORE FIX: no two bursts ever ran capture_fn concurrently",
+      _peak_concurrency["max"] == 1, f"peak concurrent executions={_peak_concurrency['max']}")
+check("a trigger deferred due to overlap does NOT consume a real budget slot "
+      "(refunded, since it never actually ran)",
+      d5._count == 1, f"got _count={d5._count} (expected 1 -- only the one real execution)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

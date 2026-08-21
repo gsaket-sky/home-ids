@@ -598,6 +598,18 @@ class ReactiveCaptureDispatcher:
         self._window_start = time.time()
         self._count = 0
         self._capture_fn = capture_fn or capture_and_ingest
+        # BUGFIX: the hourly budget above only ever limited total burst COUNT, never
+        # CONCURRENT execution. Every dispatched trigger spawned its own daemon thread
+        # immediately, with nothing stopping two bursts from running at the same time.
+        # The Fritzbox radio capture is a single shared resource per interface -- it
+        # cannot run two independent diagnostic captures on the same radio at once.
+        # In production this caused repeated "Capture on athX produced an empty file"
+        # results and a genuinely-written .std.pcap disappearing before Zeek could read
+        # it (a second overlapping burst's ts/session stomping on the first's). This
+        # lock serializes actual burst EXECUTION -- try_dispatch() defers (not queues)
+        # a trigger that finds a burst already in flight, exactly like a budget-exhausted
+        # trigger, and refunds the budget slot it consumed since it never actually ran.
+        self._burst_lock = threading.Lock()
 
     def _check_and_consume_budget(self, config: dict) -> bool:
         """Pure budget bookkeeping, no threading -- kept separate from try_dispatch()
@@ -640,6 +652,20 @@ class ReactiveCaptureDispatcher:
                 reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred").inc()
             return False
 
+        if not self._burst_lock.acquire(blocking=False):
+            LOGGER.info(
+                "[DEFERRED] a reactive-capture burst is already in progress -- deferring trigger "
+                "'%s' (the router's radio capture is a single shared resource; concurrent bursts "
+                "corrupt each other's output). Not counted against the hourly budget.",
+                trigger_reason,
+            )
+            reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred_concurrent").inc()
+            # This trigger consumed a budget slot in _check_and_consume_budget() above but never
+            # actually ran a burst -- refund it so the hourly budget only ever counts real executions.
+            with self._lock:
+                self._count = max(0, self._count - 1)
+            return False
+
         out_dir = Path(config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
         zeek_bin = config.get("reactive_capture_zeek_bin", "/opt/zeek/bin/zeek")
         capture_fn = self._capture_fn
@@ -651,6 +677,8 @@ class ReactiveCaptureDispatcher:
                            geoip_engine=geoip_engine, ti_engine=ti_engine)
             except Exception as exc:
                 LOGGER.error("Reactive capture burst (trigger=%s) failed: %s", trigger_reason, exc)
+            finally:
+                self._burst_lock.release()
 
         threading.Thread(target=_run, daemon=True, name=f"reactive-capture-{trigger_reason}").start()
         reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="dispatched").inc()
