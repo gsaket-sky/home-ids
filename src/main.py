@@ -83,7 +83,22 @@ def main():
     # =====================================================================
     fastapi_proc = None
     webhook_log_file = None  # AUDIT FIX #2: Always initialize to None to prevent UnboundLocalError
-    if CONFIG.get("ips_router_enabled", False):
+    # BUGFIX (dead-code audit): this used to start ONLY when ips_router_enabled was true --
+    # but this same FastAPI process is the only thing serving /api/ipc/immunize and
+    # /api/ipc/revoke (pihole_api.py), which every "Mark False Positive"/"Revoke" Telegram
+    # button hits regardless of hardware router isolation, and /api/ipc/release, /api/ipc/block
+    # (fritzbox_api.py) for interactive approve/release. fp_revoke_notifications_enabled
+    # defaults to True (it's the primary closed-loop safety net on autonomous suppressions)
+    # while ips_router_enabled defaults to False -- so under DEFAULT config, this server
+    # never started at all, yet Telegram was already sending Revoke buttons that pointed at
+    # nothing. Now starts whenever ANY consumer of this webhook is enabled, not just the
+    # hardware-isolation one.
+    fastapi_needed = (
+        bool(CONFIG.get("ips_router_enabled", False))
+        or bool(CONFIG.get("interactive_blocking_enabled", False))
+        or bool(CONFIG.get("fp_revoke_notifications_enabled", True))
+    )
+    if fastapi_needed:
         fastapi_port = int(CONFIG.get("fastapi_port", 8010))
         if fastapi_port <= 0:
             LOGGER.warning("Configured fastapi_port %s is invalid; falling back to 8010.", fastapi_port)

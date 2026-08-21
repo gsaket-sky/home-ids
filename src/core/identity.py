@@ -179,7 +179,8 @@ class DeviceIdentityManager:
             
         return stable_device_id(client_ip)
 
-    def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None) -> List[str]:
+    def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
+                                ips_mitigator: Any = None) -> List[str]:
         if not dns_rows:
             return []
 
@@ -213,8 +214,9 @@ class DeviceIdentityManager:
 
             state = self.state_manager.get_or_create(
                 device_id=dev_id, client_ip=client_ip, hostname=hostname, alpha=alpha,
-                **self._reidentify_kwargs(client_ip, zeek_fx)
+                ml_registry=ml_registry, **self._reidentify_kwargs(client_ip, zeek_fx)
             )
+            self._release_stale_isolation_if_merged(ips_mitigator)
 
             with self.state_manager.lock_device(dev_id) as locked_state:
                 self._refresh_identity_signals(locked_state, mac_addr, client_ip, hostname, zeek_fx)
@@ -240,6 +242,23 @@ class DeviceIdentityManager:
             "candidate_window": float(self.config.get("identity_reidentify_window_seconds", 1800.0)),
         }
 
+    def _release_stale_isolation_if_merged(self, ips_mitigator: Any) -> None:
+        """BUGFIX (dead-code audit): IPSMitigator.unisolate_all() existed with zero
+        callers -- a device isolated under an old MAC/IP that then rotated identity (a
+        get_or_create() re-identify merge) had no code path ever releasing the stale
+        isolation bookkeeping tied to its old identifiers. Called right after
+        get_or_create() and OUTSIDE state_manager's lock (unisolate_all() can make a real
+        outbound HTTP call to the router) -- pop_last_migrated_isolation_target() is a
+        consume-once side channel, so this is a no-op on every call that wasn't a merge.
+        unisolate_all() itself is a safe no-op if the old identifiers weren't actually
+        isolated (it checks membership before doing anything)."""
+        if ips_mitigator is None:
+            return
+        target = self.state_manager.pop_last_migrated_isolation_target()
+        if not target:
+            return
+        ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
+
     def _refresh_identity_signals(self, locked_state: Any, mac_addr: str, client_ip: str,
                                     hostname: str, zeek_fx: Any, overwrite_hostname: bool = True) -> None:
         """Updates the mutable per-cycle identity fields on an already-locked DeviceState:
@@ -264,7 +283,8 @@ class DeviceIdentityManager:
             for ja4_hash in zeek_fx.get_ja4_set(client_ip):
                 locked_state.ja4_seen.add(ja4_hash)
 
-    def process_zeek_identities(self, zeek_events: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None) -> List[str]:
+    def process_zeek_identities(self, zeek_events: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
+                                 ips_mitigator: Any = None) -> List[str]:
         if not zeek_events:
             return []
 
@@ -295,8 +315,9 @@ class DeviceIdentityManager:
 
             state = self.state_manager.get_or_create(
                 device_id=dev_id, client_ip=src_ip, hostname=hostname, alpha=alpha,
-                **self._reidentify_kwargs(src_ip, zeek_fx)
+                ml_registry=ml_registry, **self._reidentify_kwargs(src_ip, zeek_fx)
             )
+            self._release_stale_isolation_if_merged(ips_mitigator)
 
             with self.state_manager.lock_device(dev_id) as locked_state:
                 self._refresh_identity_signals(locked_state, mac_addr, src_ip, hostname, zeek_fx,

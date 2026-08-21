@@ -19,11 +19,8 @@ RECENT FIXES:
 - FIXED: Added explicit bypasses for .local and .lan domains to prevent mDNS hashes from triggering DGA/DNS penalties.
 """
 import math
-import hashlib
-import socket
 import ipaddress
 import logging
-import functools
 import json
 import time
 from pathlib import Path
@@ -38,10 +35,6 @@ LOGGER = logging.getLogger("home_ids.utils")
 def normalize_domain(domain):
     """Lowercases and cleans up trailing dots from raw DNS queries."""
     return str(domain).lower().strip(".")
-
-def safe_label(label):
-    """Hashes labels that are too long or weird into safe representations."""
-    return hashlib.sha1(str(label).encode()).hexdigest()[:8]
 
 def sanitize_hostname(host):
     """Prevents invalid characters in Prometheus labels and dashboard variables."""
@@ -312,24 +305,6 @@ def suspicious_dga(domain):
     dr = digits / n
     
     return ent > 3.2 and vr < 0.25 and dr < 0.75
-
-@functools.lru_cache(maxsize=10000)
-def resolve_domain(domain):
-    """Attempts to do a physical socket check on a domain to find its true endpoint[cite: 3]."""
-    old_timeout = socket.getdefaulttimeout()
-    try:
-        socket.setdefaulttimeout(1.0)
-        infos = socket.getaddrinfo(domain, None)
-        for info in infos:
-            ip = info[4][0]
-            parsed = ipaddress.ip_address(ip)
-            if not parsed.is_private and not parsed.is_loopback and not parsed.is_multicast and not parsed.is_link_local:
-                return ip
-    except Exception:
-        return None
-    finally:
-        socket.setdefaulttimeout(old_timeout)
-    return None
 
 def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "") -> str:
     """

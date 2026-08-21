@@ -48,7 +48,7 @@ class StateManager:
             "last_sync_timestamp": 0.0,
         }
         self._global_lock = threading.RLock()
-        # AUDIT FIX #7: Reverse IP → device_id index for O(1) update_device_mac()
+        # AUDIT FIX #7: Reverse IP → device_id index for O(1) lookups elsewhere in this file.
         self._ip_to_device_id: Dict[str, str] = {}
         # PHASE 3 (closed-loop autonomous actions): revocable-action ledger. Records
         # autonomous actions (currently: immunize_domain) that a human can undo with a
@@ -73,6 +73,20 @@ class StateManager:
         # popped once by pop_last_reidentify_ambiguous() right after the call that
         # produced it, so a stale value can never be misread on a later, unrelated call.
         self._last_reidentify_ambiguous: Optional[Dict[str, Any]] = None
+        # BUGFIX (dead-code audit): consume-once side channel for a re-identify MERGE's
+        # now-stale isolation identifiers, same pattern as _last_reidentify_ambiguous just
+        # above. IPSMitigator.unisolate_all() existed with zero callers anywhere -- a
+        # device isolated under an old MAC/IP that then rotated identity (re-identified as
+        # a MAC/DHCP rotation of a known device, see get_or_create()'s matched_old_id
+        # branch) had no code path ever releasing the stale isolation bookkeeping tied to
+        # its old identifiers. Not called directly from inside get_or_create() itself:
+        # unisolate_all() can make a real outbound HTTP call to the router, and
+        # get_or_create() runs its entire body under self._global_lock -- holding that
+        # lock across a network call would stall every other thread needing StateManager
+        # for the duration of the request. Set here, popped once by
+        # pop_last_migrated_isolation_target() right after the get_or_create() call that
+        # produced it, entirely outside any lock.
+        self._last_migrated_isolation_target: Optional[Dict[str, str]] = None
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -118,7 +132,7 @@ class StateManager:
     def get_or_create(self, device_id: str, client_ip: str, hostname: str, alpha: float = 0.05,
                        dhcp_fingerprint: Optional[Dict[str, Any]] = None, ja4_set: Optional[set] = None,
                        reidentify: bool = True, min_confidence: float = AUTO_MERGE_CONFIDENCE,
-                       candidate_window: float = 1800.0) -> DeviceState:
+                       candidate_window: float = 1800.0, ml_registry: Any = None) -> DeviceState:
         with self._global_lock:
             if device_id in self._states:
                 state = self._states[device_id]
@@ -129,8 +143,8 @@ class StateManager:
                 # IPv6 side of a dual-stack device resolving to the same device_id as its
                 # already-known IPv4 side via the MAC-correlation index. Without this, the
                 # reverse IP index would only ever point at whichever address the device
-                # happened to cold-start from, so update_device_mac()'s O(1) lookup (and any
-                # other by-IP reverse lookup) would silently miss this address family.
+                # happened to cold-start from, so any by-IP reverse lookup elsewhere in this
+                # file would silently miss this address family.
                 self._ip_to_device_id[client_ip] = device_id
                 self._states.move_to_end(device_id)
                 return state
@@ -157,8 +171,18 @@ class StateManager:
                         "confidence": best_conf, "ts": time.time(),
                     }
                 if matched_old_id:
-                    self.migrate_device_id(matched_old_id, device_id)
+                    self.migrate_device_id(matched_old_id, device_id, ml_registry=ml_registry)
                     state = self._states[device_id]
+                    # BUGFIX: capture the OLD mac/ip BEFORE they're overwritten below, so a
+                    # caller can release any stale isolation bookkeeping keyed by them (see
+                    # pop_last_migrated_isolation_target()'s docstring). old client_ip is
+                    # whatever this device was last known at under its pre-merge identity;
+                    # old mac_address survives migrate_device_id() untouched (only
+                    # overwritten later by identity.py's _refresh_identity_signals()).
+                    self._last_migrated_isolation_target = {
+                        "mac_addr": getattr(state, "mac_address", "unknown") or "unknown",
+                        "ip_addr": getattr(state, "client_ip", "unknown") or "unknown",
+                    }
                     state.client_ip = client_ip
                     if hostname and hostname != "unknown":
                         state.hostname = hostname
@@ -265,45 +289,37 @@ class StateManager:
             self._last_reidentify_ambiguous = None
             return val
 
-    def update_device_mac(self, client_ip: str, mac_address: str) -> None:
-        """Dynamically binds real-time MAC updates from Zeek/ARP to the device profile.
-        AUDIT FIX #7: O(1) lookup via reverse IP index instead of O(N) linear scan.
-        """
-        if not client_ip or not mac_address or mac_address == "unknown":
-            return
+    def pop_last_migrated_isolation_target(self) -> Optional[Dict[str, str]]:
+        """Consume-once accessor for the "a re-identify merge just made these old MAC/IP
+        isolation bookkeeping entries stale" side channel -- see __init__'s comment.
+        Returns None if the most recent get_or_create() call didn't perform a merge, or
+        {"mac_addr": ..., "ip_addr": ...} identifying the OLD identity whose isolation
+        state (if any) should now be released via IPSMitigator.unisolate_all(). Clears the
+        value either way so a caller that doesn't check every cycle can't act on a stale
+        result from a much earlier call."""
         with self._global_lock:
-            device_id = self._ip_to_device_id.get(client_ip)
-            if device_id:
-                state = self._states.get(device_id)
-                if state:
-                    state.mac_address = mac_address
-                    self._mac_to_device_id[mac_address] = device_id  # PHASE 6
-                    LOGGER.debug("Updated MAC binding for IP %s -> %s", client_ip, mac_address)
-            else:
-                # Fallback: linear scan for IPs not yet in index (e.g., after restart)
-                for state in self._states.values():
-                    if getattr(state, "client_ip", "") == client_ip:
-                        state.mac_address = mac_address
-                        self._ip_to_device_id[client_ip] = state.device_id
-                        self._mac_to_device_id[mac_address] = state.device_id  # PHASE 6
-                        LOGGER.debug("Updated MAC binding (fallback scan) for IP %s -> %s", client_ip, mac_address)
-                        break
-
-    def register_existing_state(self, state: DeviceState) -> None:
-        with self._global_lock:
-            device_id = state.device_id
-            self._states[device_id] = state
-            self._states.move_to_end(device_id)
-            # Keep reverse index in sync
-            self._ip_to_device_id[state.client_ip] = device_id
-            self._prune_lru_capacity()
-            LOGGER.debug("Existing state registered into manager memory for %s.", device_id)
+            val = self._last_migrated_isolation_target
+            self._last_migrated_isolation_target = None
+            return val
 
     def has_device(self, device_id: str) -> bool:
         with self._global_lock:
             return device_id in self._states
 
-    def migrate_device_id(self, old_id: str, new_id: str) -> bool:
+    def migrate_device_id(self, old_id: str, new_id: str, ml_registry: Any = None) -> bool:
+        """ml_registry is optional (default None) so existing callers keep working
+        unchanged. When supplied, also migrates that device's per-device ML anomaly
+        model to the new id -- BUGFIX: this used to be the caller's job (identity.py's
+        process_dns_identities()/process_zeek_identities() accepted an ml_registry
+        parameter specifically for this) but nothing ever actually called
+        ml_registry.migrate_device() on a re-identify merge, since get_or_create()
+        performs the DeviceState migration internally and never surfaced that fact to
+        its caller. Doing it here, at the single choke point where a device-id
+        migration actually happens, means every migration path (current and future)
+        keeps the ML model in sync automatically instead of relying on each caller to
+        remember. Called outside self._global_lock -- ml_registry.migrate_device() does
+        its own file I/O (renaming the on-disk model) and never calls back into
+        StateManager, so there's no reason to hold this lock across it."""
         with self._global_lock:
             if old_id not in self._states:
                 LOGGER.debug("Migration failed: %s not found in states.", old_id)
@@ -336,7 +352,10 @@ class StateManager:
             client_ip = getattr(old_state, "client_ip", "unknown")
             
             LOGGER.info("Successfully migrated DeviceState tracking profile for %s (%s)", hostname, client_ip)
-            return True
+
+        if ml_registry is not None:
+            ml_registry.migrate_device(old_id, new_id)
+        return True
 
     def get_all_device_ids(self) -> List[str]:
         with self._global_lock:
@@ -616,24 +635,3 @@ class StateManager:
         except Exception as exc:
             LOGGER.error("Failed to reconcile IPS state from disk: %s", exc)
             return False
-    def reset_device_state(self, device_id: str):
-        with self._global_lock:
-            if device_id in self._states:
-                state = self._states[device_id]
-                state.seen_domains = BoundedSet(max_size=10000)
-                state.geo_exported_ips = BoundedSet(max_size=5000)
-                state.killchain_history = deque(maxlen=5)
-                state.has_validated_threat = False
-                state.confirmed_threat_count = 0
-                state.fp_count = 0
-                state.rate_baseline = EWMABaseline(alpha=state.rate_baseline.alpha)
-                state.entropy_baseline = EWMABaseline(alpha=state.entropy_baseline.alpha)
-                state.unique_baseline = EWMABaseline(alpha=state.unique_baseline.alpha)
-                state.nxdomain_baseline = EWMABaseline(alpha=state.nxdomain_baseline.alpha)
-                state.blocked_baseline = EWMABaseline(alpha=state.blocked_baseline.alpha)
-                state.dga_baseline = EWMABaseline(alpha=state.dga_baseline.alpha)
-                state.outbound_bytes_baseline = EWMABaseline(alpha=state.outbound_bytes_baseline.alpha)
-                state.risk_baseline = EWMABaseline(alpha=state.risk_baseline.alpha)
-                state.last_alert_time = 0.0
-                state.last_alert_confidence = 0.0
-                LOGGER.info("🧹 Fully reset in-memory state baselines for %s", device_id)

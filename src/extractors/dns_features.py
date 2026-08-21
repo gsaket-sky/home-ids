@@ -442,11 +442,21 @@ class FeatureExtractor:
         }
         
         current_phase = self._determine_killchain_phase(state, extracted_features)
+        # markov_anomaly compares current_phase against the LAST recorded phase, so it
+        # must be computed BEFORE this cycle's phase is appended to history below.
         markov_anomaly = self._compute_markov_anomaly(state, current_phase)
         
         extracted_features["killchain_phase"] = current_phase
         extracted_features["markov_anomaly"] = markov_anomaly
-        
+
+        # BUGFIX (dead-code audit): state.killchain_history (a deque(maxlen=5)) was
+        # initialized, persisted, and read every cycle by _compute_markov_anomaly() above,
+        # but nothing anywhere ever appended to it -- so `history` there was always empty
+        # and markov_anomaly was permanently 0.0 for every device since this feature was
+        # introduced. Appending here, after the comparison above, so next cycle's
+        # _compute_markov_anomaly() has real transition history to score against.
+        state.killchain_history.append(current_phase)
+
         return extracted_features
 
     def _zero_features(self) -> dict:
