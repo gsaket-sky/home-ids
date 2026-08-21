@@ -563,7 +563,15 @@ class EnginePipeline:
                 # PHASE 1: DGA/exfiltration/beaconing/tunneling-v2/connection-abuse — the
                 # scoring.py-derived categories that previously had no path into the live
                 # evidence/hypothesis pipeline at all (scoring.py itself is dead code).
-                arp_sweep_threshold = int(self.config.get("arp_sweep_unique_targets_threshold", 8))
+                # PHASE 21D2: a device with its OWN raised threshold (operator/LLM
+                # corrected a past ARP-sweep false positive via mark_false_positive())
+                # uses that instead of the global default -- self-healing takes effect
+                # immediately, not just as a contribution to next week's retrain.
+                global_arp_sweep_threshold = float(self.config.get("arp_sweep_unique_targets_threshold", 8))
+                arp_sweep_threshold = int(
+                    self.fp_engine.get_device_arp_sweep_threshold(dev_id, default=global_arp_sweep_threshold)
+                    if self.fp_engine else global_arp_sweep_threshold
+                )
                 threat_signal_ev = self.threat_signal_detector.detect(
                     dev_id, features, top_domain=top_domain, arp_sweep_threshold=arp_sweep_threshold
                 )

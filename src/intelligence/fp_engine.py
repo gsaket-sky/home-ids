@@ -1031,47 +1031,116 @@ class AutonomousFPEngine:
         domain couldn't be safely extracted) and `is_new_immunization` for the caller to
         report back to the operator / decide whether an unblock is even necessary.
         """
-        domain = target_domain or alert_payload.get("network_context", {}).get("queried_domain", "") or ""
-        base_domain = self._extract_base_domain(domain)
+        # PHASE 21D2: mark_false_positive() originally assumed "correct this alert"
+        # always means "immunize a domain" -- right for the great majority of alerts,
+        # but structurally wrong for two evidence-driven signature types that have no
+        # domain by definition. `signature` here is decision_engine.py's `explanation`
+        # field, which for an attack-hypothesis-driven alert is literally the winning
+        # hypothesis's own .name (e.g. "DNS_EVASION", "CONNECTION_ABUSE") -- already
+        # present on every alert, exactly what the routing below needs.
+        #   DNS_EVASION (dns_evasion.py's blind-spot audit): the whole signal IS "no
+        #     matching DNS history" -- there's no domain to extract. The correctable
+        #     thing is the specific destination IP the audit flagged as unexplained.
+        #     Immunizing it reuses the EXACT SAME trust cache _immunize_domain()
+        #     already provides -- evaluate()'s TRUST CACHE FAST PATH already checks
+        #     network_context.destination_ip against this same cache (see above), so
+        #     this needed no new cache structure, only correct routing here.
+        #   CONNECTION_ABUSE (covers arp_sweep evidence, among others): a domain-based
+        #     immunization does nothing for a device that legitimately ARP-scans the
+        #     LAN on startup. What needs correcting is THIS device's own
+        #     arp_sweep_unique_targets_threshold, raised immediately via the existing
+        #     per-device profile mechanism (get_device_arp_sweep_threshold(), same
+        #     PHASE 13 pattern get_device_suppress_threshold() already established)
+        #     rather than waiting for next week's retrain.
+        # Every other signature keeps the exact domain-based behavior from before this.
+        signature = alert_payload.get("signature", "")
         device_id = alert_payload.get("device", {}).get("id", "unknown")
 
+        domain, base_domain, ip_immunized = "", "", ""
         is_new_immunization = False
-        if base_domain:
-            is_new_immunization = self._immunize_domain(base_domain, hostname, source=source)
-        else:
-            LOGGER.warning(
-                "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
-                "skipping trust-cache immunization, but still recording the training "
-                "correction and sigma widening below.",
-                hostname, domain
+        threshold_bumped = False
+
+        if signature == "DNS_EVASION":
+            dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
+            if dest_ip and dest_ip != "unknown":
+                is_new_immunization = self._immunize_domain(dest_ip, hostname, source=source)
+                ip_immunized = dest_ip
+            else:
+                LOGGER.warning(
+                    "⚠️ [FP ENGINE » MARK FP] %s: DNS_EVASION correction has no usable "
+                    "destination_ip on this alert — skipping IP immunization, but still "
+                    "recording the training correction and sigma widening below.", hostname
+                )
+        elif signature == "CONNECTION_ABUSE":
+            current = self.get_device_arp_sweep_threshold(device_id, default=8.0)
+            new_threshold = current + 4.0
+            self.apply_device_fp_profile(
+                device_id, "arp_sweep_unique_targets_threshold", new_threshold, baseline=current,
+                set_by=source,
+                reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
+                       f"CONNECTION_ABUSE alert for {hostname} — raising this device's own "
+                       f"ARP-sweep threshold instead of the global default.",
+                sample_count=1,
             )
+            threshold_bumped = True
+        else:
+            domain = target_domain or alert_payload.get("network_context", {}).get("queried_domain", "") or ""
+            base_domain = self._extract_base_domain(domain)
+            if base_domain:
+                is_new_immunization = self._immunize_domain(base_domain, hostname, source=source)
+            else:
+                LOGGER.warning(
+                    "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
+                    "skipping trust-cache immunization, but still recording the training "
+                    "correction and sigma widening below.",
+                    hostname, domain
+                )
 
         # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
         # the autonomous path applies, scoped to the one device this correction is about.
+        # Runs regardless of which branch above fired -- a general behavioral dampener,
+        # not specific to domain-based corrections.
         self._apply_sigma_shift(device_id, hostname, source=source)
 
         is_llm = source == "llm_validated"
         event_type = "LLM_VALIDATED_FALSE_POSITIVE" if is_llm else "OPERATOR_MARKED_FALSE_POSITIVE"
         origin_text = "Ollama LLM (DeterministicValidator-passed)" if is_llm else "operator via Telegram"
 
-        reasons = [
-            f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
-            f"Base domain '{base_domain}' added to trust cache." if base_domain else
-            "Base domain could not be extracted — trust cache NOT updated for this domain.",
-        ]
+        if signature == "DNS_EVASION":
+            reasons = [
+                f"Marked as false positive (DNS-evasion blind-spot finding) by {origin_text}.",
+                f"Destination IP '{ip_immunized}' added to trust cache." if ip_immunized else
+                "No usable destination IP on this alert — trust cache NOT updated.",
+            ]
+        elif signature == "CONNECTION_ABUSE":
+            reasons = [
+                f"Marked as false positive (ARP-sweep / connection-abuse finding) by {origin_text}.",
+                "This device's own arp_sweep_unique_targets_threshold was raised — was too "
+                "sensitive for its normal behavior.",
+            ]
+        else:
+            reasons = [
+                f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
+                f"Base domain '{base_domain}' added to trust cache." if base_domain else
+                "Base domain could not be extracted — trust cache NOT updated for this domain.",
+            ]
         self._write_muted_log(alert_payload, event_type, reasons, 1.0)
 
         LOGGER.warning(
-            "🛡️  [FP ENGINE » MARK FP] %s: %s-corrected alert for '%s' — training "
-            "correction logged, sigma widened, domain %s.",
-            hostname, "LLM" if is_llm else "operator", domain,
-            f"immunized ('{base_domain}')" if base_domain else "NOT immunized (extraction failed)"
+            "🛡️  [FP ENGINE » MARK FP] %s: %s-corrected alert (signature=%s) — training "
+            "correction logged, sigma widened, %s.",
+            hostname, "LLM" if is_llm else "operator", signature or "domain-based",
+            (f"IP immunized ('{ip_immunized}')" if ip_immunized else
+             "device threshold raised" if threshold_bumped else
+             f"domain immunized ('{base_domain}')" if base_domain else "no target-specific action taken")
         )
 
         return {
             "base_domain": base_domain,
             "is_new_immunization": is_new_immunization,
             "domain": domain,
+            "ip_immunized": ip_immunized,
+            "threshold_bumped": threshold_bumped,
         }
 
     def _apply_sigma_shift(self, device_id: str, hostname: str, direction: str = "TUNE_DOWN", source: str = "autonomous"):
@@ -1153,6 +1222,20 @@ class AutonomousFPEngine:
         if profile and "fp_combined_suppress_threshold" in profile:
             return float(profile["fp_combined_suppress_threshold"]["value"])
         return self.combined_suppress_threshold
+
+    def get_device_arp_sweep_threshold(self, device_id: Optional[str], default: float) -> float:
+        """PHASE 21D2: same layered-fallback shape as get_device_suppress_threshold()
+        above, reused for arp_sweep_unique_targets_threshold -- a device whose ARP
+        sweeps get operator-corrected as false positives (e.g. a smart-home hub that
+        legitimately ARP-scans the LAN on startup) gets ITS OWN raised threshold
+        immediately (mark_false_positive()'s CONNECTION_ABUSE routing below), not just
+        a contribution to next week's retrain. Everything else shares the global
+        config.yaml default, same as before this existed."""
+        with self._lock:
+            profile = self._device_fp_profiles.get(device_id or "")
+        if profile and "arp_sweep_unique_targets_threshold" in profile:
+            return float(profile["arp_sweep_unique_targets_threshold"]["value"])
+        return default
 
     def apply_device_fp_profile(self, device_id: str, key: str, value: float, baseline: float,
                                  set_by: str, reason: str, sample_count: int = 0) -> None:
