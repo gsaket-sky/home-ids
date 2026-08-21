@@ -63,6 +63,16 @@ class StateManager:
         # a fresh IP-anchored device_id, so all of a device's address families unify into
         # one DeviceState instead of each cold-starting its own permanently-separate profile.
         self._mac_to_device_id: Dict[str, str] = {}
+        # PHASE 21D: consume-once side channel for the "ambiguous re-identification
+        # candidate" reactive-capture trigger (pipeline.py). A candidate strong enough
+        # to log about but not strong enough to clear the actual merge bar used for a
+        # given get_or_create() call is genuinely ambiguous -- fresh JA4/DHCP data from
+        # a capture burst can resolve it next time instead of it staying stuck below
+        # the merge bar indefinitely. Not returned from get_or_create() itself (that
+        # would mean changing its return type, used by many call sites) -- set here,
+        # popped once by pop_last_reidentify_ambiguous() right after the call that
+        # produced it, so a stale value can never be misread on a later, unrelated call.
+        self._last_reidentify_ambiguous: Optional[Dict[str, Any]] = None
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -132,11 +142,20 @@ class StateManager:
             # compare — callers that don't care about re-identification (or that predate
             # this feature) get identical cold-start behavior to before.
             if reidentify and (dhcp_fingerprint or ja4_set):
-                matched_old_id = self._find_reidentify_candidate(
+                matched_old_id, best_candidate_id, best_conf = self._find_reidentify_candidate(
                     exclude_ip=client_ip, hostname=hostname,
                     dhcp_fingerprint=dhcp_fingerprint, ja4_set=ja4_set,
                     min_confidence=min_confidence, candidate_window=candidate_window,
                 )
+                if not matched_old_id and best_candidate_id and best_conf >= MIN_CANDIDATE_CONFIDENCE:
+                    # A real candidate was found (strong enough to log about) but didn't
+                    # clear THIS call's actual merge bar -- genuinely ambiguous, not "no
+                    # match at all". Overwrites any prior unconsumed value; only the
+                    # most recent ambiguous case matters, there's no queue semantics here.
+                    self._last_reidentify_ambiguous = {
+                        "new_device_id": device_id, "candidate_id": best_candidate_id,
+                        "confidence": best_conf, "ts": time.time(),
+                    }
                 if matched_old_id:
                     self.migrate_device_id(matched_old_id, device_id)
                     state = self._states[device_id]
@@ -185,13 +204,23 @@ class StateManager:
 
     def _find_reidentify_candidate(self, exclude_ip: str, hostname: str,
                                      dhcp_fingerprint: Optional[Dict[str, Any]], ja4_set: Optional[set],
-                                     min_confidence: float, candidate_window: float) -> Optional[str]:
+                                     min_confidence: float, candidate_window: float
+                                     ) -> "tuple[Optional[str], Optional[str], float]":
         """Scans currently-tracked devices for one that plausibly IS the new device under
         its old identity — i.e. it just went quiet (not still active, not ancient history;
         that's what the weekly prune sweep is for) and its DHCP/JA4/hostname fingerprint
         matches. Must be called with self._global_lock already held (it iterates
         self._states without re-locking). O(N) in device count — only runs on the
         cold-start path, never per-packet, so this is cheap even at max_devices capacity.
+
+        Returns (matched_id, best_id, best_conf): matched_id is the auto-merge result
+        (None unless best_conf >= min_confidence, i.e. identical to this function's
+        original single-value return before PHASE 21D); best_id/best_conf are the best
+        candidate found regardless of whether it cleared min_confidence, added so the
+        caller can distinguish "no candidate at all" from "a candidate existed but
+        wasn't confident enough to auto-merge" (the ambiguous-band reactive-capture
+        trigger needs exactly this distinction, which the original bool-ish return
+        couldn't express).
         """
         now = time.time()
         best_id, best_conf = None, 0.0
@@ -223,9 +252,18 @@ class StateManager:
             if conf > best_conf:
                 best_conf, best_id = conf, cand_id
 
-        if best_id and best_conf >= min_confidence:
-            return best_id
-        return None
+        matched_id = best_id if (best_id and best_conf >= min_confidence) else None
+        return matched_id, best_id, best_conf
+
+    def pop_last_reidentify_ambiguous(self) -> Optional[Dict[str, Any]]:
+        """Consume-once accessor for the ambiguous re-identification side channel (see
+        __init__'s comment). Returns None if nothing's pending, or the pending finding
+        -- and clears it either way, so a caller that doesn't check every cycle can't
+        end up re-triggering on a stale value from several cycles ago."""
+        with self._global_lock:
+            val = self._last_reidentify_ambiguous
+            self._last_reidentify_ambiguous = None
+            return val
 
     def update_device_mac(self, client_ip: str, mac_address: str) -> None:
         """Dynamically binds real-time MAC updates from Zeek/ARP to the device profile.

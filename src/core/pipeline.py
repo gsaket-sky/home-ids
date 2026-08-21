@@ -141,10 +141,16 @@ class EnginePipeline:
         honeypot_ips = set(self.config.get("honeypot_ips", []))
         if bool(self.config.get("ips_enabled", True)) and not honeypot_ips and bool(self.config.get("ips_router_enabled", False)):
             LOGGER.warning("⚠️ IPS router isolation is enabled but no honeypot IPs are configured. Router isolation will remain inert until honeypot_ips is populated.")
+        # PHASE 21D: the two wired devices (NAS/server) already have full Zeek flow
+        # visibility today -- a new source IP contacting one of them for the first
+        # time is worth a reactive-capture burst. Empty by default (opt-in, since it
+        # names specific real device IPs).
+        wired_probe_ips = set(self.config.get("reactive_capture_wired_probe_ips", []))
         self.zeek_fx = ZeekFeatureExtractor(
             home_subnets=resolve_home_subnets(self.config),  # PHASE 0 FIX: multi-subnet support
             ti_engine=self.ti_engine, geoip_engine=self.geoip_engine,
             safe_ips=safe_ips, honeypot_ips=honeypot_ips, safe_patterns=safe_patterns,
+            wired_probe_ips=wired_probe_ips,
         )
 
         self.zeek_collector = ZeekCollector(log_dir=self.config.get("zeek_log_dir", "/opt/zeek/logs/current"), poll_interval=float(self.config.get("poll_interval", 2.0)), state_dir=state_dir)
@@ -279,6 +285,17 @@ class EnginePipeline:
         for ze_event in zeek_events:
             self.zeek_fx.ingest(ze_event)
 
+        # PHASE 21D trigger: a new, previously-unseen source IP contacted one of the
+        # configured wired-probe devices this cycle -- fire one burst per cycle that has
+        # any new source at all, not one per new source (a single burst captures the
+        # whole radio regardless of count, same reasoning as every other trigger here).
+        if bool(self.config.get("reactive_capture_wired_probe_trigger_enabled", True)):
+            new_probe_sources = self.zeek_fx.pop_new_wired_probe_sources()
+            if new_probe_sources:
+                LOGGER.info("🔌 New source(s) contacting a wired-probe device this cycle: %s "
+                            "-- dispatching a reactive capture.", new_probe_sources)
+                self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="wired_probe")
+
         active_ids_dns = self.identity_manager.process_dns_identities(dns_rows, self.zeek_fx, self.ml_registry)
         active_ids_zeek = self.identity_manager.process_zeek_identities(zeek_events, self.zeek_fx, self.ml_registry)
         all_active_ids = set(active_ids_dns + active_ids_zeek)
@@ -299,12 +316,35 @@ class EnginePipeline:
             dev_id = self.identity_manager.resolve_device_id(client_ip, mac_addr, hostname)
 
             if not self.state_manager.has_device(dev_id):
-                self.state_manager.get_or_create(dev_id, client_ip, hostname, float(self.config.get("baseline_alpha", 0.05)))
+                # PHASE 21D: pass real fingerprints so get_or_create()'s MAC-rotation
+                # re-identification actually has something to compare against -- before
+                # this, this call site always cold-started directly (fingerprints were
+                # never supplied here), so the ambiguous-candidate trigger below could
+                # never fire regardless of what state_guard.py itself supported.
+                dhcp_fp = self.zeek_fx.get_dhcp_fingerprint(client_ip) if self.zeek_fx else None
+                ja4s = self.zeek_fx.get_ja4_set(client_ip) if self.zeek_fx else None
+                self.state_manager.get_or_create(
+                    dev_id, client_ip, hostname, float(self.config.get("baseline_alpha", 0.05)),
+                    dhcp_fingerprint=dhcp_fp, ja4_set=ja4s,
+                )
                 # PHASE 21D trigger: a brand-new device cold-starting fires one capture
                 # burst to establish a baseline JA4/connection fingerprint for it
                 # immediately, rather than waiting for it to look suspicious first.
                 if bool(self.config.get("reactive_capture_new_device_trigger_enabled", True)):
                     self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="new_device")
+
+                # PHASE 21D trigger: get_or_create() just found a MAC-rotation candidate
+                # too weak to auto-merge on -- genuinely ambiguous, not "no match". Fresh
+                # JA4/DHCP data from this burst can resolve it on a FUTURE cold-start of
+                # the same physical device instead of it staying stuck below the merge
+                # bar indefinitely (this cycle's own dev_id already exists now either way).
+                if bool(self.config.get("reactive_capture_reid_ambiguous_trigger_enabled", True)):
+                    ambiguous = self.state_manager.pop_last_reidentify_ambiguous()
+                    if ambiguous:
+                        LOGGER.info("🔎 Ambiguous re-identification candidate (new=%s, candidate=%s, "
+                                    "confidence=%.2f) -- dispatching a reactive capture to try to resolve it.",
+                                    ambiguous["new_device_id"], ambiguous["candidate_id"], ambiguous["confidence"])
+                        self.reactive_capture.try_dispatch(self.config, self.zeek_fx, trigger_reason="ambiguous_reidentify")
 
             with self.state_manager.lock_device(dev_id) as state:
                 status_code = int(row.get("status", 0))

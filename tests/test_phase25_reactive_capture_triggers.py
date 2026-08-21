@@ -144,6 +144,133 @@ for flag in (
     check(f"{flag} is read from config.yaml to gate its trigger", flag in pipeline_src)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section D: ambiguous re-identification trigger -- real StateManager, no mocks
+# ═══════════════════════════════════════════════════════════════════════════════════
+from core.state_guard import StateManager
+
+# D1: a hostname-only match (dhcp_score=0, ja4_sim=0, hostname_ok=True) scores exactly
+# 0.50 per device_matching.match_confidence()'s formula -- squarely in the ambiguous
+# band (MIN_CANDIDATE_CONFIDENCE=0.45, AUTO_MERGE_CONFIDENCE=0.75 default merge bar).
+sm = StateManager()
+old_state = sm.get_or_create("old_dev", "192.168.1.50", "my-nas", alpha=0.05)
+old_state.last_seen = time.time() - 100.0  # idle, but within the 1800s candidate_window
+
+new_state = sm.get_or_create("new_dev", "192.168.1.51", "my-nas", alpha=0.05,
+                              ja4_set={"some_ja4_hash_not_shared_with_old_dev"})
+
+check("an ambiguous hostname-only match does NOT auto-merge (new_dev cold-started as its own device)",
+      sm.has_device("new_dev") and sm.has_device("old_dev"), f"ids={sm.get_all_device_ids()}")
+
+ambiguous = sm.pop_last_reidentify_ambiguous()
+check("THE CORE FIX: an ambiguous candidate (below the merge bar but above "
+      "MIN_CANDIDATE_CONFIDENCE) is surfaced via pop_last_reidentify_ambiguous(), not silently lost",
+      ambiguous is not None, f"got {ambiguous}")
+if ambiguous:
+    check("the ambiguous finding names the correct candidate and confidence",
+          ambiguous["candidate_id"] == "old_dev" and abs(ambiguous["confidence"] - 0.50) < 1e-9,
+          f"got {ambiguous}")
+
+check("pop_last_reidentify_ambiguous() is consume-once -- a second immediate pop returns None",
+      sm.pop_last_reidentify_ambiguous() is None)
+
+# D2: a genuine strong match (DHCP match + strong JA4 overlap) still auto-merges exactly
+# as before PHASE 21D -- regression guard against breaking the existing merge behavior
+# while adding the ambiguous side channel.
+sm2 = StateManager()
+old2 = sm2.get_or_create("old_dev2", "192.168.1.60", "printer-office", alpha=0.05)
+old2.last_seen = time.time() - 100.0
+# get_or_create()'s dhcp_fingerprint/ja4_set params are only used transiently to
+# compare an INCOMING device against EXISTING candidates -- they are not persisted
+# onto the new DeviceState itself. Set them directly here to simulate a device that
+# has accumulated this fingerprint over time (what _find_reidentify_candidate() reads
+# via getattr(cand_state, "dhcp_fingerprint"/"ja4_seen", ...)).
+old2.dhcp_fingerprint = {"vendor_class": "MSFT 5.0", "param_list": [1, 3, 6], "user_class": ""}
+old2.ja4_seen = {"hashA", "hashB"}
+
+new2 = sm2.get_or_create("new_dev2", "192.168.1.61", "printer-office", alpha=0.05,
+                          dhcp_fingerprint={"vendor_class": "MSFT 5.0", "param_list": [1, 3, 6], "user_class": ""},
+                          ja4_set={"hashA", "hashB"})
+# migrate_device_id() merges the OLD identity's history FORWARD under the NEW
+# device_id (the just-observed one) and retires the old id -- not the other way
+# around.
+check("a strong DHCP+JA4 match still auto-merges (continues under new_dev2, old_dev2 retired)",
+      sm2.has_device("new_dev2") and not sm2.has_device("old_dev2"))
+check("a genuine auto-merge is NOT also reported as ambiguous (mutually exclusive outcomes)",
+      sm2.pop_last_reidentify_ambiguous() is None)
+
+# D3: totally unrelated fingerprints -- no candidate at all, no ambiguous report either.
+sm3 = StateManager()
+old3 = sm3.get_or_create("old_dev3", "192.168.1.70", "esp32-sensor", alpha=0.05)
+old3.last_seen = time.time() - 100.0
+sm3.get_or_create("new_dev3", "192.168.1.71", "totally-different-name", alpha=0.05,
+                   ja4_set={"unrelated_hash"})
+check("completely unrelated fingerprints produce neither a merge nor an ambiguous report",
+      sm3.has_device("old_dev3") and sm3.has_device("new_dev3") and sm3.pop_last_reidentify_ambiguous() is None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section E: wired-device-probe trigger -- real ZeekFeatureExtractor, no mocks
+# ═══════════════════════════════════════════════════════════════════════════════════
+from extractors.zeek_features import ZeekFeatureExtractor
+
+WIRED_IP = "192.168.1.94"
+zfx_probe = ZeekFeatureExtractor(home_subnets=["192.168.1.0/24"], wired_probe_ips={WIRED_IP})
+
+zfx_probe.ingest({"_zeek_type": "conn", "id.orig_h": "192.168.1.50", "id.resp_h": WIRED_IP,
+                   "id.resp_p": 445, "proto": "tcp", "orig_bytes": 100, "uid": "C1", "ts": time.time()})
+found = zfx_probe.pop_new_wired_probe_sources()
+check("a first-time source contacting a configured wired-probe IP is queued",
+      found == [(WIRED_IP, "192.168.1.50")], f"got {found}")
+
+check("pop_new_wired_probe_sources() is consume-once -- a second immediate pop returns empty",
+      zfx_probe.pop_new_wired_probe_sources() == [])
+
+# Same source again -- must NOT re-queue (already known).
+zfx_probe.ingest({"_zeek_type": "conn", "id.orig_h": "192.168.1.50", "id.resp_h": WIRED_IP,
+                   "id.resp_p": 445, "proto": "tcp", "orig_bytes": 50, "uid": "C2", "ts": time.time()})
+check("the SAME source contacting the wired device again does NOT re-trigger",
+      zfx_probe.pop_new_wired_probe_sources() == [])
+
+# A genuinely different source -- must queue.
+zfx_probe.ingest({"_zeek_type": "conn", "id.orig_h": "192.168.1.51", "id.resp_h": WIRED_IP,
+                   "id.resp_p": 445, "proto": "tcp", "orig_bytes": 50, "uid": "C3", "ts": time.time()})
+check("a genuinely DIFFERENT new source contacting the same wired device does trigger",
+      zfx_probe.pop_new_wired_probe_sources() == [(WIRED_IP, "192.168.1.51")])
+
+# Connections to a non-wired-probe destination are never tracked at all (control).
+zfx_probe.ingest({"_zeek_type": "conn", "id.orig_h": "192.168.1.99", "id.resp_h": "8.8.8.8",
+                   "id.resp_p": 443, "proto": "tcp", "orig_bytes": 50, "uid": "C4", "ts": time.time()})
+check("a connection to an IP NOT in wired_probe_ips is never queued",
+      zfx_probe.pop_new_wired_probe_sources() == [])
+
+# Feature is opt-in/inert when wired_probe_ips is unset (matches default config: []).
+zfx_default = ZeekFeatureExtractor(home_subnets=["192.168.1.0/24"])
+zfx_default.ingest({"_zeek_type": "conn", "id.orig_h": "192.168.1.50", "id.resp_h": "192.168.1.94",
+                     "id.resp_p": 445, "proto": "tcp", "orig_bytes": 100, "uid": "C5", "ts": time.time()})
+check("with wired_probe_ips unset (default), nothing is ever tracked/queued",
+      zfx_default.pop_new_wired_probe_sources() == [])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section F: pipeline.py -- source-level guards for the 2 completed remaining triggers
+# ═══════════════════════════════════════════════════════════════════════════════════
+check("pipeline.py now passes real DHCP/JA4 fingerprints into get_or_create() (previously "
+      "never did, so the reidentify branch could never even run from this call site)",
+      "dhcp_fingerprint=dhcp_fp, ja4_set=ja4s" in pipeline_src)
+check("ambiguous re-id trigger call site exists with the correct trigger_reason",
+      'trigger_reason="ambiguous_reidentify"' in pipeline_src)
+check("reactive_capture_reid_ambiguous_trigger_enabled gates the ambiguous re-id trigger",
+      "reactive_capture_reid_ambiguous_trigger_enabled" in pipeline_src)
+
+check("ZeekFeatureExtractor is constructed with wired_probe_ips from config",
+      "wired_probe_ips=wired_probe_ips" in pipeline_src)
+check("wired-probe trigger call site exists with the correct trigger_reason",
+      'trigger_reason="wired_probe"' in pipeline_src)
+check("reactive_capture_wired_probe_trigger_enabled gates the wired-probe trigger",
+      "reactive_capture_wired_probe_trigger_enabled" in pipeline_src)
+
+
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 25 check(s) FAILED: {FAILURES}")
     sys.exit(1)

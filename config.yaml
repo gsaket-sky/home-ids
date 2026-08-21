@@ -438,6 +438,25 @@ reactive_capture:
   reactive_capture_dns_trigger_enabled: true
   reactive_capture_high_severity_trigger_enabled: true
 
+  # Fires when state_guard.py's MAC-rotation re-identification finds a candidate
+  # strong enough to log about (>= MIN_CANDIDATE_CONFIDENCE) but not strong enough to
+  # auto-merge (< the merge bar used) -- genuinely ambiguous. Fresh JA4/DHCP data from
+  # the burst can resolve it on a later cold-start of the same physical device instead
+  # of it staying stuck below the merge bar indefinitely. [LIVE]
+  reactive_capture_reid_ambiguous_trigger_enabled: true
+
+  # Fires when a new, previously-unseen source IP contacts one of the devices listed
+  # in reactive_capture_wired_probe_ips below -- these are devices with full Zeek flow
+  # visibility already (unlike WiFi devices), so this uses data that's already
+  # flowing, no new detector needed. [LIVE]
+  reactive_capture_wired_probe_trigger_enabled: true
+
+  # The wired device IP(s) reactive_capture_wired_probe_trigger_enabled watches for a
+  # new source -- typically your NAS and/or the Ubuntu server itself. Empty by default
+  # (opt-in, since it names specific real device IPs on your LAN -- fill in your own).
+  # [LIVE]
+  reactive_capture_wired_probe_ips: []
+
   # Periodic baseline spot-check, in-process (not a separate scheduled script -- see
   # pipeline.py's PHASE 21D comment on why: a burst's findings only reach live
   # detection by ingesting into the SAME long-running ZeekFeatureExtractor instance

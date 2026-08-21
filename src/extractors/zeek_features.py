@@ -228,7 +228,7 @@ class ZeekFeatureExtractor:
     _SUSPICIOUS_PORTS = frozenset([4444, 4445, 8888, 9999, 1337, 31337, 6667, 6697, 1080, 3128, 5353])
     _EXCLUDED_HONEYPOT_PORTS = frozenset([137, 138, 139, 1900, 5353])
     
-    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None):
+    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None):
         self._conn_ts = defaultdict(lambda: deque(maxlen=5000))
         self._new_ips = defaultdict(dict)
         self._ja3_hits = defaultdict(lambda: deque(maxlen=100))
@@ -248,6 +248,16 @@ class ZeekFeatureExtractor:
         self._last_connection_meta = {}
         
         self.honeypot_ips = honeypot_ips if honeypot_ips is not None else set()
+        # PHASE 21D: "wired-device-visible probe" reactive-capture trigger. The two
+        # wired devices (NAS/server, configured via reactive_capture_wired_probe_ips)
+        # already have full Zeek flow visibility today (unlike WiFi devices, per this
+        # session's live testing) -- a new/unusual source IP connecting to one of them
+        # for the first time is worth a capture using data that's already flowing, no
+        # new detector needed beyond this membership check. Consume-once queue, same
+        # pattern as StateManager.pop_last_reidentify_ambiguous().
+        self.wired_probe_ips = wired_probe_ips if wired_probe_ips is not None else set()
+        self._known_sources_per_wired_ip = defaultdict(set)
+        self._new_wired_probe_sources = []
         self._wire_dns_resolutions = {}
         self._mac_bindings = {}
         # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
@@ -492,7 +502,17 @@ class ZeekFeatureExtractor:
         if not src: return
         self._enrich_ptr(src)
             
-        if etype == "conn": self._process_conn(src, event)
+        if etype == "conn":
+            if self.wired_probe_ips:
+                dst = event.get("id.resp_h", "")
+                if dst in self.wired_probe_ips:
+                    known = self._known_sources_per_wired_ip[dst]
+                    if src not in known:
+                        known.add(src)
+                        self._new_wired_probe_sources.append((dst, src))
+                        if len(self._new_wired_probe_sources) > 200:  # safety valve, not expected in practice
+                            self._new_wired_probe_sources = self._new_wired_probe_sources[-200:]
+            self._process_conn(src, event)
         elif etype == "dns": self._process_dns(event)
         elif etype == "ssl": self._process_ssl(src, event)
         elif etype == "http": self._process_http(src, event)
@@ -587,6 +607,15 @@ class ZeekFeatureExtractor:
         out = set()
         for ip in self._as_ip_list(device_ip):
             out.update(self._new_ips.get(ip, {}).keys())
+        return out
+
+    def pop_new_wired_probe_sources(self) -> list:
+        """Consume-once accessor for PHASE 21D's wired-device-probe trigger. Returns
+        [(wired_ip, new_source_ip), ...] for any first-time-seen source since the last
+        call, and clears the queue -- a caller that doesn't check every cycle can't
+        end up re-triggering on stale findings from several cycles ago."""
+        out = self._new_wired_probe_sources
+        self._new_wired_probe_sources = []
         return out
 
     def _process_ssl(self, src: str, ev: dict) -> None:
