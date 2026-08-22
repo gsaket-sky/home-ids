@@ -29,6 +29,7 @@ compromised. It needs to reach the same 2-independent-source bar as every other
 hypothesis before it can influence containment or a Telegram alert -- see
 DNSEvasionHypothesis in hypotheses/engine.py and Phase A's Telegram-gating change.
 """
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Dict, List, Set
 
@@ -51,6 +52,28 @@ class DeviceBurstAudit:
     """
     dest_ips: Set[str] = field(default_factory=set)
     queried_domains: Set[str] = field(default_factory=set)
+
+
+def _is_private_lan_ip(ip: str) -> bool:
+    """True for any RFC1918/link-local/loopback/multicast address -- i.e. traffic that
+    never needed DNS to begin with, because it never left the local network.
+
+    BUGFIX (production false-positive): the only two "explained" checks below
+    (reverse-DNS-matches-a-query, VPN-ASN-match) are both structurally incapable of
+    ever passing for a private IP -- a home LAN has no public PTR record for
+    192.168.x.x, and a private address has no public ASN to match against a VPN
+    provider. That meant ANY intra-LAN connection (a device talking to the IDS
+    server itself, to a NAS, to another local device -- none of which need or use
+    DNS to find each other) was guaranteed to be flagged as "unexplained," no matter
+    how legitimate. Confirmed in production: a device repeatedly flagged for
+    connecting to 192.168.1.94 -- the IDS server's own LAN IP -- re-firing
+    DNS_EVASION roughly every minute for 15+ minutes straight. This detector's whole
+    premise is real INTERNET traffic bypassing DNS to avoid detection; intra-LAN
+    traffic was never DNS-bound in the first place, so it isn't evidence of anything."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
 
 
 def _reverse_dns_explains(ip: str, queried_domains: Set[str], geoip_engine) -> bool:
@@ -99,6 +122,8 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     reputation_hits: List[str] = []
 
     for ip in audit.dest_ips:
+        if _is_private_lan_ip(ip):
+            continue
         if _reverse_dns_explains(ip, audit.queried_domains, geoip_engine):
             continue
         if _vpn_explains(ip, geoip_engine):

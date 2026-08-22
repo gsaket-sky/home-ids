@@ -89,6 +89,23 @@ check("THE CORE REGRESSION GUARD: a real NordVPN destination with zero DNS histo
       "flagged as an evasion anomaly (this is the exact iPhone/NordVPN case found live this session)",
       ev_vpn == [])
 
+# B3b (BUGFIX regression guard): a connection to a private/LAN IP (e.g. the IDS server's
+# own address, a NAS, another local device) must never be flagged, even with zero DNS
+# history and no geoip_engine at all -- intra-LAN traffic never needed DNS to begin with.
+# Found in production: a device re-firing DNS_EVASION every ~65s for 15+ minutes straight
+# because its connection to 192.168.1.94 (the IDS server itself) was "unexplained."
+audit_lan = DeviceBurstAudit(dest_ips={"192.168.1.94"}, queried_domains=set())
+ev_lan = audit_device(DEV, audit_lan, geoip_engine=None)
+check("THE CORE FIX: a private-LAN destination is never flagged as an evasion anomaly, "
+      "even with zero DNS history and no geoip_engine",
+      ev_lan == [])
+
+audit_lan_mixed = DeviceBurstAudit(dest_ips={"192.168.1.94", "9.9.9.9"}, queried_domains=set())
+geoip_unknown_for_mixed = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"9.9.9.9": "Some Random Hosting LLC"})
+ev_lan_mixed = audit_device(DEV, audit_lan_mixed, geoip_engine=geoip_unknown_for_mixed)
+check("a private-LAN IP alongside a genuinely unexplained public IP: only the public one counts",
+      len(ev_lan_mixed) == 1 and ev_lan_mixed[0].value == 1.0 and ev_lan_mixed[0].domain == "9.9.9.9")
+
 # B4: genuinely unexplained -- no DNS match, not CDN, not VPN -- fires evidence.
 geoip_unknown = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"9.9.9.9": "Some Random Hosting LLC"})
 audit_unexplained = DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains={"totally-unrelated.com"})
