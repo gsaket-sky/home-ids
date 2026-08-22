@@ -1,4 +1,4 @@
-# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 8.0)
+# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 9.0)
 
 Welcome to the definitive reference documentation for **Home-IDS**.
 
@@ -422,6 +422,26 @@ Polled every 60s by `scripts/scheduler.py`. Cron fields: minute/hour/day/month/d
 
 No two jobs above fire in the same hour as each other or as `autotune_schedule_cron`'s 3am default — this is asserted by `tests/test_phase7_scheduling.py`, so a future config edit that breaks it fails a test rather than silently double-booking two jobs.
 
+### 14. `reactive_capture` (new in 9.0)
+Short, triggered Fritzbox WLAN capture bursts — the only way this deployment gets real Zeek flow visibility (lateral movement, JA3/JA4) for WiFi devices at all, since a consumer all-in-one router+AP means neither a mirror port nor an inline bridge can see WiFi-to-WiFi traffic. Every key here is documented in-line in `config.yaml` itself in more depth than this table; read that file directly when tuning this feature. Fritzbox-specific — never applies to a deployment without an AVM router.
+
+| Key | Default | Reload | Description |
+|---|---|---|---|
+| `reactive_capture_enabled` | `false` | `[LIVE]` | Master switch. Live-verified and enabled on this deployment; leave `false` until you've confirmed the capture-control CGI parameters against your own router (see ENGINEERING_MANUAL.md §7). |
+| `reactive_capture_max_bursts_per_hour` | `6` | `[LIVE]` | Shared budget every trigger source below draws from — a burst captures the whole radio regardless of which trigger fired it, so trigger-source count doesn't multiply cost, only actual burst count does. |
+| `reactive_capture_{new_device,arp_sweep,dns,high_severity,reid_ambiguous,wired_probe}_trigger_enabled` | `true` (all) | `[LIVE]` | Per-source enable flags — six independent trigger conditions, each individually disable-able without touching the shared budget. See ENGINEERING_MANUAL.md §7 for what each one fires on. |
+| `reactive_capture_wired_probe_ips` | `[]` | `[LIVE]` | The wired-device IP(s) the wired-probe trigger watches for a new, previously-unseen source connecting to. |
+| `reactive_capture_spotcheck_enabled` / `_interval_seconds` | `true` / `1800.0` | `[LIVE]` | Periodic baseline capture regardless of any trigger — runs in-process (not a separate scheduled script), since a burst's findings only reach live detection by ingesting into the same long-running `ZeekFeatureExtractor` instance the pipeline already holds. |
+| `reactive_capture_radios` | `[ath0, ath1]` | `[LIVE]` | Which Fritzbox diagnostic interfaces to capture — this router's 2.4GHz/5GHz radios, confirmed live as the only interfaces that see WiFi-to-WiFi traffic. |
+| `reactive_capture_burst_seconds` | `120.0` | `[LIVE]` | Length of one capture burst. ~100MB per burst at the measured live dual-radio rate (~3GB/hour continuous). |
+| `reactive_capture_snaplen` | `1600` | `[LIVE]` | Per-packet snapshot length in bytes, matching the router's own browser-UI default. |
+| `reactive_capture_scratch_dir` | `state/reactive_capture` | `[LIVE]` | Where raw/converted pcaps and Zeek's scratch reprocessing output land. |
+| `reactive_capture_delete_after_ingest` | `true` | `[LIVE]` | Deletes each burst's raw pcaps/Zeek scratch logs right after ingestion (disk safety — unbounded retention fills a disk over weeks at ~3GB/hour). `reactive_capture_history.jsonl` (a compact permanent summary) is kept regardless. |
+| `arp_sweep_unique_targets_threshold` | `8` | `[LIVE]` | Distinct ARP-requested targets in-window before the ARP host-discovery-sweep evidence fires (§6 Detection Engine's own category, not this one, but tuned alongside reactive capture since ARP sweeps are one of its triggers). Auto-calibrated per-device — see §3 and `train_fp_classifier.py`'s `calibrate_arp_sweep_threshold()`. |
+| `local_confirmed_intel_ttl_seconds` | `2592000.0` (30 days) | `[LIVE]` | TTL for the network-effect confirmed-threat learning store — see ENGINEERING_MANUAL.md §8 and the state-file reference below (`local_confirmed_intel.json`). |
+
+`reactive_capture_zeek_bin` lives in the `external_system_paths` section at the very bottom of `config.yaml` (describes your Zeek installation's layout, not this app's own data — same reasoning as `pihole_db`/`zeek_log_dir`).
+
 ### Removed / dead keys (do not reintroduce)
 | Removed Key | Why |
 |---|---|
@@ -479,8 +499,11 @@ home_ids/
 | `scheduler.log` | **New in 8.0.** `scripts/scheduler.py`'s own log output, and (since it launches every scheduled job as a child process with no redirect of its own) every scheduled script's log output too. Previously piped to `/dev/null` — a real zero-day retro-hunt finding was going completely unrecorded before this fix. |
 | `zeek_cursor_*.json` | Byte-offset + inode trackers per Zeek log file, so a restart never re-reads or skips events. |
 | `models/.last_retrain` | Timestamp lock file for `fp_engine.py`'s own internal 7-day retrain thread (a second, in-process path to the same retrain function the scheduler's cron job calls standalone — see §6). |
-| `ti_cache/` | Cached threat-intel feed data (OTX/AbuseIPDB/VirusTotal/URLhaus/ThreatFox/Tranco), refreshed on `ti_refresh_interval`. |
+| `ti_cache/` | Cached threat-intel feed data (OTX/AbuseIPDB/VirusTotal/URLhaus/ThreatFox/Tranco), refreshed on `ti_refresh_interval`. As of 9.0, `ti_cache/tranco_ranks.cache` also persists the full domain→rank mapping (not just top-10k membership) so `ThreatIntel.get_tranco_rank()` can answer without a second download. |
 | `fritz_webhook.log` | FastAPI/uvicorn subprocess's own log (isolate/hosts endpoints). |
+| `local_confirmed_intel.json` | **New in 9.0.** Network-effect learning store: once ANY device's traffic reaches a Stage-1 hard-stop or a genuinely corroborated HIGH/CRITICAL verdict, the triggering domain/IP is recorded here so a *different* device touching the same infrastructure gets an immediate hard-stop instead of re-earning independent corroboration from scratch. TTL-bounded (`local_confirmed_intel_ttl_seconds`, default 30 days — confirmed-malicious infrastructure from months ago may be repurposed or abandoned). Matches domains at the eTLD+1 base-domain level and IPs by exact string — both the write path and the Stage-1 read path refuse known-safe telemetry/CDN base domains (`utils.is_telemetry_domain()`) and private/multicast/loopback/`safe_ips`-listed addresses, closing a real production incident where amazon.com/netflix.com and this network's own router/server IPs got permanently "confirmed malicious" from one bad hit and then self-reinforced on every subsequent re-check. Audit or prune it with `src/clean_confirmed_intel.py` (dry-run by default, `--apply` to actually remove entries). |
+| `reactive_capture_history.jsonl` (inside `reactive_capture_scratch_dir`) | Compact permanent summary of every reactive-capture burst — kept regardless of `reactive_capture_delete_after_ingest`. |
+| `training_row_exclusions.json` | **New in 9.0.** Overlay listing historical training rows to skip during the next `train_fp_classifier.py` retrain, without ever mutating `alerts.json`/`autonomous_muted.jsonl` themselves (same "baseline stays untouched, override layer is additive" pattern as `config_overrides.json`). Currently populated by `src/identify_corrupted_training_rows.py` for `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` rows predating each signature's own domain-attribution fix (their `f1_entropy` feature was computed from the wrong domain). Absent by default — the exclusion mechanism is strictly opt-in; run the script and pass `--apply` to populate it. |
 
 *(`alerts.json` lives at the project root, not inside `state/` — see `paths.alert_json_path`.)*
 
@@ -495,6 +518,16 @@ home_ids/
 ### The `reports/` Directory
 - `soc_daily_report_YYYYMMDD.md` — Brain 3's per-run summary, now including a per-run header (`N fresh, M cached, K deferred`) so you can see at a glance how much of that run's cost was actually spent on the LLM.
 - `top_domains_YYYYMMDD.md` — daily top-domains-per-device summary, 6 AM.
+
+### Maintenance CLI Scripts (`src/`, new in 9.0)
+Standalone, operator-run utilities — none of these run automatically. All follow the same convention: dry-run by default (prints what *would* change, changes nothing), `--apply` to actually act. Stop the service first for any of these to avoid a write race with the live process's own periodic saves.
+
+| Script | Purpose |
+|---|---|
+| `src/clean_confirmed_intel.py` | Audits/prunes `state/local_confirmed_intel.json` for known-safe domains or private/multicast/`safe_ips` addresses — see the state-file reference above. |
+| `src/release_wrongly_blocked_domains.py` | Classifies every currently Pi-hole-blocked domain into recognized-safe (CDN/telemetry allowlist), manually-reviewed-safe (a curated list built from this deployment's own blocklist), suspicious (regex DGA-pattern families — never auto-touched), or unclassified — and releases the safe categories via `fp.mark_false_positive()` + `ips.unblock_by_base_domain()`. |
+| `src/clear_stale_isolation.py` | `python3 src/clear_stale_isolation.py <identifier>` — removes only matching `tarpit_targets`/`router_isolated_devices` bookkeeping entries, deliberately **not** touching `blocked_domains` (unlike `release_device()`). For the specific case of a device manually released on the router/Pi-hole admin UI while Home-IDS's own state still thinks it's isolated. |
+| `src/identify_corrupted_training_rows.py` | Finds and (with `--apply`) excludes historically-corrupted `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` training rows — see `training_row_exclusions.json` above and ENGINEERING_MANUAL.md §8. |
 
 ---
 

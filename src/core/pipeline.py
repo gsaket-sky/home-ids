@@ -585,6 +585,14 @@ class EnginePipeline:
 
             features["ti_risk"] = ti_risk
             features["ti_match"] = ti_match
+            # BUGFIX: fp_engine.py Stage-2 and train_fp_classifier.py both read
+            # features["tranco_rank"] for Feature 0 of the 11-dim LightGBM vector, but
+            # nothing ever wrote it -- permanently 0 for every alert since this feature
+            # was introduced. threat_intel.py's Tranco loader already downloads the
+            # full ranked 1M-row list every 24h (only the domain half was ever kept);
+            # get_tranco_rank() now exposes the rank half too. Same top_domain used for
+            # the reputation classifier just below, for consistency.
+            features["tranco_rank"] = self.ti_engine.get_tranco_rank(top_domain) if self.ti_engine and top_domain else 0
 
             abuse_risk = 0.0
             honeypots = self.config.get("honeypot_ips", [])

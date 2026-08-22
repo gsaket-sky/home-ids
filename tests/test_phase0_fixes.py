@@ -10,6 +10,7 @@ Covers:
   4. fp_engine._extract_base_domain() fail-closed behavior when tldextract is unavailable.
   5. decision_engine.py no longer has the dead dns_rate_anomaly branch (source check,
      since the live detector never emits that type — this is a "can't regress" guard).
+  6. ThreatIntel.get_tranco_rank() -- real, wired-up tranco_rank feature (was always 0).
 """
 import sys
 from pathlib import Path as _PathForSysPath
@@ -168,6 +169,36 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("empty domain input returns '' without raising", base_empty_input == "")
 
 _utils_mod.tldextract = _orig_tldextract  # restore
+
+
+# ── Test 5: ThreatIntel.get_tranco_rank() -- real (non-zero, non-dead) tranco_rank ──
+# BUGFIX: fp_engine.py's Stage-2 LightGBM feature vector (Feature 0, f0_tranco_rank_norm)
+# and train_fp_classifier.py's training-time extraction both read features["tranco_rank"],
+# but nothing ever wrote it -- permanently 0 for every alert. The Tranco list loader
+# already downloaded the full ranked 1M-row list; only the rank column was discarded.
+from intelligence.threat_intel import ThreatIntel
+
+with tempfile.TemporaryDirectory() as tmpdir2:
+    ti = ThreatIntel(cache_dir=tmpdir2)
+    ti._tranco_ranks = {"google.com": 1, "example.com": 54321}
+
+    check("get_tranco_rank() returns the real rank for a ranked domain",
+          ti.get_tranco_rank("google.com") == 1)
+    check("get_tranco_rank() returns the real rank for a mid-list domain",
+          ti.get_tranco_rank("example.com") == 54321)
+    check("get_tranco_rank() normalizes case and a trailing dot before lookup",
+          ti.get_tranco_rank("EXAMPLE.com.") == 54321)
+    check("get_tranco_rank() returns 0 (not a crash/None) for an unranked domain",
+          ti.get_tranco_rank("some-random-unranked-domain.example") == 0)
+    check("get_tranco_rank() returns 0 for empty/None input",
+          ti.get_tranco_rank("") == 0)
+
+# REGRESSION GUARD (source check): pipeline.py must actually populate
+# features["tranco_rank"] from the real engine -- guards against this wiring being
+# silently reverted or the key never reaching the features dict fp_engine.py reads.
+_pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+check("pipeline.py populates features['tranco_rank'] via ti_engine.get_tranco_rank()",
+      'features["tranco_rank"] = self.ti_engine.get_tranco_rank(top_domain)' in _pipeline_src)
 
 print()
 if FAILURES:

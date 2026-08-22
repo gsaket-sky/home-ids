@@ -84,6 +84,7 @@ class ThreatIntel:
             "microsoft.com", "windows.com"
         })
         self._tranco_top10k: Set[str] = set()
+        self._tranco_ranks: Dict[str, int] = {}
         self.fp_engine = None  # Bound dynamically by pipeline at boot
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
@@ -246,34 +247,77 @@ class ThreatIntel:
 
     def _refresh_tranco_trust_list(self) -> None:
         cache_file = self.cache_dir / "tranco_top10k.cache"
+        # BUGFIX: fp_engine.py's Stage-2 LightGBM feature vector and
+        # train_fp_classifier.py's training-time feature extraction both read
+        # features["tranco_rank"] (Feature 0 of 11, f0_tranco_rank_norm) -- but nothing
+        # anywhere ever WROTE that key, so it was permanently 0 for every alert, ever,
+        # contributing zero information to the model. The full ranked 1M-row Tranco
+        # list was already being downloaded here in full -- only the domain (parts[1])
+        # was ever kept; the rank itself (parts[0]) was read and discarded on every
+        # single line. Now also builds a rank cache file, same 24h refresh cadence as
+        # the existing top-10k set, from the SAME download (no extra network cost).
+        rank_cache_file = self.cache_dir / "tranco_ranks.cache"
         domains = set()
-        
+        ranks: Dict[str, int] = {}
+
         try:
-            if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < 86400:
-                LOGGER.debug("Loading Tranco Top 10k from local cache.")
+            cache_fresh = (
+                cache_file.exists() and rank_cache_file.exists()
+                and (time.time() - cache_file.stat().st_mtime) < 86400
+            )
+            if cache_fresh:
+                LOGGER.debug("Loading Tranco Top 10k + rank cache from local cache.")
                 domains = set(cache_file.read_text(encoding="utf-8").splitlines())
+                for line in rank_cache_file.read_text(encoding="utf-8").splitlines():
+                    dom, _, rank_str = line.partition(",")
+                    if dom and rank_str.isdigit():
+                        ranks[dom] = int(rank_str)
             else:
-                LOGGER.info("Downloading Tranco Top 1M list to build Top 10k Harmless Cache...")
+                LOGGER.info("Downloading Tranco Top 1M list to build Top 10k Harmless Cache + full rank index...")
                 req = Request(_TRANCO_URL, headers={"User-Agent": "home-ids/1.0"})
                 with urlopen(req, timeout=30) as r:
                     with zipfile.ZipFile(io.BytesIO(r.read())) as z:
                         csv_filename = z.namelist()[0]
                         with z.open(csv_filename) as f:
                             for i, line in enumerate(f):
-                                if i >= 10000: break
                                 parts = line.decode('utf-8', errors='ignore').strip().split(',')
-                                if len(parts) >= 2:
-                                    dom = parts[1].lower().strip()
-                                    if dom: domains.add(dom)
+                                if len(parts) < 2:
+                                    continue
+                                dom = parts[1].lower().strip()
+                                if not dom:
+                                    continue
+                                if i < 10000:
+                                    domains.add(dom)
+                                try:
+                                    ranks[dom] = int(parts[0])
+                                except ValueError:
+                                    pass
                 if domains:
                     cache_file.write_text("\n".join(domains), encoding="utf-8")
+                if ranks:
+                    rank_cache_file.write_text(
+                        "\n".join(f"{dom},{rank}" for dom, rank in ranks.items()), encoding="utf-8"
+                    )
 
             if domains:
                 with self._lock:
                     self._tranco_top10k = domains
                 LOGGER.info("✅ Loaded %d exact domains into Tranco Top 10k Trust List.", len(domains))
+            if ranks:
+                with self._lock:
+                    self._tranco_ranks = ranks
+                LOGGER.info("✅ Loaded %d domain ranks into the Tranco rank index.", len(ranks))
         except Exception as e:
             LOGGER.error("Failed to refresh Tranco Trust List: %s", e)
+
+    def get_tranco_rank(self, domain: str) -> int:
+        """Returns this domain's Tranco Top-1M rank (1 = most popular), or 0 if the
+        domain isn't ranked at all -- matches fp_engine.py's/train_fp_classifier.py's
+        existing `tranco_rank > 0` convention for "unranked."""
+        if not domain:
+            return 0
+        with self._lock:
+            return self._tranco_ranks.get(domain.lower().strip("."), 0)
 
     def _refresh_all(self) -> None:
         LOGGER.info("Initiating intelligence feed update cycle...")

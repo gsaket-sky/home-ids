@@ -124,6 +124,8 @@ network_and_devices:
     - 192.168.1.15
     - 192.168.1.31
     - 192.0.0.2
+    - 192.168.1.2
+    - 192.168.1.3
 
   # Decoy IP(s) on your LAN. Any device that contacts one gets an instant
   # 10.0 (max) risk score — deploy an unused IP running a fake SSH/SMB
@@ -347,7 +349,7 @@ threat_intel_and_ai:
   # timeout), 5 calls is at most ~75 minutes, comfortably inside the 4h gap to the next
   # run. Alerts beyond this cap are deferred to the next scheduled run, prioritized by
   # which threat pattern repeated most often this run. [LIVE]
-  ollama_max_queries_per_run: 5
+  ollama_max_queries_per_run: 3
 
 
 # -----------------------------------------------------------------------------
@@ -425,7 +427,7 @@ reactive_capture:
   # deployment to actually fire capture bursts (Phase D's triggers below are wired and
   # live-verified as of this session, see zeek_scripts/local-arp-log.zeek's deployment
   # notes and this phase's commit message). [LIVE]
-  reactive_capture_enabled: false
+  reactive_capture_enabled: true
 
   # The ONE shared aggressiveness knob (Phase D design): every trigger below draws
   # from this single hourly budget instead of a per-trigger-type cooldown, since a

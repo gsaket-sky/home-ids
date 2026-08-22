@@ -20,6 +20,12 @@ INPUT DATA SOURCES:
   1. config.yaml -> paths.alert_json_path (preferred; JSONL or JSON array)
   2. state/alerts.json (legacy fallback)
   3. state/autonomous_muted.jsonl (auto-suppressed false positives)
+  4. state/training_row_exclusions.json (optional; written by
+     identify_corrupted_training_rows.py) -- rows listed here are skipped during
+     load_dataset(), without alerts.json/autonomous_muted.jsonl themselves being
+     modified. Currently used to exclude historical DNS_COVERT_TUNNELING/DGA_BOTNET_C2
+     rows whose f1_entropy feature was computed from the wrong domain, predating each
+     signature's own domain-attribution fix.
 
 FEATURE MATRIX EXTRACTED (11 normalized dimensions):
   [0] Tranco global rank score
@@ -773,6 +779,25 @@ def run_threshold_calibration(state_dir: Path) -> None:
         LOGGER.error(f"[AUTOTUNE] Failed to write autotune relay stats (non-fatal): {exc}")
 
 
+def _load_training_row_exclusions(state_dir: Path) -> set:
+    """Reads state/training_row_exclusions.json (written by
+    identify_corrupted_training_rows.py), a set of dedup keys for historically-
+    corrupted rows -- e.g. DNS_COVERT_TUNNELING/DGA_BOTNET_C2 alerts predating their
+    domain-attribution fix, whose f1_entropy feature was computed from the wrong
+    domain. This file is a separate, deletable overlay; load_dataset() below skips
+    matching rows without alerts.json/autonomous_muted.jsonl themselves ever being
+    modified. Missing/unreadable file -> empty set, i.e. no exclusions (fail-open,
+    matches config_overrides.json's own missing-file behavior elsewhere in this file)."""
+    path = state_dir / "training_row_exclusions.json"
+    if not path.exists():
+        return set()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return set(data.get("excluded_keys", {}).keys())
+    except Exception:
+        return set()
+
+
 def load_dataset(state_dir: Path) -> tuple:
     """Loads labeled training samples from configured alerts stream + autonomous muted log.
 
@@ -800,7 +825,9 @@ def load_dataset(state_dir: Path) -> tuple:
         "fp_accepted": 0, "fp_rejected": 0,
         "threat_skipped_corrected": 0,
         "threat_skipped_non_alert": 0,
+        "skipped_corrupted_attribution": 0,
     }
+    excluded_keys = _load_training_row_exclusions(state_dir)
 
     # Read autonomous_muted.jsonl FIRST so its dedup keys are available while filtering
     # the alerts.json threat stream below.
@@ -857,10 +884,20 @@ def load_dataset(state_dir: Path) -> tuple:
             # Corrected after the fact (autonomous or operator) — same reasoning.
             stats["threat_skipped_corrected"] += 1
             continue
+        if _alert_dedup_key(payload) in excluded_keys:
+            # Historically-corrupted domain attribution (see
+            # identify_corrupted_training_rows.py) — f1_entropy would be computed from
+            # the wrong domain for this row; excluded rather than trained on.
+            stats["skipped_corrupted_attribution"] += 1
+            continue
         _append_sample(X, y, doc, 0, stats, source="threat")
 
     # 2. False positives from autonomous muted JSONL (parsed above, label=1)
     for doc in muted_docs:
+        payload = _extract_payload(doc)
+        if _alert_dedup_key(payload) in excluded_keys:
+            stats["skipped_corrupted_attribution"] += 1
+            continue
         _append_sample(X, y, doc, 1, stats, source="fp")
 
     return X, y, stats
@@ -872,11 +909,12 @@ def train_and_export_onnx(state_dir: Path) -> bool:
     LOGGER.info(
         "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d "
         "(skipped as corrected FPs=%d, skipped as non-alert transparency logs=%d) | "
-        "fp accepted/rejected=%d/%d | dim=%d",
+        "fp accepted/rejected=%d/%d | skipped as historically-corrupted attribution=%d | dim=%d",
         len(X),
         stats["threat_accepted"], stats["threat_rejected"],
         stats["threat_skipped_corrected"], stats["threat_skipped_non_alert"],
         stats["fp_accepted"], stats["fp_rejected"],
+        stats["skipped_corrupted_attribution"],
         FP_FEATURE_DIM
     )
 
