@@ -912,6 +912,27 @@ class EnginePipeline:
                                     alert_dest_ip = ev.domain
                                     break
 
+                        # BUGFIX (found via production alerts.json audit): same class of bug as
+                        # the DNS_EVASION fix above. target_malicious_domain comes ONLY from
+                        # _select_target_domain()'s "most notable domain in the whole window"
+                        # scan -- independent of which evidence/hypothesis actually fired. For
+                        # DNS_COVERT_TUNNELING (DNSTunnelingV2Hypothesis, keyed on dns_tunnel_v2
+                        # evidence), this produced alerts whose displayed queried_domain had NO
+                        # causal relationship to the actual tunneling finding -- confirmed in
+                        # production data showing benign domains (init.push.apple.com,
+                        # time.g.aaplimg.com, an AWS device-hash subdomain) displayed as the
+                        # "target" of a tunneling alert that couldn't possibly have fired on
+                        # them (they're all in the CDN/telemetry allowlist). threat_signals.py
+                        # already attaches the REAL triggering domain onto dns_tunnel_v2
+                        # evidence's own .domain field (see its own comment on this exact
+                        # transparency gap) -- this was simply never consumed here.
+                        alert_target_domain = target_malicious_domain
+                        if primary_sig == "DNS_COVERT_TUNNELING":
+                            for ev in active_evidence:
+                                if ev.type == "dns_tunnel_v2" and ev.domain:
+                                    alert_target_domain = ev.domain
+                                    break
+
                         alert_payload = {
                             "type": "ids_alert",
                             "timestamp": now,
@@ -919,7 +940,7 @@ class EnginePipeline:
                             "network_context": {
                                 "destination_ip": alert_dest_ip, "destination_port": dest_port, "service_name": service_name,
                                 "data_type": dest_proto, "payload_size_bytes": outbound_bytes, "payload_classification": data_classification,
-                                "queried_domain": target_malicious_domain,
+                                "queried_domain": alert_target_domain,
                             },
                             "risk": risk,
                             "signature": primary_sig,
@@ -1064,9 +1085,14 @@ class EnginePipeline:
                             if decision.get("escalated_via_persistence"):
                                 containment_decision_state = DecisionState.SUSPICIOUS
                             if self.ips_mitigator:
+                                # BUGFIX: use alert_target_domain (the evidence-corrected domain,
+                                # see its own comment above), not the raw target_malicious_domain
+                                # fallback -- otherwise containment could block/track a benign
+                                # "most frequent domain" instead of the domain actually implicated
+                                # by the evidence that authorized this containment decision.
                                 self.ips_mitigator.mitigate(
                                     st=state,
-                                    target_domain=target_malicious_domain,
+                                    target_domain=alert_target_domain,
                                     risk_score=risk,
                                     lateral_threat=lateral_threat,
                                     is_safe=is_safe,
@@ -1078,7 +1104,7 @@ class EnginePipeline:
                                 containment_status = self.ips_mitigator.get_containment_status(
                                     client_ip=client_ip,
                                     mac_addr=getattr(state, "mac_address", "unknown"),
-                                    domain=target_malicious_domain
+                                    domain=alert_target_domain
                                 )
 
                             # PHASE 10 FIX: this used to rewrite ANY "UNBLOCKED" containment
@@ -1141,8 +1167,12 @@ class EnginePipeline:
                         # second, non-redundant confirmation path, not a duplicate of the one
                         # inside fp_engine.py. Same not-suppressed gate as the trigger above.
                         if telegram_worthy and not fp_verdict["suppress"] and self.fp_engine:
+                            # BUGFIX: alert_target_domain, not target_malicious_domain -- see its
+                            # own comment above. Feeding the local confirmed-intel store (which a
+                            # DIFFERENT device's future connection can hard-stop against) the
+                            # wrong domain would teach the network to remember the wrong thing.
                             self.fp_engine.record_confirmed_threat(
-                                dev_id, etld1(target_malicious_domain), dest_ip, reason="HIGH_CRITICAL_DECISION",
+                                dev_id, etld1(alert_target_domain), dest_ip, reason="HIGH_CRITICAL_DECISION",
                                 signature=primary_sig,
                             )
 
@@ -1231,7 +1261,7 @@ class EnginePipeline:
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
 
-                                target_display = target_malicious_domain if target_malicious_domain and target_malicious_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
+                                target_display = alert_target_domain if alert_target_domain and alert_target_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
 
                                 action_summary = ("auto-blocked" if "BLOCKED" in containment_status
                                                    else "awaiting approval" if "WAITING FOR APPROVAL" in containment_status

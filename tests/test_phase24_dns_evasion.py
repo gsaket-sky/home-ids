@@ -237,6 +237,39 @@ check("the alert_payload's destination_ip uses the corrected alert_dest_ip varia
       "not the raw generic dest_ip, for every alert (not just DNS_EVASION ones)",
       '"destination_ip": alert_dest_ip,' in pipeline_src)
 
+# BUGFIX regression guard (found via a live alerts.json audit): the SAME class of bug as
+# DNS_EVASION's destination_ip fix above, for the queried_domain field instead --
+# target_malicious_domain came ONLY from _select_target_domain()'s "most notable domain
+# in the whole window" scan, independent of which evidence/hypothesis actually fired.
+# For DNS_COVERT_TUNNELING (DNSTunnelingV2Hypothesis / dns_tunnel_v2 evidence), this
+# produced alerts whose displayed target had no causal relationship to the real finding
+# -- and, more seriously, the SAME wrong domain was what actually got passed to
+# mitigate() (real Pi-hole blocking), get_containment_status(), and
+# record_confirmed_threat() (the local confirmed-intel learning store).
+check("pipeline.py prefers a DNS_COVERT_TUNNELING evidence's own flagged domain over the "
+      "generic 'most notable domain in the window' fallback",
+      'if primary_sig == "DNS_COVERT_TUNNELING":' in pipeline_src and
+      'if ev.type == "dns_tunnel_v2" and ev.domain:' in pipeline_src)
+check("the alert_payload's queried_domain uses the corrected alert_target_domain variable, "
+      "not the raw target_malicious_domain, for every alert",
+      '"queried_domain": alert_target_domain,' in pipeline_src)
+check("THE MORE SERIOUS HALF OF THE FIX: real containment (mitigate()) targets the "
+      "corrected alert_target_domain, not the raw target_malicious_domain -- otherwise "
+      "containment could block/track a benign frequently-visited domain instead of the "
+      "one actually implicated by the evidence that authorized it",
+      "target_domain=alert_target_domain," in pipeline_src)
+check("get_containment_status() also checks against the corrected domain, not the raw fallback",
+      "domain=alert_target_domain" in pipeline_src)
+check("the local confirmed-intel learning store (record_confirmed_threat) is fed the "
+      "corrected domain -- feeding it the wrong domain would teach the network-effect "
+      "cross-device hard-stop to remember the wrong thing",
+      "etld1(alert_target_domain)" in pipeline_src)
+check("REGRESSION GUARD: no remaining use of the raw target_malicious_domain in the "
+      "alert-payload/containment call sites this fix touched",
+      'target_domain=target_malicious_domain,' not in pipeline_src and
+      '"queried_domain": target_malicious_domain,' not in pipeline_src and
+      'etld1(target_malicious_domain)' not in pipeline_src)
+
 
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 24 check(s) FAILED: {FAILURES}")
