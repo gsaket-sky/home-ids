@@ -44,6 +44,22 @@ class ReputationClassifier:
         self._TIER_0 = {".box", ".local", "fritz.box"}
         self._TIER_1 = {"apple.com", "microsoft.com", "google.com", "icloud.com", "windowsupdate.com"}
         self._TIER_2 = {"doubleclick.net", "cloudflare.com", "amazonaws.com", "azure.com", "akamaiedge.net", "googlesyndication.com"}
+        # BUGFIX: found via a production alerts.json audit spanning 5+ days -- the SAME
+        # PHASE 8 case (149.154.166.110, Telegram's own published server infrastructure,
+        # AS62041) that the >=4.0 AbuseIPDB bar below was raised specifically to stop
+        # auto-blocking on kept RECURRING anyway: AbuseIPDB's crowd-sourced score for a
+        # huge, widely-shared IP block naturally drifts above and below any fixed
+        # threshold over time as community reports come and go, so raising the bar once
+        # only reduced the false-positive rate, it didn't eliminate it. Hundreds of
+        # alerts over 5 days, oscillating between "Elevated Reputation Signal
+        # (Unconfirmed)" and full "Confirmed Malicious IOC" Stage-1 hard-stops -- for a
+        # domain-less raw IP, which the existing domain-based safe-lists/trust-cache can
+        # never immunize regardless of how many times it recurs. Same pattern already
+        # proven for VPN providers (utils.is_vpn_provider_org(), ASN-org-name matching,
+        # not a brittle IP/CIDR list): a known-legitimate, publicly-documented service's
+        # own infrastructure shouldn't be re-litigated against a noisy crowd-sourced
+        # score every single time, regardless of what that score says on a given day.
+        self._SAFE_ASN_OWNER_KEYWORDS = ("telegram",)
 
     def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0, asn_owner: str = "Unknown") -> ReputationVector:
         domain = (domain or "").lower().strip(".")
@@ -65,6 +81,14 @@ class ReputationClassifier:
                     tier = 2
                     break
 
+        # See _SAFE_ASN_OWNER_KEYWORDS' comment above: a known-legitimate service's own
+        # infrastructure is tier 2 (known infrastructure) regardless of what a noisy
+        # crowd-sourced abuse score says today -- checked BEFORE the confirmed_ioc/
+        # weak_signal evaluation below so it can never be overridden back up to tier 4/5.
+        owner_lower = (asn_owner or "").lower()
+        if tier == 3 and any(kw in owner_lower for kw in self._SAFE_ASN_OWNER_KEYWORDS):
+            tier = 2
+
         # PHASE 8 FIX: a live alert for 149.154.166.110 (Telegram's own API infrastructure,
         # AS62041) reached "Confirmed Malicious IOC" / 99% confidence / auto-block purely
         # from an AbuseIPDB score of 3.78 (~63% abuseConfidenceScore) — with VirusTotal and
@@ -78,11 +102,20 @@ class ReputationClassifier:
         # AbuseIPDB alone now has to clear the same 4.0 bar fp_engine already trusted it at.
         confirmed_ioc = vt_score > 2.0 or ti_score > 2.0 or abuse_score >= 4.0
         weak_signal = vt_score > 0.0 or ti_score > 0.0 or abuse_score > 0.0
-        if confirmed_ioc:
-            tier = 5
-        elif weak_signal:
-            tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
-                     # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).
+        # BUGFIX: this used to run unconditionally, so ANY explicit tier assigned above
+        # (0/1/2, including the new ASN-based safe-infrastructure check) could still be
+        # escalated straight back to tier 5 by a single noisy reputation score -- directly
+        # contradicting this class's own docstring ("1 trusted... strong counter-evidence
+        # required to override"). No existing caller/test relies on a tier-0/1/2 domain
+        # being escalatable this way. Only an still-unclassified (tier 3) domain/IP can be
+        # promoted by a reputation hit now -- an explicit safe classification is a floor,
+        # not a suggestion.
+        if tier == 3:
+            if confirmed_ioc:
+                tier = 5
+            elif weak_signal:
+                tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
+                         # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).
 
         return ReputationVector(
             domain=domain,

@@ -50,6 +50,45 @@ vec_lookalike = rc.classify("evil-doubleclick.net.attacker.io")
 check("lookalike 'evil-doubleclick.net.attacker.io' is NOT promoted to Tier 2",
       vec_lookalike.tier != 2, f"got tier={vec_lookalike.tier}")
 
+# BUGFIX regression guard (found via a live alerts.json audit spanning 5+ days): the
+# EXACT PHASE 8 case (149.154.166.110, Telegram's own published server infrastructure)
+# kept recurring anyway, because AbuseIPDB's crowd-sourced score for a huge shared IP
+# block naturally drifts above and below any fixed threshold over time. Hundreds of
+# alerts oscillating between "Elevated Reputation Signal (Unconfirmed)" and full
+# "Confirmed Malicious IOC" Stage-1 hard-stops for a domain-less raw IP that no
+# domain-based safe-list could ever immunize.
+vec_telegram_low = rc.classify("unknown", abuse_score=3.78, asn_owner="Telegram Messenger Inc")
+check("a known-safe ASN (Telegram) with a below-bar abuse score stays Tier 2",
+      vec_telegram_low.tier == 2, f"got tier={vec_telegram_low.tier}")
+vec_telegram_high = rc.classify("unknown", abuse_score=9.9, asn_owner="Telegram Messenger LLP")
+check("THE CORE FIX: a known-safe ASN (Telegram) does NOT escalate to Tier 5 even when "
+      "the abuse score clears the confirmed-IOC bar (this is what kept recurring in "
+      "production despite the PHASE 8 threshold-only fix)",
+      vec_telegram_high.tier == 2, f"got tier={vec_telegram_high.tier}")
+
+# REGRESSION GUARDS: an otherwise-identical unrelated IP still escalates normally --
+# this fix must not weaken reputation-based detection for anything else.
+vec_evil_high = rc.classify("unknown", abuse_score=4.0, asn_owner="Definitely Evil Hosting LLC")
+check("an UNRELATED asn_owner with the same abuse score still escalates to Tier 5 "
+      "(the fix is scoped to known-safe ASNs, not a general threshold change)",
+      vec_evil_high.tier == 5, f"got tier={vec_evil_high.tier}")
+vec_evil_low = rc.classify("unknown", abuse_score=1.0, asn_owner="Definitely Evil Hosting LLC")
+check("an UNRELATED asn_owner with a below-bar score still reaches Tier 4 (unconfirmed) as before",
+      vec_evil_low.tier == 4, f"got tier={vec_evil_low.tier}")
+
+# BUGFIX regression guard: an explicit tier assignment (0/1/2) is now a floor a stray
+# reputation score cannot override -- matches this class's own documented intent
+# ("1 trusted... strong counter-evidence required to override"), which the code
+# previously did not actually enforce for ANY tier, not just the new ASN check above.
+vec_trusted_with_hit = rc.classify("apple.com", vt_score=3.0)
+check("an explicit Tier-1 domain (apple.com) is no longer escalated by a single stray "
+      "reputation score -- an explicit safe classification is a floor, not a suggestion",
+      vec_trusted_with_hit.tier == 1, f"got tier={vec_trusted_with_hit.tier}")
+vec_unclassified_with_hit = rc.classify("totally-unclassified-domain.example", vt_score=3.0)
+check("REGRESSION GUARD: a genuinely unclassified (Tier 3) domain still escalates "
+      "normally on a real reputation hit -- only explicit tiers are protected",
+      vec_unclassified_with_hit.tier == 5, f"got tier={vec_unclassified_with_hit.tier}")
+
 
 # ── Test 2: ml_engine reject_threat() real exclusion window ────────────────────────
 from intelligence.ml_engine import DeviceMLEngine, GlobalMLEngine, REJECT_THREAT_WINDOW_SECONDS
