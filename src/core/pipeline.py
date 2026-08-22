@@ -52,7 +52,10 @@ _INFRA_DEVICE_TYPES = frozenset({"dns_server", "router", "gateway"})
 # naturally produces DNS/connection volume that would misfire these detectors, but
 # reputation/honeypot/lateral-movement/malicious-TLS evidence is NEVER stripped, so a
 # genuinely compromised router still alerts.
-_INFRA_NOISY_TYPES = {"dns_dga_burst", "dns_tunnel_v2", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn"}
+_INFRA_NOISY_TYPES = {"dns_dga_burst", "dns_tunnel_v2", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn",
+                       "arp_sweep"}  # BUGFIX: same gap as the is_safe noisy_types set above -- a router
+                       # ARPing its own LAN is routine gateway behavior, not recon, for an
+                       # operator-confirmed infra device either.
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
@@ -453,7 +456,22 @@ class EnginePipeline:
                 known_ips_snapshot = state.known_ips.to_list() if getattr(state, "known_ips", None) else []
                 if not known_ips_snapshot:
                     known_ips_snapshot = [client_ip] if client_ip else []
-                is_safe = (client_ip in safe_ips) or (bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat))
+                # BUGFIX: found via a live state-folder audit -- checking only the single
+                # current client_ip against safe_ips missed a device entirely once its
+                # snapshot happened to be one of its OTHER known addresses that cycle.
+                # Confirmed live: this network's own Fritzbox (dev_id 3028d18cbd7c,
+                # safe_ips lists only its IPv4 "192.168.1.1") still generated a
+                # CONNECTION_ABUSE alert at risk=8.5 in a cycle where client_ip was its
+                # IPv6 link-local address (fe80::52e6:36ff:fe6a:5428) instead -- same
+                # physical device, same known_ips set, just a different snapshot of
+                # which address was "most recently active." known_ips_snapshot already
+                # exists for exactly this reason (see the PHASE 6 comment above); the
+                # same reasoning applies here, not just to Zeek feature aggregation.
+                is_safe = (
+                    client_ip in safe_ips
+                    or any(ip in safe_ips for ip in known_ips_snapshot)
+                    or (bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat))
+                )
 
                 # AUDIT FIX #4: Prune rolling.domains to the current window using domain_timestamps.
                 # This prevents the Counter from growing unboundedly across the device's lifetime.
@@ -635,10 +653,33 @@ class EnginePipeline:
             # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
             # --- Version 7 Integration ---
             # 1. Check for Layer-2 ARP Spoofing
+            # BUGFIX: found via a live state-folder audit -- this is a CRITICAL/block
+            # hard-stop (decision_engine.py's has_arp_spoof branch, threat_confidence=1.0,
+            # zero corroboration required) that was never gated on is_safe/safe_ips at
+            # all, unlike every other behavioral noise source. Confirmed live: this
+            # network's own mesh Wi-Fi repeaters (192.168.1.2/.3, both explicitly in
+            # safe_ips, both "repeaters" per the operator) kept reaching this hard-stop
+            # even after the earlier known-oscillation fix (zeek_features.py's
+            # _bind_mac()) -- a repeater relaying many different client devices'
+            # traffic naturally presents new-to-this-IP MACs on an ongoing basis, which
+            # that fix can't distinguish from a genuine hijack. `client_ip` here is
+            # this exact device's own address -- if the operator has explicitly listed
+            # it as safe_ips ("NEVER treated as suspicious... even if flagged
+            # elsewhere" per its own config.yaml docstring), honor that promise for
+            # this hard-stop too, same as the noisy_types exclusion above already does
+            # for behavioral evidence. Honeypot/geofencing/reputation hard-stops are
+            # untouched -- this is scoped to the MAC-flip heuristic specifically, which
+            # is the one demonstrated to have this exact false-positive shape.
             if hasattr(self.zeek_fx, "layer2_spoofs") and client_ip in self.zeek_fx.layer2_spoofs:
                 spoof_info = self.zeek_fx.layer2_spoofs[client_ip]
-                LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing on {client_ip}")
-                self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}"))
+                if is_safe:
+                    LOGGER.info(
+                        f"ARP/NDP MAC flip on {client_ip} ({spoof_info['old']} -> {spoof_info['new']}) "
+                        f"NOT escalated to a hard-stop -- this IP is explicitly listed in safe_ips."
+                    )
+                else:
+                    LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing on {client_ip}")
+                    self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}"))
                 del self.zeek_fx.layer2_spoofs[client_ip]
 
             mitigation_pending = None
@@ -731,7 +772,17 @@ class EnginePipeline:
                 if is_safe:
                     # Hybrid Approach: Exclude ML and DNS behavioral anomalies for infrastructure,
                     # but retain Threat Intel and Honeypot evidence to alert on real threats.
-                    noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network"}
+                    # BUGFIX: found via a live state-folder audit -- "lan_recon" (arp_sweep
+                    # evidence, added in Phase 21B, well after this noisy_types set was
+                    # written) was missing here. A router/gateway ARPs its entire LAN as
+                    # routine DHCP/ARP-table/mesh-sync behavior -- confirmed live: this
+                    # network's own Fritzbox (192.168.1.1, explicitly in safe_ips)
+                    # generated repeated CONNECTION_ABUSE alerts against its own mesh
+                    # repeaters (.2/.3, also in safe_ips) purely from zeek_arp_sweep_count=14,
+                    # the single most predictable false-positive case for this detector and
+                    # exactly the class of behavioral noise this exclusion already exists to
+                    # dampen for infrastructure devices.
+                    noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon"}
                     active_evidence = [ev for ev in active_evidence if ev.type not in noisy_types and ev.independence_group not in noisy_types]
 
                 # PHASE 1 FIX (device-sensitivity source): only dampen the new Phase-1

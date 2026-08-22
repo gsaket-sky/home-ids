@@ -119,6 +119,55 @@ check("a tier-1/2 trusted device's arp_sweep is dampened by the contradicting-sc
       score_trusted < score_arp_only, f"got {score_trusted} vs {score_arp_only}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# BUGFIX regression guards (found via a live state-folder audit, post-v9.0.0 restart):
+# arp_sweep evidence (independence_group="lan_recon", added in Phase 21B) was never
+# added to pipeline.py's two existing "dampen behavioral noise for infrastructure"
+# exclusion sets, both written before arp_sweep existed. A router/gateway ARPs its
+# entire LAN as routine DHCP/ARP-table/mesh-sync behavior -- confirmed live: this
+# network's own Fritzbox (192.168.1.1, in safe_ips) generated repeated
+# CONNECTION_ABUSE alerts against its own mesh repeaters (.2/.3, also in safe_ips)
+# purely from zeek_arp_sweep_count=14, and a SEPARATE, unrelated ARP-spoofing
+# hard-stop (decision_engine.py's has_arp_spoof, CRITICAL/block, zero corroboration)
+# was ALSO reaching those same safe_ips-listed repeaters, since it was never gated on
+# is_safe/safe_ips at all -- unlike every other behavioral noise source. Both are
+# source-guard checks (this logic lives deep in pipeline.py's per-device loop, not
+# practically unit-testable in isolation without mocking the whole pipeline).
+# ═══════════════════════════════════════════════════════════════════════════════════
+_pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+
+check("THE FIX: the is_safe noisy_types set now includes 'lan_recon' (arp_sweep's "
+      "independence_group), alongside the pre-existing zeek_network/dns/ml_anomaly "
+      "exclusions",
+      'noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon"}' in _pipeline_src)
+check("THE FIX: the sibling _INFRA_NOISY_TYPES set (operator-confirmed infra devices) "
+      "now includes 'arp_sweep' too",
+      '"arp_sweep"' in _pipeline_src.split("_INFRA_NOISY_TYPES = {")[1].split("}")[0])
+check("THE FIX: the ARP-spoofing hard-stop Evidence injection is now gated on "
+      "'if is_safe:' (skip) / else (inject) -- a safe_ips-listed IP's own MAC-flip "
+      "heuristic no longer bypasses the same trust promise every other behavioral "
+      "signal already honors",
+      "if is_safe:" in _pipeline_src.split('LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing')[0][-400:])
+check("REGRESSION GUARD: the ARP-spoofing hard-stop Evidence is still actually added "
+      "for the non-safe case (the fix must not have deleted real detection)",
+      'self.evidence_store.add(Evidence(type="arp_spoofing"' in _pipeline_src)
+
+# BUGFIX (found in the SAME live audit): is_safe checked only the single current
+# client_ip against safe_ips -- but a device with multiple known addresses (IPv4 +
+# IPv6 forms, unified under one dev_id by MAC correlation) can have client_ip snapshot
+# to any ONE of them cycle to cycle. Confirmed live: this network's own Fritzbox
+# (safe_ips lists only its IPv4 192.168.1.1) still alerted at risk=8.5 in a cycle
+# where client_ip was its IPv6 link-local address instead -- same device, same
+# known_ips set, is_safe simply never checked the other addresses.
+check("THE FIX: is_safe now also checks membership across known_ips_snapshot (every "
+      "address this device is known to answer to), not just the single current "
+      "client_ip snapshot",
+      "any(ip in safe_ips for ip in known_ips_snapshot)" in _pipeline_src)
+check("REGRESSION GUARD: the original client_ip check and the hostname-pattern check "
+      "are both still present -- the fix is additive, not a replacement",
+      "client_ip in safe_ips" in _pipeline_src and "pat in hostname.lower()" in _pipeline_src)
+
+
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 22 check(s) FAILED: {FAILURES}")
     sys.exit(1)
