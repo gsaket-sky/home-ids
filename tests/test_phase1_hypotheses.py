@@ -51,6 +51,32 @@ check("DGAHypothesis becomes the winning attack hypothesis for a DGA burst",
 check("DGA burst reaches at least SUSPICIOUS-equivalent score (>=2.0)",
       result["attack"]["score"] >= 2.0)
 
+# BUGFIX regression guard: dns_dga_burst used to be a pure device-wide aggregate with
+# NO domain attached at all -- found via a production alerts.json audit showing the
+# same displayed "target" domain with wildly different max_label_length across
+# consecutive alerts, and the same domain family spread across 6+ unrelated devices
+# with zero threat-intel corroboration (both symptoms of this exact attribution gap).
+# dns_features.py's compute() now collects real examples from the SAME per-domain loop
+# that counts them, mirroring the already-fixed dns_tunneling_domain_examples pattern.
+dga_features_no_examples = {"suspicious_domains": 20.0, "entropy_avg": 4.0, "dga_score": 0.0}
+ev_no_examples, _, _, _ = run_hypothesis(dga_features_no_examples)
+dga_ev_no_examples = [e for e in ev_no_examples if e.type == "dns_dga_burst"]
+check("without suspicious_domain_examples present (the pre-fix shape), evidence.domain "
+      "stays None rather than crashing -- backward compatible with any caller that "
+      "hasn't been updated yet",
+      bool(dga_ev_no_examples) and dga_ev_no_examples[0].domain is None)
+
+dga_features_with_examples = {
+    "suspicious_domains": 20.0, "entropy_avg": 4.0, "dga_score": 0.0,
+    "suspicious_domain_examples": ["xkqz289dfj10dj-224.ru", "xkqz289dfj10dj-393.ru"],
+}
+ev_with_examples, _, _, _ = run_hypothesis(dga_features_with_examples)
+dga_ev_with_examples = [e for e in ev_with_examples if e.type == "dns_dga_burst"]
+check("THE CORE FIX: dns_dga_burst evidence now carries a real example domain from "
+      "the per-domain loop that actually found it, not None",
+      bool(dga_ev_with_examples) and dga_ev_with_examples[0].domain == "xkqz289dfj10dj-224.ru",
+      f"got domain={dga_ev_with_examples[0].domain if dga_ev_with_examples else 'NO EVIDENCE'}")
+
 # Confirm it actually reaches DecisionEngine and produces an alertable state
 de = DecisionEngine()
 decision = de.evaluate(active, rep)

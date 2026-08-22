@@ -290,6 +290,7 @@ class FeatureExtractor:
 
         entropy_sum  = 0.0
         suspicious   = 0
+        suspicious_domain_examples = []
         deep_domains = 0
         beaconing_c2_count = 0
         beaconing_c2_1h = 0
@@ -341,6 +342,21 @@ class FeatureExtractor:
             entropy_sum += entropy(sublabel)
             if suspicious_dga(domain):
                 suspicious += 1
+                # BUGFIX (found via a production alerts.json audit): this loop already
+                # checks each domain individually, but only ever counted the total -- the
+                # SAME class of gap as tunneling_domains/tunneling_domain_examples just
+                # above, for DGA_BOTNET_C2's underlying dns_dga_burst evidence instead of
+                # dns_tunnel_v2's. Without this, DGA_BOTNET_C2 alerts had NO real domain to
+                # attach to Evidence.domain at all -- the displayed "target" was always the
+                # generic "most frequent domain in window" fallback, no causal connection
+                # to which domain(s) actually looked DGA-like. Confirmed in production:
+                # the same displayed domain string showing wildly different
+                # max_label_length across consecutive alerts, and the same domain family
+                # spread across 6+ unrelated devices with zero threat-intel corroboration
+                # -- both symptoms of this exact attribution gap, not necessarily evidence
+                # of a real coordinated threat.
+                if len(suspicious_domain_examples) < 3:
+                    suspicious_domain_examples.append(domain)
             if len(parts) > 5:
                 deep_domains += 1
 
@@ -421,6 +437,7 @@ class FeatureExtractor:
             "nxdomain_ratio": min(rw.nxdomain / max(n_events, 1), 1.0),
             "entropy_avg": avg_entropy,
             "suspicious_domains": suspicious,
+            "suspicious_domain_examples": suspicious_domain_examples,
             "total": n_events,
             "query_variance": query_variance,
             "events_per_second": n_events / max(window_seconds, 1),
@@ -463,6 +480,7 @@ class FeatureExtractor:
         return {
             "query_rate": 0.0, "unique_domains": 0, "blocked_ratio": 0.0,
             "nxdomain_ratio": 0.0, "entropy_avg": 0.0, "suspicious_domains": 0,
+            "suspicious_domain_examples": [],
             "total": 0, "query_variance": 0.0, "events_per_second": 0.0,
             "top_domain_ratio": 0.0, "new_domains": 0, "deep_domains": 0,
             "max_label_length": 0, "max_label_domain": "", "dns_tunneling_domains": 0,

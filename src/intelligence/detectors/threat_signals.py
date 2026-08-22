@@ -83,13 +83,27 @@ class ThreatSignalDetector:
             sd = float(features.get("suspicious_domains", 0.0) or 0.0)
             entropy_avg = float(features.get("entropy_avg", 0.0) or 0.0)
             dga_score = float(features.get("dga_score", 0.0) or 0.0)
+            # BUGFIX: dns_dga_burst is a device-wide AGGREGATE (a count of how many
+            # recent domains looked DGA-like), so it never had any specific domain to
+            # attach -- the alert's displayed target was always the unrelated "most
+            # frequent domain in window" fallback (pipeline.py's _select_target_domain()),
+            # no causal connection to which domain(s) actually looked suspicious.
+            # dns_features.py's compute() now collects real examples in the SAME loop
+            # that counts them (mirroring dns_tunneling_domain_examples for the sibling
+            # dns_tunnel_v2 signal above) -- attach one here so pipeline.py's alert-
+            # building can prefer it, same as it already does for DNS_COVERT_TUNNELING.
+            dga_domain_examples = features.get("suspicious_domain_examples", []) or []
+            dga_evidence_domain = dga_domain_examples[0] if dga_domain_examples else None
+            dga_examples_note = f" e.g.={','.join(dga_domain_examples)}" if dga_domain_examples else ""
             if sd >= 15:
                 add("dns_dga_burst", sd, min(1.0, 0.6 + sd / 50.0), "dns_behavior",
-                    f"absolute burst {int(sd)} domains")
+                    f"absolute burst {int(sd)} domains{dga_examples_note}", domain=dga_evidence_domain)
             elif sd >= 5 and entropy_avg > 3.5:
                 add("dns_dga_burst", sd, 0.6, "dns_behavior",
-                    f"elevated {int(sd)} domains entropy={entropy_avg:.2f}")
+                    f"elevated {int(sd)} domains entropy={entropy_avg:.2f}{dga_examples_note}", domain=dga_evidence_domain)
             elif dga_score > 0.40:
+                # Pure classifier-score branch, not the per-domain loop above -- no
+                # specific domain to attach here, unlike the two branches above it.
                 add("dns_dga_burst", dga_score, min(1.0, dga_score), "dns_behavior",
                     f"classifier score {dga_score:.2f}")
 

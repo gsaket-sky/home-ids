@@ -270,6 +270,19 @@ check("REGRESSION GUARD: no remaining use of the raw target_malicious_domain in 
       '"queried_domain": target_malicious_domain,' not in pipeline_src and
       'etld1(target_malicious_domain)' not in pipeline_src)
 
+# BUGFIX regression guard: the SAME class of bug again, DGA_BOTNET_C2/dns_dga_burst
+# instead of DNS_COVERT_TUNNELING/dns_tunnel_v2 -- found while investigating why the
+# qwertyuiopasdfghjklzxcvbnm-*.ru / xkqz289dfj10dj-*.ru domain families appeared spread
+# across 6+ unrelated devices with zero threat-intel corroboration. dns_dga_burst was a
+# pure device-wide aggregate (a count of recent DGA-looking domains) with no domain
+# attached at all -- every DGA_BOTNET_C2 alert's displayed target was the same
+# unrelated "most notable domain in window" fallback, so the cross-device spread proved
+# nothing about a real coordinated threat; it was an attribution artifact.
+check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over the "
+      "generic 'most notable domain in the window' fallback, same as DNS_COVERT_TUNNELING",
+      'elif primary_sig == "DGA_BOTNET_C2":' in pipeline_src and
+      'if ev.type == "dns_dga_burst" and ev.domain:' in pipeline_src)
+
 
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 24 check(s) FAILED: {FAILURES}")

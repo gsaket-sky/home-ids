@@ -932,6 +932,22 @@ class EnginePipeline:
                                 if ev.type == "dns_tunnel_v2" and ev.domain:
                                     alert_target_domain = ev.domain
                                     break
+                        # BUGFIX: same gap, DGA_BOTNET_C2/dns_dga_burst instead of
+                        # DNS_COVERT_TUNNELING/dns_tunnel_v2 -- dns_dga_burst was a pure
+                        # device-wide aggregate (count of recent domains that looked
+                        # DGA-like) with no domain attached at all until threat_signals.py
+                        # started collecting real examples from the same per-domain loop
+                        # that counts them. Confirmed in production: the SAME displayed
+                        # domain showing wildly different max_label_length across
+                        # consecutive alerts, and the SAME domain family spread across 6+
+                        # unrelated devices with zero threat-intel corroboration -- both
+                        # symptoms of this exact attribution gap, not necessarily evidence
+                        # of a real coordinated threat across those devices.
+                        elif primary_sig == "DGA_BOTNET_C2":
+                            for ev in active_evidence:
+                                if ev.type == "dns_dga_burst" and ev.domain:
+                                    alert_target_domain = ev.domain
+                                    break
 
                         alert_payload = {
                             "type": "ids_alert",
