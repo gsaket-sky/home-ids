@@ -42,7 +42,25 @@ class GeoIPEngine:
                 LOGGER.warning("Could not open GeoIP ASN database: %s", exc)
                 self.asn_reader = None
 
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="rev-dns")
+        # BUGFIX: found via a live audit -- 4 workers/1.0s was tight enough that a
+        # reactive-capture burst's DNS-evasion audit (which reverse-DNS's every
+        # unexplained IP across EVERY device seen in the burst, in one pass) could
+        # genuinely saturate this pool: a ThreadPoolExecutor future that times out on
+        # the CALLER side does not stop the underlying worker thread, which keeps
+        # running (up to its own 1.0s socket timeout) and occupying a slot regardless
+        # -- so a handful of near-simultaneous lookups could cascade into later ones
+        # queueing behind busy workers and hitting the 1.05s ceiling before even
+        # starting, independent of whether the destination's DNS server would have
+        # answered promptly. Confirmed live: 4 different devices (a server and three
+        # smart-home devices) all got flagged "no matching DNS lookup history" within
+        # the same ~2-minute window, right after a reactive-capture burst -- the
+        # signature of a shared-resource bottleneck, not four coincidentally-evasive
+        # devices. dns_evasion.py's _reverse_dns_explains() currently has no way to
+        # tell "genuinely no PTR record" apart from "timed out under load" (both
+        # collapse to a None return here) and treats either the same as unexplained,
+        # so reducing spurious timeouts directly reduces false dns_evasion_anomaly
+        # findings without touching that detector's own logic.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="rev-dns")
 
     def lookup(self, ip):
         if not self.reader:
@@ -78,7 +96,7 @@ class GeoIPEngine:
             # Set socket timeout for the thread worker
             old_timeout = socket.getdefaulttimeout()
             try:
-                socket.setdefaulttimeout(1.0)
+                socket.setdefaulttimeout(2.5)
                 host, _, _ = socket.gethostbyaddr(ip)
                 return host.lower().rstrip('.')
             finally:
@@ -86,9 +104,9 @@ class GeoIPEngine:
 
         future = self._executor.submit(_resolve)
         try:
-            return future.result(timeout=1.05)
+            return future.result(timeout=2.6)
         except concurrent.futures.TimeoutError:
-            LOGGER.debug("Reverse DNS timeout (>1.0s) for IP: %s", ip)
+            LOGGER.debug("Reverse DNS timeout (>2.5s) for IP: %s", ip)
             return None
         except socket.herror:
             LOGGER.debug("Reverse DNS host not found for IP: %s", ip)

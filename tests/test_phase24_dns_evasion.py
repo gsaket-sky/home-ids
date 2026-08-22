@@ -100,15 +100,15 @@ check("THE CORE FIX: a private-LAN destination is never flagged as an evasion an
       "even with zero DNS history and no geoip_engine",
       ev_lan == [])
 
-audit_lan_mixed = DeviceBurstAudit(dest_ips={"192.168.1.94", "9.9.9.9"}, queried_domains=set())
-geoip_unknown_for_mixed = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"9.9.9.9": "Some Random Hosting LLC"})
+audit_lan_mixed = DeviceBurstAudit(dest_ips={"192.168.1.94", "99.99.99.99"}, queried_domains=set())
+geoip_unknown_for_mixed = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"99.99.99.99": "Some Random Hosting LLC"})
 ev_lan_mixed = audit_device(DEV, audit_lan_mixed, geoip_engine=geoip_unknown_for_mixed)
 check("a private-LAN IP alongside a genuinely unexplained public IP: only the public one counts",
-      len(ev_lan_mixed) == 1 and ev_lan_mixed[0].value == 1.0 and ev_lan_mixed[0].domain == "9.9.9.9")
+      len(ev_lan_mixed) == 1 and ev_lan_mixed[0].value == 1.0 and ev_lan_mixed[0].domain == "99.99.99.99")
 
 # B4: genuinely unexplained -- no DNS match, not CDN, not VPN -- fires evidence.
-geoip_unknown = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"9.9.9.9": "Some Random Hosting LLC"})
-audit_unexplained = DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains={"totally-unrelated.com"})
+geoip_unknown = _FakeGeoIP(reverse_dns_map={}, asn_org_map={"99.99.99.99": "Some Random Hosting LLC"})
+audit_unexplained = DeviceBurstAudit(dest_ips={"99.99.99.99"}, queried_domains={"totally-unrelated.com"})
 ev_unexplained = audit_device(DEV, audit_unexplained, geoip_engine=geoip_unknown)
 check("a genuinely unexplained destination (no DNS match, not CDN, not VPN) fires exactly one evidence",
       len(ev_unexplained) == 1)
@@ -120,7 +120,7 @@ if ev_unexplained:
 
 # B5: no DNS history at all + unexplained connection -> higher confidence than a
 # device with SOME (unrelated) DNS history.
-audit_no_dns = DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains=set())
+audit_no_dns = DeviceBurstAudit(dest_ips={"99.99.99.99"}, queried_domains=set())
 ev_no_dns = audit_device(DEV, audit_no_dns, geoip_engine=geoip_unknown)
 check("a device with real traffic and ZERO dns history at all scores a HIGHER confidence "
       "than one with some unrelated DNS history for the same unexplained IP",
@@ -128,7 +128,7 @@ check("a device with real traffic and ZERO dns history at all scores a HIGHER co
       f"no_dns={ev_no_dns[0].confidence} vs some_dns={ev_unexplained[0].confidence}")
 
 # B6: reputation-hit bump.
-ti_bad = _FakeTI(bad_ips={"9.9.9.9"})
+ti_bad = _FakeTI(bad_ips={"99.99.99.99"})
 ev_reputation = audit_device(DEV, audit_unexplained, geoip_engine=geoip_unknown, ti_engine=ti_bad)
 check("an unexplained IP that also carries threat-intel reputation data scores a higher "
       "confidence than the same IP without a reputation hit",
@@ -144,7 +144,7 @@ geoip_mixed = _FakeGeoIP(
     reverse_dns_map={"1.1.1.1": "sub.example.com"},
     asn_org_map={},
 )
-audit_mixed = DeviceBurstAudit(dest_ips={"1.1.1.1", "9.9.9.9"}, queried_domains={"example.com"})
+audit_mixed = DeviceBurstAudit(dest_ips={"1.1.1.1", "99.99.99.99"}, queried_domains={"example.com"})
 ev_mixed = audit_device(DEV, audit_mixed, geoip_engine=geoip_mixed)
 check("mixed case: 1 explained + 1 unexplained out of 2 total -> evidence value is 1 (only the unexplained one)",
       len(ev_mixed) == 1 and ev_mixed[0].value == 1.0, f"got {ev_mixed}")
@@ -154,12 +154,12 @@ check("mixed case: 1 explained + 1 unexplained out of 2 total -> evidence value 
 # network_context.destination_ip, instead of falling back to the device's unrelated
 # last-known dest_ip (the fix for the "wrong IP got immunized on correction" gap).
 geoip_unknown2 = _FakeGeoIP()
-audit_single = DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains=set())
+audit_single = DeviceBurstAudit(dest_ips={"99.99.99.99"}, queried_domains=set())
 ev_single = audit_device(DEV, audit_single, geoip_engine=geoip_unknown2)
 check("a single unexplained IP is carried as Evidence.domain",
-      ev_single[0].domain == "9.9.9.9", f"got {ev_single[0].domain}")
+      ev_single[0].domain == "99.99.99.99", f"got {ev_single[0].domain}")
 
-audit_multi = DeviceBurstAudit(dest_ips={"9.9.9.9", "5.5.5.5", "7.7.7.7"}, queried_domains=set())
+audit_multi = DeviceBurstAudit(dest_ips={"99.99.99.99", "5.5.5.5", "7.7.7.7"}, queried_domains=set())
 ev_multi = audit_device(DEV, audit_multi, geoip_engine=geoip_unknown2)
 check("with multiple unexplained IPs and no reputation hits, the representative IP is "
       "chosen deterministically (sorted first) -- same input always yields the same evidence",
@@ -178,7 +178,7 @@ check("THE CORE FIX: when one of several unexplained IPs carries threat-intel re
 # ═══════════════════════════════════════════════════════════════════════════════════
 devices = {
     "dev-clean": DeviceBurstAudit(dest_ips={"93.184.216.34"}, queried_domains={"example.com"}),
-    "dev-evasive": DeviceBurstAudit(dest_ips={"9.9.9.9"}, queried_domains=set()),
+    "dev-evasive": DeviceBurstAudit(dest_ips={"99.99.99.99"}, queried_domains=set()),
 }
 geoip_burst = _FakeGeoIP(reverse_dns_map={"93.184.216.34": "www.example.com"})
 capture_ts = 1700000000.0
@@ -282,6 +282,103 @@ check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over th
       "generic 'most notable domain in the window' fallback, same as DNS_COVERT_TUNNELING",
       'elif primary_sig == "DGA_BOTNET_C2":' in pipeline_src and
       'if ev.type == "dns_dga_burst" and ev.domain:' in pipeline_src)
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# BUGFIX (found via a live alert): alert_dest_ip (a few lines above target_display's
+# computation) was already correctly attributed to the flagged unexplained IP for
+# DNS_EVASION -- but target_display (the "Contacted `X`" headline field) never
+# consulted it, and alert_target_domain never got a DNS_EVASION branch the way
+# DNS_COVERT_TUNNELING/DGA_BOTNET_C2 do (DNS_EVASION structurally has no domain, so
+# there's nothing meaningful to attach there). Confirmed live: a DNS_EVASION alert's
+# "Contacted" line showed a domain the device happened to also query (no causal link),
+# while the real flagged IP -- and the one actually immunized on a correction -- was a
+# completely different value buried in the WHY section.
+# ═══════════════════════════════════════════════════════════════════════════════════
+check("THE FIX: target_display prefers alert_dest_ip specifically for DNS_EVASION, "
+      "checked before the generic alert_target_domain path",
+      'alert_dest_ip if primary_sig == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"' in pipeline_src)
+check("THE FIX: the non-DNS_EVASION fallback now uses alert_dest_ip (the corrected "
+      "variable), not the raw dest_ip",
+      'else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")' in pipeline_src)
+
+# Simulate the actual priority chain the fix uses, to prove the real mapping.
+def _target_display_for(primary_sig, alert_target_domain, alert_dest_ip):
+    return (
+        alert_dest_ip if primary_sig == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"
+        else alert_target_domain if alert_target_domain and alert_target_domain != "unknown"
+        else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")
+    )
+
+check("DNS_EVASION with a coincidental unrelated domain in alert_target_domain still "
+      "displays the real flagged IP, not the domain",
+      _target_display_for("DNS_EVASION", "device-metrics-us.amazon.com", "104.156.80.32") == "104.156.80.32")
+check("REGRESSION GUARD: DNS_COVERT_TUNNELING (a real evidence-linked domain signature) "
+      "still displays its domain, unaffected by the DNS_EVASION-specific branch",
+      _target_display_for("DNS_COVERT_TUNNELING", "real-tunnel-domain.example", "5.5.5.5") == "real-tunnel-domain.example")
+check("REGRESSION GUARD: DNS_EVASION with no resolved IP at all falls back to 'unknown', "
+      "not a stale/wrong domain",
+      _target_display_for("DNS_EVASION", "unknown", "unknown") == "unknown")
+
+# BUGFIX (found via a live audit): reverse-DNS's tiny worker pool (4) and tight timeout
+# (1.0s/1.05s) meant a burst reverse-DNS'ing every unexplained IP across every device
+# seen in ONE capture (audit_burst()'s whole point -- every device, not just the
+# triggering one) could genuinely saturate the pool: a caller-side future timeout does
+# NOT stop the underlying worker thread, which keeps running and occupying a slot
+# regardless, so later lookups queue behind busy workers and hit the ceiling before
+# even starting. _reverse_dns_explains() has no way to tell "genuinely no PTR record"
+# apart from "timed out under load" -- both collapse to a None return and count as
+# unexplained. Confirmed live: 4 unrelated devices (including this network's own IDS
+# server) all flagged "no matching DNS lookup history" within the same ~2-minute
+# window, right after a reactive-capture burst -- the signature of a shared-resource
+# bottleneck, not four coincidentally-evasive devices.
+geoip_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "geoip.py").read_text(encoding="utf-8")
+check("THE FIX: reverse-DNS worker pool widened from 4 to reduce queueing under a "
+      "multi-device burst audit",
+      "ThreadPoolExecutor(max_workers=12" in geoip_src)
+check("THE FIX: reverse-DNS timeout widened from the original tight 1.0s/1.05s pairing",
+      "socket.setdefaulttimeout(2.5)" in geoip_src and "future.result(timeout=2.6)" in geoip_src)
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# BUGFIX (found via a live alert): a device's own DNS QUERY traffic to a well-known
+# public resolver (e.g. a Chromecast querying 8.8.8.8 directly instead of through
+# Pi-hole) was guaranteed to be flagged as "unexplained" -- the connection itself IS
+# how domain resolution happens, so by definition no domain lookup can ever explain it.
+# Confirmed live: chromecast_fritz_box flagged for "no matching DNS lookup history" on
+# a connection to 8.8.8.8.
+# ═══════════════════════════════════════════════════════════════════════════════════
+from intelligence.detectors.dns_evasion import _is_known_dns_resolver, audit_device, DeviceBurstAudit
+
+check("THE FIX: 8.8.8.8 (Google Public DNS) is recognized as a known resolver",
+      _is_known_dns_resolver("8.8.8.8"))
+check("THE FIX: 1.1.1.1 (Cloudflare) is recognized as a known resolver",
+      _is_known_dns_resolver("1.1.1.1"))
+check("REGRESSION GUARD: an ordinary, unrecognized public IP is NOT treated as a resolver",
+      not _is_known_dns_resolver("172.238.164.57"))
+
+resolver_audit = DeviceBurstAudit(dest_ips={"8.8.8.8"}, queried_domains=set())
+resolver_evidence = audit_device("dev_resolver", resolver_audit, geoip_engine=None, ti_engine=None)
+check("END-TO-END: a device whose ONLY real destination is a known public DNS resolver "
+      "produces NO dns_evasion_anomaly evidence at all",
+      resolver_evidence == [], f"got {resolver_evidence}")
+
+mixed_audit = DeviceBurstAudit(dest_ips={"8.8.8.8", "66.66.66.66"}, queried_domains=set())
+mixed_evidence = audit_device("dev_mixed", mixed_audit, geoip_engine=None, ti_engine=None)
+check("REGRESSION GUARD: a genuinely unexplained IP alongside a known resolver still "
+      "produces evidence -- the fix excludes only the resolver, not the whole device",
+      bool(mixed_evidence) and mixed_evidence[0].domain == "66.66.66.66", f"got {mixed_evidence}")
+
+# BUGFIX (found in the SAME live audit, a level deeper than the earlier target_display
+# fix): alert_target_domain ITSELF (not just the Telegram display text) never got a
+# DNS_EVASION branch, so network_context["queried_domain"] -- used by
+# train_fp_classifier.py's f1_entropy feature and other consumers, not just display --
+# stayed polluted with a coincidentally-queried, causally-unrelated real domain for
+# every DNS_EVASION alert. Confirmed live: "Contacted: device-metrics-us.amazon.com"
+# stored in the alert record itself, while the actual flagged IP (already correctly in
+# destination_ip) was something completely different.
+check("THE DEEPER FIX: alert_target_domain itself (the source field, not just the "
+      "display variable) is now set to 'unknown' for DNS_EVASION -- no domain is "
+      "attached where none exists, rather than the generic fallback leaking in",
+      'elif primary_sig == "DNS_EVASION":\n                            alert_target_domain = "unknown"' in pipeline_src)
 
 
 if FAILURES:

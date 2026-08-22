@@ -171,6 +171,47 @@ check("the WHY section shows plain-language sentences with no raw per-signal mag
       "concern, now structurally impossible rather than just labeled)",
       "text = _EVIDENCE_PLAIN_LANGUAGE.get(ev.type" in pipeline_src)
 
+# BUGFIX (found via a live alert): action_summary (drives the headline's "— auto-blocked" /
+# "— monitoring only" suffix) only recognized "BLOCKED" and "WAITING FOR APPROVAL" as
+# substrings of containment_status, but ips.py's get_containment_status() can also return
+# "🔒 TARPITTED (Layer-2 ARP/NDP)" or "🔒 ROUTER ISOLATED (Fritz!Box WAN)" -- neither
+# contains "BLOCKED". A genuinely tarpitted device (Layer 2 fires on risk>=9.0 OR lateral
+# movement, independent of the decision engine's own HIGH-vs-CRITICAL state) had its
+# headline read "monitoring only" directly above an "Action taken: TARPITTED" line a few
+# lines further down in the SAME message -- confirmed on a real family_pc_fritz_box alert.
+check("THE FIX: action_summary now recognizes TARPITTED as its own case, checked before "
+      "the generic BLOCKED substring match",
+      '"tarpitted (Layer-2)" if "TARPITTED" in containment_status' in pipeline_src)
+check("THE FIX: action_summary also recognizes ROUTER ISOLATED as its own case",
+      '"router isolated" if "ROUTER ISOLATED" in containment_status' in pipeline_src)
+check("REGRESSION GUARD: the WAITING FOR APPROVAL case is still present, just reordered "
+      "so TARPITTED/ROUTER ISOLATED are checked first",
+      '"awaiting approval" if "WAITING FOR APPROVAL" in containment_status' in pipeline_src)
+check("SECOND BUGFIX (caught by this fix's own regression test below): the auto-blocked "
+      "check now matches the specific 'DOMAIN BLOCKED' badge text, not a bare 'BLOCKED' "
+      "substring -- 'BLOCKED' is itself a substring of 'UNBLOCKED' "
+      "(get_containment_status()'s genuine not-blocked-at-all case), so the original "
+      "bare-word check mislabeled a fully clean device as 'auto-blocked'",
+      '"auto-blocked" if "DOMAIN BLOCKED" in containment_status' in pipeline_src)
+
+# Simulate all four real get_containment_status() return values through the same
+# if/elif chain the fix uses, to prove the actual mapping (not just string presence).
+def _action_summary_for(containment_status: str) -> str:
+    return ("tarpitted (Layer-2)" if "TARPITTED" in containment_status
+            else "router isolated" if "ROUTER ISOLATED" in containment_status
+            else "auto-blocked" if "DOMAIN BLOCKED" in containment_status
+            else "awaiting approval" if "WAITING FOR APPROVAL" in containment_status
+            else "monitoring only")
+
+check("a real TARPITTED containment_status maps to 'tarpitted (Layer-2)', not 'monitoring only'",
+      _action_summary_for("🔒 TARPITTED (Layer-2 ARP/NDP)") == "tarpitted (Layer-2)")
+check("a real ROUTER ISOLATED containment_status maps to 'router isolated', not 'monitoring only'",
+      _action_summary_for("🔒 ROUTER ISOLATED (Fritz!Box WAN)") == "router isolated")
+check("REGRESSION GUARD: a real DOMAIN BLOCKED containment_status still maps to 'auto-blocked'",
+      _action_summary_for("🔒 DOMAIN BLOCKED (Pi-hole DNS)") == "auto-blocked")
+check("REGRESSION GUARD: the genuine unblocked/monitoring case still maps correctly",
+      _action_summary_for("🔓 ACTIVE / UNBLOCKED (Monitoring Only)") == "monitoring only")
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED: {FAILURES}")

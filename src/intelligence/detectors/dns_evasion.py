@@ -76,6 +76,31 @@ def _is_private_lan_ip(ip: str) -> bool:
         return False
 
 
+# BUGFIX (production false-positive, found via a live audit): a device's own DNS QUERY
+# traffic to a well-known public resolver (e.g. a Chromecast querying 8.8.8.8 directly
+# instead of through Pi-hole) was guaranteed to be flagged as "unexplained" -- the
+# connection itself IS how domain resolution happens, so by definition no domain lookup
+# can ever explain it (a chicken-and-egg self-reference the other two "explained"
+# checks structurally can't resolve: reverse-DNS of a resolver IP won't match anything
+# the device queried, and a resolver operator is not a VPN provider). Deliberately a
+# short, stable, name-brand list -- these IPs are as close to universally-recognized
+# internet infrastructure as exists, unlike a general "trust this cloud provider" list
+# that would create a real blind spot for C2 hosted on the same infrastructure.
+_KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
+    "8.8.8.8", "8.8.4.4",              # Google Public DNS
+    "1.1.1.1", "1.0.0.1",              # Cloudflare
+    "9.9.9.9", "149.112.112.112",      # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+    "94.140.14.14", "94.140.15.15",    # AdGuard DNS
+    "2001:4860:4860::8888", "2001:4860:4860::8844",  # Google Public DNS, IPv6
+    "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
+})
+
+
+def _is_known_dns_resolver(ip: str) -> bool:
+    return ip in _KNOWN_PUBLIC_DNS_RESOLVERS
+
+
 def _reverse_dns_explains(ip: str, queried_domains: Set[str], geoip_engine) -> bool:
     """True if this IP's reverse-DNS hostname shares an eTLD+1 base domain with
     something the device actually queried, or is itself known CDN/cloud
@@ -123,6 +148,8 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
 
     for ip in audit.dest_ips:
         if _is_private_lan_ip(ip):
+            continue
+        if _is_known_dns_resolver(ip):
             continue
         if _reverse_dns_explains(ip, audit.queried_domains, geoip_engine):
             continue

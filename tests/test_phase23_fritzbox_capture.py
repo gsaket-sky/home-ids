@@ -287,7 +287,7 @@ with sm.lock_device("dev_clean") as st:
 
 zfx2 = ZeekFeatureExtractor(home_subnets=["192.168.1.0/24"])
 # The evasive device has a real connection to an IP with no matching DNS history.
-zfx2.ingest({"_zeek_type": "conn", "id.orig_h": EVASIVE_IP, "id.resp_h": "9.9.9.9",
+zfx2.ingest({"_zeek_type": "conn", "id.orig_h": EVASIVE_IP, "id.resp_h": "66.66.66.66",
              "id.resp_p": 443, "proto": "tcp", "orig_bytes": 100, "uid": "CX1", "ts": time.time()})
 # The clean device's connection resolves (via reverse-DNS) to a host under the same
 # base domain it queried -- genuinely explained.

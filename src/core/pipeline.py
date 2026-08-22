@@ -1007,6 +1007,24 @@ class EnginePipeline:
                                 if ev.type == "dns_dga_burst" and ev.domain:
                                     alert_target_domain = ev.domain
                                     break
+                        # BUGFIX: found via a live alert audit -- unlike the two branches
+                        # above (which replace the fallback with a REAL evidence-linked
+                        # domain), DNS_EVASION structurally has no domain at all by design
+                        # (that's the whole signature: real traffic, no DNS explanation) --
+                        # yet alert_target_domain had no branch for it either, so it stayed
+                        # as target_malicious_domain, a coincidentally-queried, causally-
+                        # unrelated domain the device happened to also look up. This
+                        # polluted network_context["queried_domain"] (used by
+                        # train_fp_classifier.py's f1_entropy feature, among other
+                        # consumers) with a real-looking but meaningless domain for every
+                        # DNS_EVASION alert -- confirmed live, alongside the earlier
+                        # target_display fix which only patched the Telegram TEXT, not this
+                        # underlying field. alert_dest_ip (computed just above) already
+                        # correctly carries the real flagged IP into destination_ip -- this
+                        # just stops a second, unrelated domain from also being attached
+                        # where none exists.
+                        elif primary_sig == "DNS_EVASION":
+                            alert_target_domain = "unknown"
 
                         alert_payload = {
                             "type": "ids_alert",
@@ -1350,9 +1368,51 @@ class EnginePipeline:
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
 
-                                target_display = alert_target_domain if alert_target_domain and alert_target_domain != "unknown" else (dest_ip if dest_ip and dest_ip != "unknown" else "unknown")
+                                # BUGFIX: found via a live alert audit -- alert_target_domain never got a
+                                # DNS_EVASION branch the way DNS_COVERT_TUNNELING/DGA_BOTNET_C2 do above,
+                                # so it stayed as the generic target_malicious_domain fallback (a
+                                # coincidentally-queried domain, no causal link) for that signature --
+                                # DNS_EVASION structurally has no domain by design, so alert_target_domain
+                                # is NEVER meaningfully correct for it. alert_dest_ip (computed just above,
+                                # already correctly attributed to the flagged unexplained IP) was sitting
+                                # right there unused for display. Confirmed live: a DNS_EVASION alert's
+                                # "Contacted" line showed a domain like "device-metrics-us.amazon.com" the
+                                # device happened to also query, while the real evidence -- and the actual
+                                # IP that got immunized on a correction -- was a completely different IP
+                                # buried in the WHY section. The non-DNS_EVASION fallback also now uses
+                                # alert_dest_ip instead of the raw dest_ip, for the same reason
+                                # alert_dest_ip exists at all: it's the one already-corrected IP variable.
+                                target_display = (
+                                    alert_dest_ip if primary_sig == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"
+                                    else alert_target_domain if alert_target_domain and alert_target_domain != "unknown"
+                                    else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")
+                                )
 
-                                action_summary = ("auto-blocked" if "BLOCKED" in containment_status
+                                # BUGFIX: found via a live alert audit -- this only recognized "BLOCKED"
+                                # and "WAITING FOR APPROVAL" as substrings of containment_status, but
+                                # ips.py's get_containment_status() can also return "🔒 TARPITTED
+                                # (Layer-2 ARP/NDP)" or "🔒 ROUTER ISOLATED (Fritz!Box WAN)" -- neither
+                                # contains the literal word "BLOCKED", so a genuinely tarpitted device
+                                # (Layer 2 fires on risk>=9.0 OR lateral movement, independent of the
+                                # decision engine's own HIGH-vs-CRITICAL state) had its headline read
+                                # "monitoring only" directly above an "Action taken: TARPITTED" line a
+                                # few lines further down in the SAME message -- confirmed live on a
+                                # real family_pc_fritz_box alert. Same bug class as the 8.0
+                                # "WAITING FOR APPROVAL contradiction" fix; this is the other half of
+                                # the SAME containment_status value that fix never got extended to.
+                                # SECOND BUGFIX, caught by this fix's own regression test: a bare
+                                # "BLOCKED" substring check also matches "UNBLOCKED" (get_containment_
+                                # status()'s genuine not-blocked-at-all case, "🔓 ACTIVE / UNBLOCKED
+                                # (Monitoring Only)") -- "BLOCKED" IS a substring of "UNBLOCKED", so a
+                                # fully clean device was mislabeled "auto-blocked" in the headline,
+                                # pre-existing and unrelated to the tarpit gap above. Checking for the
+                                # specific "DOMAIN BLOCKED" badge text instead of the bare word fixes
+                                # both directions at once. Order matters here (most-severe-first) since
+                                # a device could theoretically match more than one badge in a future
+                                # containment_status format change.
+                                action_summary = ("tarpitted (Layer-2)" if "TARPITTED" in containment_status
+                                                   else "router isolated" if "ROUTER ISOLATED" in containment_status
+                                                   else "auto-blocked" if "DOMAIN BLOCKED" in containment_status
                                                    else "awaiting approval" if "WAITING FOR APPROVAL" in containment_status
                                                    else "monitoring only")
 
