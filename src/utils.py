@@ -190,15 +190,29 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "aiv-cdn.net", "aiv-delivery.net", "amazon-adsystem.com", "ssl-images-amazon.com",
     "firetvcaptiveportal.com", "mmechocaptiveportal.com", "kindle.com",
     "amazon.co.uk", "amazon.de",  # PHASE 8 FIX: msh.amazon.co.uk was 43% of all alerts
+    # PHASE 9.0.1 FIX: found via a live state-folder audit -- these were poisoning
+    # local_confirmed_intel.json as "confirmed malicious" (200/44/19/1/1/4/1
+    # confirmations respectively), cascading into Stage-1 hard-stops for every device
+    # legitimately using Amazon/Alexa infrastructure. See fp_engine.py's
+    # _is_domain_causal_hard_stop() -- the underlying attribution bug is fixed there;
+    # these are the already-known-safe domains that bug happened to poison in
+    # production before the fix landed.
+    "acsechocaptiveportal.com", "tabletcaptiveportal.com", "aws.dev", "pv-cdn.net",
+    "amazoncrl.com", "amazonsilk.com", "route71.net",
 
     # Meta / Facebook / WhatsApp Ecosystem — PHASE 8 FIX
     "facebook.com", "whatsapp.com", "whatsapp.net",
+    "cdninstagram.com",  # PHASE 9.0.1 FIX: same live audit as above (5 confirmations)
     
     # Google & Android Ecosystem
     "google.com", "googleapis.com", "gstatic.com", "googlevideo.com",
     "googleusercontent.com", "googlesyndication.com", "google-analytics.com",
     "gvt1.com", "gvt2.com", "gvt3.com", "android.com", "ggpht.com",
     "doubleclick.net", "youtube.com", "ytimg.com", "1e100.net", "fastly-edge.com",
+    # PHASE 9.0.1 FIX: same live audit -- antigravity-unleash.goog is a .goog TLD
+    # (Google-exclusive, registry-restricted to Google itself) with 127 confirmations;
+    # run.app is Google Cloud Run's own domain.
+    "antigravity-unleash.goog", "run.app",
     
     # Apple & iOS/macOS Ecosystem
     "apple.com", "icloud.com", "icloud-content.com", "cdn-apple.com",
@@ -209,6 +223,11 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "msn.com", "office365.com", "msftncsi.com", "skype.com", "sentry.io",
     "brave.com", "wordnik.com", "napps-2.com", "bitdefender.net", "bitdefender.com",
     "trafficmanager.net", "azureedge.net", "msecnd.net", "windowsupdate.com",
+    # PHASE 9.0.1 FIX: same live audit -- sharepoint.com/microsoftonline.com/
+    # vscode-cdn.net (Microsoft's own dev-tooling CDN) and malwarebytes.com (an
+    # antivirus VENDOR being flagged as "confirmed malicious" is the clearest possible
+    # symptom of the non-causal-attribution bug fixed in fp_engine.py).
+    "sharepoint.com", "microsoftonline.com", "vscode-cdn.net", "malwarebytes.com",
     
     # Smart Home, Synology, IoT & Streaming Platforms
     "quickconnect.to", "synology.me", "synology.com", "samsungcloud.com",
@@ -217,7 +236,31 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "nflxext.com", "netflix.net", "spotify.com", "scdn.co", "spotifycdn.com", "plex.tv",
     "sonos.com", "tplinkcloud.com", "tuya.com", "tuyacn.com", "myq-cloud.com",
     "pluto.tv",  # PHASE 8 FIX: service-media-catalog.clusters.pluto.tv false positives
-    
+    # PHASE 9.0.1 FIX: same live audit -- nflximg.com (Netflix's own image CDN, 145
+    # confirmations -- the single largest poisoned entry found), dreame.tech (a real
+    # smart-vacuum vendor, 245 confirmations -- the largest of all), samsungqbe.com
+    # (Samsung's QBE cloud service), avm.de (this router's OWN manufacturer's domain).
+    "nflximg.com", "dreame.tech", "samsungqbe.com", "avm.de",
+
+    # Alibaba Ecosystem -- PHASE 9.0.1 FIX: same live audit (alibaba.com=12,
+    # aliyuncs.com=6, alicdn.com=2 confirmations); ucweb.com/taobao.com were already
+    # curated safe in release_wrongly_blocked_domains.py's SAFE_REVIEWED list this
+    # same session but never made it into this shared, canonical allowlist until now.
+    "alibaba.com", "aliyuncs.com", "alicdn.com", "ucweb.com", "taobao.com",
+
+    # Media, Education & Misc Vendors -- PHASE 9.0.1 FIX: same live audit.
+    "zdf.de", "khanacademykids.org", "epson.biz",
+    "claudeusercontent.com",  # Anthropic/Claude's own content domain
+    # NOTE: coinbase.com is deliberately NOT added here, despite also being poisoned in
+    # local_confirmed_intel.json (16 confirmations) -- threat_signals.py's
+    # _VENDOR_CLOUD_API_DOMAINS already covers it on purpose, kept OUT of this broader
+    # telemetry allowlist so an exfiltration burst against it is DAMPENED (0.35
+    # confidence) rather than fully excluded (see that list's own comment: "a broad
+    # match here would create a real blind spot"). Adding it here would silently defeat
+    # that existing, deliberate design boundary. Its confirmed-intel entry ages out via
+    # normal TTL instead -- the root-cause fix in fp_engine.py's
+    # _is_domain_causal_hard_stop() already stops it from being re-poisoned.
+
     # Global CDNs & Security Ingestion
     "cloudflare.com", "cloudflare.net", "cloudflare-dns.com", "fastly.net", "fastlylb.net", "fastly-edge.com",
     "akamaized.net", "akamai.net", "akamaihd.net", "akamaiedge.net",

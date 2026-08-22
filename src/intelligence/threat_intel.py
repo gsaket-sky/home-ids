@@ -27,6 +27,8 @@ from typing import Optional, Dict, Set
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
+from utils import etld1
+
 LOGGER = logging.getLogger("home_ids.ti")
 
 _FEEDS = {
@@ -313,11 +315,30 @@ class ThreatIntel:
     def get_tranco_rank(self, domain: str) -> int:
         """Returns this domain's Tranco Top-1M rank (1 = most popular), or 0 if the
         domain isn't ranked at all -- matches fp_engine.py's/train_fp_classifier.py's
-        existing `tranco_rank > 0` convention for "unranked."""
+        existing `tranco_rank > 0` convention for "unranked."
+
+        BUGFIX: Tranco's list ranks registrable (eTLD+1) domains only -- e.g. "netflix.com",
+        never "customerevents.netflix.com". A real DNS query is almost always for a specific
+        subdomain, not the bare registrable domain, so an exact-match-only lookup here made
+        this feature evaluate to 0 for effectively all real traffic -- confirmed live: 92/92
+        alerts in the first production window after this feature shipped, including
+        subdomains of Netflix/Amazon/Microsoft, all scored tranco_rank=0. Falls back to the
+        eTLD+1 base domain (utils.etld1(), the same shared helper fp_engine.py/local_intel.py
+        already use) when the exact FQDN isn't ranked -- deliberately NOT applied to
+        is_allowlisted()'s Tranco check above, which is a security-relevant trust decision
+        where subdomain-of-a-trusted-base-domain is a real bypass risk; this is a continuous
+        ML feature, where being generous about the match costs nothing."""
         if not domain:
             return 0
+        domain = domain.lower().strip(".")
         with self._lock:
-            return self._tranco_ranks.get(domain.lower().strip("."), 0)
+            rank = self._tranco_ranks.get(domain, 0)
+            if rank:
+                return rank
+            base = etld1(domain)
+            if base and base != domain:
+                return self._tranco_ranks.get(base, 0)
+            return 0
 
     def _refresh_all(self) -> None:
         LOGGER.info("Initiating intelligence feed update cycle...")

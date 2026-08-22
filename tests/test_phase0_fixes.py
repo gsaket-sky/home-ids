@@ -193,6 +193,25 @@ with tempfile.TemporaryDirectory() as tmpdir2:
     check("get_tranco_rank() returns 0 for empty/None input",
           ti.get_tranco_rank("") == 0)
 
+    # BUGFIX (found live, first production window after this feature shipped): Tranco
+    # only ranks registrable (eTLD+1) domains -- "netflix.com", never
+    # "customerevents.netflix.com" -- but real DNS queries are almost always for a
+    # specific subdomain. An exact-match-only lookup made this feature evaluate to 0 for
+    # effectively all real traffic: 92/92 post-deploy alerts, including subdomains of
+    # Netflix/Amazon/Microsoft, all scored tranco_rank=0. Confirmed against the actual
+    # live production tranco_ranks.cache (netflix.com=40, amazon.com=26,
+    # microsoft.com=5, amazonalexa.com=417).
+    check("get_tranco_rank() falls back to the eTLD+1 base domain for a real subdomain",
+          ti.get_tranco_rank("customerevents.example.com") == 54321)
+    check("...specifically: a deeply-nested subdomain still resolves via the base domain",
+          ti.get_tranco_rank("api.eu.sub.example.com") == 54321)
+    check("...and an exact FQDN match (rare, but possible) is still preferred over the "
+          "base-domain fallback when both exist",
+          ti.get_tranco_rank("google.com") == 1)
+    check("REGRESSION GUARD: a subdomain of a genuinely UNRANKED base domain still "
+          "returns 0, not a false rank",
+          ti.get_tranco_rank("www.totally-unranked-domain.example") == 0)
+
 # REGRESSION GUARD (source check): pipeline.py must actually populate
 # features["tranco_rank"] from the real engine -- guards against this wiring being
 # silently reverted or the key never reaching the features dict fp_engine.py reads.

@@ -360,9 +360,13 @@ class AutonomousFPEngine:
                 fp_engine_confirmed_threats_total.inc()
                 fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
                 self._apply_sigma_shift(device_id, hostname, direction="TUNE_UP")
-                self.record_confirmed_threat(device_id, base_domain, dest_ip,
-                                              reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
-                                              signature=alert_payload.get("signature", ""))
+                self.record_confirmed_threat(
+                    device_id,
+                    base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
+                    dest_ip,
+                    reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
+                    signature=alert_payload.get("signature", ""),
+                )
                 LOGGER.warning(
                     "🚨 [FP ENGINE » Trust Cache OVERRIDDEN] %s: '%s' is immunized BUT hard-stop "
                     "signal(s) fired: %s → CONFIRMED THREAT despite trust cache hit.",
@@ -418,9 +422,17 @@ class AutonomousFPEngine:
             # from scratch. base_domain (not raw `domain`) so a subdomain variance
             # doesn't prevent the match, same key shape the trust cache already uses.
             # (base_domain was already computed once at the top of evaluate() and is
-            # still in scope here -- Python has no block scoping.)
-            self.record_confirmed_threat(device_id, base_domain, dest_ip, reason="STAGE_1_HARD_STOP",
-                                          signature=alert_payload.get("signature", ""))
+            # still in scope here -- Python has no block scoping.) See
+            # _is_domain_causal_hard_stop()'s docstring: only Check 1 (ThreatIntel IOC)
+            # has a plausible causal link to `domain` at all -- everything else records
+            # dest_ip only, never base_domain.
+            self.record_confirmed_threat(
+                device_id,
+                base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
+                dest_ip,
+                reason="STAGE_1_HARD_STOP",
+                signature=alert_payload.get("signature", ""),
+            )
 
             LOGGER.warning(
                 "🚨 [FP ENGINE » Stage 1] CONFIRMED THREAT for %s │ Triggers: %s │ Sensitivity tuned UP",
@@ -916,6 +928,38 @@ class AutonomousFPEngine:
             local_confirmed_intel_hits_total.inc()
 
         return triggers if triggers else None
+
+    @staticmethod
+    def _is_domain_causal_hard_stop(triggers: Optional[list]) -> bool:
+        """BUGFIX: found via a live state-folder audit -- record_confirmed_threat()'s two
+        call sites were passing `base_domain` unconditionally whenever ANY Stage-1 check
+        fired, but only Check 1 (ThreatIntel IOC) has any plausible causal link to the
+        alert's `queried_domain` at all. Checks 2-6 (lateral movement, malicious JA3/JA4
+        TLS fingerprint, honeypot access, AbuseIPDB IP reputation, exfiltration-burst
+        z-score) are all either pure behavioral signals or explicitly IP-based -- the
+        `domain` field they're evaluated alongside is just whatever this device's alert
+        happened to carry as `network_context.queried_domain` that cycle (for every
+        signature except DNS_COVERT_TUNNELING/DGA_BOTNET_C2/DNS_EVASION, this is
+        `_select_target_domain()`'s generic "most notable domain in the window" pick --
+        the exact same structural gap CLAUDE.md's pre-flight checklist item #1 already
+        documents for the alert-display path, found here too in the confirmed-intel
+        write path). Confirmed live in production: sharepoint.com (5 confirmations),
+        coinbase.com (16), alibaba.com (12), aws.dev (44), nflximg.com (145),
+        vscode-cdn.net (16), claudeusercontent.com (15), epson.biz (1) -- all
+        ordinary, high-traffic vendor domains these devices legitimately use, none
+        remotely plausible as a Stage-1 IOC/lateral-movement/JA4/honeypot/AbuseIPDB/
+        exfiltration trigger in their own right, all poisoned as "confirmed malicious"
+        purely because SOME OTHER unrelated hard-stop fired on that device while this
+        domain happened to also be in its recent query window. is_telemetry_domain()
+        (the existing floor) only protects domains someone already thought to add to
+        that curated list -- this fix addresses the root cause instead, so a NEW
+        unlisted domain can no longer be poisoned this way at all. dest_ip is NOT
+        restricted the same way: it IS causally the right target for Checks 2-6 (lateral
+        movement's scan target, the TLS connection's endpoint, the honeypot's own IP,
+        AbuseIPDB's flagged IP, the exfiltration destination)."""
+        if not triggers:
+            return False
+        return any(t.startswith("ThreatIntel IOC match") for t in triggers)
 
     # ==========================================================================
     # STAGE 2: LightGBM ONNX Tabular Classifier

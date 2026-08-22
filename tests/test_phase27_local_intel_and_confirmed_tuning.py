@@ -230,6 +230,74 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section B2: THE ROOT-CAUSE FIX -- evaluate()/_stage1_hard_stop() must not record a
+# domain into local_intel unless the hard-stop that actually fired was domain-causal.
+# BUGFIX (found via a live production state-folder audit, same day as the write-side
+# fix above): record_confirmed_threat()'s two callers were passing base_domain
+# unconditionally whenever ANY Stage-1 check fired -- but only Check 1 (ThreatIntel
+# IOC) has a plausible causal link to `domain` at all. Checks 2-6 (lateral movement,
+# malicious JA3/JA4, honeypot, AbuseIPDB, exfiltration burst) are pure behavioral/IP
+# signals; the `domain` they're evaluated alongside is just whatever this device's
+# alert happened to carry as queried_domain that cycle. Confirmed live: sharepoint.com,
+# coinbase.com, alibaba.com, aws.dev, nflximg.com, vscode-cdn.net, claudeusercontent.com,
+# epson.biz -- all ordinary high-traffic vendor domains, NONE on the is_telemetry_domain()
+# floor from the fix above, ALL poisoned this exact way. This is the write-side's
+# COMPLEMENT: is_telemetry_domain() only protects domains someone already curated;
+# this fix stops the wrong domain from ever being fed in in the first place.
+# ═══════════════════════════════════════════════════════════════════════════════════
+with tempfile.TemporaryDirectory() as tmpdir_b2:
+    fp_b2 = AutonomousFPEngine(config={}, state_dir=tmpdir_b2)
+
+    def _make_alert(domain, features):
+        return {
+            "device": {"id": "dev_bystander", "hostname": "some-device"},
+            "network_context": {"queried_domain": domain, "destination_ip": "5.5.5.5"},
+            "signature": "CONNECTION_ABUSE",
+        }
+
+    # Check 2 (lateral movement) fires; `domain` is an innocent bystander (the generic
+    # target-domain fallback's pick, structurally unrelated to the lateral-movement
+    # evidence) -- must NOT be recorded, even though the alert IS a genuine confirmed
+    # threat (dest_ip DOES get recorded).
+    lateral_alert = _make_alert("sharepoint.com", {})
+    verdict_b2 = fp_b2.evaluate(lateral_alert, {"zeek_lateral_moves": 5}, risk_score=9.0, ti_engine=None)
+    check("Check 2 (lateral movement) alone reaches CONFIRMED_THREAT as before",
+          verdict_b2["verdict"] == "CONFIRMED_THREAT", f"got={verdict_b2}")
+    check("THE FIX: a lateral-movement-only hard-stop does NOT poison the bystander "
+          "domain in local_intel",
+          fp_b2.local_intel.check("domain", "sharepoint.com") is None)
+    check("...but DOES still record the dest_ip -- lateral movement's target IS "
+          "causally the right thing to remember",
+          fp_b2.local_intel.check("ip", "5.5.5.5") is not None)
+
+    # Check 5 (AbuseIPDB) fires; different innocent bystander domain.
+    abuse_alert = _make_alert("coinbase.com", {})
+    fp_b2.evaluate(abuse_alert, {"abuseipdb_risk": 8.0}, risk_score=9.0, ti_engine=None)
+    check("an AbuseIPDB-only hard-stop does NOT poison its bystander domain either",
+          fp_b2.local_intel.check("domain", "coinbase.com") is None)
+
+    # REGRESSION GUARD: Check 1 (ThreatIntel IOC) is the one case where `domain` DOES
+    # have a real causal link -- a genuine domain-blacklist hit must still poison the
+    # domain as before, or the fix would have thrown out real detection value too.
+    ti_alert = _make_alert("actually-malicious-c2.example", {})
+    fp_b2.evaluate(ti_alert, {"ti_risk": 3.5}, risk_score=9.0, ti_engine=None)
+    check("REGRESSION GUARD: a genuine ThreatIntel IOC hit still records its domain "
+          "as confirmed-malicious -- the fix is scoped to non-domain-causal checks only",
+          fp_b2.local_intel.check("domain", "actually-malicious-c2.example") is not None)
+
+    # REGRESSION GUARD: the trust-cache-override path (a SECOND call site with the
+    # identical bug) gets the same fix.
+    fp_b2_cached = AutonomousFPEngine(config={}, state_dir=tmpdir_b2 + "_2")
+    with fp_b2_cached._lock:
+        fp_b2_cached._trust_cache["nflximg.com"] = time.time()
+    cached_alert = _make_alert("nflximg.com", {})
+    fp_b2_cached.evaluate(cached_alert, {"zeek_lateral_moves": 3}, risk_score=9.0, ti_engine=None)
+    check("REGRESSION GUARD: the trust-cache-override path (a trusted domain overridden "
+          "by a fresh non-domain-causal hard-stop) also does not re-poison the domain",
+          fp_b2_cached.local_intel.check("domain", "nflximg.com") is None)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: retro_hunter.py -- check_local_intel_history()
 # ═══════════════════════════════════════════════════════════════════════════════════
 from scripts.retro_hunter import check_local_intel_history

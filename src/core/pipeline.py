@@ -1195,8 +1195,22 @@ class EnginePipeline:
                             # own comment above. Feeding the local confirmed-intel store (which a
                             # DIFFERENT device's future connection can hard-stop against) the
                             # wrong domain would teach the network to remember the wrong thing.
+                            # FURTHER BUGFIX (found via a live state-folder audit): alert_target_domain
+                            # is only ever evidence-linked for the two signatures explicitly handled
+                            # above (DNS_COVERT_TUNNELING/DGA_BOTNET_C2) -- for every other signature
+                            # reaching HIGH/CRITICAL (e.g. CONNECTION_ABUSE via arp_sweep + a second
+                            # corroborating source, with no domain involved in the actual evidence at
+                            # all), alert_target_domain still equals target_malicious_domain, the
+                            # generic "most notable domain in the window" fallback -- confirmed live:
+                            # sharepoint.com/coinbase.com/alibaba.com/aws.dev/nflximg.com/
+                            # vscode-cdn.net/claudeusercontent.com/epson.biz all got poisoned as
+                            # "confirmed malicious" this exact way. Only pass a domain here when it
+                            # was actually overridden by real evidence above, never the raw fallback.
+                            domain_is_evidence_linked = alert_target_domain != target_malicious_domain
                             self.fp_engine.record_confirmed_threat(
-                                dev_id, etld1(alert_target_domain), dest_ip, reason="HIGH_CRITICAL_DECISION",
+                                dev_id,
+                                etld1(alert_target_domain) if domain_is_evidence_linked else None,
+                                dest_ip, reason="HIGH_CRITICAL_DECISION",
                                 signature=primary_sig,
                             )
 
