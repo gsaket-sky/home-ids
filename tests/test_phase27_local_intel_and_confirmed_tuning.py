@@ -95,6 +95,57 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("a DIFFERENT device's confirmed count is completely unaffected",
           fp.get_confirmed_count("dev_B") == 0)
 
+    # BUGFIX regression guard (found via a production alerts.json audit): amazon.com
+    # (188 confirmations), amazonalexa.com (139), netflix.com (97), and microsoft.com
+    # (14) had all been recorded here as "confirmed malicious" in production,
+    # cascading into hundreds of Stage-1 hard-stops/day against every device that
+    # legitimately uses these services -- this store matches on the ETLD+1 BASE
+    # DOMAIN, far too coarse for huge shared vendor domains, where one
+    # wrongly-attributed confirmation poisons every future connection to ANY
+    # subdomain, for EVERY device on the network.
+    fp.record_confirmed_threat("dev_A", "amazon.com", "8.8.8.8", reason="STAGE_1_HARD_STOP")
+    check("THE CORE FIX (write side): record_confirmed_threat() refuses to record a "
+          "known-safe base domain (amazon.com) as confirmed-malicious",
+          fp.local_intel.check("domain", "amazon.com") is None)
+    check("the confirmed-count still increments even when the domain write was refused "
+          "(this device's alert WAS still a real confirmed threat -- only the overly-"
+          "broad domain record was refused, e.g. it may have hard-stopped on the IP "
+          "or another signal)",
+          fp.get_confirmed_count("dev_A") == 2)
+
+    # READ-SIDE guard: even an ALREADY-poisoned entry (simulating what production found
+    # sitting in local_confirmed_intel.json before this fix, from before it existed)
+    # must stop being honored -- bypass the now-fixed write guard directly to prove the
+    # read-side check works independently, since the real poisoned entries won't
+    # disappear from disk until their TTL expires.
+    fp.local_intel.record("domain", "netflix.com", "some_other_device", reason="STAGE_1_HARD_STOP")
+    check("the simulated pre-existing poisoned entry is really there before the read-side check",
+          fp.local_intel.check("domain", "netflix.com") is not None)
+    poisoned_alert = {
+        "device": {"id": "dev_D", "hostname": "some-smart-tv"},
+        "network_context": {"queried_domain": "nrdp.logs.netflix.com", "destination_ip": "2.2.2.2"},
+        "signature": "",
+        "timestamp": time.time(),
+    }
+    poisoned_alert_safe_features = {
+        "ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
+        "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
+        "outbound_bytes_z": 0.0,
+    }
+    poisoned_verdict = fp.evaluate(poisoned_alert, poisoned_alert_safe_features, risk_score=4.0, ti_engine=None)
+    check("THE CORE FIX (read side): an ALREADY-poisoned known-safe base domain "
+          "(netflix.com, simulating what production actually found on disk) is no "
+          "longer honored as a Stage-1 hard-stop match, even though it's still "
+          "physically present in the store",
+          poisoned_verdict["stage"] != "STAGE_1_HARD_STOP", f"got={poisoned_verdict}")
+
+    # REGRESSION GUARD: an unrelated, genuinely malicious domain is completely unaffected.
+    fp.record_confirmed_threat("dev_E", "still-malicious.example", "9.9.9.9", reason="STAGE_1_HARD_STOP")
+    check("REGRESSION GUARD: a genuinely unrelated (non-safe-listed) domain is still "
+          "recorded and still hard-stops normally -- the fix is scoped to known-safe "
+          "domains only",
+          fp.local_intel.check("domain", "still-malicious.example") is not None)
+
     # THE CORE FIX: a DIFFERENT device connecting to the same confirmed IOC gets an
     # immediate hard-stop via evaluate(), without needing its own hard-stop signal.
     later_alert = {

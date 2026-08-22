@@ -685,6 +685,35 @@ class AutonomousFPEngine:
         corrected count. Never raises -- a bookkeeping failure must not take down the
         confirmed-threat verdict itself."""
         try:
+            # BUGFIX: found via a production alerts.json audit -- amazon.com (188
+            # confirmations), amazonalexa.com (139), netflix.com (97), and
+            # microsoft.com (14) had all been recorded here as "confirmed malicious,"
+            # cascading into hundreds of Stage-1 hard-stops per day against every
+            # device that legitimately uses these services (nearly every IoT/smart-
+            # home device in the house), each of which then RE-CONFIRMED the same
+            # poisoned entry via this same code path -- a self-reinforcing feedback
+            # loop. Root seed was almost certainly the target-domain-attribution bug
+            # fixed earlier this session (a device's ACTUAL malicious domain got
+            # base-domained down correctly, but a DIFFERENT alert's flawed "most
+            # frequent domain in window" fallback happened to be an Amazon/Netflix/
+            # Microsoft subdomain that same device also legitimately visited). This
+            # store matches at the ETLD+1 BASE DOMAIN (see Check 7's comment in
+            # _stage1_hard_stop) -- far too coarse for huge, shared, multi-tenant
+            # vendor domains, where one wrongly-attributed confirmation poisons every
+            # future connection to ANY subdomain, for EVERY device on the network.
+            # is_telemetry_domain() is the same battle-tested safe-domain check
+            # already used throughout this codebase (CDN/vendor/telemetry allowlist)
+            # -- a domain on it should never be recordable as confirmed-malicious at
+            # the base-domain granularity, regardless of which alert tried to.
+            from utils import is_telemetry_domain
+            if base_domain and is_telemetry_domain(base_domain):
+                LOGGER.warning(
+                    "[LOCAL INTEL] Refusing to record known-safe base domain '%s' as "
+                    "confirmed malicious (device=%s, reason=%s) -- too broad/shared a "
+                    "domain to ever hard-stop on at this granularity.",
+                    base_domain, device_id, reason,
+                )
+                base_domain = None
             if base_domain:
                 self.local_intel.record("domain", base_domain, device_id, reason=reason)
             if dest_ip and dest_ip != "unknown":
@@ -816,7 +845,20 @@ class AutonomousFPEngine:
         # infrastructure, the more it confirms. TTL-bounded (see local_intel.py), so
         # months-stale infrastructure ages out rather than hard-stopping forever.
         base_domain = self._extract_base_domain(domain)
-        local_domain_hit = self.local_intel.check("domain", base_domain) if base_domain else None
+        # BUGFIX: read-side twin of the guard in record_confirmed_threat() -- this
+        # check matches on the ETLD+1 BASE DOMAIN, which is far too coarse for huge,
+        # shared, multi-tenant vendor domains. record_confirmed_threat() now refuses
+        # to WRITE a known-safe base domain going forward, but that alone leaves any
+        # ALREADY-poisoned entry (e.g. amazon.com, netflix.com, microsoft.com, all
+        # found actually poisoned in production, cascading into hundreds of false
+        # hard-stops/day) still sitting in local_intel's persisted store, still
+        # matching, until its TTL expires (config: local_confirmed_intel_ttl_seconds,
+        # can be weeks). Checking is_telemetry_domain() here too means an existing
+        # poisoned entry stops being HONORED immediately on restart, without needing
+        # to hand-edit the state file.
+        from utils import is_telemetry_domain
+        domain_hit_eligible = bool(base_domain) and not is_telemetry_domain(base_domain)
+        local_domain_hit = self.local_intel.check("domain", base_domain) if domain_hit_eligible else None
         local_ip_hit = self.local_intel.check("ip", dest_ip) if dest_ip else None
         if local_domain_hit or local_ip_hit:
             hit_target = base_domain if local_domain_hit else dest_ip
