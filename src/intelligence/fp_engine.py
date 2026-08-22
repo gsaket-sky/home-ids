@@ -669,6 +669,37 @@ class AutonomousFPEngine:
     # PHASE 21D3: local confirmed-threat store feed + confirmed-count tracking
     # ==========================================================================
 
+    def _is_ip_protected_from_confirmed_intel(self, ip: str) -> bool:
+        """BUGFIX: found via a live production check while verifying the domain-side fix
+        above -- the SAME poisoning pattern exists on the IP side of this store, and it's
+        WORSE: 192.168.1.94 (this network's own IDS server -- already listed in
+        config.yaml's safe_ips, "NEVER treated as suspicious... even if flagged
+        elsewhere") had 822 confirmations; 192.168.1.1 (the router) had 121; IPv6/IPv4
+        MULTICAST addresses (ff02::fb, 224.0.0.22, 224.0.0.251 -- not even real hosts,
+        just mDNS/IGMP group addresses every device on the LAN legitimately sends to) had
+        hundreds each. Proves safe_ips was never actually being consulted by this store at
+        all, despite its own docstring's promise. Since gateway/multicast traffic is
+        constant and universal across every device, this was very likely the single
+        largest driver of Stage-1 hard-stop false positives found this session.
+
+        True if `ip` should NEVER be recordable/matchable via the local confirmed-intel
+        store: private/multicast/loopback/link-local/reserved (stdlib ipaddress -- these
+        structurally cannot be "malicious external infrastructure," which is the entire
+        premise of this store), OR explicitly listed in config.yaml's safe_ips (the
+        user's own "never suspicious" list, which this store should have always honored)."""
+        if not ip or ip == "unknown":
+            return False
+        safe_ips = self.config.get("safe_ips", []) if self.config else []
+        if ip in safe_ips:
+            return True
+        try:
+            import ipaddress
+            addr = ipaddress.ip_address(ip)
+            return bool(addr.is_private or addr.is_multicast or addr.is_loopback
+                        or addr.is_link_local or addr.is_reserved or addr.is_unspecified)
+        except ValueError:
+            return False
+
     def record_confirmed_threat(self, device_id: str, base_domain: str, dest_ip: str, reason: str,
                                  signature: str = "") -> None:
         """Public: the ONE call BOTH confirmation paths use -- fp_engine's own Stage-1
@@ -716,6 +747,13 @@ class AutonomousFPEngine:
                 base_domain = None
             if base_domain:
                 self.local_intel.record("domain", base_domain, device_id, reason=reason)
+            if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip):
+                LOGGER.warning(
+                    "[LOCAL INTEL] Refusing to record known-safe/private/multicast IP '%s' "
+                    "as confirmed malicious (device=%s, reason=%s).",
+                    dest_ip, device_id, reason,
+                )
+                dest_ip = "unknown"
             if dest_ip and dest_ip != "unknown":
                 self.local_intel.record("ip", dest_ip, device_id, reason=reason)
             # PHASE 21-METRICS: this subsystem had zero Prometheus visibility before --
@@ -859,7 +897,13 @@ class AutonomousFPEngine:
         from utils import is_telemetry_domain
         domain_hit_eligible = bool(base_domain) and not is_telemetry_domain(base_domain)
         local_domain_hit = self.local_intel.check("domain", base_domain) if domain_hit_eligible else None
-        local_ip_hit = self.local_intel.check("ip", dest_ip) if dest_ip else None
+        # BUGFIX: read-side twin for the IP path, same reasoning as the domain guard
+        # above -- see _is_ip_protected_from_confirmed_intel()'s own docstring for the
+        # production numbers (this network's own server at 822 false confirmations,
+        # multicast addresses in the hundreds). Neutralizes already-poisoned IP entries
+        # immediately on restart, without needing to hand-edit the state file.
+        ip_hit_eligible = bool(dest_ip) and not self._is_ip_protected_from_confirmed_intel(dest_ip)
+        local_ip_hit = self.local_intel.check("ip", dest_ip) if ip_hit_eligible else None
         if local_domain_hit or local_ip_hit:
             hit_target = base_domain if local_domain_hit else dest_ip
             hit_entry = local_domain_hit or local_ip_hit

@@ -146,6 +146,58 @@ with tempfile.TemporaryDirectory() as tmpdir:
           "domains only",
           fp.local_intel.check("domain", "still-malicious.example") is not None)
 
+    # BUGFIX regression guard (found via a LIVE production check, 13 minutes after
+    # restarting with the domain-side fix above): the SAME poisoning pattern exists on
+    # the IP side of this store, and it's WORSE -- 192.168.1.94 (this network's own
+    # IDS server, already listed in config.yaml's safe_ips) had 822 false confirmations;
+    # 192.168.1.1 (the router) had 121; multicast addresses (ff02::fb, 224.0.0.22,
+    # 224.0.0.251 -- not real hosts) had hundreds each. Proved safe_ips was never
+    # actually consulted by this store despite its own config.yaml docstring's promise.
+    fp.record_confirmed_threat("dev_F", "", "192.168.1.94", reason="HIGH_CRITICAL_DECISION")
+    check("THE CORE FIX (write side, IP): record_confirmed_threat() refuses to record a "
+          "private LAN IP (192.168.1.94, this network's own server) as confirmed-malicious",
+          fp.local_intel.check("ip", "192.168.1.94") is None)
+    fp.record_confirmed_threat("dev_G", "", "224.0.0.251", reason="STAGE_1_HARD_STOP")
+    check("a multicast address (224.0.0.251, mDNS -- not even a real host) is refused too",
+          fp.local_intel.check("ip", "224.0.0.251") is None)
+    fp.record_confirmed_threat("dev_H", "", "ff02::fb", reason="STAGE_1_HARD_STOP")
+    check("an IPv6 multicast address (ff02::fb, mDNS) is refused too",
+          fp.local_intel.check("ip", "ff02::fb") is None)
+
+    # Read-side guard: an ALREADY-poisoned private IP (simulating what production found
+    # on disk before this fix existed) must stop being honored, same as the domain case.
+    fp.local_intel.record("ip", "192.168.1.1", "some_other_device", reason="STAGE_1_HARD_STOP")
+    check("the simulated pre-existing poisoned IP entry is really there before the read-side check",
+          fp.local_intel.check("ip", "192.168.1.1") is not None)
+    poisoned_ip_alert = {
+        "device": {"id": "dev_I", "hostname": "some-iot-device"},
+        "network_context": {"queried_domain": "unknown", "destination_ip": "192.168.1.1"},
+        "signature": "", "timestamp": time.time(),
+    }
+    poisoned_ip_verdict = fp.evaluate(poisoned_ip_alert, poisoned_alert_safe_features, risk_score=4.0, ti_engine=None)
+    check("THE CORE FIX (read side, IP): an ALREADY-poisoned private IP (192.168.1.1, "
+          "the router) is no longer honored as a Stage-1 hard-stop match",
+          poisoned_ip_verdict["stage"] != "STAGE_1_HARD_STOP", f"got={poisoned_ip_verdict}")
+
+    # Explicit safe_ips config path (not just automatically-private addresses) -- a
+    # PUBLIC IP the operator explicitly listed in config.yaml's safe_ips must also be
+    # protected, matching safe_ips' own documented promise ("NEVER treated as suspicious
+    # ... even if flagged elsewhere").
+    with tempfile.TemporaryDirectory() as tmpdir2:
+        fp_with_config = AutonomousFPEngine(config={"safe_ips": ["203.0.113.50"]}, state_dir=tmpdir2)
+        fp_with_config.record_confirmed_threat("dev_J", "", "203.0.113.50", reason="STAGE_1_HARD_STOP")
+        check("an explicitly-configured safe_ips entry (a PUBLIC IP, not automatically "
+              "private) is also refused -- safe_ips' own documented promise, honored for "
+              "the first time by this store",
+              fp_with_config.local_intel.check("ip", "203.0.113.50") is None)
+
+    # REGRESSION GUARD: a genuinely unrelated public IP is completely unaffected.
+    fp.record_confirmed_threat("dev_K", "", "8.8.4.4", reason="STAGE_1_HARD_STOP")
+    check("REGRESSION GUARD: a genuinely unrelated public IP is still recorded and "
+          "still hard-stops normally -- the fix is scoped to private/multicast/"
+          "safe-listed IPs only",
+          fp.local_intel.check("ip", "8.8.4.4") is not None)
+
     # THE CORE FIX: a DIFFERENT device connecting to the same confirmed IOC gets an
     # immediate hard-stop via evaluate(), without needing its own hard-stop signal.
     later_alert = {
