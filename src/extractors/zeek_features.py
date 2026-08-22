@@ -22,7 +22,7 @@ import time
 import concurrent.futures
 from collections import defaultdict, deque
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Dict
 
 LOGGER = logging.getLogger("home_ids.zeek")
 ZEEK_LOG_DIR = Path("/opt/zeek/logs/current")
@@ -270,6 +270,10 @@ class ZeekFeatureExtractor:
         self._dns_evasion_ratio = {}   # ip -> most recent unexplained-connection ratio [0.0, 1.0]
         self._wire_dns_resolutions = {}
         self._mac_bindings = {}
+        # BUGFIX (production false-positive): ip -> {mac: last_seen_ts}. A rolling record
+        # of every MAC actually seen for an IP, not just the single most recent one --
+        # see _bind_mac()'s spoof-detection comment for why this exists.
+        self._mac_history: Dict[str, Dict[str, float]] = {}
         # PHASE 4 (MAC-rotation resilience): DHCP Option 55/60/77 fingerprint of the most
         # recent DHCP transaction per IP/MAC, and a rolling per-device set of *all* JA4
         # hashes seen (not just malicious ones) used as a benign behavioral fingerprint.
@@ -430,6 +434,18 @@ class ZeekFeatureExtractor:
             entry = self._reverse_dns_cache[ip]
             if isinstance(entry, dict) and entry.get("ts", 0) < ttl_cutoff:
                 del self._reverse_dns_cache[ip]
+
+        # BUGFIX: same 24h TTL for _mac_history (the known-oscillation dedup memory --
+        # see _bind_mac()) -- a MAC not seen for a given IP in 24h is dropped from that
+        # IP's "known" set, so a real re-hijack long after a mesh device's last known
+        # rotation still gets treated as genuinely new.
+        for ip in list(self._mac_history.keys()):
+            macs = self._mac_history[ip]
+            for mac in list(macs.keys()):
+                if macs[mac] < ttl_cutoff:
+                    del macs[mac]
+            if not macs:
+                del self._mac_history[ip]
                 
         if len(self._wire_dns_resolutions) > 20000:
             self._wire_dns_resolutions.clear()
@@ -452,16 +468,33 @@ class ZeekFeatureExtractor:
         # Feature 4: Layer-2 Spoofing Detection (ARP/NDP Telemetry)
         if existing_mac and existing_mac != mac:
             last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
-            # If MAC flipped within 10 minutes, it's highly suspicious (not a normal DHCP
-            # renewal or IPv6 privacy-address rotation, which don't change the underlying MAC).
-            if (ts - last_seen) < 600:
+            # BUGFIX (production false-positive, feeds a Stage-0 HARD-STOP that bypasses
+            # CL-AFPE entirely -- decision_engine.py's has_arp_spoof branch, single evidence
+            # item, zero corroboration required): a genuine ARP-spoofing attacker hijacks an
+            # IP and HOLDS it -- it would be self-defeating for them to keep handing control
+            # back to the real device and re-attacking every ~15-20s, since that's exactly
+            # when their own MITM window would close. What was actually observed in
+            # production is IP addresses oscillating between the SAME small set of MACs
+            # repeatedly over minutes to hours (mesh-WiFi repeater relay/rewrite behavior is
+            # the leading suspect -- conn.log's orig_l2_addr can differ from the DHCP-sourced
+            # MAC depending on which mesh hop last touched a given packet) -- a pattern a
+            # real attack fundamentally does not produce. Only treat this as a genuine spoof
+            # when the NEW mac has never been seen for this IP before; a MAC re-appearing
+            # that we've already recorded for this IP is a known oscillation, not a new
+            # hijacker, and does not reach the hard-stop evidence pipeline.
+            mac_is_known_for_ip = mac in self._mac_history.get(ip, {})
+            if (ts - last_seen) < 600 and not mac_is_known_for_ip:
                 LOGGER.critical(f"🚨 LAYER-2 ARP/NDP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s")
                 if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
                 self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
+            elif (ts - last_seen) < 600:
+                LOGGER.debug(f"IP {ip} MAC flip {existing_mac} -> {mac} is a known-oscillation "
+                             f"(mac previously seen for this ip) -- not treated as a new spoof.")
 
         self._mac_bindings[ip] = mac
         if not hasattr(self, "_mac_last_seen"): self._mac_last_seen = {}
         self._mac_last_seen[ip] = ts
+        self._mac_history.setdefault(ip, {})[mac] = ts
         self._enrich_ptr(ip)
 
     def ingest(self, event: dict) -> None:
