@@ -88,26 +88,53 @@ DEFAULT_MAX_QUERIES_PER_RUN = 5             # 5 x up to ~15min worst-case (900s 
 DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD = 3
 
 
+# VERSION 10 (incident aggregation): this grouping-key logic used to live only here,
+# duplicated nowhere else -- pipeline.py's own real-time Telegram-volume gate
+# (core/incident_tracker.py) needed the identical "same ongoing incident" concept, so
+# both now import the single shared definition from incident_key.py instead of drifting
+# independently. Kept as thin wrappers under their original names so nothing else in
+# this file needs to change.
+from incident_key import target_for_key as _target_for_key_raw, incident_key as _incident_key
+
+
 def _target_for_key(payload: dict) -> str:
-    """Best available identifier for 'what was this alert about' -- prefers the resolved
-    domain, falls back to the raw destination IP for connections with no DNS resolution
-    (e.g. the 149.154.166.110/Telegram case), matching the same fallback pipeline.py's
-    own alert-message target_display logic already uses."""
     nc = payload.get("network_context", {}) or {}
-    domain = nc.get("queried_domain", "") or ""
-    if domain and domain != "unknown":
-        return domain
-    dest_ip = nc.get("destination_ip", "") or ""
-    return dest_ip or "unknown"
+    return _target_for_key_raw(nc.get("destination_ip"), nc.get("queried_domain"))
 
 
 def _cache_key(payload: dict) -> str:
-    """Canonical 'same threat' identity: same device, same target, same signature. This is
-    deliberately coarser than a per-event key (e.g. it ignores the exact timestamp) --
-    the whole point is that repeat firings of the identical pattern collapse to one key."""
+    """Canonical 'same threat' identity: same device, same target, same signature
+    (persistence-escalation suffix stripped -- see incident_key.signature_base -- so an
+    incident that escalates mid-episode, e.g. "DNS_EVASION" -> "DNS_EVASION (persisted
+    603s)", still collapses to the same cache key instead of fragmenting into two)."""
     device_id = payload.get("device", {}).get("id", "unknown")
     signature = payload.get("signature", "unknown")
-    return f"{device_id}|{_target_for_key(payload)}|{signature}"
+    return _incident_key(device_id, payload.get("network_context", {}).get("destination_ip"),
+                          payload.get("network_context", {}).get("queried_domain"), signature)
+
+
+# VERSION 10 (#15/#16, Ollama circular-reasoning guard): every field below encodes a
+# PRIOR VERDICT this system already computed about the alert, not a raw observation --
+# confirmed via a third-party review of production ollama_transparency records that the
+# old prompt handed the model the whole raw alert_payload undiscriminated, including
+# "risk": 9.9 and "signature": "Confirmed Malicious IOC" sitting right next to genuinely
+# raw evidence. That let the model simply reflect the existing verdict back as
+# "confirmation" ("risk=9.9 therefore malicious") instead of independently reasoning
+# from device/network_context/features -- exactly the failure mode DeterministicValidator
+# (ai_soc.py) now also has a defense-in-depth check for.
+_VERDICT_SHAPED_FIELDS = frozenset({
+    "risk", "signature", "factors", "fp_verdict", "hypothesis_weight",
+    "evidence_verification_required", "reasoning_trail",
+})
+
+
+def _build_evidence_only_payload(representative: dict) -> dict:
+    """Strips every verdict-shaped field (see _VERDICT_SHAPED_FIELDS above) before the
+    alert reaches the LLM prompt. Everything left -- device, network_context, features,
+    timestamp, schema, incident_id -- is a genuine raw observation, INCLUDING features
+    like ti_risk/abuse_risk/vt_risk: those are input signals for the model to weigh
+    itself, not this system's own already-computed verdict, so they deliberately stay."""
+    return {k: v for k, v in representative.items() if k not in _VERDICT_SHAPED_FIELDS}
 
 
 def _load_cache(cache_path: Path, ttl_seconds: float) -> dict:
@@ -303,10 +330,20 @@ def main():
     deferred = 0
     run_validated = defaultdict(int)  # classification -> count this run, for the cumulative relay metric
 
+    # VERSION 10 (#15/#16): explicitly instructs independent reasoning from raw evidence
+    # only, matching what the payload itself now actually contains (see
+    # _build_evidence_only_payload) -- the model is never shown this system's own risk
+    # score, signature name, or prior verdict, so it must derive a classification from
+    # device/network_context/features itself rather than ratifying an existing one.
     system_prompt = (
         "You are an autonomous Tier 2 SOC Analyst for a Home Intrusion Detection System. "
-        "Analyze the provided JSON alert payload. "
-        "Your job is to analyze the evidence and determine if the activity is benign (e.g. telemetry, ads) or malicious. "
+        "You are given RAW EVIDENCE ONLY for one network alert -- device info, connection "
+        "details, and measured features (DNS query patterns, Zeek flow statistics, threat-"
+        "intelligence/reputation scores such as ti_risk/abuse_risk/vt_risk). You are "
+        "deliberately NOT told this system's own prior risk score, signature name, or "
+        "verdict -- you must independently determine whether the activity is benign (e.g. "
+        "telemetry, ads, routine device chatter) or malicious purely from the evidence "
+        "given, not by assuming any classification already exists. "
         "You must respond ONLY with a valid JSON object matching this schema: "
         "{\"classification\": \"benign|malicious\", \"confidence\": 0.0-1.0, \"reason\": \"<short executive summary>\", \"recommended_action\": \"suppress|block|none\"}"
     )
@@ -338,7 +375,11 @@ def main():
             report_lines.append("")
             continue
         else:
-            prompt_text = f"Alert Payload:\n{json.dumps(representative, indent=2)}"
+            # VERSION 10 (#15/#16): prompt built from the sanitized evidence-only view,
+            # not the raw representative dict -- see _build_evidence_only_payload's own
+            # comment for the incident this fixed.
+            evidence_only_payload = _build_evidence_only_payload(representative)
+            prompt_text = f"Alert Payload:\n{json.dumps(evidence_only_payload, indent=2)}"
             feats = representative.get("features", {}) or {}
             rep_value = max(
                 float(feats.get("ti_risk", 0.0) or 0.0),
@@ -364,7 +405,10 @@ def main():
             if response_json is None:
                 continue
 
-            is_valid = validator.validate(response_json, ev_store)
+            # VERSION 10 (#15/#16): original_risk lets the validator's defense-in-depth
+            # check catch a response that suspiciously cites the exact score it was
+            # never shown (see ai_soc.py's DeterministicValidator.validate()).
+            is_valid = validator.validate(response_json, ev_store, original_risk=risk)
             cache[key] = {
                 "classification": response_json.get("classification", "unknown"),
                 "confidence": response_json.get("confidence", 0.0),

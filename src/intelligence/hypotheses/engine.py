@@ -16,15 +16,20 @@ class Hypothesis:
         self.supporting_score = 0.0
         self.contradicting_score = 0.0
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
-        """Returns confidence score 0-4"""
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+        """Returns confidence score 0-4. `device_type` (VERSION 10, #9/#10 per-device
+        benign profiles) is the device's coarse category (e.g. "smart_tv", "iot", "nas"
+        -- see utils.infer_device_type()) -- optional and ignored by most hypotheses;
+        only DeviceProfileBenignHypothesis below actually reads it. Every subclass
+        accepts it (even unused) so HypothesisEngine.evaluate_all() can call every
+        hypothesis uniformly."""
         raise NotImplementedError
 
 class DNSTunnelingHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DNS_TUNNELING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         # Check requirements
         has_high_rate = any(e.type == "dns_rate" and e.value > 100 for e in ev_store)
@@ -55,7 +60,7 @@ class NetworkIntrusionHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("NETWORK_INTRUSION")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         # Check requirements: Zeek evidence
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
@@ -89,7 +94,7 @@ class AdvertisingBurstHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("ADVERTISING_BURST")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         has_high_rate = any(e.type == "dns_rate" and e.value > 50 for e in ev_store)
         
@@ -125,7 +130,7 @@ class LocalDeviceDiscoveryHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("LOCAL_DEVICE_DISCOVERY")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "local_device_discovery" and e.value > 0]
         self.required_satisfied = bool(hits)
@@ -138,7 +143,7 @@ class DGAHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DGA_BOTNET_C2")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_dga_burst"]
         self.required_satisfied = bool(hits)
@@ -163,7 +168,7 @@ class ExfiltrationHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DATA_EXFILTRATION")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "zeek_exfiltration"]
         self.required_satisfied = bool(hits)
@@ -188,7 +193,7 @@ class BeaconingHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("C2_BEACONING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "zeek_beaconing"]
         self.required_satisfied = bool(hits)
@@ -218,7 +223,7 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DNS_COVERT_TUNNELING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_tunnel_v2"]
         self.required_satisfied = bool(hits)
@@ -254,7 +259,7 @@ class ConnectionAbuseHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("CONNECTION_ABUSE")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         scan_hits = [e for e in ev_store if e.type == "zeek_conn_abuse"]
         long_hits = [e for e in ev_store if e.type == "zeek_long_conn"]
@@ -304,7 +309,7 @@ class DNSEvasionHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DNS_EVASION")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_evasion_anomaly"]
         self.required_satisfied = bool(hits)
@@ -325,6 +330,87 @@ class DNSEvasionHypothesis(Hypothesis):
         return score
 
 
+class DeviceProfileBenignHypothesis(Hypothesis):
+    """VERSION 10 (#9/#10, per-device benign profiles): device_type is a coarse
+    CATEGORY classification (smart_tv, iot, gaming_console, nas, router, gateway,
+    dns_server, laptop, phone, tablet, printer, camera -- see utils.infer_device_type())
+    with no brand dimension at all -- there is no detection basis today to distinguish
+    "Amazon Fire TV" from "Google Chromecast" from "generic smart TV", so this
+    deliberately does NOT attempt a reviewer-suggested brand-specific catalog
+    (AMAZON_DEVICE_TELEMETRY, APPLE_TELEMETRY, MICROSOFT_TELEMETRY, ...) -- that would
+    be duplicated, brand-guessing effort with no real signal behind it. What IS
+    available and genuinely useful: some device categories are EXPECTED to generate
+    frequent traffic to already-trusted/known infrastructure as their normal operating
+    behavior (a smart TV or IoT hub constantly phoning its vendor's telemetry endpoints
+    is routine; the same volume from a laptop would be more surprising) --
+    rep_vector.tier already tells us the destination is trusted (tier 0/1) or known
+    infrastructure (tier 2), via the SAME global reputation classifier every other
+    hypothesis already relies on (no new per-category domain list to maintain/drift out
+    of sync). This lets that combination score a NAMED benign hypothesis instead of
+    silently falling through to the generic UNKNOWN_BENIGN catch-all -- pure audit-trail/
+    explanation-quality improvement (decision_engine.py only reads a benign hypothesis's
+    NAME when nothing attack-worthy won anyway; this does not relax any containment
+    threshold)."""
+
+    # Categories where frequent traffic to trusted/known infrastructure is routine,
+    # expected behavior rather than merely "not yet proven malicious" -- laptop/phone/
+    # tablet/printer/camera are deliberately excluded: those categories don't have the
+    # same "constant vendor telemetry is the device's normal job" profile a smart TV,
+    # IoT hub, or home-infrastructure box does.
+    _EXPECTED_HIGH_VOLUME_CATEGORIES = frozenset({
+        "smart_tv", "iot", "gaming_console", "nas", "router", "gateway", "dns_server",
+    })
+
+    # BUGFIX (found while verifying this hypothesis, before it was ever committed):
+    # decision_engine.py picks whichever of attack/benign scores higher with a strict
+    # `>` comparison -- so without this guard, this hypothesis firing at 2.5-3.0 could
+    # outright outscore a WEAK-but-genuine attack hypothesis that's dampened (not
+    # zeroed) by the same trusted-tier reputation this hypothesis also requires (every
+    # attack hypothesis here adds contradicting_score for rep_vector.tier in (1, 2),
+    # capping it at its base 2.0 rather than disqualifying it). Verified concretely: a
+    # dampened dns_dga_burst signal (DGA_BOTNET_C2, score 2.0) on an iot-category
+    # device against trusted infrastructure would otherwise silently downgrade from
+    # SUSPICIOUS to BENIGN -- logging nothing at all, worse than the generic
+    # UNKNOWN_BENIGN fallback this hypothesis was built to replace. iot is exactly the
+    # device category most associated with real-world botnet compromise, so this
+    # can't be waved off as a laptop/phone edge case. Any of these evidence types
+    # existing at all means some OTHER hypothesis has real attack-relevant material to
+    # reason about -- back off entirely rather than risk outscoring it. Deliberately
+    # excludes dns_rate/dns_entropy/dns_unique_ratio: those are the same ambiguous
+    # signals this hypothesis itself is explaining as routine telemetry, not
+    # attack-specific on their own.
+    _ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
+        "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
+        "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
+        "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
+    })
+
+    def __init__(self):
+        super().__init__("DEVICE_PROFILE_TELEMETRY")
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+        self._reset_eval_state()
+        is_expected_category = device_type in self._EXPECTED_HIGH_VOLUME_CATEGORIES
+        is_trusted_destination = rep_vector.tier in (0, 1, 2)
+        has_elevated_dns_activity = any(e.type == "dns_rate" and e.value > 20 for e in ev_store)
+        has_competing_attack_evidence = any(e.type in self._ATTACK_SHAPED_EVIDENCE_TYPES for e in ev_store)
+
+        self.required_satisfied = (
+            is_expected_category and is_trusted_destination and has_elevated_dns_activity
+            and not has_competing_attack_evidence
+        )
+        if not self.required_satisfied:
+            return 0.0
+
+        score = 2.5
+        if rep_vector.tier in (0, 1):
+            # Tier 0/1 (local/internal or explicitly trusted, e.g. apple.com/google.com)
+            # is stronger counter-evidence than tier 2 (merely "known infrastructure,
+            # not fully trusted") -- matches ReputationVector's own docstring ordering.
+            score = 3.0
+        return score
+
+
 class HypothesisEngine:
     def __init__(self):
         self.attack_hypotheses = [
@@ -333,14 +419,17 @@ class HypothesisEngine:
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
             DNSEvasionHypothesis(),
         ]
-        self.benign_hypotheses = [AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis()]
+        self.benign_hypotheses = [
+            AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis(),
+            DeviceProfileBenignHypothesis(),
+        ]
 
-    def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector) -> Dict[str, Any]:
+    def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "") -> Dict[str, Any]:
         best_attack = None
         best_attack_score = 0.0
         
         for h in self.attack_hypotheses:
-            score = h.evaluate(ev_store, rep)
+            score = h.evaluate(ev_store, rep, device_type)
             if score > best_attack_score:
                 best_attack_score = score
                 best_attack = h
@@ -349,7 +438,7 @@ class HypothesisEngine:
         best_benign_score = 0.0
         
         for h in self.benign_hypotheses:
-            score = h.evaluate(ev_store, rep)
+            score = h.evaluate(ev_store, rep, device_type)
             if score > best_benign_score:
                 best_benign_score = score
                 best_benign = h

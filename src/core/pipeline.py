@@ -34,6 +34,8 @@ from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 1
 from core.decision_engine import DecisionEngine, DecisionState
+from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggregation)
+from incident_key import incident_key as _incident_key
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
@@ -247,6 +249,13 @@ class EnginePipeline:
         self.pihole_collector = pihole_collector or PiHoleCollector(db_path=self.config.get("pihole_db", "/etc/pihole/pihole-FTL.db"), lookback_seconds=int(self.config.get("startup_lookback_seconds", 300)), excluded_ips=safe_ips, excluded_patterns=safe_patterns)
 
         self.evidence_store = EvidenceStore()
+        # VERSION 10 (incident aggregation): config-driven so an operator can tune
+        # notification density without a code change, same pattern as
+        # suspicious_escalation_seconds. See incident_tracker.py for the full rationale.
+        self.incident_tracker = IncidentTracker(
+            grouping_window_seconds=float(self.config.get("incident_grouping_window_seconds", 1800.0)),
+            update_min_interval_seconds=float(self.config.get("incident_update_min_interval_seconds", 900.0)),
+        )
         self.rep_classifier = ReputationClassifier()
         self.dns_detector = DNSBehaviorDetector()
         self.zeek_detector = ZeekNetworkDetector()
@@ -921,7 +930,11 @@ class EnginePipeline:
                 if is_verified_infra:
                     active_evidence = [ev for ev in active_evidence if ev.type not in _INFRA_NOISY_TYPES]
 
-                decision = self.decision_engine.evaluate(active_evidence, rep_vector)
+                # VERSION 10 (#9/#10 per-device benign profiles): state.device_type feeds
+                # DeviceProfileBenignHypothesis so routine vendor-telemetry traffic from a
+                # smart TV/IoT/NAS/router-category device gets a named benign explanation
+                # instead of falling through to the generic UNKNOWN_BENIGN catch-all.
+                decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
                 
                 risk = decision["threat_confidence"] * 10.0 # Map to old 0-10 scale temporarily for metrics
                 factors = [{"name": decision["explanation"], "score": risk}]
@@ -960,7 +973,7 @@ class EnginePipeline:
                                         # Inject hard-stop evidence into the current active evidence set
                                         active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}"))
                                         # Force re-evaluate decision
-                                        decision = self.decision_engine.evaluate(active_evidence, rep_vector)
+                                        decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
                                         risk = decision["threat_confidence"] * 10.0
                                         factors = [{"name": decision["explanation"], "score": risk}]
                                 
@@ -1190,6 +1203,15 @@ class EnginePipeline:
                             except (ValueError, TypeError):
                                 alert_target_domain = reputation_target or "unknown"
 
+                        # VERSION 10 (incident aggregation): computed here, once, using the
+                        # already-corrected alert_dest_ip/alert_target_domain (not the raw
+                        # dest_ip/target_malicious_domain fallbacks) so the incident key is
+                        # keyed on the SAME evidence-linked target every domain-attribution
+                        # fix above already worked to get right -- an incorrect target here
+                        # would silently re-fragment incident grouping the same way the
+                        # persistence-suffix bug once fragmented alert attribution.
+                        incident_id = _incident_key(dev_id, alert_dest_ip, alert_target_domain, primary_sig_base)
+
                         alert_payload = {
                             "type": "ids_alert",
                             "timestamp": now,
@@ -1207,6 +1229,7 @@ class EnginePipeline:
                             "evidence_verification_required": decision.get("evidence_verification_required", False),
                             "hypothesis_weight": decision.get("hypothesis_weight", 0.0),
                             "reasoning_trail": decision.get("reasoning_trail", []),
+                            "incident_id": incident_id,
                         }
 
                         # =============================================================
@@ -1460,7 +1483,27 @@ class EnginePipeline:
                                 signature=primary_sig,
                             )
 
-                        if not fp_verdict["suppress"] and telegram_worthy:
+                        # VERSION 10 (incident aggregation): the same device+target+signature
+                        # combination could previously generate a full Telegram alert every
+                        # time this cadence gate cleared (as often as every 60s once a
+                        # signature escalated) even though it's the SAME ongoing incident, not
+                        # a new one. should_notify() always records the occurrence (so
+                        # occurrence_count/incident age stay accurate regardless), but only
+                        # asks for a Telegram send on: the first occurrence, a genuine severity
+                        # escalation (SUSPICIOUS->HIGH->CRITICAL), or a periodic "still
+                        # ongoing" update no more often than incident_update_min_interval_seconds.
+                        # alerts.json (written unconditionally above, before this gate) and
+                        # mitigate()/containment (their own independent gates above) are both
+                        # completely unaffected -- this only ever suppresses the redundant
+                        # Telegram push for a repeat of the exact same incident.
+                        incident_notify = self.incident_tracker.should_notify(incident_id, containment_decision_state, now)
+                        if not incident_notify.should_notify:
+                            LOGGER.info(
+                                "Telegram suppressed for %s: occurrence #%d of ongoing incident '%s' (age %.0fs)",
+                                hostname, incident_notify.occurrence_count, incident_id, incident_notify.incident_age_seconds,
+                            )
+
+                        if not fp_verdict["suppress"] and telegram_worthy and incident_notify.should_notify:
 
                                 # Extract Application / Process Name & Scanned Ports
                                 app_name = self.zeek_fx.get_app_context(client_ip) if self.zeek_fx else "Network Socket"
@@ -1608,6 +1651,21 @@ class EnginePipeline:
                                     f"🚨 *THREAT — {hostname}* ({client_ip})\n\n"
                                     f"{severity_badge}  *{threat_name}* — {action_summary}\n"
                                     f"{recommendation}\n"
+                                )
+                                # VERSION 10 (incident aggregation): occurrence_count > 1 means
+                                # this Telegram send is a periodic "still ongoing" update or a
+                                # severity escalation for an incident already notified once --
+                                # say so explicitly, since without this an operator who already
+                                # saw the first alert has no way to tell "still the same thing"
+                                # apart from "something new just started".
+                                if incident_notify.occurrence_count > 1:
+                                    incident_age_min = incident_notify.incident_age_seconds / 60.0
+                                    update_kind = "escalated" if incident_notify.is_escalation else "still ongoing"
+                                    alert_msg += (
+                                        f"🔁 _Incident update — {update_kind}: {incident_notify.occurrence_count} "
+                                        f"occurrences over {incident_age_min:.0f}m_\n"
+                                    )
+                                alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📍 *WHAT HAPPENED* _(facts)_\n"
                                     f"- Contacted `{target_display}` ({service_name} / Port {dest_port})\n"

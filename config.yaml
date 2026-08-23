@@ -212,6 +212,20 @@ detection_engine:
   # same signature before it's escalated to HIGH. [LIVE]
   suspicious_escalation_seconds: 600.0
 
+  # VERSION 10 (incident aggregation, core/incident_tracker.py): how long a gap since
+  # the last occurrence of a given device+target+signature combination before the NEXT
+  # occurrence is treated as a genuinely new incident rather than a continuation of the
+  # same one. [LIVE]
+  incident_grouping_window_seconds: 1800.0
+
+  # VERSION 10 (incident aggregation): minimum spacing between periodic "still ongoing,
+  # N occurrences" Telegram re-notifications for one incident that's staying open --
+  # this is the knob that controls Telegram volume for a long-running incident (a
+  # severity escalation, e.g. SUSPICIOUS -> HIGH, always re-notifies immediately
+  # regardless of this interval). alerts.json still gets a line every qualifying cycle
+  # unconditionally -- this only affects the Telegram push. [LIVE]
+  incident_update_min_interval_seconds: 900.0
+
   # Distinct IPs a device must ARP-request within one window_seconds window to
   # be flagged as a host-discovery sweep (arp_sweep evidence, threat_signals.py).
   # Broadcast-visible, so this reaches WiFi devices the same way MAC correlation

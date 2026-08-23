@@ -229,9 +229,14 @@ check("DNSEvasionHypothesis is registered in HypothesisEngine.attack_hypotheses"
 with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
     pipeline_src = f.read()
 
+# UPDATED (persistence-suffix fix): primary_sig can carry a " (persisted Ns)" suffix
+# once a signature escalates via the cross-cycle persistence mechanism, so every one of
+# these source-guard checks now targets primary_sig_base (the suffix-stripped value)
+# instead of the raw primary_sig -- see pipeline.py's own comment on primary_sig_base
+# for the full incident this fixed.
 check("pipeline.py prefers a DNS_EVASION evidence's own flagged IP over the generic "
       "last-known dest_ip when building that alert's network_context",
-      'if primary_sig == "DNS_EVASION":' in pipeline_src and
+      'if primary_sig_base == "DNS_EVASION":' in pipeline_src and
       'if ev.type == "dns_evasion_anomaly" and ev.domain:' in pipeline_src)
 check("the alert_payload's destination_ip uses the corrected alert_dest_ip variable, "
       "not the raw generic dest_ip, for every alert (not just DNS_EVASION ones)",
@@ -248,7 +253,7 @@ check("the alert_payload's destination_ip uses the corrected alert_dest_ip varia
 # record_confirmed_threat() (the local confirmed-intel learning store).
 check("pipeline.py prefers a DNS_COVERT_TUNNELING evidence's own flagged domain over the "
       "generic 'most notable domain in the window' fallback",
-      'if primary_sig == "DNS_COVERT_TUNNELING":' in pipeline_src and
+      'if primary_sig_base == "DNS_COVERT_TUNNELING":' in pipeline_src and
       'if ev.type == "dns_tunnel_v2" and ev.domain:' in pipeline_src)
 check("the alert_payload's queried_domain uses the corrected alert_target_domain variable, "
       "not the raw target_malicious_domain, for every alert",
@@ -280,7 +285,7 @@ check("REGRESSION GUARD: no remaining use of the raw target_malicious_domain in 
 # nothing about a real coordinated threat; it was an attribution artifact.
 check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over the "
       "generic 'most notable domain in the window' fallback, same as DNS_COVERT_TUNNELING",
-      'elif primary_sig == "DGA_BOTNET_C2":' in pipeline_src and
+      'elif primary_sig_base == "DGA_BOTNET_C2":' in pipeline_src and
       'if ev.type == "dns_dga_burst" and ev.domain:' in pipeline_src)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -296,7 +301,7 @@ check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over th
 # ═══════════════════════════════════════════════════════════════════════════════════
 check("THE FIX: target_display prefers alert_dest_ip specifically for DNS_EVASION, "
       "checked before the generic alert_target_domain path",
-      'alert_dest_ip if primary_sig == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"' in pipeline_src)
+      'alert_dest_ip if primary_sig_base == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"' in pipeline_src)
 check("THE FIX: the non-DNS_EVASION fallback now uses alert_dest_ip (the corrected "
       "variable), not the raw dest_ip",
       'else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")' in pipeline_src)
@@ -378,7 +383,7 @@ check("REGRESSION GUARD: a genuinely unexplained IP alongside a known resolver s
 check("THE DEEPER FIX: alert_target_domain itself (the source field, not just the "
       "display variable) is now set to 'unknown' for DNS_EVASION -- no domain is "
       "attached where none exists, rather than the generic fallback leaking in",
-      'elif primary_sig == "DNS_EVASION":\n                            alert_target_domain = "unknown"' in pipeline_src)
+      'elif primary_sig_base == "DNS_EVASION":\n                            alert_target_domain = "unknown"' in pipeline_src)
 
 
 if FAILURES:

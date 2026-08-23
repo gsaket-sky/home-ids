@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from intelligence.hypotheses.evidence import Evidence
+from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
 from intelligence.hypotheses.engine import HypothesisEngine
 from intelligence.reputation.classifier import ReputationVector
 
@@ -23,8 +23,11 @@ class DecisionEngine:
     def __init__(self):
         self.hypothesis_engine = HypothesisEngine()
 
-    def evaluate(self, ev_store: List[Evidence], rep: ReputationVector) -> Dict[str, Any]:
-        hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep)
+    def evaluate(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "") -> Dict[str, Any]:
+        # VERSION 10 (#9/#10 per-device benign profiles): device_type is optional and
+        # defaults to "" for any existing caller that hasn't been updated -- only
+        # DeviceProfileBenignHypothesis (hypotheses/engine.py) actually reads it.
+        hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type)
         
         attack_score = hyp_results["attack"]["score"]
         benign_score = hyp_results["benign"]["score"]
@@ -41,11 +44,18 @@ class DecisionEngine:
                 attack_score >= 2.0 or has_meaningful_partial_signal
             )
         
-        # Calculate independence groups from the evidence that materially contributes to attack scoring.
-        attack_evidence = [
-            e for e in ev_store
-            if e.type.startswith("dns") or e.type == "reputation" or e.type.startswith("zeek") or e.type == "ml_anomaly" or e.independence_group in {"reputation", "zeek_network", "honeypot", "ml_anomaly"}
-        ]
+        # VERSION 10 (evidence families) BUGFIX: this used to be a hand-maintained hybrid
+        # of type-prefix matching ("dns"/"zeek") OR membership in a hardcoded 4-value
+        # group set -- which silently excluded arp_sweep evidence (type "arp_sweep",
+        # independence_group "lan_recon": doesn't start with dns/zeek, and "lan_recon"
+        # was never added to the hardcoded set) from the independent-source count
+        # entirely, even though ConnectionAbuseHypothesis treats it as a real
+        # corroborating signal. Every Evidence construction site in the codebase already
+        # sets an explicit independence_group (confirmed via audit -- "general", the
+        # dataclass default, is never actually used in practice), so a clean
+        # group-membership test against the canonical ATTACK_EVIDENCE_FAMILIES registry
+        # (evidence.py) is both simpler and strictly more correct than the old hybrid.
+        attack_evidence = [e for e in ev_store if e.independence_group in ATTACK_EVIDENCE_FAMILIES]
         independence_groups = {e.independence_group for e in attack_evidence if e.independence_group}
         num_independent_sources = len(independence_groups)
 
