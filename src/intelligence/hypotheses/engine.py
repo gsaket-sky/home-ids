@@ -111,6 +111,29 @@ class AdvertisingBurstHypothesis(Hypothesis):
 # reach DecisionEngine.
 # ══════════════════════════════════════════════════════════════════════════════════════
 
+class LocalDeviceDiscoveryHypothesis(Hypothesis):
+    """Reviewer suggestion, implemented: a device's real HTTP/SSDP/DIAL requests to
+    OTHER devices on its own LAN, matching known media/UPnP device-discovery
+    conventions (see pipeline.py's _LOCAL_DEVICE_DISCOVERY_URI_PATTERNS -- dd.xml,
+    ssdp/, apps/), is normal device-discovery behavior (Spotify Connect, Chromecast,
+    smart-TV app launch), not "more suspicious network activity." Deliberately a
+    modest score: it should dampen a WEAK, otherwise-unexplained attack signal (the
+    kind that would only just clear the SUSPICIOUS floor), but never unilaterally
+    override a genuinely multi-source-corroborated attack finding -- the
+    attack_score > benign_score comparison in decision_engine.py already enforces
+    that naturally, since a real corroborated finding scores higher than this."""
+    def __init__(self):
+        super().__init__("LOCAL_DEVICE_DISCOVERY")
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector) -> float:
+        self._reset_eval_state()
+        hits = [e for e in ev_store if e.type == "local_device_discovery" and e.value > 0]
+        self.required_satisfied = bool(hits)
+        if not self.required_satisfied:
+            return 0.0
+        return 2.5
+
+
 class DGAHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DGA_BOTNET_C2")
@@ -310,7 +333,7 @@ class HypothesisEngine:
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
             DNSEvasionHypothesis(),
         ]
-        self.benign_hypotheses = [AdvertisingBurstHypothesis()]
+        self.benign_hypotheses = [AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis()]
 
     def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector) -> Dict[str, Any]:
         best_attack = None

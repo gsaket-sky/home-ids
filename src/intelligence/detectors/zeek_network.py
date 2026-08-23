@@ -21,6 +21,15 @@ class ZeekNetworkDetector:
                     provenance=f"detector:zeek:{evt_type}"
                 ))
             elif evt_type == "zeek_notice":
+                # BUGFIX (reviewer suggestion, implemented): the alert's WHY line only
+                # ever said "Zeek policy notice fired for this connection" with no way to
+                # tell a genuinely alarming notice type (e.g. SSL::Invalid_Server_Cert)
+                # apart from a routine one -- get_alerts() already carries the real
+                # note/msg text (zeek_features.py's _process_notice()), it just never
+                # made it past this detector. provenance is the established free-text
+                # slot other detectors already use for this exact purpose (see
+                # threat_signals.py's add() helper).
+                note_type = evt.get("note", "") or "unknown"
                 ev_list.append(Evidence(
                     type="zeek_notice",
                     source="zeek",
@@ -29,7 +38,7 @@ class ZeekNetworkDetector:
                     value=1.0,
                     confidence=evt.get("confidence", 0.75),
                     independence_group="zeek_network",
-                    provenance="detector:zeek:notice"
+                    provenance=f"detector:zeek:notice:{note_type}"
                 ))
                 
         return ev_list

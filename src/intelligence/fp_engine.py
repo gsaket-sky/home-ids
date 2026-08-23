@@ -854,10 +854,26 @@ class AutonomousFPEngine:
 
         # Check 2: Lateral movement / internal port scanning
         # A device scanning internal network ports (192.168.x.x) is active attack behaviour.
+        # BUGFIX: found via a live third-party review of a real tarpit alert, verified
+        # against production data -- `lateral` is a raw COUNT of connections to
+        # LATERAL_PORTS (22/445/3389/5900/23), so a single ordinary SMB/SSH/RDP
+        # connection to ONE internal device (e.g. browsing a NAS share) satisfied
+        # `lateral > 0` just as readily as a genuine multi-target scan -- confirmed
+        # live: zeek_lateral_moves=1 alone reached this hard-stop (bypassing ALL
+        # ML/corroboration) and authorized Layer-2 tarpit containment. Now requires a
+        # genuine minimum DISTINCT-TARGET count (zeek_lateral_unique_targets,
+        # zeek_features.py's get_features()) before calling this "movement" rather than
+        # routine single-service access.
         lateral = int(features.get("zeek_lateral_moves", 0) or 0)
-        if lateral > 0:
-            triggers.append(f"Internal lateral movement / port scan ({lateral} events)")
-            LOGGER.debug("[Stage 1] %s: Lateral movement (%d events)", hostname, lateral)
+        lateral_targets = int(features.get("zeek_lateral_unique_targets", 0) or 0)
+        lateral_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2)) if self.config else 2
+        if lateral > 0 and lateral_targets >= lateral_threshold:
+            triggers.append(
+                f"Internal lateral movement / port scan ({lateral} connection(s) across "
+                f"{lateral_targets} distinct target(s))"
+            )
+            LOGGER.debug("[Stage 1] %s: Lateral movement (%d events, %d distinct targets)",
+                         hostname, lateral, lateral_targets)
 
         # Check 3: Malicious TLS fingerprint (JA3/JA4+)
         # These are cryptographic fingerprints of specific malware TLS implementations.

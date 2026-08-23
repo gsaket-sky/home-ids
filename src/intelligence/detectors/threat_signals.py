@@ -79,75 +79,116 @@ class ThreatSignalDetector:
             ))
 
         # ── DGA / algorithmic-domain burst ──────────────────────────────────────────
-        if not is_telemetry:
-            sd = float(features.get("suspicious_domains", 0.0) or 0.0)
-            entropy_avg = float(features.get("entropy_avg", 0.0) or 0.0)
-            dga_score = float(features.get("dga_score", 0.0) or 0.0)
-            # BUGFIX: dns_dga_burst is a device-wide AGGREGATE (a count of how many
-            # recent domains looked DGA-like), so it never had any specific domain to
-            # attach -- the alert's displayed target was always the unrelated "most
-            # frequent domain in window" fallback (pipeline.py's _select_target_domain()),
-            # no causal connection to which domain(s) actually looked suspicious.
-            # dns_features.py's compute() now collects real examples in the SAME loop
-            # that counts them (mirroring dns_tunneling_domain_examples for the sibling
-            # dns_tunnel_v2 signal above) -- attach one here so pipeline.py's alert-
-            # building can prefer it, same as it already does for DNS_COVERT_TUNNELING.
-            dga_domain_examples = features.get("suspicious_domain_examples", []) or []
-            dga_evidence_domain = dga_domain_examples[0] if dga_domain_examples else None
-            dga_examples_note = f" e.g.={','.join(dga_domain_examples)}" if dga_domain_examples else ""
-            if sd >= 15:
-                add("dns_dga_burst", sd, min(1.0, 0.6 + sd / 50.0), "dns_behavior",
-                    f"absolute burst {int(sd)} domains{dga_examples_note}", domain=dga_evidence_domain)
-            elif sd >= 5 and entropy_avg > 3.5:
-                add("dns_dga_burst", sd, 0.6, "dns_behavior",
-                    f"elevated {int(sd)} domains entropy={entropy_avg:.2f}{dga_examples_note}", domain=dga_evidence_domain)
-            elif dga_score > 0.40:
-                # Pure classifier-score branch, not the per-domain loop above -- no
-                # specific domain to attach here, unlike the two branches above it.
-                add("dns_dga_burst", dga_score, min(1.0, dga_score), "dns_behavior",
-                    f"classifier score {dga_score:.2f}")
+        # BUGFIX (found via a third-party review of the full alerts.json history,
+        # verified with a live repro): this whole block used to be gated on `is_telemetry`
+        # -- computed from `top_domain`, the SAME unreliable "most notable domain in the
+        # whole window" value flagged elsewhere in this file, not from any domain actually
+        # involved in this evidence. That cut both ways: a device could have its DGA
+        # evidence wrongly SUPPRESSED because some unrelated domain elsewhere in its
+        # window happened to be telemetry-recognized (confirmed live: top_domain=
+        # "mask.icloud.com" silently zeroed out evidence for a totally unrelated,
+        # genuinely-suspicious domain), and conversely a real telemetry domain could still
+        # get flagged if a DIFFERENT domain in the window wasn't telemetry-recognized.
+        # suspicious_domains/suspicious_domain_examples now exclude telemetry domains at
+        # the source (dns_features.py's per-domain loop, matching the pattern
+        # tunneling_domains/fanout_by_base already used) -- so the two domain-example
+        # branches below no longer need any device-wide gate at all. Only the pure
+        # classifier-score branch (no specific domain, nothing to check at the source)
+        # still needs SOME telemetry awareness, so it keeps its own explicit condition.
+        sd = float(features.get("suspicious_domains", 0.0) or 0.0)
+        entropy_avg = float(features.get("entropy_avg", 0.0) or 0.0)
+        dga_score = float(features.get("dga_score", 0.0) or 0.0)
+        # BUGFIX: dns_dga_burst is a device-wide AGGREGATE (a count of how many
+        # recent domains looked DGA-like), so it never had any specific domain to
+        # attach -- the alert's displayed target was always the unrelated "most
+        # frequent domain in window" fallback (pipeline.py's _select_target_domain()),
+        # no causal connection to which domain(s) actually looked suspicious.
+        # dns_features.py's compute() now collects real examples in the SAME loop
+        # that counts them (mirroring dns_tunneling_domain_examples for the sibling
+        # dns_tunnel_v2 signal above) -- attach one here so pipeline.py's alert-
+        # building can prefer it, same as it already does for DNS_COVERT_TUNNELING.
+        dga_domain_examples = features.get("suspicious_domain_examples", []) or []
+        dga_evidence_domain = dga_domain_examples[0] if dga_domain_examples else None
+        dga_examples_note = f" e.g.={','.join(dga_domain_examples)}" if dga_domain_examples else ""
+        if sd >= 15:
+            add("dns_dga_burst", sd, min(1.0, 0.6 + sd / 50.0), "dns_behavior",
+                f"absolute burst {int(sd)} domains{dga_examples_note}", domain=dga_evidence_domain)
+        elif sd >= 5 and entropy_avg > 3.5:
+            add("dns_dga_burst", sd, 0.6, "dns_behavior",
+                f"elevated {int(sd)} domains entropy={entropy_avg:.2f}{dga_examples_note}", domain=dga_evidence_domain)
+        elif not is_telemetry and dga_score > 0.40:
+            # Pure classifier-score branch, not the per-domain loop above -- no
+            # specific domain to attach here, unlike the two branches above it, and no
+            # per-domain source protection either -- keep the device-wide gate for
+            # this one branch only.
+            add("dns_dga_burst", dga_score, min(1.0, dga_score), "dns_behavior",
+                f"classifier score {dga_score:.2f}")
 
         # ── Real DNS tunneling signals (distinct from the existing rate/entropy-based
         #    "DNS_TUNNELING" hypothesis, which is really a burst detector) ────────────
-        if not is_telemetry:
-            max_label = float(features.get("max_label_length", 0.0) or 0.0)
-            max_label_domain = str(features.get("max_label_domain", "") or "")
-            tunnel_domains = float(features.get("dns_tunneling_domains", 0.0) or 0.0)
-            tunnel_domain_examples = features.get("dns_tunneling_domain_examples", []) or []
-            txt_null_ratio = float(features.get("dns_txt_null_ratio", 0.0) or 0.0)
-            susp_tld_ratio = float(features.get("suspicious_tld_ratio", 0.0) or 0.0)
-            fanout_count = float(features.get("subdomain_fanout_count", 0.0) or 0.0)
-            fanout_domain = str(features.get("subdomain_fanout_domain", "") or "")
+        # BUGFIX: same class of fix as the DGA block above -- tunnel_domains/fanout_domain
+        # already exclude telemetry at the source (dns_features.py), and max_label's own
+        # CDN/telemetry protection now lives in the evidence_domain check just below
+        # (this file's own earlier fix), so this block no longer needs the unreliable
+        # device-wide `is_telemetry` gate either. Only txt_null_ratio/susp_tld_ratio (pure
+        # aggregate ratios, no specific domain to check at the source) still need it.
+        max_label = float(features.get("max_label_length", 0.0) or 0.0)
+        max_label_domain = str(features.get("max_label_domain", "") or "")
+        tunnel_domains = float(features.get("dns_tunneling_domains", 0.0) or 0.0)
+        tunnel_domain_examples = features.get("dns_tunneling_domain_examples", []) or []
+        txt_null_ratio = float(features.get("dns_txt_null_ratio", 0.0) or 0.0)
+        susp_tld_ratio = float(features.get("suspicious_tld_ratio", 0.0) or 0.0)
+        fanout_count = float(features.get("subdomain_fanout_count", 0.0) or 0.0)
+        fanout_domain = str(features.get("subdomain_fanout_domain", "") or "")
 
-            # A live-data audit found the alert's displayed "Target" domain often has no
-            # causal relationship to which domain actually produced this evidence (e.g. a
-            # 19-char domain reported alongside "max_label=57" measured on a DIFFERENT
-            # domain elsewhere in the same window) -- pipeline.py's target-domain picker
-            # scans the whole window for "most notable," independent of which evidence
-            # fired. Attaching the real domain here (Evidence.domain, always present on
-            # the dataclass but never previously populated) lets the alert/reasoning trail
-            # show the domain this specific evidence actually came from.
-            if (tunnel_domains >= 2 or max_label > 55) and not (top_domain and _is_cdn_or_cloud_domain(top_domain)):
-                evidence_domain = max_label_domain if max_label > 55 else (tunnel_domain_examples[0] if tunnel_domain_examples else None)
-                examples_note = f" e.g.={','.join(tunnel_domain_examples)}" if tunnel_domain_examples else ""
-                add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15), "dns_tunnel_v2",
-                    f"encoded/long labels max={int(max_label)} domain={max_label_domain or '?'} count={int(tunnel_domains)}{examples_note}",
-                    subtag="encoded_labels", domain=evidence_domain)
-            # Sliding-window subdomain fanout: many distinct labels sharing one registrable
-            # parent within the window is the classic tunneling shape (unlike the
-            # rotating-whole-domain DGA pattern above, which max_label/tunnel_domains
-            # already covers) -- distinct evidence, distinct subtag, so the hypothesis
-            # engine's "2+ corroborating categories" bonus can count it independently.
-            if fanout_count >= 8:
-                add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04), "dns_tunnel_v2",
-                    f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window",
-                    subtag="subdomain_fanout", domain=fanout_domain)
-            if txt_null_ratio > 0.15:
-                add("dns_tunnel_v2", txt_null_ratio, min(1.0, txt_null_ratio * 2.0), "dns_tunnel_v2",
-                    f"txt/null ratio {txt_null_ratio:.2f}", subtag="txt_null_abuse")
-            if susp_tld_ratio > 0.15:
-                add("dns_tunnel_v2", susp_tld_ratio, min(1.0, susp_tld_ratio * 2.0), "dns_tunnel_v2",
-                    f"suspicious tld ratio {susp_tld_ratio:.2f}", subtag="suspicious_tld")
+        # A live-data audit found the alert's displayed "Target" domain often has no
+        # causal relationship to which domain actually produced this evidence (e.g. a
+        # 19-char domain reported alongside "max_label=57" measured on a DIFFERENT
+        # domain elsewhere in the same window) -- pipeline.py's target-domain picker
+        # scans the whole window for "most notable," independent of which evidence
+        # fired. Attaching the real domain here (Evidence.domain, always present on
+        # the dataclass but never previously populated) lets the alert/reasoning trail
+        # show the domain this specific evidence actually came from.
+        #
+        # BUGFIX (found via a third-party review of the full alerts.json history,
+        # verified against real post-fix production data): the CDN/cloud-safe
+        # exemption below used to check `top_domain` -- the SAME unreliable
+        # "most notable domain in the whole window" value the comment above already
+        # calls out as causally unrelated to this specific evidence -- instead of the
+        # domain that actually produced the long-label/tunnel-domain hit. Confirmed
+        # live: a Synology QuickConnect DDNS hostname (*.quickconnect.to, already in
+        # _SYSTEM_SAFE_BASE_DOMAINS) and an Amazon Minerva telemetry hash-subdomain
+        # (*.a2z.com, also already safe-listed) both tripped dns_tunnel_v2 because
+        # top_domain -- some unrelated domain elsewhere in the window -- wasn't
+        # CDN-recognized, even though the domain that actually triggered max_label>55
+        # was. The exemption must test the evidence's own domain, not a bystander.
+        evidence_domain = max_label_domain if max_label > 55 else (tunnel_domain_examples[0] if tunnel_domain_examples else None)
+        if (tunnel_domains >= 2 or max_label > 55) and not (evidence_domain and _is_cdn_or_cloud_domain(evidence_domain)):
+            examples_note = f" e.g.={','.join(tunnel_domain_examples)}" if tunnel_domain_examples else ""
+            add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15), "dns_tunnel_v2",
+                f"encoded/long labels max={int(max_label)} domain={max_label_domain or '?'} count={int(tunnel_domains)}{examples_note}",
+                subtag="encoded_labels", domain=evidence_domain)
+        # Sliding-window subdomain fanout: many distinct labels sharing one registrable
+        # parent within the window is the classic tunneling shape (unlike the
+        # rotating-whole-domain DGA pattern above, which max_label/tunnel_domains
+        # already covers) -- distinct evidence, distinct subtag, so the hypothesis
+        # engine's "2+ corroborating categories" bonus can count it independently.
+        # BUGFIX: same class of bug as above -- a legitimate CDN/cloud parent domain
+        # (e.g. a content-hash-per-request CDN pattern) can also produce many distinct
+        # labels under one parent; this never had any CDN exemption at all. Uses
+        # fanout_domain (the parent this evidence is actually about), not top_domain.
+        if fanout_count >= 8 and not _is_cdn_or_cloud_domain(fanout_domain):
+            add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04), "dns_tunnel_v2",
+                f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window",
+                subtag="subdomain_fanout", domain=fanout_domain)
+        if not is_telemetry and txt_null_ratio > 0.15:
+            # Pure aggregate ratio, no specific domain to check at the source -- keep
+            # the device-wide gate for this one, same reasoning as the dga_score branch.
+            add("dns_tunnel_v2", txt_null_ratio, min(1.0, txt_null_ratio * 2.0), "dns_tunnel_v2",
+                f"txt/null ratio {txt_null_ratio:.2f}", subtag="txt_null_abuse")
+        if not is_telemetry and susp_tld_ratio > 0.15:
+            add("dns_tunnel_v2", susp_tld_ratio, min(1.0, susp_tld_ratio * 2.0), "dns_tunnel_v2",
+                f"suspicious tld ratio {susp_tld_ratio:.2f}", subtag="suspicious_tld")
 
         # ── Exfiltration byte bursts ─────────────────────────────────────────────────
         outbound_z = float(features.get("outbound_bytes_z", 0.0) or 0.0)

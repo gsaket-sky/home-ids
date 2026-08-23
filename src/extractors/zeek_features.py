@@ -312,6 +312,12 @@ class ZeekFeatureExtractor:
             addr = ipaddress.ip_address(ip)
             return any(addr in net for net in self._home_nets)
         except ValueError: return False
+
+    def is_home_ip(self, ip: str) -> bool:
+        """Public wrapper for _is_home_ip() -- lets callers outside this module (e.g.
+        pipeline.py's local-device-discovery evidence gathering) reuse the same
+        home-subnet check without re-parsing home_subnets a second time."""
+        return self._is_home_ip(ip)
         
     def _is_local_or_multicast(self, ip_str: str) -> bool:
         if not ip_str or ip_str == "unknown": return True
@@ -790,6 +796,21 @@ class ZeekFeatureExtractor:
         port = meta.get("last_dest_port", 0)
         app_weight = 0.2 if port in (80, 443) else (0.6 if port in (22, 445, 3389) else 0.4)
 
+        # BUGFIX: found via a live alert audit (a third-party review of a real
+        # family_pc_fritz_box tarpit alert, verified against this exact code) --
+        # zeek_lateral_moves is a raw COUNT of connections to LATERAL_PORTS, with no
+        # distinction between "one legitimate SMB/SSH/RDP connection" and "a genuine
+        # multi-target scan." fp_engine.py's Stage-1 hard-stop and pipeline.py's
+        # lateral_threat (which authorizes Layer-2 tarpit, bypassing the normal
+        # risk>=9.0 floor) both gate on a bare `> 0` check against this same count --
+        # confirmed live: a single connection (zeek_lateral_moves=1) was sufficient to
+        # reach CONFIRMED_THREAT and trigger tarpit containment. zeek_s0_rej_unique_ips
+        # already exists alongside zeek_s0_rej_count for exactly this reason; the same
+        # distinct-target tracking was simply never added for lateral movement.
+        lateral_targets = set()
+        for ip in ips:
+            lateral_targets.update(dst_ip for _, dst_ip, _ in self._lateral_moves.get(ip, []))
+
         return {
             "zeek_conn_count": sum(len(self._conn_ts.get(ip, [])) for ip in ips),
             "zeek_new_ips": sum(len(self._new_ips.get(ip, {})) for ip in ips),
@@ -801,6 +822,7 @@ class ZeekFeatureExtractor:
             "zeek_outbound_bytes": sum(b for ip in ips for t, b in self._outbound_bytes.get(ip, [])),
             "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
             "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),
+            "zeek_lateral_unique_targets": len(lateral_targets),
             "zeek_s0_rej_count": sum(1 for s in states if s in ("S0", "REJ")),
             "zeek_s0_rej_unique_ips": len(rejected_ips),
             "zeek_max_duration": max(durations) if durations else 0.0,

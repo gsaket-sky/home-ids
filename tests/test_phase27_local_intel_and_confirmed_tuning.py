@@ -260,7 +260,8 @@ with tempfile.TemporaryDirectory() as tmpdir_b2:
     # evidence) -- must NOT be recorded, even though the alert IS a genuine confirmed
     # threat (dest_ip DOES get recorded).
     lateral_alert = _make_alert("sharepoint.com", {})
-    verdict_b2 = fp_b2.evaluate(lateral_alert, {"zeek_lateral_moves": 5}, risk_score=9.0, ti_engine=None)
+    verdict_b2 = fp_b2.evaluate(lateral_alert, {"zeek_lateral_moves": 5, "zeek_lateral_unique_targets": 3},
+                                 risk_score=9.0, ti_engine=None)
     check("Check 2 (lateral movement) alone reaches CONFIRMED_THREAT as before",
           verdict_b2["verdict"] == "CONFIRMED_THREAT", f"got={verdict_b2}")
     check("THE FIX: a lateral-movement-only hard-stop does NOT poison the bystander "
@@ -291,7 +292,8 @@ with tempfile.TemporaryDirectory() as tmpdir_b2:
     with fp_b2_cached._lock:
         fp_b2_cached._trust_cache["nflximg.com"] = time.time()
     cached_alert = _make_alert("nflximg.com", {})
-    fp_b2_cached.evaluate(cached_alert, {"zeek_lateral_moves": 3}, risk_score=9.0, ti_engine=None)
+    fp_b2_cached.evaluate(cached_alert, {"zeek_lateral_moves": 3, "zeek_lateral_unique_targets": 2},
+                           risk_score=9.0, ti_engine=None)
     check("REGRESSION GUARD: the trust-cache-override path (a trusted domain overridden "
           "by a fresh non-domain-causal hard-stop) also does not re-poison the domain",
           fp_b2_cached.local_intel.check("domain", "nflximg.com") is None)

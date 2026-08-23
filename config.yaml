@@ -220,6 +220,19 @@ detection_engine:
   # [LIVE]
   arp_sweep_unique_targets_threshold: 8
 
+  # BUGFIX: found via a live third-party review of a real tarpit alert, verified
+  # against production data -- zeek_lateral_moves was a raw COUNT of connections to
+  # LATERAL_PORTS (22/445/3389/5900/23), with fp_engine.py's Stage-1 hard-stop and
+  # pipeline.py's lateral_threat (which authorizes Layer-2 tarpit, bypassing the
+  # normal risk>=9.0 floor) both gating on a bare `> 0` check -- confirmed live: a
+  # single ordinary SMB connection (zeek_lateral_moves=1) was sufficient to reach
+  # CONFIRMED_THREAT and trigger containment, no different treatment from a genuine
+  # multi-target scan. Distinct DESTINATION IPs on lateral-movement-relevant ports
+  # a device must touch within one window_seconds window before either of those two
+  # consequential gates treats it as "lateral movement" rather than routine access
+  # to a single internal service (a NAS, a home server via SSH/RDP). [LIVE]
+  lateral_movement_unique_targets_threshold: 2
+
 
 # -----------------------------------------------------------------------------
 # false_positive_engine — CL-AFPE (autonomous false-positive suppression)

@@ -159,6 +159,12 @@ class DeviceState:
         self.last_alert_time = 0.0
         self.last_alert_confidence = 0.0
         self.last_alert_signature = ""
+        # BUGFIX: the raw signature above can carry a " (persisted Ns)" suffix that
+        # grows every cycle once a signature escalates -- comparing against it directly
+        # made the repeat-suppression cadence below think the signature kept changing.
+        # This tracks the stable, suffix-stripped signature instead. Deliberately
+        # in-memory only, same rationale as suspicious_since/suspicious_signature below.
+        self.last_alert_signature_base = ""
         # PHASE 2 (cross-cycle escalation): tracks how long the SAME SUSPICIOUS signature
         # has persisted uninterrupted. Deliberately in-memory only (not persisted to
         # disk) — a service restart resetting this tracker just means escalation starts

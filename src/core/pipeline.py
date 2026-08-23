@@ -11,6 +11,7 @@ RECENT ARCHITECTURAL FIXES:
   are migrated to a new identity anchor.
 """
 
+import ipaddress
 import logging
 import math
 import time
@@ -62,6 +63,38 @@ LOGGER = logging.getLogger("home_ids.pipeline")
 # Real DNS status classifications aligned with dns_features.py
 BLOCKED_STATUSES = {1, 4, 5, 6, 7, 8, 10}
 NXDOMAIN_STATUSES = {3, 12, 13}
+
+
+# Reviewer suggestion, implemented: URI substrings characteristic of local media/UPnP
+# device-discovery protocols (SSDP, DIAL app-launch) -- confirmed against real traffic
+# in a live alert (dd.xml, ssdp/device-desc.xml, apps/com.spotify.Spotify.TVv2). Kept
+# narrow and specific to well-known discovery-protocol conventions, not a broad "any
+# local HTTP request is benign" rule -- a genuinely malicious local pivot would not
+# typically request these exact, standardized discovery-protocol paths.
+_LOCAL_DEVICE_DISCOVERY_URI_PATTERNS = (
+    "/dd.xml", "/ssdp/", "/description.xml", "/apps/",  # UPnP/DIAL device + app discovery
+)
+
+
+def _count_local_device_discovery_requests(zeek_fx, client_ip: str) -> int:
+    """Counts this device's recent HTTP requests that look like local media/UPnP
+    device-discovery traffic (SSDP/DIAL) to another device on the SAME home network --
+    see _LOCAL_DEVICE_DISCOVERY_URI_PATTERNS. Reuses the exact same zeek_fx.
+    get_http_reqs() data source pipeline.py's own alert-display code (recent_http_reqs)
+    already reads; this just also reads it at evidence-gathering time, not only at
+    alert-build time, so decision_engine.py's benign-hypothesis track can weigh it."""
+    if not zeek_fx or not client_ip:
+        return 0
+    count = 0
+    for entry in zeek_fx.get_http_reqs(client_ip):
+        host, _, uri = entry.partition("/")
+        uri = "/" + uri
+        host_ip = host.split(":", 1)[0]
+        if not zeek_fx.is_home_ip(host_ip):
+            continue
+        if any(pat in uri for pat in _LOCAL_DEVICE_DISCOVERY_URI_PATTERNS):
+            count += 1
+    return count
 
 
 def classify_payload_size(bytes_count: int) -> str:
@@ -124,7 +157,16 @@ def _describe_evidence(ev) -> str:
     evidence fired -- a live-data audit found these can differ within one alert)."""
     text = _EVIDENCE_PLAIN_LANGUAGE.get(ev.type, ev.type.replace("_", " ").capitalize())
     domain_suffix = f" — `{ev.domain}`" if getattr(ev, "domain", None) else ""
-    return f"{text}{domain_suffix}"
+    # BUGFIX (reviewer suggestion, implemented): zeek_notice previously gave no way to
+    # tell a genuinely alarming notice type apart from a routine one -- provenance now
+    # carries the real note type (see zeek_network.py), surfaced here the same way
+    # domain_suffix already surfaces per-evidence detail for other types.
+    notice_suffix = ""
+    if ev.type == "zeek_notice" and getattr(ev, "provenance", ""):
+        parts = ev.provenance.split(":", 3)
+        if len(parts) == 4 and parts[3] and parts[3] != "unknown":
+            notice_suffix = f" — `{parts[3]}`"
+    return f"{text}{domain_suffix}{notice_suffix}"
 
 
 class EnginePipeline:
@@ -585,19 +627,40 @@ class EnginePipeline:
                         dest_ip = "unknown"
 
             # ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
+            # BUGFIX: found via a live third-party review of a real CRITICAL/"Confirmed
+            # Malicious IOC" alert (c.pki.goog, Google's own certificate-revocation
+            # infrastructure), verified against this exact code -- ti_risk/abuse_risk/
+            # vt_risk are each a MAX across this device's several recent domains and its
+            # single dest_ip, with NO tracking of WHICH domain/IP actually produced that
+            # max. rep_classifier.classify(top_domain, ti_score=ti_risk, ...) then blames
+            # top_domain (a SEPARATE, "_select_target_domain()-picked most notable domain
+            # in the window" value) for a risk score that may have come from a completely
+            # different domain this same device also happened to query -- confirmed
+            # plausible here: family_pc has a real history of contacting genuinely malicious
+            # DGA domains in the same rolling window. reputation_target now tracks the
+            # SPECIFIC domain/IP that earned the highest risk score, so the classifier
+            # (and the alert built from its verdict) blame the actual source of the risk,
+            # not an unrelated bystander domain. When no risk was ever found at all,
+            # nothing needs attribution and top_domain remains a harmless, neutral choice.
+            reputation_target = top_domain
             ti_risk, ti_match = 0.0, 0
             if self.ti_engine:
                 for domain in _rolling_domain_keys:
                     ti_res = self.ti_engine.lookup_domain(domain)
                     if ti_res:
                         cur_risk = float(ti_res.get("confidence", 0.8)) * 4.0
-                        ti_risk = max(ti_risk, cur_risk)
+                        if cur_risk > ti_risk:
+                            ti_risk = cur_risk
+                            reputation_target = domain
                         ti_match = 1
                         ti_ioc_hits_total.labels(source="threat_intel", ioc_type="domain").inc()
                 if dest_ip and dest_ip != "unknown":
                     ip_ti_res = self.ti_engine.lookup_ip(dest_ip)
                     if ip_ti_res:
-                        ti_risk = max(ti_risk, float(ip_ti_res.get("confidence", 0.8) * 4.0))
+                        cur_ip_risk = float(ip_ti_res.get("confidence", 0.8) * 4.0)
+                        if cur_ip_risk > ti_risk:
+                            ti_risk = cur_ip_risk
+                            reputation_target = dest_ip
                         ti_match = 1
                         ti_ioc_hits_total.labels(source="threat_intel", ioc_type="ip").inc()
 
@@ -611,6 +674,9 @@ class EnginePipeline:
             # get_tranco_rank() now exposes the rank half too. Same top_domain used for
             # the reputation classifier just below, for consistency.
             features["tranco_rank"] = self.ti_engine.get_tranco_rank(top_domain) if self.ti_engine and top_domain else 0
+            # Running best-so-far for reputation_target's attribution, carried across the
+            # ti_risk/abuse_risk/vt_risk blocks (see the BUGFIX comment above ti_risk).
+            _best_risk_seen = ti_risk
 
             abuse_risk = 0.0
             honeypots = self.config.get("honeypot_ips", [])
@@ -630,24 +696,38 @@ class EnginePipeline:
                         if live_risk > 0:
                             abuse_risk = live_risk
                             ti_ioc_hits_total.labels(source="abuseipdb", ioc_type="ip").inc()
-                        
+                # abuse_risk is always dest_ip-sourced when nonzero -- no ambiguity to track.
+                if abuse_risk > _best_risk_seen:
+                    _best_risk_seen = abuse_risk
+                    reputation_target = dest_ip
+
             features["abuseipdb_risk"] = abuse_risk
 
             vt_risk = 0.0
             if dest_ip in honeypots:
                 # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                 vt_risk = 4.0
+                if vt_risk > _best_risk_seen:
+                    _best_risk_seen = vt_risk
+                    reputation_target = dest_ip
             else:
                 if dest_ip and dest_ip != "unknown":
                     self.virustotal.enqueue_ip(dest_ip)
                 if top_domain:
                     self.virustotal.enqueue_domain(top_domain)
-                vt_risk = max(
-                    self.virustotal.risk_contribution("ip", dest_ip) if dest_ip else 0.0,
-                    self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
-                )
+                vt_ip_risk = self.virustotal.risk_contribution("ip", dest_ip) if dest_ip else 0.0
+                vt_domain_risk = self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
+                if vt_ip_risk >= vt_domain_risk:
+                    vt_risk = vt_ip_risk
+                    vt_risk_source = dest_ip
+                else:
+                    vt_risk = vt_domain_risk
+                    vt_risk_source = top_domain
                 if vt_risk > 0:
                     ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
+                    if vt_risk > _best_risk_seen:
+                        _best_risk_seen = vt_risk
+                        reputation_target = vt_risk_source
             features["vt_risk"] = vt_risk
 
             # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
@@ -731,8 +811,41 @@ class EnginePipeline:
                 if features.get("zeek_honeypot_hits", 0) > 0:
                     self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot"))
                 
-                if features.get("zeek_lateral_moves", 0) > 0:
+                # BUGFIX: found via a third-party review of a real tarpit alert, verified
+                # against production data -- this fed NetworkIntrusionHypothesis's own
+                # "Hard escalate for lateral scans (very rarely benign on a home network)"
+                # branch (hypotheses/engine.py), which force-escalates to HIGH whenever
+                # this evidence's value > 0 -- the SAME raw-connection-count gap already
+                # fixed at fp_engine.py's Stage-1 hard-stop and this file's lateral_threat
+                # (tarpit authorization), just missed here. A single legitimate SMB/SSH/
+                # RDP connection to one internal device is not "very rarely benign" --
+                # it's routine. Same distinct-target threshold as those two fixes.
+                lateral_unique_targets = int(features.get("zeek_lateral_unique_targets", 0) or 0)
+                lateral_evidence_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
+                if features.get("zeek_lateral_moves", 0) > 0 and lateral_unique_targets >= lateral_evidence_threshold:
                     self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan"))
+
+                # BUGFIX (reviewer suggestion, implemented): a device's own real-time
+                # HTTP/SSDP/DIAL requests to OTHER local devices for media-discovery
+                # purposes (Spotify Connect app discovery, Chromecast/UPnP device
+                # descriptors) were only ever surfaced as alert-display context
+                # (recent_http_reqs, computed after scoring already finished) -- never as
+                # an actual benign signal decision_engine.py's hypothesis competition could
+                # weigh. A device browsing for Spotify/Chromecast targets on its own LAN is
+                # not "more suspicious network activity"; it's exactly why HEE has a benign
+                # hypothesis track (see AdvertisingBurstHypothesis) rather than only ever
+                # scoring attack likelihood. Deliberately checked using the SAME zeek_fx.
+                # get_http_reqs() data source pipeline.py's own alert-display code already
+                # reads, just gathered here (evidence time) instead of only at
+                # alert-build time.
+                local_discovery_hits = _count_local_device_discovery_requests(self.zeek_fx, client_ip)
+                if local_discovery_hits > 0:
+                    self.evidence_store.add(Evidence(
+                        type="local_device_discovery", source="zeek", timestamp=now, device=dev_id,
+                        value=float(local_discovery_hits), confidence=0.7,
+                        independence_group="local_context",
+                        provenance="detector:zeek:local_device_discovery",
+                    ))
                 
                 reputation_value = max(ti_risk, abuse_risk, vt_risk)
                 if ti_match or abuse_risk > 0.0 or vt_risk > 0.0:
@@ -764,7 +877,15 @@ class EnginePipeline:
                             asn_owner = asn_info.autonomous_system_organization
                     except Exception:
                         pass
-                rep_vector = self.rep_classifier.classify(top_domain, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=asn_owner)
+                # BUGFIX: classify reputation_target (the domain/IP that actually earned
+                # ti_risk/abuse_risk/vt_risk), not top_domain -- see the BUGFIX comment
+                # above the ti_risk computation for the full incident (a genuinely
+                # innocent domain, Google's own c.pki.goog certificate-revocation
+                # endpoint, reached CRITICAL/"Confirmed Malicious IOC" purely because it
+                # happened to be _select_target_domain()'s "most notable domain in the
+                # window" pick while a DIFFERENT domain this same device also queried is
+                # what actually earned the risk score).
+                rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=asn_owner)
                 
                 # 3. Decision Engine
                 active_evidence = self.evidence_store.get_for_device(dev_id)
@@ -922,6 +1043,21 @@ class EnginePipeline:
                     state.suspicious_signature = ""
                     state.suspicious_since = 0.0
 
+                # BUGFIX (found via a 1.5h live alert audit): persistence-escalation
+                # (just above) can append " (persisted Ns)" onto primary_sig, and N keeps
+                # growing every cycle -- so a raw primary_sig comparison against a
+                # previously-stored raw signature almost never matches once a signature
+                # has escalated, even though the UNDERLYING signature hasn't changed at
+                # all. This fed the repeat-suppression gate below a false "signature
+                # changed" signal every cycle, defeating its normal 300s cadence and
+                # spamming an alert roughly every 60s+ for as long as the persistence
+                # held -- confirmed live via a real "DNS_EVASION (persisted Ns)" alert
+                # storm. primary_sig_base strips the suffix so cadence/attribution both
+                # key off the stable underlying signature. Split on " (persisted " (not a
+                # bare space) since "Confirmed Malicious IOC" has internal spaces of its
+                # own.
+                primary_sig_base = primary_sig.split(" (persisted ", 1)[0]
+
                 risk_delta = abs(risk - getattr(state, "last_alert_confidence", 0.0))
                 time_elapsed = now - getattr(state, "last_alert_time", 0.0)
 
@@ -931,11 +1067,12 @@ class EnginePipeline:
                 # strong signal now reaches the operator instead of going silent until a
                 # second independent source corroborates it.
                 if decision["state"] in (DecisionState.HIGH, DecisionState.CRITICAL, DecisionState.SUSPICIOUS):
-                    if time_elapsed > 300 or (time_elapsed > 60 and (risk_delta >= 1.0 or primary_sig != getattr(state, "last_alert_signature", ""))):
+                    if time_elapsed > 300 or (time_elapsed > 60 and (risk_delta >= 1.0 or primary_sig_base != getattr(state, "last_alert_signature_base", ""))):
                         LOGGER.warning("Alert Triggered for %s! Risk: %.2f, Signature: %s", hostname, risk, primary_sig)
                         state.last_alert_time = now
                         state.last_alert_confidence = risk
                         state.last_alert_signature = primary_sig
+                        state.last_alert_signature_base = primary_sig_base
 
                         outbound_bytes = features.get("zeek_outbound_bytes", 0)
                         data_classification = classify_payload_size(outbound_bytes)
@@ -964,8 +1101,15 @@ class EnginePipeline:
                         # unaddressed and can keep re-firing. dns_evasion.py attaches one
                         # representative unexplained IP onto its Evidence.domain field
                         # specifically so this alert-building step can prefer it here.
+                        # BUGFIX: every domain-attribution branch below was written
+                        # against the clean, un-suffixed signature name -- primary_sig_base
+                        # (computed earlier, stripping any " (persisted Ns)" suffix from
+                        # the cross-cycle escalation step) is used here instead of raw
+                        # primary_sig so persisted alerts get the same correct attribution
+                        # as fresh ones. See primary_sig_base's own comment above for the
+                        # full incident writeup.
                         alert_dest_ip = dest_ip
-                        if primary_sig == "DNS_EVASION":
+                        if primary_sig_base == "DNS_EVASION":
                             for ev in active_evidence:
                                 if ev.type == "dns_evasion_anomaly" and ev.domain:
                                     alert_dest_ip = ev.domain
@@ -986,7 +1130,7 @@ class EnginePipeline:
                         # evidence's own .domain field (see its own comment on this exact
                         # transparency gap) -- this was simply never consumed here.
                         alert_target_domain = target_malicious_domain
-                        if primary_sig == "DNS_COVERT_TUNNELING":
+                        if primary_sig_base == "DNS_COVERT_TUNNELING":
                             for ev in active_evidence:
                                 if ev.type == "dns_tunnel_v2" and ev.domain:
                                     alert_target_domain = ev.domain
@@ -1002,7 +1146,7 @@ class EnginePipeline:
                         # unrelated devices with zero threat-intel corroboration -- both
                         # symptoms of this exact attribution gap, not necessarily evidence
                         # of a real coordinated threat across those devices.
-                        elif primary_sig == "DGA_BOTNET_C2":
+                        elif primary_sig_base == "DGA_BOTNET_C2":
                             for ev in active_evidence:
                                 if ev.type == "dns_dga_burst" and ev.domain:
                                     alert_target_domain = ev.domain
@@ -1023,8 +1167,28 @@ class EnginePipeline:
                         # correctly carries the real flagged IP into destination_ip -- this
                         # just stops a second, unrelated domain from also being attached
                         # where none exists.
-                        elif primary_sig == "DNS_EVASION":
+                        elif primary_sig_base == "DNS_EVASION":
                             alert_target_domain = "unknown"
+                        # BUGFIX: found via a live third-party review of a real CRITICAL
+                        # alert -- decision_engine.py's tier-5 reputation escalation
+                        # ("Confirmed Malicious IOC", rep.tier==5) is a SEPARATE verdict
+                        # path from the hypothesis competition above; it never got a
+                        # branch here either, so it stayed on target_malicious_domain
+                        # too. reputation_target (computed alongside ti_risk/abuse_risk/
+                        # vt_risk above) is the domain/IP that actually earned the tier-5
+                        # classification -- use it here for the same reason the branches
+                        # above use their own evidence-linked domain, so the alert
+                        # displays/records/immunizes the real source of the risk, not an
+                        # unrelated bystander domain. reputation_target may be an IP
+                        # (abuse_risk and part of vt_risk are IP-only signals) rather
+                        # than a domain, so route it to whichever field actually fits.
+                        elif primary_sig_base == "Confirmed Malicious IOC":
+                            try:
+                                ipaddress.ip_address(reputation_target)
+                                alert_dest_ip = reputation_target
+                                alert_target_domain = "unknown"
+                            except (ValueError, TypeError):
+                                alert_target_domain = reputation_target or "unknown"
 
                         alert_payload = {
                             "type": "ids_alert",
@@ -1164,7 +1328,20 @@ class EnginePipeline:
                         else:
                             # Real threat or low-confidence alert -> execute IPS containment & publish Telegram
                             containment_status = "🔓 UNBLOCKED / ACTIVE (Monitoring Only)"
-                            lateral_threat = (features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_honeypot_hits", 0) > 0)
+                            # BUGFIX: found via a live third-party review of a real tarpit alert --
+                            # this authorizes Layer-2 tarpit containment (bypassing the normal
+                            # risk>=9.0 floor entirely), but zeek_lateral_moves is a raw connection
+                            # COUNT, so a single ordinary SMB/SSH/RDP connection to one internal
+                            # device satisfied `> 0` identically to a genuine multi-target scan --
+                            # confirmed live: zeek_lateral_moves=1 alone triggered tarpit. Same fix
+                            # as fp_engine.py's Stage-1 Check 2 -- require a genuine distinct-target
+                            # count, not just "at least one connection happened."
+                            lateral_targets_count = int(features.get("zeek_lateral_unique_targets", 0) or 0)
+                            lateral_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
+                            lateral_threat = (
+                                (features.get("zeek_lateral_moves", 0) > 0 and lateral_targets_count >= lateral_threshold)
+                                or features.get("zeek_honeypot_hits", 0) > 0
+                            )
                             # PHASE 19 FIX: decision["state"] alone can no longer be trusted here --
                             # it reads HIGH both when decision_engine.py itself found >=2 genuinely
                             # independent corroborating sources, AND when the escalation block above
@@ -1383,7 +1560,7 @@ class EnginePipeline:
                                 # alert_dest_ip instead of the raw dest_ip, for the same reason
                                 # alert_dest_ip exists at all: it's the one already-corrected IP variable.
                                 target_display = (
-                                    alert_dest_ip if primary_sig == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"
+                                    alert_dest_ip if primary_sig_base == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"
                                     else alert_target_domain if alert_target_domain and alert_target_domain != "unknown"
                                     else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")
                                 )
@@ -1437,7 +1614,20 @@ class EnginePipeline:
                                     f"- Application: `{app_name}`\n"
                                 )
                                 if scanned_ports:
-                                    alert_msg += f"- Lateral Scans: `{', '.join(scanned_ports)}`\n"
+                                    # BUGFIX (reviewer suggestion, implemented): this used to show
+                                    # only the port list ("445 (SMB)"), reading like a confirmed
+                                    # multi-target scan regardless of whether it was one connection
+                                    # or many -- confirmed live: a single-connection alert displayed
+                                    # identically to a genuine scan. Now shows the distinct-target
+                                    # count and raw connection count alongside the ports, the same
+                                    # numbers that now actually gate containment (see
+                                    # zeek_lateral_unique_targets).
+                                    lateral_targets_display = int(features.get("zeek_lateral_unique_targets", 0) or 0)
+                                    lateral_conns_display = int(features.get("zeek_lateral_moves", 0) or 0)
+                                    alert_msg += (
+                                        f"- Lateral Scans: `{', '.join(scanned_ports)}` "
+                                        f"({lateral_conns_display} connection(s) across {lateral_targets_display} distinct target(s))\n"
+                                    )
                                 if recent_http_reqs:
                                     alert_msg += f"- Recent HTTP requests: `{', '.join(recent_http_reqs)}`\n"
                                 # BUGFIX (dead-code audit): _killchain_hist was snapshotted under
@@ -1453,13 +1643,32 @@ class EnginePipeline:
                                 for line in why_lines:
                                     alert_msg += f"- {line}\n"
 
+                                # BUGFIX (reviewer suggestion, implemented): a Stage-1 hard-stop's
+                                # fp_verdict["confidence"] is a HARDCODED categorical 0.0, not a
+                                # computed probability -- it means "this bypassed probabilistic
+                                # scoring entirely because a hard-stop fired," not "we computed a
+                                # 0% chance of false positive." Displaying it as a bare percentage
+                                # implied a precision/certainty CL-AFPE never actually claims.
+                                # Stage 2/3-scored alerts (a real ML probability) still show the
+                                # percentage as before.
+                                fp_stage = str(fp_verdict.get("stage", ""))
+                                if "HARD_STOP" in fp_stage:
+                                    fp_confidence_line = (
+                                        f"- Could this still be a false positive? → `bypassed FP scoring` "
+                                        f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')} — {fp_stage}, "
+                                        f"not a probabilistic estimate)_\n"
+                                    )
+                                else:
+                                    fp_confidence_line = (
+                                        f"- Could this still be a false positive? → `{fp_pct}%` "
+                                        f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})_\n"
+                                    )
                                 alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📊 *CONFIDENCE* _(two different questions — not directly comparable)_\n"
                                     f"- Is this really the attack pattern? → `{threat_conf_pct}%` "
                                     f"_({len(grouped_evidence)} independent signal(s) agree)_\n"
-                                    f"- Could this still be a false positive? → `{fp_pct}%` "
-                                    f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})_\n"
+                                    f"{fp_confidence_line}"
                                 )
 
                                 if threat_dns_str and "No suspicious" not in threat_dns_str:

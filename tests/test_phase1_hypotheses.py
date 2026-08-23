@@ -140,7 +140,18 @@ check("two distinct tunneling signal categories push DNSTunnelingV2Hypothesis to
 # "aiv-delivery.net" (this one) — a curated-list gap, not a detector bug. Fixed by
 # adding "aiv-delivery.net" alongside "aiv-cdn.net" in utils.py's
 # _CDN_PARENT_ALLOWLIST and _SYSTEM_SAFE_BASE_DOMAINS. This locks that fix in.
-aiv_features = {"max_label_length": 62.0, "dns_tunneling_domains": 3.0}
+#
+# UPDATED (later phase): threat_signals.py's CDN exemption now checks the evidence's
+# OWN domain (max_label_domain/tunnel_domain_examples), not top_domain -- top_domain
+# used to double as "the domain this evidence is about" by convention alone, which is
+# exactly the bug a later phase fixed for the opposite case (a SAFE evidence domain
+# escaping exemption because top_domain was something unrelated). max_label_domain is
+# added here to match what dns_features.py's real get_features() always populates
+# whenever max_label_length is set (they're written together in the same loop) --
+# this test previously relied on top_domain standing in for it, which only worked by
+# coincidence before that fix.
+aiv_features = {"max_label_length": 62.0, "dns_tunneling_domains": 3.0,
+                "max_label_domain": "api.eu-west-1.aiv-delivery.net"}
 ev_aiv = detector.detect("dev_x", aiv_features, top_domain="api.eu-west-1.aiv-delivery.net")
 check("REGRESSION: Amazon Prime Video's aiv-delivery.net CDN no longer trips "
       "DNS_COVERT_TUNNELING on long/encoded edge-node subdomains",
@@ -156,16 +167,31 @@ check("ConnectionAbuseHypothesis becomes the winning attack hypothesis",
       result["attack"]["name"] == "CONNECTION_ABUSE", f"got={result['attack']}")
 
 
-# ── Test 6: telemetry-domain dampening suppresses DGA/tunnel noise ─────────────────
+# ── Test 6: telemetry-domain dampening suppresses the classifier-score DGA branch ──
 # apple.com traffic is treated as telemetry-safe by utils.is_telemetry_domain in most
 # builds of this codebase's allowlist; use a domain explicitly configured as telemetry-safe
 # via the module's own is_telemetry_domain to keep this test resilient to allowlist changes.
+#
+# UPDATED (later phase): the domain-EXAMPLE-driven branches (suspicious_domains >= 15
+# or >= 5-with-entropy, i.e. what dga_features above exercises) no longer use this
+# device-wide top_domain-based gate at all -- suspicious_domains itself now excludes
+# telemetry domains at the source (dns_features.py's suspicious_dga() call site), so a
+# real suspicious_domains=20 count can no longer legitimately consist of telemetry
+# domains in the first place. Re-using dga_features (sd=20) with a telemetry
+# top_domain here would now be a self-contradictory scenario (that count could never
+# arise from telemetry-only domains post-fix) rather than a real regression -- fixed by
+# testing the ONE branch that still has no per-domain source protection and therefore
+# still needs (and still has) the device-wide gate: the pure classifier-score path.
 from utils import is_telemetry_domain
 telemetry_probe_domain = "push.apple.com"
+classifier_only_features = {"suspicious_domains": 0.0, "entropy_avg": 0.0, "dga_score": 0.75}
 if is_telemetry_domain(telemetry_probe_domain):
-    ev_telemetry = detector.detect("dev_x", dga_features, top_domain=telemetry_probe_domain)
-    check(f"DGA burst evidence is dampened (suppressed) for known-telemetry domain '{telemetry_probe_domain}'",
+    ev_telemetry = detector.detect("dev_x", classifier_only_features, top_domain=telemetry_probe_domain)
+    check(f"DGA classifier-score evidence is dampened (suppressed) for known-telemetry domain '{telemetry_probe_domain}'",
           not any(e.type == "dns_dga_burst" for e in ev_telemetry))
+    ev_non_telemetry = detector.detect("dev_x", classifier_only_features, top_domain="some-unrelated-domain.example")
+    check("REGRESSION GUARD: the same classifier-score evidence still fires for a non-telemetry top_domain",
+          any(e.type == "dns_dga_burst" for e in ev_non_telemetry))
 else:
     print(f"[SKIP] telemetry dampening check — '{telemetry_probe_domain}' not classified as telemetry in this build")
 

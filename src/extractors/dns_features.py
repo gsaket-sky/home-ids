@@ -340,7 +340,16 @@ class FeatureExtractor:
                 fanout_by_base[base].add(domain)
 
             entropy_sum += entropy(sublabel)
-            if suspicious_dga(domain):
+            # BUGFIX: suspicious_dga() itself only excludes CDN/cloud domains (see its own
+            # docstring), not telemetry -- unlike tunneling_domains/fanout_by_base just
+            # above, which already exclude both at this exact source. Without this, the
+            # only telemetry protection for suspicious_domains was threat_signals.py's
+            # device-wide `is_telemetry` gate keyed on an unrelated "most notable domain in
+            # the window" -- which both false-positived (a non-telemetry domain suppressed
+            # because some OTHER domain in the window was telemetry) and, worse,
+            # false-negatived (a genuinely suspicious domain silently never counted at all
+            # whenever the device's top_domain happened to be telemetry-recognized).
+            if suspicious_dga(domain) and not is_telemetry_domain(domain):
                 suspicious += 1
                 # BUGFIX (found via a production alerts.json audit): this loop already
                 # checks each domain individually, but only ever counted the total -- the
