@@ -17,6 +17,7 @@ import math
 import time
 import uuid
 from pathlib import Path
+from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
 from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1
@@ -179,6 +180,76 @@ def _describe_evidence(ev) -> str:
         if len(parts) == 4 and parts[3] and parts[3] != "unknown":
             notice_suffix = f" — `{parts[3]}`"
     return f"{text}{domain_suffix}{notice_suffix}"
+
+
+# ALERT REDESIGN: the previous Telegram alert exposed two raw, differently-scaled
+# percentages ("Is this the attack? -> 89%" / "Could this be a FP? -> 12%") and left
+# it to the operator to reconcile them under a live incident, with no statement of
+# what (if anything) already happened or what happens if they do nothing. These two
+# helpers compute that reconciliation once, in plain language, instead of leaving it
+# to the reader -- see the alert_msg assembly below for how they're used.
+def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
+    """Returns (already_done_emoji, already_done_text, your_move_text, if_nothing_text)
+    for the alert's top status block, keyed off the same action_summary already
+    derived from containment_status. `mixed_signal` (true confidence conflicts with
+    the false-positive check) softens an "already blocked, nothing to do" line into
+    a "please double-check" line without changing what action was actually taken.
+    """
+    contained_text = {
+        "tarpitted (Layer-2)": "device tarpitted at Layer-2 (traffic slowed/contained).",
+        "router isolated": "device isolated at the router (WAN access cut).",
+        "auto-blocked": "device auto-blocked from the network.",
+    }
+    if action_summary in contained_text:
+        your_move = (
+            "review below -- there's a real chance this is a false positive. Release if it looks wrong."
+            if mixed_signal else
+            'nothing required -- tap "Release" only if you\'re sure this is a false positive.'
+        )
+        return "✅", contained_text[action_summary], your_move, "the block stays in place until you release it."
+
+    if action_summary == "awaiting approval":
+        return (
+            "⏳", "nothing yet -- action is queued, waiting for your approval via the buttons below.",
+            "approve or release using the buttons below.",
+            "the device stays on the network, unblocked, until you approve isolation.",
+        )
+
+    return (
+        "⚠️", "nothing -- traffic is being monitored only, not blocked.",
+        "review below and decide manually.",
+        "the device stays on the network; this alert repeats if the behavior continues.",
+    )
+
+
+def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_pct: int, fp_calibrated_pct: Optional[int]) -> tuple:
+    """Returns (confidence_label, confidence_line_text, mixed_signal_bool). Folds the
+    two previously-separate raw percentages into one synthesized verdict -- the
+    system already computes which side "wins" (that's what gates HIGH/CRITICAL and
+    the >=0.75 false-positive-lean check below), so it should say so rather than
+    handing the reader two uncomparable numbers.
+    """
+    fp_stage = str(fp_verdict.get("stage", ""))
+    if "HARD_STOP" in fp_stage:
+        return "Very High", "Very High -- matched a known-bad signature directly _(not a probabilistic estimate)_", False
+
+    fp_risk_pct = fp_calibrated_pct if fp_calibrated_pct is not None else fp_pct
+    calib_note = "" if fp_calibrated_pct is not None else " _(uncalibrated estimate)_"
+
+    if fp_risk_pct >= 50:
+        label = "Mixed"
+        detail = (f"attack pattern matches ({threat_conf_pct}%), but our false-positive check leans "
+                  f"benign ({fp_risk_pct}%{calib_note} chance this is a false positive) -- worth a manual look")
+    elif fp_risk_pct >= 25:
+        label = "Moderate"
+        detail = (f"attack pattern matches ({threat_conf_pct}%); some chance this is benign "
+                  f"({fp_risk_pct}%{calib_note}) -- quick review recommended")
+    else:
+        label = "High"
+        detail = (f"attack pattern strongly matches ({threat_conf_pct}%), and our false-positive check "
+                  f"disagrees only weakly ({fp_risk_pct}%{calib_note} chance this is benign)")
+
+    return label, f"{label} -- {detail}", fp_risk_pct >= 50
 
 
 class EnginePipeline:
@@ -1310,6 +1381,9 @@ class EnginePipeline:
                         alert_payload["fp_verdict"] = {
                             "verdict": fp_verdict.get("verdict"),
                             "confidence": fp_verdict.get("confidence"),
+                            # VERSION 11 (P2 follow-up): None whenever no reliable
+                            # calibration is loaded -- see fp_engine.py's _apply_calibration().
+                            "calibrated_confidence": fp_verdict.get("calibrated_confidence"),
                             "stage": fp_verdict.get("stage"),
                         }
 
@@ -1597,7 +1671,14 @@ class EnginePipeline:
                                 else:
                                     threat_dns_header = "🕒 *Threat-Filtered DNS Sequence:*"
 
+                                # calibrated_confidence is None whenever no reliable calibration is
+                                # loaded (train_fp_classifier.py hasn't run with enough held-out data
+                                # yet) -- _build_confidence_line() below appends an explicit
+                                # "(uncalibrated estimate)" caveat in that case rather than silently
+                                # implying precision that isn't there.
                                 fp_pct = int(fp_verdict.get("confidence", 0.0) * 100)
+                                fp_calibrated = fp_verdict.get("calibrated_confidence")
+                                fp_calibrated_pct = int(fp_calibrated * 100) if fp_calibrated is not None else None
 
                                 # PHASE 21-ALERT-REDESIGN: this whole block only runs inside
                                 # `if not fp_verdict["suppress"] and telegram_worthy:` (Phase A's
@@ -1692,21 +1773,26 @@ class EnginePipeline:
                                                    else "awaiting approval" if "WAITING FOR APPROVAL" in containment_status
                                                    else "monitoring only")
 
-                                if fp_verdict["confidence"] >= 0.75:
-                                    recommendation = (
-                                        f"⚠️ *Possibly a false positive despite reaching {decision_state_for_rec}.* "
-                                        f"CL-AFPE's own check leans benign ({fp_pct}%) -- review before acting."
-                                    )
-                                else:
-                                    recommendation = (
-                                        f"➡️ *Investigate.* {len(grouped_evidence)} independent signal(s) "
-                                        f"corroborated before containment fired."
-                                    )
+                                # See _build_confidence_line/_build_status_lines module docstrings:
+                                # these replace the old two-raw-percentages CONFIDENCE block and the
+                                # separately-worded severity_badge/action_summary/recommendation trio
+                                # with one reconciled verdict and one status block that says what
+                                # already happened, what's expected of the operator, and what happens
+                                # if they do nothing -- computed once here instead of left for the
+                                # reader to piece together from three different lines.
+                                confidence_label, confidence_line, mixed_signal = _build_confidence_line(
+                                    threat_conf_pct, fp_verdict, fp_pct, fp_calibrated_pct
+                                )
+                                status_emoji, status_done, status_move, status_if_idle = _build_status_lines(
+                                    action_summary, mixed_signal
+                                )
 
                                 alert_msg = (
                                     f"🚨 *THREAT — {hostname}* ({client_ip})\n\n"
-                                    f"{severity_badge}  *{threat_name}* — {action_summary}\n"
-                                    f"{recommendation}\n"
+                                    f"{severity_badge}  *{threat_name}*\n\n"
+                                    f"{status_emoji} *Already done:* {status_done}\n"
+                                    f"👉 *Your move:* {status_move}\n"
+                                    f"⏱ *If you do nothing:* {status_if_idle}\n"
                                 )
                                 # VERSION 10 (incident aggregation): occurrence_count > 1 means
                                 # this Telegram send is a periodic "still ongoing" update or a
@@ -1753,40 +1839,21 @@ class EnginePipeline:
                                     alert_msg += f"- Kill-chain trajectory: `{' → '.join(_killchain_hist)}`\n"
                                 alert_msg += f"- Action taken: `{containment_status}`\n"
 
-                                alert_msg += "\n🧠 *WHY* _(evidence, strongest first)_\n"
+                                alert_msg += f"\n🧠 *WHY* _({len(grouped_evidence)} independent signal(s), strongest first)_\n"
                                 for line in why_lines:
                                     alert_msg += f"- {line}\n"
 
-                                # BUGFIX (reviewer suggestion, implemented): a Stage-1 hard-stop's
-                                # fp_verdict["confidence"] is a HARDCODED categorical 0.0, not a
-                                # computed probability -- it means "this bypassed probabilistic
-                                # scoring entirely because a hard-stop fired," not "we computed a
-                                # 0% chance of false positive." Displaying it as a bare percentage
-                                # implied a precision/certainty CL-AFPE never actually claims.
-                                # Stage 2/3-scored alerts (a real ML probability) still show the
-                                # percentage as before.
-                                fp_stage = str(fp_verdict.get("stage", ""))
-                                if "HARD_STOP" in fp_stage:
-                                    fp_confidence_line = (
-                                        f"- Could this still be a false positive? → `bypassed FP scoring` "
-                                        f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')} — {fp_stage}, "
-                                        f"not a probabilistic estimate)_\n"
-                                    )
-                                else:
-                                    fp_confidence_line = (
-                                        f"- Could this still be a false positive? → `{fp_pct}%` "
-                                        f"_(CL-AFPE verdict: {fp_verdict.get('verdict', 'N/A')})_\n"
-                                    )
                                 alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
-                                    f"📊 *CONFIDENCE* _(two different questions — not directly comparable)_\n"
-                                    f"- Is this really the attack pattern? → `{threat_conf_pct}%` "
-                                    f"_({len(grouped_evidence)} independent signal(s) agree)_\n"
-                                    f"{fp_confidence_line}"
+                                    f"📊 *CONFIDENCE:* {confidence_line}\n"
                                 )
 
                                 if threat_dns_str and "No suspicious" not in threat_dns_str:
-                                    alert_msg += f"\n━━━━━━━━━━━━━━━━━━━━\n{threat_dns_header}\n{threat_dns_str}\n"
+                                    alert_msg += (
+                                        f"\n━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"🔧 *Technical detail* _(optional)_\n"
+                                        f"{threat_dns_header}\n{threat_dns_str}\n"
+                                    )
 
 
                                 reply_markup = None

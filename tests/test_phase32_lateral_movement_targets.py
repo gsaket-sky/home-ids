@@ -288,13 +288,17 @@ check("THE FIX: the 'Lateral Scans' alert line now shows the distinct-target cou
       "alongside the port list, not just the ports -- the exact numbers that now "
       "actually gate containment",
       "distinct target(s)" in pipeline_src)
-check("THE FIX: a Stage-1 hard-stop's FP-confidence line no longer displays a bare "
-      "'0%' (a hardcoded categorical value, not a computed probability) -- now reads "
-      "'bypassed FP scoring' with the real stage name",
-      '"HARD_STOP" in fp_stage' in pipeline_src and "bypassed FP scoring" in pipeline_src)
-check("REGRESSION GUARD: a genuinely Stage-2/3-scored (non-hard-stop) alert still shows "
-      "its real computed FP percentage, unaffected by the hard-stop wording branch",
-      "f\"- Could this still be a false positive? → `{fp_pct}%` \"" in pipeline_src)
+check("THE FIX (superseded by the Phase 28/37 alert redesign -- _build_confidence_line() "
+      "now owns this, tested directly in test_phase28_alert_redesign.py): a Stage-1 "
+      "hard-stop's confidence line no longer displays a bare '0%' (a hardcoded "
+      "categorical value, not a computed probability) -- pipeline.py still routes "
+      "through the same HARD_STOP check, just via the reconciled helper now",
+      '"HARD_STOP" in fp_stage' in pipeline_src and "not a probabilistic estimate" in pipeline_src)
+check("REGRESSION GUARD: pipeline.py's CONFIDENCE line is built via the reconciled "
+      "_build_confidence_line() helper (VERSION 11's calibration-aware fp_score label "
+      "folded in -- see test_phase28_alert_redesign.py for direct coverage of the "
+      "helper itself), not the old two-separate-percentages format",
+      "confidence_label, confidence_line, mixed_signal = _build_confidence_line(" in pipeline_src)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

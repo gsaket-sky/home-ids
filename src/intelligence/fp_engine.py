@@ -627,6 +627,14 @@ class AutonomousFPEngine:
             return {
                 "verdict": "FALSE_POSITIVE",
                 "confidence": combined,
+                # VERSION 11 (P2 follow-up, review #13/#14): found via a live alert --
+                # the Telegram "CONFIDENCE" section (pipeline.py) reads fp_verdict's
+                # top-level keys directly, never the reasons list above, so the
+                # FP_MODEL_SCORE/calibration labeling never actually reached the one
+                # place a human taps approve/reject from. Exposed as a real key here
+                # so pipeline.py can show it -- None (not a fabricated number) when no
+                # reliable calibration is loaded.
+                "calibrated_confidence": calibrated_prob,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": reasons,
                 "suppress": True,
@@ -652,6 +660,7 @@ class AutonomousFPEngine:
             return {
                 "verdict": "UNCERTAIN",
                 "confidence": combined,
+                "calibrated_confidence": calibrated_prob,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (uncalibrated classifier output){calibration_note}",
@@ -679,6 +688,7 @@ class AutonomousFPEngine:
             return {
                 "verdict": "CONFIRMED_THREAT",
                 "confidence": combined,
+                "calibrated_confidence": calibrated_prob,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
                     f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (uncalibrated classifier output){calibration_note}",

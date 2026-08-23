@@ -536,13 +536,13 @@ reactive_capture:
   # a real binary and a ruleset you manage yourself (e.g. `suricata-update --etopen`
   # with a trimmed "security"/"balanced" policy, not the full noisy feed), and
   # (3) set this to true. [LIVE]
-  reactive_capture_suricata_enabled: false
+  reactive_capture_suricata_enabled: true
 
   # Max seconds to let one batch scan run before giving up on it (non-fatal --
   # the burst's Zeek/DNS-evasion findings are unaffected either way). A burst pcap
   # is bounded (reactive_capture_burst_seconds above), so this should rarely if
   # ever be reached. [LIVE]
-  reactive_capture_suricata_timeout_seconds: 60.0
+  reactive_capture_suricata_timeout_seconds: 240.0
 
   # reactive_capture_zeek_bin moved to the "external_system_paths" section at the
   # very bottom of this file, alongside pihole_db/zeek_log_dir -- same reasoning
@@ -696,4 +696,4 @@ external_system_paths:
   # /var/lib/suricata/rules/suricata.rules after suricata-update). Empty/missing
   # means the scan silently produces no findings -- not an error, see
   # suricata_scan.py's run_suricata_on_pcap(). [LIVE]
-  reactive_capture_suricata_rules_path: ""
+  reactive_capture_suricata_rules_path: /var/lib/suricata/rules/suricata.rules

@@ -245,6 +245,49 @@ check("REGRESSION GUARD: the SAME 63-char label length on a genuinely unrecogniz
       f"got {genuinely_suspicious_evidence}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section F: calibrated_confidence actually reaches the Telegram-facing text, not just
+# fp_engine.py's internal reasons list. Found via a LIVE alert during this session's own
+# rollout: the "CONFIDENCE" section in pipeline.py reads fp_verdict's top-level keys
+# directly and never touched reasons at all, so the review #13/#14 FP_MODEL_SCORE/
+# calibration labeling never reached the one place a human actually taps
+# approve/reject from.
+# ═══════════════════════════════════════════════════════════════════════════════════
+with tempfile.TemporaryDirectory() as tmpdir_f:
+    fp_f = AutonomousFPEngine(config={}, state_dir=tmpdir_f)
+    uncertain_alert = {
+        "device": {"id": "dev_f", "hostname": "paperless"},
+        "network_context": {"queried_domain": "unknown", "destination_ip": "104.156.84.32"},
+        "signature": "DNS_POLICY_BYPASS",
+    }
+    verdict_f = fp_f.evaluate(uncertain_alert, {}, risk_score=6.0, ti_engine=None)
+    check("fp_engine.evaluate()'s returned dict has a 'calibrated_confidence' key "
+          "(not just buried in the reasons text) for every Stage-2/3-scored branch",
+          "calibrated_confidence" in verdict_f, f"got keys={list(verdict_f.keys())}")
+    check("with no calibration file loaded (the common case until a retrain has run "
+          "with enough held-out data), calibrated_confidence is None, not a fabricated "
+          "number",
+          verdict_f["calibrated_confidence"] is None, f"got {verdict_f['calibrated_confidence']}")
+
+with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
+    pipeline_src_f = f.read()
+check("SOURCE-GUARD: pipeline.py's Telegram CONFIDENCE section reads "
+      "calibrated_confidence from fp_verdict",
+      'fp_verdict.get("calibrated_confidence")' in pipeline_src_f)
+check("SOURCE-GUARD: when no calibration is loaded, the Telegram CONFIDENCE line "
+      "explicitly flags the estimate as uncalibrated rather than showing a bare, "
+      "unqualified percentage (ALERT REDESIGN: reworded from 'uncalibrated model "
+      "score, not a validated probability' to the shorter reconciled-verdict phrasing, "
+      "same guarantee)",
+      '"" if fp_calibrated_pct is not None else " _(uncalibrated estimate)_"' in pipeline_src_f)
+check("SOURCE-GUARD: when calibration IS loaded, fp_calibrated_pct (the calibrated "
+      "percentage) is what feeds the Telegram CONFIDENCE line, not the raw score alone",
+      "fp_calibrated_pct if fp_calibrated_pct is not None else fp_pct" in pipeline_src_f)
+check("SOURCE-GUARD: alert_payload['fp_verdict'] (the persisted audit trail) also "
+      "carries calibrated_confidence, not just the live Telegram text",
+      '"calibrated_confidence": fp_verdict.get("calibrated_confidence")' in pipeline_src_f)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")
