@@ -298,8 +298,11 @@ class MetricsExporter:
             beaconing_volume_metric.labels(str_dev_id, str_host, str_type).set(features.get("top_domain_ratio", 0.0))
             jitter_cv_metric.labels(str_dev_id, str_host, str_type).set(features.get("min_jitter_cv", 0.0))
 
-            # Map killchain_phase string to numerical gauge (0=NORMAL, 1=RECON, 2=C2, 3=LATERAL, 4=EXFIL)
-            phase_map = {"NORMAL": 0.0, "RECON": 1.0, "C2": 2.0, "LATERAL": 3.0, "EXFIL": 4.0}
+            # Map killchain_phase string to numerical gauge (0=NORMAL, 1=RECON, 2=C2, 3=LATERAL, 4=EXFIL).
+            # VERSION 11 (P3, review #22): dns_features.py's _determine_killchain_phase()
+            # now returns SUSPECTED_-prefixed labels (display-honesty fix, not a
+            # detection-threshold change) -- keys here updated to match.
+            phase_map = {"NORMAL": 0.0, "SUSPECTED_RECON": 1.0, "SUSPECTED_C2": 2.0, "SUSPECTED_LATERAL": 3.0, "SUSPECTED_EXFIL": 4.0}
             kc_phase_val = phase_map.get(features.get("killchain_phase", "NORMAL"), 0.0)
             killchain_phase_metric.labels(str_dev_id, str_host, str_type).set(kc_phase_val)
 

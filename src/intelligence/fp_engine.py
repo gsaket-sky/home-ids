@@ -207,6 +207,15 @@ class AutonomousFPEngine:
         # ML Model handles (None until background threads finish loading)
         # -----------------------------------------------------------------
         self._lgbm_session = None       # onnxruntime InferenceSession
+        # VERSION 11 (P2, review #13/#14): isotonic calibration breakpoints from
+        # train_fp_classifier.py's held-out split, or None if no calibration file
+        # exists yet / it was written with reliable=False (too little held-out data).
+        # See _apply_calibration() for how this is used -- purely additive to the
+        # audit trail, never changes what drives an actual suppress/threat verdict
+        # (those thresholds were chosen against the raw score's distribution;
+        # swapping the calibrated score in without re-validating them is a separate,
+        # bigger change this session deliberately doesn't make blind).
+        self._calibration: Optional[dict] = None
         self._embed_model = None        # fastembed TextEmbedding model
         self._safe_vendor_embeddings = None   # numpy (N, 384) normalised matrix
         self._safe_vendor_labels: list = []   # human-readable label per row
@@ -294,6 +303,7 @@ class AutonomousFPEngine:
         features: dict,
         risk_score: float,
         ti_engine=None,
+        decision: Optional[dict] = None,
     ) -> dict:
         """
         Evaluate a breach alert through the 3-stage autonomous pipeline.
@@ -306,6 +316,19 @@ class AutonomousFPEngine:
             features:       Raw feature dict from DNS/Zeek extractors.
             risk_score:     Risk score that triggered the alert (>= alert_threshold).
             ti_engine:      ThreatIntel engine for IOC cross-check (optional).
+            decision:       VERSION 11 (P0 fix): the already-computed decision_engine.py
+                            verdict dict for this same alert, when available. When
+                            decision["state"] == "CRITICAL", Stage 1 treats that as an
+                            immediate, authoritative hard-stop instead of independently
+                            re-deriving the same signal from raw `features` -- closes the
+                            gap a third-party review of live alerts.json found, where
+                            fp_engine's own thresholds could disagree with
+                            decision_engine.py's and produce a SUSPICIOUS/monitor HEE
+                            verdict sitting next to a CONFIRMED_THREAT fp_verdict on the
+                            same alert, with nothing reconciling them. Optional and
+                            defaults to None so direct/unit-test callers that evaluate
+                            fp_engine in isolation (no decision_engine involved at all)
+                            are unaffected.
 
         Returns:
             dict with keys:
@@ -355,7 +378,7 @@ class AutonomousFPEngine:
             # already get, every time, even for immunized domains. This closes audit
             # Finding #2 outright.
             # ==============================================================
-            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip)
+            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision)
             if stage1_triggers:
                 fp_engine_confirmed_threats_total.inc()
                 fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
@@ -406,7 +429,7 @@ class AutonomousFPEngine:
         # Real malware C2, port scans and honeypot access CANNOT be FPs.
         # ==================================================================
         LOGGER.debug("[FP ENGINE » Stage 1] Running hard-stop security filter...")
-        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip)
+        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision)
 
         if stage1_triggers:
             # One or more hard-stop signals fired → this is a real threat
@@ -475,7 +498,7 @@ class AutonomousFPEngine:
             # matching is specifically built to catch). Both branches now fall through
             # identically to Stage 3 and the weighted combined score below.
             LOGGER.info(
-                "📊 [FP ENGINE » Stage 2] %s: P(FP)=%.3f (threshold=%.2f) %s",
+                "📊 [FP ENGINE » Stage 2] %s: FP_MODEL_SCORE=%.3f (uncalibrated, threshold=%.2f) %s",
                 hostname, lgbm_prob, self.lgbm_fp_threshold,
                 "→ proceeding to Stage 3" if lgbm_prob >= self.lgbm_fp_threshold else "→ LOW FP probability (continuing to Stage 3 for corroboration)"
             )
@@ -553,6 +576,19 @@ class AutonomousFPEngine:
         # the actual decision and the audit-trail text below so they can never disagree.
         effective_suppress_threshold = self.get_device_suppress_threshold(device_id)
 
+        # VERSION 11 (P2, review #13/#14): a GENUINELY calibrated probability, when
+        # train_fp_classifier.py has fit one against a real held-out split (see
+        # _apply_calibration()'s docstring) -- purely additive to the audit trail
+        # below. Deliberately NOT used for the suppress/uncertain/threat branching
+        # above: effective_suppress_threshold and friends were chosen against the
+        # RAW score's distribution, and swapping the calibrated score into that
+        # decision without re-validating those thresholds against it is a separate,
+        # bigger change this session doesn't make blind.
+        calibrated_prob = self._apply_calibration(lgbm_prob)
+        calibration_note = (
+            f" [calibrated: {calibrated_prob:.3f}]" if calibrated_prob is not None else ""
+        )
+
         if combined >= effective_suppress_threshold:
             # ---------------------------------------------------------------
             # HIGH CONFIDENCE FALSE POSITIVE → auto-suppress + self-heal
@@ -575,9 +611,15 @@ class AutonomousFPEngine:
             self._apply_sigma_shift(device_id, hostname)
 
             # Self-healing Action 3: Write full audit log entry (never silently lost)
+            # VERSION 11 (P2, review #13/#14): labeled FP_MODEL_SCORE, not P(FP) -- this is
+            # a raw LightGBM classifier output, not a calibrated probability (no
+            # isotonic/Platt calibration has ever been run against a validation set), and
+            # FastEmbed similarity is contextual evidence about vendor-pattern resemblance,
+            # not a verdict on its own. Neither claim should be implied by the label a
+            # human or an LLM reads in this alert's audit trail.
             reasons = [
-                f"LightGBM P(FP)={lgbm_prob:.3f} (Stage 2)",
-                f"FastEmbed cosine similarity={embed_sim_str} → best match: '{embed_match}' (Stage 3)",
+                f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (Stage 2, uncalibrated classifier output){calibration_note}",
+                f"FastEmbed similarity (contextual evidence, not a verdict)={embed_sim_str} → closest known pattern: '{embed_match}' (Stage 3)",
                 f"Combined confidence={combined:.3f} >= {effective_suppress_threshold} (suppress threshold)",
             ]
             self._write_muted_log(alert_payload, "AUTONOMOUS_FP_SUPPRESSED", reasons, combined)
@@ -612,8 +654,8 @@ class AutonomousFPEngine:
                 "confidence": combined,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
-                    f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}' → best match: '{embed_match or 'N/A'}'",
+                    f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (uncalibrated classifier output){calibration_note}",
+                    f"FastEmbed similarity (contextual evidence, not a verdict)={embed_sim_str} for domain '{domain}' → closest known pattern: '{embed_match or 'N/A'}'",
                     f"Combined confidence={combined:.3f} insufficient to suppress (threshold={effective_suppress_threshold})",
                 ],
                 "suppress": False,
@@ -639,8 +681,8 @@ class AutonomousFPEngine:
                 "confidence": combined,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [
-                    f"LightGBM P(FP)={lgbm_prob:.3f}",
-                    f"FastEmbed similarity={embed_sim_str} for domain '{domain}' → best match: '{embed_match or 'N/A'}'",
+                    f"LightGBM FP_MODEL_SCORE={lgbm_prob:.3f} (uncalibrated classifier output){calibration_note}",
+                    f"FastEmbed similarity (contextual evidence, not a verdict)={embed_sim_str} for domain '{domain}' → closest known pattern: '{embed_match or 'N/A'}'",
                     "Alert pattern consistent with genuine threat activity",
                 ],
                 "suppress": False,
@@ -825,12 +867,14 @@ class AutonomousFPEngine:
     # ==========================================================================
 
     def _stage1_hard_stop(
-        self, features: dict, ti_engine, hostname: str, domain: str, dest_ip: str = ""
+        self, features: dict, ti_engine, hostname: str, domain: str, dest_ip: str = "",
+        decision: Optional[dict] = None,
     ) -> Optional[list]:
         """
         Fast filter for definitive threat signals that cannot be false positives.
 
         Checks are ordered from most to least severe:
+        0. (VERSION 11) decision_engine.py's own hard-stop verdict, when available
         1. ThreatIntel IOC match (Feodo, ThreatFox, OTX malware blacklists)
         2. Active lateral movement (internal port scanning)
         3. Malicious TLS fingerprint (JA3/JA4+ known malware libraries)
@@ -841,12 +885,29 @@ class AutonomousFPEngine:
             List of trigger strings if any hard-stop signal fires → CONFIRMED THREAT
             None if no hard-stop signals → proceed to Stage 2
         """
+        from utils import is_telemetry_domain, _is_cdn_or_cloud_domain
         triggers = []
+
+        # Check 0 (VERSION 11, P0 fix): if decision_engine.py already independently
+        # reached a hard-stop verdict of its own (honeypot / verified ARP spoof /
+        # geofencing / tier-5 confirmed IOC), recognize it immediately instead of
+        # silently re-deriving the same signal from raw features with a threshold that
+        # can drift out of sync with decision_engine.py's -- see evaluate()'s docstring
+        # for the live example a third-party review found (a SUSPICIOUS/monitor HEE
+        # verdict sitting next to a CONFIRMED_THREAT fp_verdict on the same alert).
+        if decision is not None and decision.get("state") == "CRITICAL":
+            triggers.append(f"HEE hard-stop verdict: {decision.get('explanation', 'unknown')}")
 
         # Check 1: ThreatIntel IOC (Feodo Tracker, ThreatFox, OTX)
         # If the queried domain is on a global malware blocklist, this CANNOT be a FP.
+        # VERSION 11 (P0 fix): was `> 0` -- ANY nonzero ThreatIntel score, however weak,
+        # unconditionally hard-stopped here, bypassing decision_engine.py's own tier
+        # logic (classifier.py's confirmed_ioc bar is ti_score > 2.0; a weaker hit is
+        # deliberately tier 4 / "monitor", never auto-blocked). Same bar as
+        # classifier.py now, so the two subsystems can no longer disagree about what
+        # "confirmed" means for the identical number.
         ti_risk = float(features.get("ti_risk", 0.0) or 0.0)
-        if ti_risk > 0:
+        if ti_risk > 2.0:
             triggers.append(
                 f"ThreatIntel IOC match (ti_risk={ti_risk:.2f}) – domain on global malware blacklist"
             )
@@ -898,9 +959,26 @@ class AutonomousFPEngine:
             LOGGER.debug("[Stage 1] %s: AbuseIPDB risk=%.1f", hostname, abuse)
 
         # Check 6: Exfiltration Payload Burst Hard-Stop
+        # VERSION 11 (P0 fix): a live alerts.json audit found this hard-stopping a
+        # routine Amazon AWS IoT/MQTT connection (TCP:8883, ASN owner "Amazon.com,
+        # Inc.") purely from outbound_bytes_z=9.3 on an otherwise-quiet baseline.
+        # threat_signals.py's own zeek_exfiltration evidence generator (the detector
+        # ExfiltrationHypothesis is actually built on) already requires an ABSOLUTE
+        # outbound_bytes floor -- a z-score alone just means "unusual for this
+        # device," not "a lot of data," and any device can produce one on a quiet
+        # enough baseline -- plus a telemetry/vendor-cloud exemption. This check had
+        # neither guard, so it was a strictly more aggressive, disagreeing copy of a
+        # check that already existed and was already correct elsewhere.
+        base_domain = self._extract_base_domain(domain)
         out_z = float(features.get("outbound_bytes_z", 0.0) or 0.0)
-        if out_z > 5.0:
-            triggers.append(f"Exfiltration Payload Burst (outbound_bytes_z={out_z:.2f})")
+        out_bytes = float(features.get("zeek_outbound_bytes", 0.0) or 0.0)
+        is_exempt_exfil_dest = bool(domain) and (
+            is_telemetry_domain(base_domain) or _is_cdn_or_cloud_domain(domain)
+        )
+        if out_z > 5.0 and out_bytes > 2_500_000 and not is_exempt_exfil_dest:
+            triggers.append(
+                f"Exfiltration Payload Burst (outbound_bytes_z={out_z:.2f}, bytes={int(out_bytes)})"
+            )
             LOGGER.warning("[Stage 1] %s: Exfiltration Hard-Stop triggered (Z=%.2f)", hostname, out_z)
 
         # Check 7 (PHASE 21D3): local confirmed-threat store. Once ANY device on this
@@ -910,7 +988,6 @@ class AutonomousFPEngine:
         # scratch -- the network gets collectively harder to compromise via the same
         # infrastructure, the more it confirms. TTL-bounded (see local_intel.py), so
         # months-stale infrastructure ages out rather than hard-stopping forever.
-        base_domain = self._extract_base_domain(domain)
         # BUGFIX: read-side twin of the guard in record_confirmed_threat() -- this
         # check matches on the ETLD+1 BASE DOMAIN, which is far too coarse for huge,
         # shared, multi-tenant vendor domains. record_confirmed_threat() now refuses
@@ -922,7 +999,6 @@ class AutonomousFPEngine:
         # can be weeks). Checking is_telemetry_domain() here too means an existing
         # poisoned entry stops being HONORED immediately on restart, without needing
         # to hand-edit the state file.
-        from utils import is_telemetry_domain
         domain_hit_eligible = bool(base_domain) and not is_telemetry_domain(base_domain)
         local_domain_hit = self.local_intel.check("domain", base_domain) if domain_hit_eligible else None
         # BUGFIX: read-side twin for the IP path, same reasoning as the domain guard
@@ -1092,7 +1168,7 @@ class AutonomousFPEngine:
             outputs = self._lgbm_session.run(None, {input_name: feat_vec})
 
             prob_fp = self._parse_onnx_prob(outputs)
-            LOGGER.debug("[Stage 2] %s: ONNX P(FP)=%.4f", hostname, prob_fp)
+            LOGGER.debug("[Stage 2] %s: ONNX FP_MODEL_SCORE=%.4f", hostname, prob_fp)
             return prob_fp
 
         except Exception as exc:
@@ -1354,7 +1430,11 @@ class AutonomousFPEngine:
         is_new_immunization = False
         threshold_bumped = False
 
-        if signature == "DNS_EVASION":
+        # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other possible name
+        # (hypotheses/engine.py) -- same dns_evasion_anomaly evidence, same "no domain,
+        # destination_ip is the correctable thing" shape, just the weaker/uncorroborated
+        # sub-case. Both route identically here.
+        if signature in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
             dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
             if dest_ip and dest_ip != "unknown":
                 is_new_immunization = self._immunize_domain(dest_ip, hostname, source=source)
@@ -1400,7 +1480,11 @@ class AutonomousFPEngine:
         event_type = "LLM_VALIDATED_FALSE_POSITIVE" if is_llm else "OPERATOR_MARKED_FALSE_POSITIVE"
         origin_text = "Ollama LLM (DeterministicValidator-passed)" if is_llm else "operator via Telegram"
 
-        if signature == "DNS_EVASION":
+        # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other possible name
+        # (hypotheses/engine.py) -- same dns_evasion_anomaly evidence, same "no domain,
+        # destination_ip is the correctable thing" shape, just the weaker/uncorroborated
+        # sub-case. Both route identically here.
+        if signature in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
             reasons = [
                 f"Marked as false positive (DNS-evasion blind-spot finding) by {origin_text}.",
                 f"Destination IP '{ip_immunized}' added to trust cache." if ip_immunized else
@@ -1573,6 +1657,80 @@ class AutonomousFPEngine:
             LOGGER.error("Failed to load per-device FP profiles: %s", exc, exc_info=True)
 
     # ==========================================================================
+    # VERSION 11 (P1, review #9/#10): PER-DEVICE LEARNED BEHAVIORAL BASELINE
+    # ==========================================================================
+    # Distinct from PHASE 13's threshold profiles above (which calibrate a NUMBER).
+    # This learns WHAT a device normally does -- destination ports, IP-owner ASNs,
+    # and base domains it has actually talked to before -- layered UNDER the
+    # existing, deliberately brand-free category classifier (DeviceProfileBenignHypothesis
+    # in hypotheses/engine.py). Fully generic and self-updating: nothing here is a
+    # hardcoded list, so it ports to any home network unchanged and adapts to
+    # whatever THIS network's devices actually do. Self-heals fully autonomously,
+    # same as _apply_sigma_shift() above -- a {device, destination} pair that keeps
+    # recurring without ever reaching CONFIRMED_THREAT becomes progressively more
+    # "known-normal" for that one device, no human step required. Persisted in the
+    # same device_fp_profiles.json store as the threshold profiles above (a new
+    # "_baseline" sub-key), reusing its existing save/load plumbing.
+
+    _BASELINE_FAMILIARITY_OBSERVATIONS = 5   # observations before familiarity maxes at 1.0
+    _BASELINE_MAX_ENTRIES_PER_KIND = 200      # per-device, per-kind safety cap
+
+    def record_device_baseline_observation(self, device_id: str, *, dest_port=None,
+                                            asn_owner: Optional[str] = None,
+                                            domain_base: Optional[str] = None) -> None:
+        """Call once per cycle per device with whatever identity is available for its
+        current traffic. Purely additive/descriptive -- never itself suppresses or
+        confirms anything; only the read side (get_baseline_familiarity()) is
+        consulted by callers, and only as damping evidence, not a verdict."""
+        if not device_id or device_id == "unknown":
+            return
+        now = time.time()
+        touched = False
+        with self._lock:
+            profile = self._device_fp_profiles.setdefault(device_id, {})
+            baseline = profile.setdefault("_baseline", {})
+            for kind, key in (("ports", dest_port), ("asn_owners", asn_owner), ("domain_bases", domain_base)):
+                if key is None or key == "" or key == "unknown" or key == 0:
+                    continue
+                key = str(key)
+                bucket = baseline.setdefault(kind, {})
+                entry = bucket.get(key)
+                if entry is None:
+                    if len(bucket) >= self._BASELINE_MAX_ENTRIES_PER_KIND:
+                        oldest_key = min(bucket, key=lambda k: bucket[k].get("last_seen", 0))
+                        bucket.pop(oldest_key, None)
+                    bucket[key] = {"count": 1, "first_seen": now, "last_seen": now}
+                else:
+                    entry["count"] = int(entry.get("count", 0)) + 1
+                    entry["last_seen"] = now
+                touched = True
+        if touched:
+            self._save_device_fp_profiles()
+
+    def get_baseline_familiarity(self, device_id: str, *, dest_port=None,
+                                  asn_owner: Optional[str] = None,
+                                  domain_base: Optional[str] = None) -> float:
+        """0.0 (never seen before, or unknown device) to 1.0 (this exact device has
+        used this exact port/ASN/domain at least _BASELINE_FAMILIARITY_OBSERVATIONS
+        times before, without that ever becoming a CONFIRMED_THREAT -- a genuine
+        confirmed threat never reaches this store since baseline observations are
+        recorded from ordinary per-cycle traffic, not from confirmed-threat alerts).
+        Highest familiarity across whichever identity dimensions are supplied."""
+        if not device_id or device_id == "unknown":
+            return 0.0
+        best = 0.0
+        with self._lock:
+            baseline = self._device_fp_profiles.get(device_id, {}).get("_baseline", {})
+            for kind, key in (("ports", dest_port), ("asn_owners", asn_owner), ("domain_bases", domain_base)):
+                if key is None or key == "" or key == "unknown" or key == 0:
+                    continue
+                entry = baseline.get(kind, {}).get(str(key))
+                if entry:
+                    count = int(entry.get("count", 0))
+                    best = max(best, min(1.0, count / float(self._BASELINE_FAMILIARITY_OBSERVATIONS)))
+        return best
+
+    # ==========================================================================
     # TRUST CACHE PERSISTENCE
     # ==========================================================================
 
@@ -1733,6 +1891,62 @@ class AutonomousFPEngine:
     # BACKGROUND MODEL LOADERS
     # ==========================================================================
 
+    def _load_calibration(self, model_dir: Path) -> None:
+        """VERSION 11 (P2, review #13/#14): loads train_fp_classifier.py's isotonic
+        calibration breakpoints (fp_calibration.json, written alongside
+        fp_classifier.onnx by the same retrain). Sets self._calibration to None
+        (not a fabricated identity curve) if the file is missing or was written with
+        reliable=False -- see _apply_calibration()'s docstring for what that means
+        downstream."""
+        path = model_dir / "fp_calibration.json"
+        if not path.exists():
+            self._calibration = None
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("reliable") and data.get("x_thresholds") and data.get("y_thresholds"):
+                self._calibration = data
+                LOGGER.info(
+                    "📐 [FP ENGINE » Stage 2 Loader] Isotonic calibration loaded "
+                    "(%d breakpoints, fit on %d held-out samples).",
+                    len(data["x_thresholds"]), data.get("calibration_sample_count", 0),
+                )
+            else:
+                self._calibration = None
+                LOGGER.info(
+                    "[FP ENGINE » Stage 2 Loader] Calibration file present but marked "
+                    "unreliable (%s) -- using raw, uncalibrated score.",
+                    data.get("reason", "unknown reason"),
+                )
+        except Exception as exc:
+            LOGGER.warning("Failed to load fp_calibration.json: %s -- using raw score.", exc)
+            self._calibration = None
+
+    def _apply_calibration(self, raw_prob: float) -> Optional[float]:
+        """Piecewise-linear interpolation over the loaded isotonic breakpoints --
+        deliberately dependency-free (no sklearn import) so this lean runtime
+        inference path doesn't need the training-only ML stack. Returns None (not a
+        guess) when no reliable calibration is loaded -- callers must handle that by
+        falling back to the raw score, never substituting an unvalidated identity
+        mapping that LOOKS calibrated but isn't."""
+        if self._calibration is None:
+            return None
+        xs = self._calibration["x_thresholds"]
+        ys = self._calibration["y_thresholds"]
+        if raw_prob <= xs[0]:
+            return ys[0]
+        if raw_prob >= xs[-1]:
+            return ys[-1]
+        for i in range(1, len(xs)):
+            if raw_prob <= xs[i]:
+                x0, x1 = xs[i - 1], xs[i]
+                y0, y1 = ys[i - 1], ys[i]
+                if x1 == x0:
+                    return y1
+                frac = (raw_prob - x0) / (x1 - x0)
+                return y0 + frac * (y1 - y0)
+        return ys[-1]
+
     def _load_lgbm_model(self):
         """
         Background thread: loads the LightGBM ONNX model from the models/ directory.
@@ -1752,6 +1966,7 @@ class AutonomousFPEngine:
 
         model_dir = Path(self.config.get("model_path", "state/ids_model.pkl")).parent
         onnx_path = model_dir / "fp_classifier.onnx"
+        self._load_calibration(model_dir)
 
         if not onnx_path.exists():
             LOGGER.warning(

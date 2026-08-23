@@ -51,10 +51,11 @@ from typing import Dict, List, Optional
 import requests
 
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
+from intelligence.detectors.suricata_scan import run_and_attribute as run_suricata_and_attribute
 from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
     reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
-    reactive_capture_stale_files_removed_total,
+    reactive_capture_stale_files_removed_total, reactive_capture_suricata_findings_total,
 )
 
 LOGGER = logging.getLogger("home_ids.fritzbox_capture")
@@ -362,7 +363,7 @@ def ingest_zeek_logs(log_dir: Path, zeek_fx, collect_sources: set = None) -> Dic
 # --- Orchestration -------------------------------------------------------------------
 
 def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_ips: set,
-                           capture_ts: float, geoip_engine=None, ti_engine=None) -> Dict[str, int]:
+                           capture_ts: float, geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, int]:
     """Runs dns_evasion.py's blind-spot audit for every tracked device whose client_ip
     was actually seen in this burst -- the piece Phase C2 built and tested but never
     actually wired into a live capture flow (found while scoping the LightGBM feature
@@ -391,15 +392,19 @@ def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_i
                 if not dest_ips:
                     continue
                 queried_domains = set(getattr(state.rolling, "domain_timestamps", {}).keys())
+                # VERSION 11 (P1): feeds DeviceBurstAudit.dest_ports so audit_device()
+                # can distinguish a direct port-53/853 resolver bypass
+                # (DNS_POLICY_BYPASS) from a generic unexplained connection.
+                dest_ports = zeek_fx.get_dest_ports(client_ip)
         except KeyError:
             continue  # device pruned between get_all_device_ids() and lock_device()
-        devices[dev_id] = DeviceBurstAudit(dest_ips=dest_ips, queried_domains=queried_domains)
+        devices[dev_id] = DeviceBurstAudit(dest_ips=dest_ips, queried_domains=queried_domains, dest_ports=dest_ports)
         device_ips[dev_id] = client_ip
 
     if not devices:
         return {}
 
-    results = audit_burst(devices, capture_ts, geoip_engine=geoip_engine, ti_engine=ti_engine)
+    results = audit_burst(devices, capture_ts, geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
     counts: Dict[str, int] = {}
     for dev_id, audit in devices.items():
         evidence_list = results.get(dev_id, [])
@@ -493,7 +498,7 @@ def cleanup_stale_scratch_files(out_dir: Path, max_age_seconds: float = 3600.0) 
 
 def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/opt/zeek/bin/zeek",
                         trigger_reason: str = "unspecified", state_manager=None, evidence_store=None,
-                        geoip_engine=None, ti_engine=None) -> Dict[str, object]:
+                        geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, object]:
     """Top-level entry point for a single reactive-capture burst: authenticate, capture
     all configured radios, convert each from AVM's modified pcap format to standard
     pcap, reprocess through real Zeek, and ingest the resulting logs into the SAME
@@ -525,6 +530,17 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     if not fritz_pass:
         raise FritzboxCaptureError("fritz_password is empty in configuration; cannot authenticate.")
 
+    # VERSION 11 (P2, Suricata follow-up): batch-mode signature scan of the SAME
+    # burst pcap Zeek already reprocesses -- see suricata_scan.py's own docstring
+    # for why batch mode (not continuous inline scanning) is what keeps this
+    # Raspberry-Pi-compatible. Disabled by default: reactive_capture_suricata_bin/
+    # _rules_path need to point at a real install + a ruleset you manage yourself
+    # (e.g. via `suricata-update`) before this does anything.
+    suricata_enabled = bool(config.get("reactive_capture_suricata_enabled", False))
+    suricata_bin = config.get("reactive_capture_suricata_bin", "/usr/bin/suricata")
+    suricata_rules_path = config.get("reactive_capture_suricata_rules_path", "")
+    suricata_timeout = float(config.get("reactive_capture_suricata_timeout_seconds", 60.0))
+
     summary: Dict[str, object] = {
         "trigger_reason": trigger_reason,
         "timestamp": time.time(),
@@ -532,6 +548,7 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
         "radios_captured": {},
         "zeek_event_counts": {},
         "dns_evasion_findings": {},
+        "suricata_findings": {},
         "errors": [],
     }
 
@@ -544,10 +561,12 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
 
     burst_source_ips: set = set()
     capture_ts = time.time()
+    suricata_evidence_by_device: Dict[str, list] = {}
 
     for iface, avm_path in raw_pcaps.items():
         std_path = avm_path.with_suffix(".std.pcap")
         scratch: Optional[Path] = None
+        suricata_scratch: Optional[Path] = None
         try:
             try:
                 n_records = avm_pcap_to_standard(avm_path, std_path)
@@ -571,20 +590,48 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
             counts = ingest_zeek_logs(scratch, zeek_fx, collect_sources=burst_source_ips)
             for etype, n in counts.items():
                 summary["zeek_event_counts"][etype] = summary["zeek_event_counts"].get(etype, 0) + n
+
+            # VERSION 11 (P2, Suricata follow-up): batch scan of the SAME std_path
+            # Zeek just reprocessed -- runs and exits within this one loop iteration,
+            # nothing left running afterward. Non-fatal: a scan failure here never
+            # aborts the rest of the burst (same defensive style as everything else
+            # in this loop).
+            if suricata_enabled:
+                try:
+                    suricata_scratch = out_dir / f"suricata_scratch_{iface}_{int(time.time())}"
+                    iface_findings = run_suricata_and_attribute(
+                        std_path, suricata_scratch, suricata_bin, suricata_rules_path,
+                        state_manager, capture_ts, timeout=suricata_timeout,
+                    )
+                    for dev_id, ev_list in iface_findings.items():
+                        suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
+                except Exception as exc:
+                    LOGGER.error("Suricata batch scan failed for %s (non-fatal): %s", iface, exc)
+                    summary["errors"].append(f"{iface}: suricata scan failed -- {exc}")
+                    reactive_capture_errors_total.labels(stage="suricata_scan").inc()
         finally:
             if delete_after_ingest:
                 _cleanup_burst_files(avm_path, std_path, scratch)
+                if suricata_scratch is not None and suricata_scratch.exists():
+                    shutil.rmtree(suricata_scratch, ignore_errors=True)
 
     try:
         summary["dns_evasion_findings"] = run_dns_evasion_audit(
             zeek_fx, state_manager, evidence_store, burst_source_ips, capture_ts,
-            geoip_engine=geoip_engine, ti_engine=ti_engine,
+            geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine,
         )
         reactive_capture_dns_evasion_findings_total.inc(sum(summary["dns_evasion_findings"].values()))
     except Exception as exc:
         LOGGER.error("DNS-evasion audit failed for this burst (non-fatal): %s", exc)
         summary["errors"].append(f"dns_evasion_audit: {exc}")
         reactive_capture_errors_total.labels(stage="dns_evasion_audit").inc()
+
+    if suricata_evidence_by_device and evidence_store is not None:
+        for dev_id, ev_list in suricata_evidence_by_device.items():
+            for ev in ev_list:
+                evidence_store.add(ev)
+            summary["suricata_findings"][dev_id] = len(ev_list)
+        reactive_capture_suricata_findings_total.inc(sum(summary["suricata_findings"].values()))
 
     reactive_capture_last_burst_timestamp.set(time.time())
     LOGGER.info("Reactive capture burst (trigger=%s) complete: %s", trigger_reason, summary)
@@ -641,7 +688,7 @@ class ReactiveCaptureDispatcher:
             return True
 
     def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str, state_manager=None,
-                      evidence_store=None, geoip_engine=None, ti_engine=None) -> bool:
+                      evidence_store=None, geoip_engine=None, ti_engine=None, fp_engine=None) -> bool:
         """Attempts to fire one capture burst asynchronously. Returns True if
         dispatched (the actual capture runs in a daemon thread and this call never
         blocks), False if reactive_capture_enabled is false or the shared hourly
@@ -686,7 +733,7 @@ class ReactiveCaptureDispatcher:
             try:
                 capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason,
                            state_manager=state_manager, evidence_store=evidence_store,
-                           geoip_engine=geoip_engine, ti_engine=ti_engine)
+                           geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
             except Exception as exc:
                 LOGGER.error("Reactive capture burst (trigger=%s) failed: %s", trigger_reason, exc)
             finally:

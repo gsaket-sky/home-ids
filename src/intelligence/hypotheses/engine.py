@@ -16,20 +16,25 @@ class Hypothesis:
         self.supporting_score = 0.0
         self.contradicting_score = 0.0
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         """Returns confidence score 0-4. `device_type` (VERSION 10, #9/#10 per-device
         benign profiles) is the device's coarse category (e.g. "smart_tv", "iot", "nas"
         -- see utils.infer_device_type()) -- optional and ignored by most hypotheses;
-        only DeviceProfileBenignHypothesis below actually reads it. Every subclass
-        accepts it (even unused) so HypothesisEngine.evaluate_all() can call every
-        hypothesis uniformly."""
+        only DeviceProfileBenignHypothesis below actually reads it. `baseline_familiarity`
+        (VERSION 11, P1 follow-up) is 0.0-1.0: how familiar THIS specific device's own
+        learned history is with the current cycle's destination (port/ASN/domain) --
+        see AutonomousFPEngine.get_baseline_familiarity() (fp_engine.py) for how it's
+        computed and pipeline.py for where it's read before this call. Also currently
+        only read by DeviceProfileBenignHypothesis. Every subclass accepts both (even
+        unused) so HypothesisEngine.evaluate_all() can call every hypothesis
+        uniformly."""
         raise NotImplementedError
 
 class DNSTunnelingHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DNS_TUNNELING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         # Check requirements
         has_high_rate = any(e.type == "dns_rate" and e.value > 100 for e in ev_store)
@@ -60,7 +65,7 @@ class NetworkIntrusionHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("NETWORK_INTRUSION")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         # Check requirements: Zeek evidence
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
@@ -94,7 +99,7 @@ class AdvertisingBurstHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("ADVERTISING_BURST")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         has_high_rate = any(e.type == "dns_rate" and e.value > 50 for e in ev_store)
         
@@ -130,7 +135,7 @@ class LocalDeviceDiscoveryHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("LOCAL_DEVICE_DISCOVERY")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "local_device_discovery" and e.value > 0]
         self.required_satisfied = bool(hits)
@@ -143,7 +148,7 @@ class DGAHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DGA_BOTNET_C2")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_dga_burst"]
         self.required_satisfied = bool(hits)
@@ -168,7 +173,7 @@ class ExfiltrationHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DATA_EXFILTRATION")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "zeek_exfiltration"]
         self.required_satisfied = bool(hits)
@@ -193,7 +198,7 @@ class BeaconingHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("C2_BEACONING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "zeek_beaconing"]
         self.required_satisfied = bool(hits)
@@ -223,7 +228,7 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
     def __init__(self):
         super().__init__("DNS_COVERT_TUNNELING")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_tunnel_v2"]
         self.required_satisfied = bool(hits)
@@ -259,7 +264,7 @@ class ConnectionAbuseHypothesis(Hypothesis):
     def __init__(self):
         super().__init__("CONNECTION_ABUSE")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         scan_hits = [e for e in ev_store if e.type == "zeek_conn_abuse"]
         long_hits = [e for e in ev_store if e.type == "zeek_long_conn"]
@@ -306,16 +311,47 @@ class DNSEvasionHypothesis(Hypothesis):
     (another hypothesis's evidence on the same device) to reach 'strong', consistent
     with every other hypothesis's corroboration bar here and with Phase A's tightened
     Telegram gate."""
-    def __init__(self):
-        super().__init__("DNS_EVASION")
+    # VERSION 11 (P1, review #3/#4): default name for the strong, unambiguous case --
+    # a device with genuinely NO DNS footprint at all in the window. See evaluate()'s
+    # dynamic override for the weaker "otherwise-normal DNS history, one connection
+    # outlived its lookup window" case, which is not the same finding and shouldn't
+    # share the same alarming name uncorroborated.
+    _NAME_POLICY_BYPASS = "DNS_POLICY_BYPASS"
+    _NAME_NO_DNS_HISTORY = "DNS_EVASION"
+    _NAME_PARTIAL_GAP = "DNS_ATTRIBUTION_GAP"
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def __init__(self):
+        super().__init__(self._NAME_NO_DNS_HISTORY)
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.type == "dns_evasion_anomaly"]
         self.required_satisfied = bool(hits)
         if not self.required_satisfied:
             return 0.0
         best = max(e.effective_weight() for e in hits)
+
+        # VERSION 11: provenance is "detector:dns_evasion:{subtag}:{note}" (see
+        # dns_evasion.py's audit_device()) -- split(":", 3) with maxsplit=3 yields the
+        # stable subtag at index [2], never the free-text note. Precedence matches
+        # dns_evasion.py's own subtag precedence: a direct port-53/853 bypass
+        # (policy_bypass) is the most specific, most actionable finding -- intentional
+        # resolver avoidance, not just an attribution gap. Next is genuinely zero DNS
+        # footprint (no_dns_history). A device with otherwise-normal DNS history that
+        # just has a couple of attribution-window misses (partial_attribution_gap) is
+        # the materially weakest case and gets the most honest, least alarming name
+        # unless/until it's independently corroborated (the existing strong_score gate
+        # below already requires that for ANY name to reach HIGH).
+        subtags = {
+            (e.provenance.split(":", 3)[2] if e.provenance.count(":") >= 2 else "")
+            for e in hits
+        }
+        if "policy_bypass" in subtags:
+            self.name = self._NAME_POLICY_BYPASS
+        elif "no_dns_history" in subtags:
+            self.name = self._NAME_NO_DNS_HISTORY
+        else:
+            self.name = self._NAME_PARTIAL_GAP
 
         if rep_vector.tier in (1, 2):
             self.contradicting_score += 1.0
@@ -326,6 +362,41 @@ class DNSEvasionHypothesis(Hypothesis):
         if best >= 0.6 and self.contradicting_score == 0:
             score = 3.0
         if self.strong_score > 0 and self.contradicting_score == 0:
+            score = 4.0
+        return score
+
+
+class SuricataSignatureHypothesis(Hypothesis):
+    """VERSION 11 (P2, Suricata follow-up): consumes suricata_scan.py's signature-
+    match evidence -- a real Suricata rule match against a curated, high-confidence
+    ruleset run in BATCH mode against reactive-capture burst pcaps (never
+    continuously against live traffic -- see suricata_scan.py's own docstring for
+    why this keeps CPU cost near-zero on both a dev box and a Raspberry Pi target).
+    A genuinely high-severity match (confidence>=0.9, Suricata's own severity=1
+    "high") is strong enough on its own to be one of decision_engine.py's explicit
+    hard-stop conditions (has_confirmed_exploit) -- everything below that threshold
+    is real evidence here like any other hypothesis, not a hard-stop."""
+
+    def __init__(self):
+        super().__init__("SIGNATURE_MATCHED_THREAT")
+
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
+        self._reset_eval_state()
+        hits = [e for e in ev_store if e.type == "suricata_signature_match"]
+        self.required_satisfied = bool(hits)
+        if not self.required_satisfied:
+            return 0.0
+        best = max(e.effective_weight() for e in hits)
+
+        if rep_vector.tier in (1, 2):
+            self.contradicting_score += 1.0
+        if len(hits) >= 2:
+            self.strong_score += 1.0
+
+        score = 2.0
+        if best >= 0.6 and self.contradicting_score == 0:
+            score = 3.0
+        if best >= 0.85 and self.contradicting_score == 0:
             score = 4.0
         return score
 
@@ -385,19 +456,35 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
     })
 
+    # VERSION 11 (P1 follow-up, review #9/#10): matches
+    # AutonomousFPEngine._BASELINE_FAMILIARITY_OBSERVATIONS (fp_engine.py) -- a
+    # familiarity of 0.6 means this device has used this exact port/ASN/domain at
+    # least 3 of the 5 observations needed to reach full (1.0) familiarity, without
+    # that ever becoming a CONFIRMED_THREAT (baseline observations are only ever
+    # recorded from cycles the HEE itself already called BENIGN/ANOMALOUS -- see
+    # pipeline.py). A per-device LEARNED pattern, not a global reputation tier or any
+    # hardcoded list -- fully generic, ports to any home network unchanged.
+    _FAMILIARITY_TRUST_BAR = 0.6
+
     def __init__(self):
         super().__init__("DEVICE_PROFILE_TELEMETRY")
 
-    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "") -> float:
+    def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
         is_expected_category = device_type in self._EXPECTED_HIGH_VOLUME_CATEGORIES
         is_trusted_destination = rep_vector.tier in (0, 1, 2)
+        # VERSION 11: a destination THIS device has personally, repeatedly talked to
+        # without incident is real counter-evidence even when the GLOBAL reputation
+        # tier hasn't classified it (tier 3/4) -- an alternate path to the same
+        # "routine, not surprising" conclusion is_trusted_destination already grants,
+        # scoped to what this one device's own history actually supports.
+        is_familiar_destination = baseline_familiarity >= self._FAMILIARITY_TRUST_BAR
         has_elevated_dns_activity = any(e.type == "dns_rate" and e.value > 20 for e in ev_store)
         has_competing_attack_evidence = any(e.type in self._ATTACK_SHAPED_EVIDENCE_TYPES for e in ev_store)
 
         self.required_satisfied = (
-            is_expected_category and is_trusted_destination and has_elevated_dns_activity
-            and not has_competing_attack_evidence
+            is_expected_category and (is_trusted_destination or is_familiar_destination)
+            and has_elevated_dns_activity and not has_competing_attack_evidence
         )
         if not self.required_satisfied:
             return 0.0
@@ -406,7 +493,8 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         if rep_vector.tier in (0, 1):
             # Tier 0/1 (local/internal or explicitly trusted, e.g. apple.com/google.com)
             # is stronger counter-evidence than tier 2 (merely "known infrastructure,
-            # not fully trusted") -- matches ReputationVector's own docstring ordering.
+            # not fully trusted") or familiarity alone -- matches ReputationVector's
+            # own docstring ordering.
             score = 3.0
         return score
 
@@ -417,19 +505,20 @@ class HypothesisEngine:
             DNSTunnelingHypothesis(), NetworkIntrusionHypothesis(),
             DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
-            DNSEvasionHypothesis(),
+            DNSEvasionHypothesis(), SuricataSignatureHypothesis(),
         ]
         self.benign_hypotheses = [
             AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis(),
             DeviceProfileBenignHypothesis(),
         ]
 
-    def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "") -> Dict[str, Any]:
+    def evaluate_all(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "",
+                      baseline_familiarity: float = 0.0) -> Dict[str, Any]:
         best_attack = None
         best_attack_score = 0.0
         
         for h in self.attack_hypotheses:
-            score = h.evaluate(ev_store, rep, device_type)
+            score = h.evaluate(ev_store, rep, device_type, baseline_familiarity)
             if score > best_attack_score:
                 best_attack_score = score
                 best_attack = h
@@ -438,7 +527,7 @@ class HypothesisEngine:
         best_benign_score = 0.0
         
         for h in self.benign_hypotheses:
-            score = h.evaluate(ev_store, rep, device_type)
+            score = h.evaluate(ev_store, rep, device_type, baseline_familiarity)
             if score > best_benign_score:
                 best_benign_score = score
                 best_benign = h

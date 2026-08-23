@@ -99,13 +99,23 @@ def _count_local_device_discovery_requests(zeek_fx, client_ip: str) -> int:
     return count
 
 
+# VERSION 11 (P2, review #23): this used to append a PROTOCOL guess to every size
+# bucket ("Standard DNS/Control Packet" for anything <128B, regardless of whether it
+# was actually DNS) -- purely a byte-count heuristic with no basis in the actual
+# protocol. classify_service(port, proto) a few lines below already does correct
+# port/protocol-based service naming from data this SAME alert payload already
+# carries (dest_proto/dominant_protocol, sourced from Zeek's real connection
+# parsing) -- the two were sitting side-by-side in the same alert with the size
+# classifier's guess contradicting the real value next to it (confirmed live: a
+# TCP:8883 MQTT connection under 128B displayed as "Standard DNS/Control Packet").
+# This now describes size only, which is all it ever had grounds to claim.
 def classify_payload_size(bytes_count: int) -> str:
-    if bytes_count == 0: return "0 B (Header/Control Ping)"
-    elif bytes_count < 128: return f"{bytes_count} B (Standard DNS/Control Packet)"
-    elif bytes_count < 1024: return f"{bytes_count} B (Small Payload / API Metadata)"
-    elif bytes_count < 1024 * 1024: return f"{bytes_count / 1024.0:.1f} KB (Medium Data Transfer)"
-    elif bytes_count < 1024 * 1024 * 1024: return f"{bytes_count / (1024.0 * 1024.0):.2f} MB (Large Payload Transfer)"
-    else: return f"{bytes_count / (1024.0 * 1024.0 * 1024.0):.2f} GB (Massive Bulk Exfiltration Risk)"
+    if bytes_count == 0: return "0 B"
+    elif bytes_count < 128: return f"{bytes_count} B"
+    elif bytes_count < 1024: return f"{bytes_count} B"
+    elif bytes_count < 1024 * 1024: return f"{bytes_count / 1024.0:.1f} KB"
+    elif bytes_count < 1024 * 1024 * 1024: return f"{bytes_count / (1024.0 * 1024.0):.2f} MB"
+    else: return f"{bytes_count / (1024.0 * 1024.0 * 1024.0):.2f} GB"
 
 
 def classify_service(port: int, proto: str = "TCP") -> str:
@@ -377,7 +387,7 @@ class EnginePipeline:
                 self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="spotcheck",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
                 # Disk-safety sweep, piggybacked on this same interval rather than a
                 # separate timer -- catches any raw pcap/Zeek scratch directory
@@ -410,7 +420,7 @@ class EnginePipeline:
                 self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="wired_probe",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
         active_ids_dns = self.identity_manager.process_dns_identities(
@@ -453,7 +463,7 @@ class EnginePipeline:
                     self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="new_device",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
                 # PHASE 21D trigger: get_or_create() just found a MAC-rotation candidate
@@ -470,7 +480,7 @@ class EnginePipeline:
                         self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="ambiguous_reidentify",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
             with self.state_manager.lock_device(dev_id) as state:
@@ -811,7 +821,7 @@ class EnginePipeline:
                     self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="arp_sweep",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
                 if ml_score > 0.90:
@@ -930,12 +940,46 @@ class EnginePipeline:
                 if is_verified_infra:
                     active_evidence = [ev for ev in active_evidence if ev.type not in _INFRA_NOISY_TYPES]
 
+                # VERSION 11 (P1 follow-up, review #9/#10): this device's own LEARNED
+                # familiarity with the current cycle's destination -- read BEFORE
+                # decision_engine.evaluate() so DeviceProfileBenignHypothesis can use it
+                # as an alternate trust signal alongside global reputation tier. The
+                # WRITE side (recording this cycle into the baseline) happens further
+                # below, gated on this cycle's own verdict -- see that comment for why.
+                baseline_familiarity = 0.0
+                if self.fp_engine:
+                    baseline_familiarity = self.fp_engine.get_baseline_familiarity(
+                        dev_id,
+                        dest_port=features.get("last_dest_port"),
+                        asn_owner=asn_owner if asn_owner != "Unknown" else None,
+                        domain_base=etld1(top_domain) if top_domain else None,
+                    )
+
                 # VERSION 10 (#9/#10 per-device benign profiles): state.device_type feeds
                 # DeviceProfileBenignHypothesis so routine vendor-telemetry traffic from a
                 # smart TV/IoT/NAS/router-category device gets a named benign explanation
                 # instead of falling through to the generic UNKNOWN_BENIGN catch-all.
-                decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
-                
+                decision = self.decision_engine.evaluate(
+                    active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity
+                )
+
+                # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
+                # Deliberately gated on the HEE's OWN verdict for THIS cycle being
+                # BENIGN/ANOMALOUS -- never records a port/ASN/domain the system itself
+                # currently considers SUSPICIOUS or worse. Without this gate, a device
+                # beaconing to a C2 host every cycle would "launder" itself into a
+                # trusted baseline through sheer repetition, which would be exactly
+                # backwards for a self-healing mechanism. fp_engine persists this
+                # per-device, fully autonomously, no human step -- see
+                # AutonomousFPEngine.record_device_baseline_observation()'s docstring.
+                if self.fp_engine and decision["state"] in (DecisionState.BENIGN, DecisionState.ANOMALOUS):
+                    self.fp_engine.record_device_baseline_observation(
+                        dev_id,
+                        dest_port=features.get("last_dest_port"),
+                        asn_owner=asn_owner if asn_owner != "Unknown" else None,
+                        domain_base=etld1(top_domain) if top_domain else None,
+                    )
+
                 risk = decision["threat_confidence"] * 10.0 # Map to old 0-10 scale temporarily for metrics
                 factors = [{"name": decision["explanation"], "score": risk}]
                 
@@ -1002,7 +1046,7 @@ class EnginePipeline:
                     self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="dns_suspicion",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
                 primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
@@ -1121,8 +1165,13 @@ class EnginePipeline:
                         # primary_sig so persisted alerts get the same correct attribution
                         # as fresh ones. See primary_sig_base's own comment above for the
                         # full incident writeup.
+                        # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other
+                        # possible name (see hypotheses/engine.py) -- same evidence type,
+                        # same "no domain, dest_ip is the real target" shape, just a
+                        # weaker/more honestly-named sub-case, so it needs the identical
+                        # attribution handling as DNS_EVASION in every branch below.
                         alert_dest_ip = dest_ip
-                        if primary_sig_base == "DNS_EVASION":
+                        if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
                             for ev in active_evidence:
                                 if ev.type == "dns_evasion_anomaly" and ev.domain:
                                     alert_dest_ip = ev.domain
@@ -1180,7 +1229,7 @@ class EnginePipeline:
                         # correctly carries the real flagged IP into destination_ip -- this
                         # just stops a second, unrelated domain from also being attached
                         # where none exists.
-                        elif primary_sig_base == "DNS_EVASION":
+                        elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
                             alert_target_domain = "unknown"
                         # BUGFIX: found via a live third-party review of a real CRITICAL
                         # alert -- decision_engine.py's tier-5 reputation escalation
@@ -1237,11 +1286,18 @@ class EnginePipeline:
                         # Before publishing this alert or executing hardware IPS containment,
                         # the 3-stage FP engine evaluates whether this is a real threat.
                         # =============================================================
+                        # VERSION 11 (P0 fix): pass the HEE's own already-computed verdict
+                        # through so fp_engine's Stage-1 hard-stop can recognize a
+                        # decision_engine.py hard-stop (honeypot/ARP-spoof/geofence/tier-5
+                        # IOC) directly instead of independently re-deriving the same
+                        # signal from raw features with its own, separately-drifting
+                        # thresholds -- see fp_engine.evaluate()'s docstring.
                         fp_verdict = self.fp_engine.evaluate(
                             alert_payload=alert_payload,
                             features=features,
                             risk_score=risk,
                             ti_engine=self.ti_engine,
+                            decision=decision,
                         )
 
                         # PHASE 12: persist CL-AFPE's own combined confidence into the alert
@@ -1449,7 +1505,7 @@ class EnginePipeline:
                             self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="high_severity",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
                     )
 
                         # PHASE 21D3: second feed point for the local confirmed-intel store
@@ -1603,7 +1659,7 @@ class EnginePipeline:
                                 # alert_dest_ip instead of the raw dest_ip, for the same reason
                                 # alert_dest_ip exists at all: it's the one already-corrected IP variable.
                                 target_display = (
-                                    alert_dest_ip if primary_sig_base == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"
+                                    alert_dest_ip if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS") and alert_dest_ip and alert_dest_ip != "unknown"
                                     else alert_target_domain if alert_target_domain and alert_target_domain != "unknown"
                                     else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")
                                 )

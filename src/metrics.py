@@ -304,6 +304,7 @@ reactive_capture_bytes_total = Counter("home_ids_reactive_capture_bytes_total", 
 reactive_capture_errors_total = Counter("home_ids_reactive_capture_errors_total", "Reactive-capture burst failures by stage", ["stage"])
 reactive_capture_last_burst_timestamp = Gauge("home_ids_reactive_capture_last_burst_timestamp", "Unix timestamp of the most recently completed reactive-capture burst")
 reactive_capture_dns_evasion_findings_total = Counter("home_ids_reactive_capture_dns_evasion_findings_total", "Total dns_evasion_anomaly findings produced across all devices by reactive-capture bursts")
+reactive_capture_suricata_findings_total = Counter("home_ids_reactive_capture_suricata_findings_total", "Total suricata_signature_match findings produced across all devices by batch-mode Suricata scans of reactive-capture burst pcaps")
 reactive_capture_stale_files_removed_total = Counter("home_ids_reactive_capture_stale_files_removed_total", "Orphaned capture files/directories removed by the periodic disk-safety sweep (process-crash recovery, not the normal per-burst cleanup path)")
 
 # ===========================================================================

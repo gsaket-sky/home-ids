@@ -23,11 +23,15 @@ class DecisionEngine:
     def __init__(self):
         self.hypothesis_engine = HypothesisEngine()
 
-    def evaluate(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "") -> Dict[str, Any]:
+    def evaluate(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "",
+                 baseline_familiarity: float = 0.0) -> Dict[str, Any]:
         # VERSION 10 (#9/#10 per-device benign profiles): device_type is optional and
         # defaults to "" for any existing caller that hasn't been updated -- only
         # DeviceProfileBenignHypothesis (hypotheses/engine.py) actually reads it.
-        hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type)
+        # VERSION 11 (P1 follow-up): baseline_familiarity is the same kind of optional,
+        # defaulted, single-consumer parameter -- see DeviceProfileBenignHypothesis's
+        # own docstring for what it means and how it's computed.
+        hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type, baseline_familiarity)
         
         attack_score = hyp_results["attack"]["score"]
         benign_score = hyp_results["benign"]["score"]
@@ -74,6 +78,15 @@ class DecisionEngine:
         has_honeypot = any(e.type == "honeypot_access" for e in ev_store)
         has_arp_spoof = any(e.type == "arp_spoofing" for e in ev_store)
         has_geofence = any(e.type == "geofencing_violation" for e in ev_store)
+        # VERSION 11 (P2, Suricata follow-up): a genuinely high-severity Suricata rule
+        # match (confidence>=0.9, its own severity=1/"high") is a real signature/
+        # exploit match against a curated ruleset, not a fuzzy heuristic -- matches the
+        # review's explicit "known malware signature" / "confirmed exploit" hard-stop
+        # category. See suricata_scan.py and SuricataSignatureHypothesis for how this
+        # evidence is produced (batch-mode scan of a reactive-capture burst pcap).
+        has_confirmed_exploit = any(
+            e.type == "suricata_signature_match" and e.confidence >= 0.9 for e in ev_store
+        )
 
         # PHASE 10 FIX: "tier" is context/prior about a destination (how much prior trust or
         # suspicion attaches to it), not a threat verdict — tier 4 means "one unconfirmed
@@ -93,7 +106,8 @@ class DecisionEngine:
             (
                 f"Hard-stop checks: honeypot={'YES' if has_honeypot else 'no'}, "
                 f"arp_spoofing={'YES' if has_arp_spoof else 'no'}, "
-                f"geofencing={'YES' if has_geofence else 'no'}"
+                f"geofencing={'YES' if has_geofence else 'no'}, "
+                f"confirmed_exploit={'YES' if has_confirmed_exploit else 'no'}"
             ),
             (
                 f"Reputation context: tier={rep.tier} ({tier_note}) — target='{rep_domain}', "
@@ -143,7 +157,14 @@ class DecisionEngine:
             explanation = "Geofencing Policy Violation"
             threat_confidence = 1.0
             decision_path = "hard_stop"
-            
+
+        elif has_confirmed_exploit:
+            state = DecisionState.CRITICAL
+            action = "block"
+            explanation = "Confirmed Exploit/Malware Signature (Suricata)"
+            threat_confidence = 0.98
+            decision_path = "hard_stop"
+
         elif rep.tier == 5:
             state = DecisionState.CRITICAL
             action = "block"

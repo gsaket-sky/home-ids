@@ -222,6 +222,32 @@ check("a tier-1/2 trusted reputation context dampens the score below the untrust
 check("DNSEvasionHypothesis is registered in HypothesisEngine.attack_hypotheses",
       any(isinstance(h, DNSEvasionHypothesis) for h in HypothesisEngine().attack_hypotheses))
 
+# VERSION 11 (P1, review #3/#4): the hypothesis's NAME should reflect why the
+# connection was unexplained, not just that it was -- a device with otherwise-normal
+# DNS history missing just one connection's attribution window is a materially
+# weaker, more honest finding than one with zero DNS footprint at all. Detection
+# power (the score thresholds above) is unchanged either way.
+hyp_naming = DNSEvasionHypothesis()
+partial_gap_evidence = [Evidence(
+    type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device=DEV,
+    value=1.0, confidence=0.7, independence_group="blindspot_audit",
+    provenance="detector:dns_evasion:partial_attribution_gap:1/12 unexplained",
+)]
+hyp_naming.evaluate(partial_gap_evidence, neutral_rep)
+check("a partial-attribution-gap-only finding (normal DNS history, one connection "
+      "outlived its window) is named DNS_ATTRIBUTION_GAP, not the more alarming "
+      "DNS_EVASION",
+      hyp_naming.name == "DNS_ATTRIBUTION_GAP", f"got {hyp_naming.name}")
+
+no_dns_history_evidence = [Evidence(
+    type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device=DEV,
+    value=1.0, confidence=0.7, independence_group="blindspot_audit",
+    provenance="detector:dns_evasion:no_dns_history:3/3 unexplained (device has NO DNS history at all in this window)",
+)]
+hyp_naming.evaluate(no_dns_history_evidence, neutral_rep)
+check("a device with genuinely zero DNS footprint keeps the strong DNS_EVASION name",
+      hyp_naming.name == "DNS_EVASION", f"got {hyp_naming.name}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section E: pipeline.py -- source-level guard for the destination_ip precision fix
@@ -236,7 +262,7 @@ with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "
 # for the full incident this fixed.
 check("pipeline.py prefers a DNS_EVASION evidence's own flagged IP over the generic "
       "last-known dest_ip when building that alert's network_context",
-      'if primary_sig_base == "DNS_EVASION":' in pipeline_src and
+      'if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in pipeline_src and
       'if ev.type == "dns_evasion_anomaly" and ev.domain:' in pipeline_src)
 check("the alert_payload's destination_ip uses the corrected alert_dest_ip variable, "
       "not the raw generic dest_ip, for every alert (not just DNS_EVASION ones)",
@@ -301,7 +327,7 @@ check("pipeline.py prefers a DGA_BOTNET_C2 evidence's own flagged domain over th
 # ═══════════════════════════════════════════════════════════════════════════════════
 check("THE FIX: target_display prefers alert_dest_ip specifically for DNS_EVASION, "
       "checked before the generic alert_target_domain path",
-      'alert_dest_ip if primary_sig_base == "DNS_EVASION" and alert_dest_ip and alert_dest_ip != "unknown"' in pipeline_src)
+      'alert_dest_ip if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS") and alert_dest_ip and alert_dest_ip != "unknown"' in pipeline_src)
 check("THE FIX: the non-DNS_EVASION fallback now uses alert_dest_ip (the corrected "
       "variable), not the raw dest_ip",
       'else (alert_dest_ip if alert_dest_ip and alert_dest_ip != "unknown" else "unknown")' in pipeline_src)
@@ -383,7 +409,7 @@ check("REGRESSION GUARD: a genuinely unexplained IP alongside a known resolver s
 check("THE DEEPER FIX: alert_target_domain itself (the source field, not just the "
       "display variable) is now set to 'unknown' for DNS_EVASION -- no domain is "
       "attached where none exists, rather than the generic fallback leaking in",
-      'elif primary_sig_base == "DNS_EVASION":\n                            alert_target_domain = "unknown"' in pipeline_src)
+      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):\n                            alert_target_domain = "unknown"' in pipeline_src)
 
 
 if FAILURES:

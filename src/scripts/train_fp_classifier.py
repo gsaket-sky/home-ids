@@ -927,14 +927,74 @@ def train_and_export_onnx(state_dir: Path) -> bool:
         from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.preprocessing import StandardScaler
         from sklearn.pipeline import make_pipeline
+        from sklearn.model_selection import train_test_split
+        from sklearn.isotonic import IsotonicRegression
+
+        # VERSION 11 (P2, review #13/#14): a genuine held-out split, used ONLY for
+        # calibration below -- fitting isotonic regression against the SAME data the
+        # classifier trained on would just refit an already-overconfident curve to
+        # itself (the model has seen every one of those labels already), which is
+        # not calibration, it's restating training accuracy in a different shape.
+        # Stratified on y so a rare class isn't accidentally starved from either
+        # split. Falls back to training on everything (previous behavior) when
+        # there's too little data for a genuine split -- see calibration_reliable
+        # below for how that case is handled honestly rather than silently.
+        can_split = len(X) >= 40 and len(set(y)) >= 2
+        if can_split:
+            X_train, X_calib, y_train, y_calib = train_test_split(
+                X, y, test_size=0.25, random_state=42, stratify=y
+            )
+        else:
+            X_train, y_train = X, y
+            X_calib, y_calib = [], []
 
         pipeline = make_pipeline(
             StandardScaler(),
             GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
         )
-        pipeline.fit(X, y)
-        acc = pipeline.score(X, y)
+        pipeline.fit(X_train, y_train)
+        acc = pipeline.score(X_train, y_train)
         LOGGER.info("✅ GBDT Model trained successfully. Training Accuracy: %.2f%%", acc * 100.0)
+
+        # VERSION 11 (P2): isotonic calibration -- maps the raw classifier score to
+        # an actually-calibrated probability, fit against the HELD-OUT split above
+        # (never seen during training). Saved as a small breakpoint JSON, not a
+        # pickled sklearn object, so fp_engine.py's lean ONNX-only runtime inference
+        # path can apply it via plain linear interpolation -- no sklearn import
+        # needed at inference time, matching this project's existing train-with-
+        # sklearn / infer-with-ONNX split.
+        model_dir = state_dir / "models"
+        model_dir.mkdir(parents=True, exist_ok=True)
+        calibrator_path = model_dir / "fp_calibration.json"
+        calibration_reliable = can_split and len(X_calib) >= 20 and len(set(y_calib)) >= 2
+        if calibration_reliable:
+            raw_calib_probs = pipeline.predict_proba(X_calib)[:, 1]
+            iso = IsotonicRegression(out_of_bounds="clip")
+            iso.fit(raw_calib_probs, y_calib)
+            calibrator_path.write_text(json.dumps({
+                "reliable": True,
+                "x_thresholds": [float(v) for v in iso.X_thresholds_],
+                "y_thresholds": [float(v) for v in iso.y_thresholds_],
+                "fit_at": time.time(),
+                "calibration_sample_count": len(X_calib),
+            }, indent=2), encoding="utf-8")
+            LOGGER.info("📐 Isotonic calibration fit on %d held-out samples (never used for "
+                        "training), saved to %s", len(X_calib), calibrator_path)
+        else:
+            # Not enough held-out data for a trustworthy calibration curve -- an
+            # explicit "unreliable" marker, not a silently-stale or fabricated-from-
+            # too-few-points curve. fp_engine.py must fall back to the raw,
+            # explicitly-labeled-as-uncalibrated score when this is present.
+            calibrator_path.write_text(json.dumps({
+                "reliable": False,
+                "reason": f"only {len(X_calib)} held-out sample(s) available "
+                          f"(need >=20 with both classes present for a trustworthy curve)",
+                "fit_at": time.time(),
+            }, indent=2), encoding="utf-8")
+            LOGGER.warning("⚠️ Not enough held-out data (%d sample(s)) for reliable calibration -- "
+                           "wrote an explicit 'unreliable' marker; fp_engine.py will use the raw, "
+                           "uncalibrated score (FP_MODEL_SCORE) instead of a fabricated calibration.",
+                           len(X_calib))
 
         # Convert to ONNX format (zipmap=False outputs clean 2D numpy probability arrays)
         from skl2onnx import convert_sklearn
@@ -946,8 +1006,6 @@ def train_and_export_onnx(state_dir: Path) -> bool:
             options={GradientBoostingClassifier: {"zipmap": False}}
         )
 
-        model_dir = state_dir / "models"
-        model_dir.mkdir(parents=True, exist_ok=True)
         onnx_path = model_dir / "fp_classifier.onnx"
 
         with open(onnx_path, "wb") as f:

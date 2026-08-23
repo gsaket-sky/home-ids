@@ -205,14 +205,20 @@ check("a fully quiet feature set emits zero evidence (no false signal generation
       len(ev_quiet) == 0, f"got {len(ev_quiet)} evidence items: {[e.type for e in ev_quiet]}")
 
 
-# ── Test 8: all 8 attack hypotheses (2 pre-existing + 5 Phase 1 ports + Phase 21C2's
-# DNS_EVASION) are registered ───────────────────────────────────────────────────────
+# ── Test 8: all 9 attack hypotheses (2 pre-existing + 5 Phase 1 ports + Phase 21C2's
+# DNS_EVASION + VERSION 11's SuricataSignatureHypothesis) are registered ────────────
+# NOTE: DNS_EVASION is DNSEvasionHypothesis's DEFAULT name -- VERSION 11 (P1) made
+# that hypothesis pick DNS_ATTRIBUTION_GAP dynamically per-evaluation for the weaker
+# uncorroborated sub-case (see hypotheses/engine.py), but the class's constructed
+# .name (read here, before any .evaluate() call) is still DNS_EVASION -- this set
+# membership check is unaffected by that change.
 hyp = HypothesisEngine()
 names = {h.name for h in hyp.attack_hypotheses}
 expected = {"DNS_TUNNELING", "NETWORK_INTRUSION", "DGA_BOTNET_C2", "DATA_EXFILTRATION",
-            "C2_BEACONING", "DNS_COVERT_TUNNELING", "CONNECTION_ABUSE", "DNS_EVASION"}
-check("all 8 attack hypotheses (2 pre-existing + 5 Phase 1 ports + Phase 21C2's DNS_EVASION) "
-      "are registered in HypothesisEngine",
+            "C2_BEACONING", "DNS_COVERT_TUNNELING", "CONNECTION_ABUSE", "DNS_EVASION",
+            "SIGNATURE_MATCHED_THREAT"}
+check("all 9 attack hypotheses (2 pre-existing + 5 Phase 1 ports + Phase 21C2's DNS_EVASION "
+      "+ VERSION 11's Suricata signature hypothesis) are registered in HypothesisEngine",
       names == expected, f"got={names}")
 
 print()

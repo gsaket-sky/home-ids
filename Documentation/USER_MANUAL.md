@@ -439,8 +439,10 @@ Short, triggered Fritzbox WLAN capture bursts — the only way this deployment g
 | `reactive_capture_delete_after_ingest` | `true` | `[LIVE]` | Deletes each burst's raw pcaps/Zeek scratch logs right after ingestion (disk safety — unbounded retention fills a disk over weeks at ~3GB/hour). `reactive_capture_history.jsonl` (a compact permanent summary) is kept regardless. |
 | `arp_sweep_unique_targets_threshold` | `8` | `[LIVE]` | Distinct ARP-requested targets in-window before the ARP host-discovery-sweep evidence fires (§6 Detection Engine's own category, not this one, but tuned alongside reactive capture since ARP sweeps are one of its triggers). Auto-calibrated per-device — see §3 and `train_fp_classifier.py`'s `calibrate_arp_sweep_threshold()`. |
 | `local_confirmed_intel_ttl_seconds` | `2592000.0` (30 days) | `[LIVE]` | TTL for the network-effect confirmed-threat learning store — see ENGINEERING_MANUAL.md §8 and the state-file reference below (`local_confirmed_intel.json`). |
+| `reactive_capture_suricata_enabled` | `false` | `[LIVE]` | New in 11.0. Batch-mode Suricata signature scan of each reactive-capture burst pcap — never continuous against live traffic. Does nothing until Suricata is installed and `reactive_capture_suricata_bin`/`_rules_path` (below) are set. See INSTALL.md §3.7. |
+| `reactive_capture_suricata_timeout_seconds` | `60.0` | `[LIVE]` | Max seconds to let one batch scan run before giving up (non-fatal — the burst's other findings are unaffected). |
 
-`reactive_capture_zeek_bin` lives in the `external_system_paths` section at the very bottom of `config.yaml` (describes your Zeek installation's layout, not this app's own data — same reasoning as `pihole_db`/`zeek_log_dir`).
+`reactive_capture_zeek_bin` lives in the `external_system_paths` section at the very bottom of `config.yaml` (describes your Zeek installation's layout, not this app's own data — same reasoning as `pihole_db`/`zeek_log_dir`). New in 11.0: `reactive_capture_suricata_bin`/`reactive_capture_suricata_rules_path` live there too, for the same reason — see INSTALL.md §3.7.
 
 ### Removed / dead keys (do not reintroduce)
 | Removed Key | Why |
@@ -528,6 +530,7 @@ Standalone, operator-run utilities — none of these run automatically. All foll
 | `src/release_wrongly_blocked_domains.py` | Classifies every currently Pi-hole-blocked domain into recognized-safe (CDN/telemetry allowlist), manually-reviewed-safe (a curated list built from this deployment's own blocklist), suspicious (regex DGA-pattern families — never auto-touched), or unclassified — and releases the safe categories via `fp.mark_false_positive()` + `ips.unblock_by_base_domain()`. |
 | `src/clear_stale_isolation.py` | `python3 src/clear_stale_isolation.py <identifier>` — removes only matching `tarpit_targets`/`router_isolated_devices` bookkeeping entries, deliberately **not** touching `blocked_domains` (unlike `release_device()`). For the specific case of a device manually released on the router/Pi-hole admin UI while Home-IDS's own state still thinks it's isolated. |
 | `src/identify_corrupted_training_rows.py` | Finds and (with `--apply`) excludes historically-corrupted `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` training rows — see `training_row_exclusions.json` above and ENGINEERING_MANUAL.md §8. |
+| `src/scripts/incident_report.py` | New in 11.0. Read-only — groups `alerts.json` by `incident_id` into a human "ONE INCIDENT, N occurrences" rollup instead of raw JSONL. `python3 src/scripts/incident_report.py [--hours 24] [--top 30] [--min-occurrences 1]`. Never writes to `alerts.json`; safe to run anytime, including against the live file. |
 
 ---
 
@@ -559,7 +562,7 @@ Two retrain paths exist for the LightGBM classifier specifically, and both now a
 
 ## 🧪 Test Suite & Validation Scripts
 
-`tests/` contains 9 self-contained phase test files (no live network, no running Pi-hole, no real malware required) plus two broader tools.
+`tests/` contains 30 self-contained phase test files (no live network, no running Pi-hole, no real malware required) plus two broader tools.
 
 ```bash
 source venv/bin/activate
@@ -580,6 +583,26 @@ done
 | `test_phase6_fp_selfheal.py` | CL-AFPE Stage 2/3 fall-through fix, training-data mislabeling fix, `record_action()`'s `extra` field round-trip. |
 | `test_phase6_mac_correlation.py` | Cross-address-family (IPv4/IPv6) device identity correlation via MAC. |
 | `test_phase7_scheduling.py` | Scheduler job→script resolution (the `retro_hunter` filename-mismatch bug class) and non-alert-stream training contamination exclusion. |
+| `test_phase19_persistence_escalation_gate.py` | Persistence-driven `SUSPICIOUS`→`HIGH` escalation can't itself authorize containment (`containment_decision_state` downgrade). |
+| `test_phase20_alert_quality.py` | Containment-status text mapping (`ROUTER ISOLATED`/`DOMAIN BLOCKED`/monitoring-only) shown in Telegram alerts. |
+| `test_phase21_telegram_gate.py` | Telegram notifications require genuine HIGH/CRITICAL corroboration, never fire for SUSPICIOUS/monitor-only. |
+| `test_phase22_arp_sweep.py` | ARP host-discovery sweep evidence and its `ConnectionAbuseHypothesis` wiring. |
+| `test_phase23_fritzbox_capture.py` | AVM pcap→standard pcap conversion, Fritzbox auth challenge-response. |
+| `test_phase24_dns_evasion.py` | DNS-evasion blind-spot audit end-to-end — private-LAN/VPN/known-resolver exclusions, representative-IP selection, and (new in 11.0) the `DNS_EVASION`/`DNS_ATTRIBUTION_GAP`/`DNS_POLICY_BYPASS` naming split. |
+| `test_phase25_reactive_capture_triggers.py` | The six reactive-capture trigger sources and the shared hourly budget. |
+| `test_phase26_fp_selfheal_new_detectors.py` | Per-device ARP-sweep threshold self-healing via `mark_false_positive()`. |
+| `test_phase27_local_intel_and_confirmed_tuning.py` | `local_confirmed_intel.json` write/read poisoning guards, Stage-1 Check 7 cross-device hard-stop, per-device threshold calibration. |
+| `test_phase28_alert_redesign.py` | Plain-language "WHY" section evidence descriptions. |
+| `test_phase29_metrics_transparency.py` | Local confirmed-intel Prometheus metrics. |
+| `test_phase30_arp_spoof_dedup.py` | ARP/NDP spoof detector's real per-IP MAC-history tracking (no false-positive on mesh-WiFi oscillation). |
+| `test_phase31_corrupted_training_rows.py` | Historically-corrupted training-row identification/exclusion. |
+| `test_phase32_lateral_movement_targets.py` | Distinct-target-count gating for lateral-movement hard-stops (a single SMB/SSH connection isn't a scan). |
+| `test_phase33_tunneling_dga_domain_attribution.py` | Evidence-linked domain attribution for `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` (not a window-wide "most notable domain" guess). |
+| `test_phase34_evidence_families_and_incidents.py` | `EVIDENCE_FAMILIES` independent-source counting, `IncidentTracker` volume aggregation. |
+| `test_phase35_device_profiles_and_ollama_guard.py` | `DeviceProfileBenignHypothesis`, Ollama circular-reasoning guard (`DeterministicValidator`). |
+| `test_phase36_review_regression.py` | New in 11.0. Golden regression suite for the third-party alerts.json review: the fp_engine Stage-1/HEE dual-verdict fixes, and golden cases for the review's own named examples. |
+| `test_phase37_suricata_batch_scan.py` | New in 11.0. Batch-mode Suricata scan — eve.json parsing, device attribution, severity→confidence mapping, `SuricataSignatureHypothesis`, the `has_confirmed_exploit` hard-stop threshold. All against synthetic data; no real Suricata binary needed. |
+| `test_phase38_comprehensive_scenarios.py` | New in 11.0. End-to-end scenario coverage across every major signature family, run through the real `DecisionEngine`/`HypothesisEngine`/`ReputationClassifier` stack — the closest thing this project has to a single-file "does the whole system still behave correctly" check. |
 
 Two additional, broader-scope tools live alongside them but are not part of the phase suite:
 - `tests/live_system_tester.py` — injects synthetic traffic against a *running* daemon (multi-stage timing/injection test), for validating an actual live deployment rather than pure logic.

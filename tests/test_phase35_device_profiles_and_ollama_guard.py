@@ -249,7 +249,7 @@ from core import pipeline as _pipeline_module
 
 _pipeline_src = inspect.getsource(_pipeline_module)
 check("SOURCE-GUARD: pipeline.py threads state.device_type into decision_engine.evaluate()",
-      'self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))' in _pipeline_src)
+      'active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity' in _pipeline_src)
 
 
 print()

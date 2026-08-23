@@ -34,12 +34,21 @@ _DEFAULT_DECAY_FACTOR = 0.995
 # -------------------------------------------------------------------------
 # MARKOV KILL-CHAIN MATRICES
 # -------------------------------------------------------------------------
+# VERSION 11 (P3, review #22): "RECON"/"C2"/"LATERAL"/"EXFIL" read as confirmed
+# kill-chain stages to anyone seeing them on a dashboard, but they're purely
+# heuristic feature-threshold guesses (see _determine_killchain_phase below) --
+# nothing in decision_engine.py or hypotheses/engine.py ever reads this value, it's
+# display/Grafana-telemetry only, but a human staring at "EXFIL" on a panel has no
+# way to know that from the label alone. Prefixed SUSPECTED_ (except NORMAL, which
+# needs no hedging) so the uncertainty is visible in the label itself, matching the
+# review's explicit suggestion ("suspected_phase" instead of "killchain_phase=EXFIL").
+# Detection thresholds themselves are UNCHANGED -- this is a labeling fix only.
 _MARKOV_TRANSITIONS = {
-    "NORMAL": {"NORMAL": 0.90, "RECON": 0.08, "C2": 0.01, "LATERAL": 0.01, "EXFIL": 0.00},
-    "RECON": {"NORMAL": 0.70, "RECON": 0.20, "C2": 0.05, "LATERAL": 0.05, "EXFIL": 0.00},
-    "C2": {"NORMAL": 0.20, "RECON": 0.10, "C2": 0.60, "LATERAL": 0.05, "EXFIL": 0.05},
-    "LATERAL": {"NORMAL": 0.40, "RECON": 0.10, "C2": 0.10, "LATERAL": 0.30, "EXFIL": 0.10},
-    "EXFIL": {"NORMAL": 0.30, "RECON": 0.05, "C2": 0.15, "LATERAL": 0.05, "EXFIL": 0.45},
+    "NORMAL": {"NORMAL": 0.90, "SUSPECTED_RECON": 0.08, "SUSPECTED_C2": 0.01, "SUSPECTED_LATERAL": 0.01, "SUSPECTED_EXFIL": 0.00},
+    "SUSPECTED_RECON": {"NORMAL": 0.70, "SUSPECTED_RECON": 0.20, "SUSPECTED_C2": 0.05, "SUSPECTED_LATERAL": 0.05, "SUSPECTED_EXFIL": 0.00},
+    "SUSPECTED_C2": {"NORMAL": 0.20, "SUSPECTED_RECON": 0.10, "SUSPECTED_C2": 0.60, "SUSPECTED_LATERAL": 0.05, "SUSPECTED_EXFIL": 0.05},
+    "SUSPECTED_LATERAL": {"NORMAL": 0.40, "SUSPECTED_RECON": 0.10, "SUSPECTED_C2": 0.10, "SUSPECTED_LATERAL": 0.30, "SUSPECTED_EXFIL": 0.10},
+    "SUSPECTED_EXFIL": {"NORMAL": 0.30, "SUSPECTED_RECON": 0.05, "SUSPECTED_C2": 0.15, "SUSPECTED_LATERAL": 0.05, "SUSPECTED_EXFIL": 0.45},
 }
 
 
@@ -220,16 +229,16 @@ class FeatureExtractor:
         outbound_bytes = features.get("zeek_outbound_bytes", 0)
         outbound_z = features.get("outbound_bytes_z", 0.0)
         if outbound_bytes > 50000000 or outbound_z > 3.0 or features.get("dns_tunneling_domains", 0) > 0 or features.get("dns_txt_null_ratio", 0.0) > 0.25:
-            return "EXFIL"
+            return "SUSPECTED_EXFIL"
         
         if features.get("beaconing_c2_count", 0) > 0 or features.get("beaconing_c2_1h", 0) > 0 or features.get("suspicious_domains", 0) > 5 or features.get("suspicious_tld_ratio", 0.0) > 0.20:
-            return "C2"
+            return "SUSPECTED_C2"
             
         if features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_s0_rej_count", 0) > 20:
-            return "LATERAL"
+            return "SUSPECTED_LATERAL"
             
         if features.get("nxdomain_ratio", 0.0) > 0.4 or features.get("zeek_susp_ports", 0) > 0:
-            return "RECON"
+            return "SUSPECTED_RECON"
             
         return "NORMAL"
 
@@ -428,6 +437,21 @@ class FeatureExtractor:
                 subdomain_fanout_count = len(children)
                 subdomain_fanout_domain = base
 
+        # VERSION 11 (P2, review #17 "parent-domain model"): average Shannon entropy
+        # of the FIRST label across every child domain sharing the winning fanout
+        # parent -- fanout COUNT alone can't distinguish "many meaningfully-named
+        # subdomains" (a legitimate multi-tenant SaaS: customer1.app.com,
+        # customer2.app.com, ...) from "many randomized/encoded chunks" (the actual
+        # DNS-tunneling shape). CDN/telemetry parents are already excluded from
+        # fanout_by_base entirely (see the loop above), so this strengthens
+        # confidence for an already-non-CDN fanout case rather than replacing that
+        # exclusion. threat_signals.py's dns_tunnel_v2 subdomain_fanout check reads
+        # this to scale confidence, not just the raw count.
+        fanout_label_entropy = 0.0
+        if subdomain_fanout_domain:
+            fanout_children = fanout_by_base[subdomain_fanout_domain]
+            fanout_label_entropy = sum(entropy(c.split(".")[0]) for c in fanout_children) / max(len(fanout_children), 1)
+
         nxdomain_tld_conc = 0.0
         nx_events = [ev[1] for ev in rw.events if ev[2] in NXDOMAIN]
         if len(nx_events) >= 5:
@@ -465,6 +489,7 @@ class FeatureExtractor:
             "min_jitter_cv": min_jitter_cv if min_jitter_cv != 999.0 else 0.0,
             "subdomain_fanout_count": subdomain_fanout_count,
             "subdomain_fanout_domain": subdomain_fanout_domain,
+            "fanout_label_entropy": fanout_label_entropy,
         }
         
         current_phase = self._determine_killchain_phase(state, extracted_features)
@@ -496,6 +521,6 @@ class FeatureExtractor:
             "dns_tunneling_domain_examples": [], "nxdomain_tld_conc": 0.0,
             "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,
             "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
-            "subdomain_fanout_count": 0, "subdomain_fanout_domain": "",
+            "subdomain_fanout_count": 0, "subdomain_fanout_domain": "", "fanout_label_entropy": 0.0,
             "killchain_phase": "NORMAL", "markov_anomaly": 0.0
         }

@@ -526,6 +526,24 @@ reactive_capture:
   # their disk usage yourself. [LIVE]
   reactive_capture_delete_after_ingest: true
 
+  # VERSION 11 (P2, Suricata follow-up): batch-mode signature/exploit scan of the
+  # SAME burst pcap Zeek already reprocesses -- runs `suricata -r burst.pcap` once
+  # per burst (never continuously against live traffic, so idle cost is zero and
+  # this stays workable on a Raspberry Pi target), turning real rule matches into
+  # Evidence (see intelligence/detectors/suricata_scan.py). Defaults to false: this
+  # does nothing until you (1) install Suricata, (2) point
+  # reactive_capture_suricata_bin/_rules_path (below, in external_system_paths) at
+  # a real binary and a ruleset you manage yourself (e.g. `suricata-update --etopen`
+  # with a trimmed "security"/"balanced" policy, not the full noisy feed), and
+  # (3) set this to true. [LIVE]
+  reactive_capture_suricata_enabled: false
+
+  # Max seconds to let one batch scan run before giving up on it (non-fatal --
+  # the burst's Zeek/DNS-evasion findings are unaffected either way). A burst pcap
+  # is bounded (reactive_capture_burst_seconds above), so this should rarely if
+  # ever be reached. [LIVE]
+  reactive_capture_suricata_timeout_seconds: 60.0
+
   # reactive_capture_zeek_bin moved to the "external_system_paths" section at the
   # very bottom of this file, alongside pihole_db/zeek_log_dir -- same reasoning
   # (describes YOUR Zeek installation's layout, not this app's own data).
@@ -659,3 +677,23 @@ external_system_paths:
   # client. Default matches this repo's own INSTALL.md for a security:zeek/zeekctl
   # install. [LIVE]
   reactive_capture_zeek_bin: /opt/zeek/bin/zeek
+
+  # Path to the suricata BINARY, used the same way as reactive_capture_zeek_bin
+  # above -- offline batch mode only (`<this> -r burst.pcap -l scratch/ -S rules`),
+  # never a continuously-running process. Only read when
+  # reactive_capture_suricata_enabled is true. Verify: `which suricata`. Standard
+  # Debian/Ubuntu package path (including under WSL2) -- `apt install suricata`.
+  # On Raspberry Pi OS (Debian-based), the same package/path applies. [LIVE]
+  reactive_capture_suricata_bin: /usr/bin/suricata
+
+  # Path to a Suricata rules FILE (not a directory) this scan will load. NOT
+  # shipped or authored by this project -- re-curating threat intelligence
+  # Suricata/Emerging Threats already maintains would be low-value reinvention.
+  # Standard way to manage this: install `suricata-update`, run it with a trimmed
+  # policy (e.g. `suricata-update --etopen` then a "security"/"balanced" policy
+  # filter, not the full ~40k-rule feed -- keeps both scan time and false-positive
+  # volume down), and point this at the resulting rules file (commonly
+  # /var/lib/suricata/rules/suricata.rules after suricata-update). Empty/missing
+  # means the scan silently produces no findings -- not an error, see
+  # suricata_scan.py's run_suricata_on_pcap(). [LIVE]
+  reactive_capture_suricata_rules_path: ""

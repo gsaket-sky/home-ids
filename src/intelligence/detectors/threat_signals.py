@@ -140,6 +140,10 @@ class ThreatSignalDetector:
         susp_tld_ratio = float(features.get("suspicious_tld_ratio", 0.0) or 0.0)
         fanout_count = float(features.get("subdomain_fanout_count", 0.0) or 0.0)
         fanout_domain = str(features.get("subdomain_fanout_domain", "") or "")
+        # VERSION 11 (P2, review #17 "parent-domain model"): average label entropy
+        # across the fanout parent's own children (dns_features.py) -- see below for
+        # how this scales confidence beyond raw count alone.
+        fanout_label_entropy = float(features.get("fanout_label_entropy", 0.0) or 0.0)
 
         # A live-data audit found the alert's displayed "Target" domain often has no
         # causal relationship to which domain actually produced this evidence (e.g. a
@@ -178,8 +182,16 @@ class ThreatSignalDetector:
         # labels under one parent; this never had any CDN exemption at all. Uses
         # fanout_domain (the parent this evidence is actually about), not top_domain.
         if fanout_count >= 8 and not _is_cdn_or_cloud_domain(fanout_domain):
-            add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04), "dns_tunnel_v2",
-                f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window",
+            # VERSION 11 (P2, review #17): fanout COUNT alone can't distinguish "many
+            # meaningfully-named subdomains" (legitimate multi-tenant SaaS) from "many
+            # randomized/encoded chunks" (real tunneling) -- a high average label
+            # entropy among the fanout parent's own children pushes confidence up on
+            # top of the count-based baseline, capped so entropy alone (with a low
+            # count just above the 8 floor) can't dominate the score.
+            entropy_bonus = min(0.3, max(0.0, fanout_label_entropy - 3.0) * 0.2)
+            add("dns_tunnel_v2", fanout_count, min(1.0, 0.4 + fanout_count * 0.04 + entropy_bonus), "dns_tunnel_v2",
+                f"{int(fanout_count)} distinct subdomains under one parent domain={fanout_domain or '?'} in-window "
+                f"(avg label entropy={fanout_label_entropy:.2f})",
                 subtag="subdomain_fanout", domain=fanout_domain)
         if not is_telemetry and txt_null_ratio > 0.15:
             # Pure aggregate ratio, no specific domain to check at the source -- keep

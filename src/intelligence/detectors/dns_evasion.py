@@ -49,9 +49,16 @@ class DeviceBurstAudit:
         burst's [window_start, window_end]). Assembling/filtering this is the
         caller's job -- kept out of this module so it stays testable without a full
         StateManager.
+    dest_ports: VERSION 11 (P1, review #3/#4 follow-up) -- {dest_ip: last-seen
+        destination port}, from ZeekFeatureExtractor.get_dest_ports(). Optional
+        (defaults empty) -- an IP absent here just means "port unknown," not an
+        error; audit_device() only uses this to distinguish a direct UDP/53 (or
+        DoT/853) bypass from a generic unexplained connection, never as a required
+        input.
     """
     dest_ips: Set[str] = field(default_factory=set)
     queried_domains: Set[str] = field(default_factory=set)
+    dest_ports: Dict[str, int] = field(default_factory=dict)
 
 
 def _is_private_lan_ip(ip: str) -> bool:
@@ -135,16 +142,34 @@ def _vpn_explains(ip: str, geoip_engine) -> bool:
 
 
 def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
-                  ti_engine=None) -> List[Evidence]:
+                  ti_engine=None, fp_engine=None) -> List[Evidence]:
     """Audits one device's burst data for real connections its own DNS history can't
     explain. Returns zero or one Evidence -- one dns_evasion_anomaly summarizing the
     whole device's gap, not one per unexplained IP (a dozen near-identical evidence
-    entries aren't more informative than one with the right numbers in its note)."""
+    entries aren't more informative than one with the right numbers in its note).
+
+    fp_engine (VERSION 11, P1, review #9/#10): optional. When supplied, damps
+    confidence by this device's own LEARNED familiarity with each unexplained IP's
+    ASN owner (AutonomousFPEngine.get_baseline_familiarity(), fp_engine.py) -- an ASN
+    this device has legitimately talked to many times before, without ever reaching
+    CONFIRMED_THREAT, is real self-healing counter-evidence, continuous rather than a
+    hard include/exclude list. Same spirit as the VPN/CDN exemptions above, just
+    softer and per-device rather than global."""
     if not audit.dest_ips:
         return []
 
     unexplained: List[str] = []
     reputation_hits: List[str] = []
+    familiarity_scores: List[float] = []
+    # VERSION 11 (P1, review #3/#4 follow-up): a direct connection on port 53/853 to
+    # an IP that isn't a recognized public resolver (_is_known_dns_resolver already
+    # excludes the well-known ones, e.g. 8.8.8.8) is a materially more specific
+    # finding than a generic unexplained connection -- it's not just "no DNS history
+    # explains this," it's "this connection IS a DNS query, made directly instead of
+    # through Pi-hole." Note: a LOCAL resolver bypass (LAN IP) is already excluded
+    # entirely by _is_private_lan_ip() above, before ever reaching this loop -- so
+    # by construction, anything landing here on port 53/853 is an external resolver.
+    policy_bypass_ips: List[str] = []
 
     for ip in audit.dest_ips:
         if _is_private_lan_ip(ip):
@@ -156,10 +181,24 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         if _vpn_explains(ip, geoip_engine):
             continue
         unexplained.append(ip)
+        if audit.dest_ports.get(ip) in (53, 853):
+            policy_bypass_ips.append(ip)
         if ti_engine is not None:
             try:
                 if ti_engine.lookup_ip(ip):
                     reputation_hits.append(ip)
+            except Exception:
+                pass
+        if fp_engine is not None:
+            owner = None
+            if geoip_engine:
+                try:
+                    asn = geoip_engine.lookup_asn(ip)
+                    owner = asn.autonomous_system_organization if asn else None
+                except Exception:
+                    owner = None
+            try:
+                familiarity_scores.append(fp_engine.get_baseline_familiarity(device_id, asn_owner=owner))
             except Exception:
                 pass
 
@@ -174,10 +213,21 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     # NO DNS footprint at all to explain any of it -- scale confidence accordingly
     # rather than treating "1 unexplained IP" the same regardless of context.
     no_dns_at_all = not audit.queried_domains
+    has_policy_bypass = bool(policy_bypass_ips)
     confidence = min(1.0, 0.3
                       + 0.4 * unexplained_ratio
                       + (0.2 if no_dns_at_all else 0.0)
-                      + (0.3 if has_reputation_hit else 0.0))
+                      + (0.3 if has_reputation_hit else 0.0)
+                      # VERSION 11: a direct port-53/853 bypass is intentional-resolver-
+                      # avoidance evidence, not just an attribution gap -- worth a
+                      # confidence bump on its own, independent of no_dns_at_all/
+                      # reputation (a device can have otherwise-normal DNS history AND
+                      # still make one direct bypass connection).
+                      + (0.2 if has_policy_bypass else 0.0))
+    # VERSION 11: dampen by this device's own learned baseline familiarity with the
+    # unexplained IPs' ASN owners (see fp_engine parameter docstring above).
+    avg_familiarity = sum(familiarity_scores) / len(familiarity_scores) if familiarity_scores else 0.0
+    confidence = max(0.0, confidence - 0.5 * avg_familiarity)
 
     note = (f"{len(unexplained)}/{total} real connection(s) from this device's captured "
             f"burst traffic have no matching DNS query history and don't resolve to "
@@ -186,19 +236,47 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         note += f"; {len(reputation_hits)} already carry threat-intel reputation data"
     if no_dns_at_all:
         note += " (device has NO DNS history at all in this window)"
+    if policy_bypass_ips:
+        note += f"; {len(policy_bypass_ips)} connection(s) are direct port-53/853 queries to a non-Pi-hole resolver"
+
+    # VERSION 11 (P1, review #3/#4): a stable subtag distinguishing WHY this is
+    # unexplained, matching threat_signals.py's provenance subtag convention.
+    # Precedence: a direct DNS-port bypass is the most specific, most actionable
+    # finding (intentional resolver avoidance, not just an attribution gap) --
+    # checked first even if the device also happens to have zero DNS history
+    # otherwise. A device with genuinely zero DNS footprint at all is the next-
+    # strongest finding ("this device isn't using DNS to look things up"); a device
+    # that mostly has normal DNS history but has a handful of connections outliving
+    # their DNS lookup's observation window (e.g. a long-lived MQTT/IoT session
+    # resolved before this capture burst started) is the weakest, most ambiguous
+    # case. Collapsing all three into the same "DNS_EVASION" name was flagged by a
+    # third-party review as misleading for the weaker cases.
+    # hypotheses/engine.py's DNSEvasionHypothesis reads this tag to name the
+    # hypothesis accordingly; detection power/thresholds are unchanged either way.
+    if has_policy_bypass:
+        gap_subtag = "policy_bypass"
+    elif no_dns_at_all:
+        gap_subtag = "no_dns_history"
+    else:
+        gap_subtag = "partial_attribution_gap"
 
     # One representative unexplained IP, so downstream alert-building
     # (pipeline.py's DNS_EVASION-signature branch) can put the ACTUAL flagged
     # destination in network_context.destination_ip instead of falling back to
     # whatever this device's most recent unrelated connection happened to be --
     # otherwise an operator/LLM correction on this alert could immunize the wrong
-    # IP entirely. Prefer a reputation-hit IP when one exists (the most actionable
-    # one, worth surfacing specifically); otherwise pick deterministically (sorted)
-    # so the same audit input always yields the same evidence. When there's more
-    # than one unexplained IP, this still only carries ONE forward -- a real
-    # narrowing, not a complete list; a persisting alert on the same device after a
-    # correction is expected if multiple distinct unexplained IPs are involved.
-    representative_ip = sorted(reputation_hits)[0] if reputation_hits else sorted(unexplained)[0]
+    # IP entirely. Prefer a policy-bypass IP (the most specific finding), then a
+    # reputation-hit IP, then pick deterministically (sorted) so the same audit
+    # input always yields the same evidence. When there's more than one unexplained
+    # IP, this still only carries ONE forward -- a real narrowing, not a complete
+    # list; a persisting alert on the same device after a correction is expected if
+    # multiple distinct unexplained IPs are involved.
+    if policy_bypass_ips:
+        representative_ip = sorted(policy_bypass_ips)[0]
+    elif reputation_hits:
+        representative_ip = sorted(reputation_hits)[0]
+    else:
+        representative_ip = sorted(unexplained)[0]
 
     return [Evidence(
         type="dns_evasion_anomaly",
@@ -208,13 +286,13 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         value=float(len(unexplained)),
         confidence=confidence,
         independence_group="blindspot_audit",
-        provenance="detector:dns_evasion",
+        provenance=f"detector:dns_evasion:{gap_subtag}:{note}",
         domain=representative_ip,
     )]
 
 
 def audit_burst(devices: Dict[str, DeviceBurstAudit], capture_ts: float,
-                 geoip_engine=None, ti_engine=None) -> Dict[str, List[Evidence]]:
+                 geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, List[Evidence]]:
     """Runs audit_device() for every device present in a completed capture burst --
     the actual point of a burst covering the whole radio, not a side effect: a burst
     triggered by one device's suspicion still gets every OTHER device present in it
@@ -222,7 +300,7 @@ def audit_burst(devices: Dict[str, DeviceBurstAudit], capture_ts: float,
     {device_id: [Evidence]} for only the devices that produced a real finding."""
     out: Dict[str, List[Evidence]] = {}
     for device_id, audit in devices.items():
-        evidence = audit_device(device_id, audit, geoip_engine=geoip_engine, ti_engine=ti_engine)
+        evidence = audit_device(device_id, audit, geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
         if not evidence:
             continue
         for e in evidence:

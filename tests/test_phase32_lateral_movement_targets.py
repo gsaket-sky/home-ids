@@ -482,17 +482,17 @@ check("THE CORE FIX: DGA_BOTNET_C2 strips correctly",
 check("SOURCE-GUARD: primary_sig_base is derived via the persisted-suffix split",
       'primary_sig_base = primary_sig.split(" (persisted ", 1)[0]' in _pipeline_src)
 check("SOURCE-GUARD: the DNS_EVASION dest-IP branch keys off primary_sig_base",
-      'if primary_sig_base == "DNS_EVASION":' in _pipeline_src)
+      'if primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in _pipeline_src)
 check("SOURCE-GUARD: the DNS_COVERT_TUNNELING branch keys off primary_sig_base",
       'if primary_sig_base == "DNS_COVERT_TUNNELING":' in _pipeline_src)
 check("SOURCE-GUARD: the DGA_BOTNET_C2 branch keys off primary_sig_base",
       'elif primary_sig_base == "DGA_BOTNET_C2":' in _pipeline_src)
 check("SOURCE-GUARD: the DNS_EVASION target-domain branch keys off primary_sig_base",
-      'elif primary_sig_base == "DNS_EVASION":' in _pipeline_src)
+      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in _pipeline_src)
 check("SOURCE-GUARD: the Confirmed Malicious IOC branch keys off primary_sig_base",
       'elif primary_sig_base == "Confirmed Malicious IOC":' in _pipeline_src)
 check("SOURCE-GUARD: target_display's DNS_EVASION preference keys off primary_sig_base",
-      "primary_sig_base == \"DNS_EVASION\" and alert_dest_ip and alert_dest_ip != \"unknown\"" in _pipeline_src)
+      "primary_sig_base in (\"DNS_EVASION\", \"DNS_ATTRIBUTION_GAP\", \"DNS_POLICY_BYPASS\") and alert_dest_ip and alert_dest_ip != \"unknown\"" in _pipeline_src)
 check("SOURCE-GUARD: the repeat-suppression cadence gate keys off primary_sig_base, "
       "not the raw suffixed signature",
       "primary_sig_base != getattr(state, \"last_alert_signature_base\", \"\")" in _pipeline_src)

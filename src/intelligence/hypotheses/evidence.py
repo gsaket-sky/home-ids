@@ -55,6 +55,12 @@ EVIDENCE_FAMILIES = frozenset({
     "ml_anomaly",       # ml_anomaly
     "local_context",    # local_device_discovery -- benign-context only, see below
     "reputation",       # reputation
+    "suricata",         # suricata_signature_match (suricata_scan.py, VERSION 11) --
+                         # real signature/rule matches from a batch-mode Suricata scan
+                         # of a reactive-capture burst pcap. Genuinely independent of
+                         # every other family here: it's the only detector that does
+                         # byte-pattern/exploit-signature matching rather than
+                         # flow/behavioral analysis.
 })
 
 # Families whose evidence can corroborate an ATTACK hypothesis toward decision_engine.py's

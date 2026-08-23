@@ -231,6 +231,12 @@ class ZeekFeatureExtractor:
     def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None):
         self._conn_ts = defaultdict(lambda: deque(maxlen=5000))
         self._new_ips = defaultdict(dict)
+        # VERSION 11 (P1, review #3/#4 follow-up): parallel to _new_ips -- last-seen
+        # destination PORT per dest_ip, so dns_evasion.py's blind-spot audit can tell
+        # a direct UDP/53-to-a-non-Pi-hole-resolver connection (DNS_POLICY_BYPASS)
+        # apart from an ordinary unexplained connection on some other port
+        # (DNS_ATTRIBUTION_GAP). Same 1000-entry cap and update site as _new_ips.
+        self._dest_ports = defaultdict(dict)
         self._ja3_hits = defaultdict(lambda: deque(maxlen=100))
         self._ja4_hits = defaultdict(lambda: deque(maxlen=100))
         self._http_uas = defaultdict(dict)
@@ -626,6 +632,7 @@ class ZeekFeatureExtractor:
 
             if self._is_home_ip(src) and not self._is_local_or_multicast(dst_ip):
                 if len(self._new_ips[src]) < 1000: self._new_ips[src][dst_ip] = ts
+                if len(self._dest_ports[src]) < 1000: self._dest_ports[src][dst_ip] = dst_port
                 if not self._is_safe_device(src):
                     if (dst_ip in DOH_IPS and dst_port == 443) or dst_port == 853:
                         if len(self._doh_bypass_uids[src]) < 100: self._doh_bypass_uids[src][uid] = ts
@@ -656,6 +663,17 @@ class ZeekFeatureExtractor:
         out = set()
         for ip in self._as_ip_list(device_ip):
             out.update(self._new_ips.get(ip, {}).keys())
+        return out
+
+    def get_dest_ports(self, device_ip) -> dict:
+        """VERSION 11 (P1): {dest_ip: last-seen destination port} for a device --
+        the port-tracking twin of get_dest_ips() above, same _as_ip_list() multi-
+        address aggregation. A dest_ip absent here (e.g. from a burst predating this
+        field) simply isn't in the returned dict -- callers must not assume every
+        dest_ip from get_dest_ips() has a matching entry."""
+        out = {}
+        for ip in self._as_ip_list(device_ip):
+            out.update(self._dest_ports.get(ip, {}))
         return out
 
     def pop_new_wired_probe_sources(self) -> list:
@@ -852,7 +870,7 @@ class ZeekFeatureExtractor:
         return alerts
 
     def reset_all(self) -> None:
-        for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
+        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
     def reset_client(self, client_ip) -> None:
