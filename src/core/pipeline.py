@@ -44,7 +44,7 @@ from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 
-from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total
+from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total, persistence_escalation_total
 
 # PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
 # (and therefore have certain behavioral evidence dampened) when device_type came from an
@@ -204,19 +204,47 @@ def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
     derived from containment_status. `mixed_signal` (true confidence conflicts with
     the false-positive check) softens an "already blocked, nothing to do" line into
     a "please double-check" line without changing what action was actually taken.
+
+    BUGFIX (live audit): "auto-blocked" (Pi-hole domain block) previously shared the
+    exact same "device auto-blocked from the network"/"the block stays in place"
+    wording as router isolation and Layer-2 tarpit -- both of which really do cut a
+    device off. A single domain being Pi-hole-blocked does not; the device keeps
+    full network/internet access otherwise. Confirmed live: this contradicted the
+    SAME alert's own "WHAT HAPPENED" section three lines down, which correctly said
+    "DOMAIN BLOCKED." Each containment type now gets its own accurate, plain-language
+    description of what actually happened and what staying idle actually means --
+    not a shared template that overstates the mildest case to match the severity of
+    the other two.
     """
     contained_text = {
-        "tarpitted (Layer-2)": "device tarpitted at Layer-2 (traffic slowed/contained).",
-        "router isolated": "device isolated at the router (WAN access cut).",
-        "auto-blocked": "device auto-blocked from the network.",
+        "tarpitted (Layer-2)": (
+            "this device's network traffic is being intercepted and slowed to a crawl "
+            "at the network level (a \"tarpit\") -- it can't reliably reach anything "
+            "until released.",
+            "the tarpit stays active until you release it.",
+        ),
+        "router isolated": (
+            "this device has been cut off from the internet at your router -- it can "
+            "still reach other devices on your home network, but not the outside world, "
+            "until released.",
+            "the device stays cut off from the internet until you release it.",
+        ),
+        "auto-blocked": (
+            "one specific domain this device was trying to reach has been blocked via "
+            "Pi-hole -- the DEVICE ITSELF is not blocked; everything else it does still "
+            "works normally.",
+            "just that one domain stays blocked until you release it -- nothing else "
+            "about this device is affected.",
+        ),
     }
     if action_summary in contained_text:
+        already_done_text, if_nothing_text = contained_text[action_summary]
         your_move = (
             "review below -- there's a real chance this is a false positive. Release if it looks wrong."
             if mixed_signal else
             'nothing required -- tap "Release" only if you\'re sure this is a false positive.'
         )
-        return "✅", contained_text[action_summary], your_move, "the block stays in place until you release it."
+        return "✅", already_done_text, your_move, if_nothing_text
 
     if action_summary == "awaiting approval":
         return (
@@ -1219,6 +1247,12 @@ class EnginePipeline:
                             # untouched: confidence, explanation text, and Telegram severity still
                             # reflect the escalation exactly as before.
                             decision["escalated_via_persistence"] = True
+                            # PHASE 30: primary_sig here is still the pre-"(persisted Ns)"
+                            # value (the suffix is appended on the next line) -- exactly the
+                            # stable underlying signature this counter should be keyed by.
+                            persistence_escalation_total.labels(
+                                device=str(state.device_id), hostname=str(hostname), signature=str(primary_sig)
+                            ).inc()
                             decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
                             # BUGFIX (live audit): 0.75 put a persistence-escalated alert's
                             # confidence in the SAME range as decision_engine.py's genuine
@@ -1404,11 +1438,24 @@ class EnginePipeline:
                         # threat_signals.py/zeek_network.py changes, this same session) --
                         # this just consumes it, same pattern as every branch above.
                         elif primary_sig_base == "CONNECTION_ABUSE":
+                            # BUGFIX (live audit, follow-up): zeek_conn_abuse's domain is a
+                            # genuinely singular target (one specific rejected connection);
+                            # arp_sweep's is only ONE of potentially hundreds of swept IPs,
+                            # picked somewhat arbitrarily -- prefer the more specific one
+                            # when both fired, instead of "whichever happens to iterate
+                            # first in active_evidence" (evidence-store insertion order,
+                            # not meaningfulness).
+                            conn_abuse_ev_domain = None
+                            arp_sweep_ev_domain = None
                             for ev in active_evidence:
-                                if ev.type in ("zeek_conn_abuse", "arp_sweep") and ev.domain:
-                                    alert_dest_ip = ev.domain
-                                    alert_target_domain = "unknown"
-                                    break
+                                if ev.type == "zeek_conn_abuse" and ev.domain and not conn_abuse_ev_domain:
+                                    conn_abuse_ev_domain = ev.domain
+                                elif ev.type == "arp_sweep" and ev.domain and not arp_sweep_ev_domain:
+                                    arp_sweep_ev_domain = ev.domain
+                            chosen = conn_abuse_ev_domain or arp_sweep_ev_domain
+                            if chosen:
+                                alert_dest_ip = chosen
+                                alert_target_domain = "unknown"
                         elif primary_sig_base == "NETWORK_INTRUSION":
                             for ev in active_evidence:
                                 if ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice") and ev.domain:

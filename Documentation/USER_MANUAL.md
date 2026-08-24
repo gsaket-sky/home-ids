@@ -689,6 +689,33 @@ All metrics defined in `src/metrics.py`, exposed on `service_ports.metrics_port`
 | `home_ids_collector_lag_seconds`, `home_ids_alert_queue_size` | Gauge | Pipeline health. |
 | `home_ids_integration_status` | Gauge, `[integration]` | 1=active, 0=inactive, per external integration (Telegram, etc.). |
 
+### Autonomous transparency — what it learned, how it tuned, what it suppressed, what it couldn't do
+The whole point of this family: turn "the system is healing/tuning itself" from a log claim into something graphable. See the **🔍 Transparency** Grafana dashboard (`grafana_dashboard/6_transparency.json`) for a curated view built around exactly these four questions.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `home_ids_autotune_global_threshold_effective`, `_baseline` | Gauge | Live `fp_combined_suppress_threshold` (from `state/config_overrides.json` if calibration has acted) vs. your hand-set `config.yaml` value. |
+| `home_ids_autotune_device_threshold_effective` | Gauge, `[device, hostname]` | Per-device calibrated suppress threshold, for devices with ≥3 pooled corrections of their own evidence. |
+| `home_ids_autotune_arp_sweep_threshold_effective` | Gauge, `[device, hostname]` | Per-device calibrated `arp_sweep_unique_targets_threshold`. |
+| `home_ids_autotune_conn_abuse_threshold_effective` | Gauge, `[device, hostname]` | Per-device calibrated `conn_abuse_unique_ip_threshold` (new this release). |
+| `home_ids_autotune_long_conn_threshold_effective` | Gauge, `[device, hostname]` | Per-device calibrated `long_conn_duration_threshold` (new this release). |
+| `home_ids_autotune_calibration_total`, `_arp_sweep_calibration_total` | Gauge, `[scope/device, outcome]` | Cumulative calibration-pass outcomes (`applied`/`refused_ambiguous`/`insufficient_samples`/`no_change_needed`) — refusals are as informative as applications. |
+| `home_ids_autotune_evidence_count`, `_arp_sweep_evidence_count` | Gauge, `[scope/device, kind]` | Pooled correction/confirmation sample counts feeding the next calibration pass. |
+| `home_ids_autotune_device_profile_correction_total` | Gauge, `[device, key, set_by]` | Cumulative per-device threshold corrections applied via any path, by which threshold key was touched and who/what made the correction (new this release). |
+| `home_ids_persistence_escalation_total` | Counter, `[device, hostname, signature]` | Alerts escalated purely because the same uncorroborated signal persisted, not new evidence — deliberately excluded from authorizing containment on its own (new this release). |
+| `home_ids_ollama_last_run_timestamp`, `_calls_last_run`, `_cache_hits_last_run`, `_deferred_last_run` | Gauge | Brain 3's most recent run: freshness, and how much of it was fresh LLM calls vs. the 7-day cache. |
+| `home_ids_ollama_validated_total` | Gauge, `[verdict]` | Cumulative validated LLM verdicts by outcome. |
+| `home_ids_job_last_success_timestamp`, `_last_duration_seconds` | Gauge, `[job]` | Staleness/duration of every scheduled cron job (`ollama_soc`, `retro_hunter`, `train_fp_classifier`, `top_domains_report`) — turns a silent scheduling bug into a Grafana panel instead of a log line nobody's watching. |
+| `home_ids_retro_hunt_findings_total` | Gauge | Cumulative retroactive threat-intel matches. |
+| `home_ids_reactive_capture_bursts_total` | Counter, `[trigger_reason, outcome]` | Reactive Fritzbox-capture trigger attempts — dispatched vs. deferred by the shared hourly budget. |
+| `home_ids_reactive_capture_bytes_total`, `_errors_total`, `_last_burst_timestamp` | Counter/Gauge | Capture volume per radio; failures by pipeline stage; freshness. |
+| `home_ids_reactive_capture_dns_evasion_findings_total`, `_suricata_findings_total`, `_stale_files_removed_total` | Counter | What each burst actually found, and orphaned-file cleanup. |
+| `home_ids_suricata_binary_health` | Gauge | 1 if the boot-time `--build-info` smoke test passed (new this release). |
+| `home_ids_suricata_scan_total` | Counter, `[outcome]` | Live batch-scan invocations by success/error, and `home_ids_suricata_last_success_timestamp` for freshness (new this release). |
+| `home_ids_pihole_gravity_queries_total` | Counter, `[outcome]` | Live Pi-hole gravity-list API lookups (cache_hit/success/error), and `home_ids_pihole_gravity_last_success_timestamp` for freshness (new this release). |
+| `home_ids_local_confirmed_intel_size` | Gauge, `[kind]` | Current entry count in the self-growing network-wide confirmed-threat store. |
+| `home_ids_local_confirmed_intel_hits_total` | Counter | Cross-device hard-stops — one device's confirmed threat protecting every other device on the network. |
+
 ### Loki LogQL examples
 - Critical threats: `{job="home_ids_alerts"} | json | threat_confidence > 0.8`
 - Brain 2 suppressions: `{job="home_ids_muted"} | json`

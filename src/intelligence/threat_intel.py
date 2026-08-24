@@ -28,6 +28,8 @@ from typing import Optional, Dict, Set
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
+from metrics import pihole_gravity_queries_total, pihole_gravity_last_success_timestamp
+
 from utils import etld1
 
 LOGGER = logging.getLogger("home_ids.ti")
@@ -197,6 +199,7 @@ class ThreatIntel:
         with self._lock:
             cached = self._pihole_gravity_cache.get(domain)
         if cached and (time.time() - cached[1]) < self._pihole_gravity_cache_ttl:
+            pihole_gravity_queries_total.labels(outcome="cache_hit").inc()
             return cached[0]
 
         try:
@@ -205,6 +208,7 @@ class ThreatIntel:
             resp = self.session.get(url, params={"partial": "false"}, headers=headers, timeout=3.0)
             if resp.status_code != 200:
                 LOGGER.debug("Pi-hole gravity search for %s returned HTTP %s", domain, resp.status_code)
+                pihole_gravity_queries_total.labels(outcome="error").inc()
                 return None
             data = resp.json()
             # v6 response shape: {"search": {"domains": [...], "gravity": [...]}, ...} --
@@ -214,9 +218,12 @@ class ThreatIntel:
             matched = bool(search.get("domains")) or bool(search.get("gravity"))
             with self._lock:
                 self._pihole_gravity_cache[domain] = (matched, time.time())
+            pihole_gravity_queries_total.labels(outcome="success").inc()
+            pihole_gravity_last_success_timestamp.set(time.time())
             return matched
         except Exception as exc:
             LOGGER.debug("Pi-hole gravity search failed for %s: %s", domain, exc)
+            pihole_gravity_queries_total.labels(outcome="error").inc()
             return None
 
     def lookup_ip(self, ip: str) -> Optional[dict]:

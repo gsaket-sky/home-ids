@@ -56,6 +56,7 @@ from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
     reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
     reactive_capture_stale_files_removed_total, reactive_capture_suricata_findings_total,
+    suricata_scan_total, suricata_last_success_timestamp,
 )
 
 LOGGER = logging.getLogger("home_ids.fritzbox_capture")
@@ -605,10 +606,13 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
                     )
                     for dev_id, ev_list in iface_findings.items():
                         suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
+                    suricata_scan_total.labels(outcome="success").inc()
+                    suricata_last_success_timestamp.set(time.time())
                 except Exception as exc:
                     LOGGER.error("Suricata batch scan failed for %s (non-fatal): %s", iface, exc)
                     summary["errors"].append(f"{iface}: suricata scan failed -- {exc}")
                     reactive_capture_errors_total.labels(stage="suricata_scan").inc()
+                    suricata_scan_total.labels(outcome="error").inc()
         finally:
             if delete_after_ingest:
                 _cleanup_burst_files(avm_path, std_path, scratch)

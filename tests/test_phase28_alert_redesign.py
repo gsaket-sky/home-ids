@@ -86,8 +86,20 @@ check("every real evidence type emitted anywhere in the codebase has a genuine p
 emoji, done, move, idle = _build_status_lines("auto-blocked", mixed_signal=False)
 check("a contained device (not mixed-signal) tells the operator no action is required",
       "nothing required" in move, f"got {move!r}")
-check("a contained device's 'if you do nothing' line says the block stays in place",
-      "stays in place" in idle, f"got {idle!r}")
+# BUGFIX (live audit, follow-up session): "auto-blocked" (Pi-hole domain block) used
+# to share the exact same "device auto-blocked from the network"/"the block stays in
+# place" wording as router isolation and Layer-2 tarpit -- both of which really do
+# cut a device off, unlike a single domain block. Confirmed live: this contradicted
+# the SAME alert's own "WHAT HAPPENED" section, which correctly said "DOMAIN
+# BLOCKED." Now scoped, accurate wording -- "stays blocked" (the domain), explicitly
+# NOT "the device."
+check("a contained device's 'if you do nothing' line says the (domain) block stays "
+      "in place",
+      "stays blocked" in idle, f"got {idle!r}")
+check("THE FIX: the domain-block case explicitly clarifies the DEVICE itself is not "
+      "blocked, unlike router-isolation/tarpit -- previously worded identically to "
+      "those two, which really do cut a device off",
+      "device itself is not blocked" in done.lower(), f"got {done!r}")
 
 emoji_m, done_m, move_m, idle_m = _build_status_lines("auto-blocked", mixed_signal=True)
 check("a contained device with a MIXED confidence signal tells the operator to review, "

@@ -2988,6 +2988,358 @@
             }
           }
         }
+      },
+      "panel-90": {
+        "kind": "Panel",
+        "spec": {
+          "id": 90,
+          "title": "⚙️ Autotune: ARP-Sweep Threshold — Effective (Per-Device)",
+          "description": "PHASE 30 (metrics-audit gap fix): home_ids_autotune_arp_sweep_threshold_effective already had sibling calibration-outcome and evidence-pool panels below, but its own current value was never plotted anywhere. Devices listed here have their OWN calibrated arp_sweep_unique_targets_threshold (from either the reactive correction path or train_fp_classifier.py's weekly bidirectional pass) -- devices not listed still use the global config.yaml default.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_arp_sweep_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-91": {
+        "kind": "Panel",
+        "spec": {
+          "id": 91,
+          "title": "⚙️ Autotune: Connection-Abuse Unique-IP Threshold — Effective (Per-Device)",
+          "description": "PHASE 30: home_ids_autotune_conn_abuse_threshold_effective -- threat_signals.py's zeek_conn_abuse check (s0_rej_unique > threshold) uses this per device instead of the global conn_abuse_unique_ip_threshold default once a CONNECTION_ABUSE alert citing zeek_conn_abuse/s0_rej evidence has been corrected for that device. Devices not listed here still use the global default.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_conn_abuse_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-92": {
+        "kind": "Panel",
+        "spec": {
+          "id": 92,
+          "title": "⚙️ Autotune: Long-Connection Duration Threshold — Effective (Per-Device)",
+          "description": "PHASE 30: home_ids_autotune_long_conn_threshold_effective -- threat_signals.py's zeek_long_conn check (max_duration > threshold) uses this per device instead of the global long_conn_duration_threshold default once a CONNECTION_ABUSE alert citing zeek_long_conn evidence has been corrected for that device. Devices not listed here still use the global default.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_long_conn_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold (s)"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-93": {
+        "kind": "Panel",
+        "spec": {
+          "id": 93,
+          "title": "🧭 Persistence-Escalated Alerts by Signature",
+          "description": "home_ids_persistence_escalation_total -- alerts whose confidence/state was escalated purely because the SAME uncorroborated signal kept recurring (decision['escalated_via_persistence']), not because of new independent evidence. Deliberately capped below every genuinely-corroborated HIGH and excluded from authorizing IPS containment on its own. A signature dominating this chart is a candidate for its own detector-specific threshold, the same way arp_sweep/conn_abuse/long_conn evolved from generic thresholds into per-device learned ones.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (signature) (increase(home_ids_persistence_escalation_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{signature}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -3435,6 +3787,58 @@
                 "name": "panel-79"
               }
             }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 121,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-90"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 121,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-91"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 129,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-92"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 129,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-93"
+              }
+            }
           }
         ]
       }
@@ -3495,6 +3899,18 @@
         "icon": "external link",
         "tooltip": "🛡️ Go to System Tuning, Healing & Health",
         "url": "/d/home_ids_v3_mitigation",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🔍 Go to Transparency",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🔍 Go to Transparency",
+        "url": "/d/home_ids_v3_transparency",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,

@@ -1480,6 +1480,18 @@
         "targetBlank": false,
         "includeVars": true,
         "keepTime": true
+      },
+      {
+        "title": "🔍 Go to Transparency",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🔍 Go to Transparency",
+        "url": "/d/home_ids_v3_transparency",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
       }
     ],
     "liveNow": true,

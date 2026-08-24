@@ -3232,6 +3232,176 @@
             }
           }
         }
+      },
+      "panel-9030": {
+        "kind": "Panel",
+        "spec": {
+          "id": 9030,
+          "title": "🦈 Suricata Health",
+          "description": "PHASE 30: home_ids_suricata_scan_total's live success/error ratio over the last 30m -- the actual batch-scan invocations reactive-capture bursts dispatch, not just the one-shot boot-time --build-info sanity check (see home_ids_suricata_binary_health on the Transparency dashboard for that). Green = recent scans are succeeding. Red = every recent scan attempt failed. No data = reactive_capture_suricata_enabled is false, or no reactive-capture burst has fired in the window yet -- not itself a failure.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum(increase(home_ids_suricata_scan_total{outcome=\"success\"}[30m])) / sum(increase(home_ids_suricata_scan_total[30m]))",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percentunit",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 0.5,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 0.9,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-9031": {
+        "kind": "Panel",
+        "spec": {
+          "id": 9031,
+          "title": "🌐 Pi-hole Gravity-List API Health",
+          "description": "PHASE 30: time since the last successful home_ids_pihole_gravity_last_success_timestamp -- the live CDN/telemetry-recognition lookup against your own Pi-hole's gravity list (threat_signals.py). Green = recently working. Red = it's been unreachable/failing for a while -- CDN/telemetry recognition silently falls back to the static list + Tranco/ASN checks, not a detection outage, but worth knowing about.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "time() - home_ids_pihole_gravity_last_success_timestamp",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 3600,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 21600,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -3471,6 +3641,32 @@
                 "name": "panel-2003"
               }
             }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 67,
+              "width": 12,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-9030"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 67,
+              "width": 12,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-9031"
+              }
+            }
           }
         ]
       }
@@ -3531,6 +3727,18 @@
         "icon": "external link",
         "tooltip": "🤖 Go to Autonomous Behavior",
         "url": "/d/home_ids_v3_autonomous",
+        "tags": [],
+        "asDropdown": false,
+        "targetBlank": false,
+        "includeVars": true,
+        "keepTime": true
+      },
+      {
+        "title": "🔍 Go to Transparency",
+        "type": "link",
+        "icon": "external link",
+        "tooltip": "🔍 Go to Transparency",
+        "url": "/d/home_ids_v3_transparency",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,

@@ -334,3 +334,55 @@ ollama_validated_total = Gauge("home_ids_ollama_validated_total", "Cumulative Ol
 job_last_success_timestamp = Gauge("home_ids_job_last_success_timestamp", "Unix timestamp of each scheduled job's last successful completion", ["job"])
 job_last_duration_seconds = Gauge("home_ids_job_last_duration_seconds", "Wall-clock duration of each scheduled job's last run", ["job"])
 retro_hunt_findings_total = Gauge("home_ids_retro_hunt_findings_total", "Cumulative retroactive threat-intel matches found by retro_hunter.py since state/job_health.json existed")
+
+# ===========================================================================
+# PHASE 30: Two New Per-Device Learned Thresholds (conn_abuse/long_conn)
+# ===========================================================================
+# Same shape as autotune_arp_sweep_threshold_effective above -- these two thresholds
+# (threat_signals.py's zeek_conn_abuse s0_rej_unique check and its zeek_long_conn
+# max_duration check) are only ever corrected reactively, in-process, via
+# fp_engine.py's mark_false_positive() -- but that function is called from the
+# FastAPI webhook subprocess (middleware/routers/pihole_api.py), a SEPARATE process
+# from the one running this registry. Synced via the device_fp_profiles.json relay
+# in metrics_sync.py, same mtime-skip mechanism as autotune_stats.json/
+# ollama_run_stats.json/job_health.json.
+autotune_conn_abuse_threshold_effective = Gauge("home_ids_autotune_conn_abuse_threshold_effective", "Live effective per-device conn_abuse_unique_ip_threshold, only set for devices with their own reactively-corrected profile", ["device", "hostname"])
+autotune_long_conn_threshold_effective = Gauge("home_ids_autotune_long_conn_threshold_effective", "Live effective per-device long_conn_duration_threshold, only set for devices with their own reactively-corrected profile", ["device", "hostname"])
+# Generic per-key correction-count gauge covering EVERY apply_device_fp_profile() key
+# (not just the two above) -- closes the "no source label on corrections" gap noted in
+# context/metrics_audit_report_2026-08.md Sec.3 for the whole device-profile mechanism
+# at once, not just these two thresholds.
+autotune_device_profile_correction_total = Gauge("home_ids_autotune_device_profile_correction_total", "Cumulative reactive/calibration corrections applied to a device's learned-threshold profile via apply_device_fp_profile(), by threshold key and correction source", ["device", "key", "set_by"])
+
+# ===========================================================================
+# PHASE 30: Persistence-Escalation Transparency
+# ===========================================================================
+# pipeline.py can escalate an alert's confidence/severity purely because the SAME
+# uncorroborated signal kept recurring (decision["escalated_via_persistence"] = True),
+# deliberately capped below every genuinely-corroborated HIGH path and excluded from
+# authorizing IPS containment on its own (see pipeline.py's containment_decision_state
+# override). No existing metric distinguishes "escalated by persistence alone" from
+# "escalated by new independent evidence" -- this is that distinction, graphable.
+persistence_escalation_total = Counter("home_ids_persistence_escalation_total", "Cumulative alerts whose confidence/state was escalated by mere signal persistence rather than new corroborating evidence, by device and underlying signature", ["device", "hostname", "signature"])
+
+# ===========================================================================
+# PHASE 30: Suricata Live Health
+# ===========================================================================
+# suricata_binary_health is the one-shot boot-time --build-info smoke test result
+# (main.py) -- rarely changes, proves the binary/rules are usable at all.
+# suricata_scan_total/suricata_last_success_timestamp are the live signal: every
+# actual batch scan a reactive-capture burst dispatches (fritzbox_capture.py),
+# turning "we ran Suricata" from a log claim into a graphable success rate over time.
+suricata_binary_health = Gauge("home_ids_suricata_binary_health", "1 if Suricata's boot-time --build-info smoke test passed, 0 if it failed. Unset (absent) if reactive_capture_suricata_enabled is false")
+suricata_scan_total = Counter("home_ids_suricata_scan_total", "Cumulative live Suricata batch-scan invocations from reactive-capture bursts, by outcome", ["outcome"])
+suricata_last_success_timestamp = Gauge("home_ids_suricata_last_success_timestamp", "Unix timestamp of the most recently successful live Suricata batch scan")
+
+# ===========================================================================
+# PHASE 30: Pi-hole Gravity-List API Health
+# ===========================================================================
+# is_pihole_gravity_domain() (threat_intel.py) is queried live for CDN/telemetry
+# domain recognition (threat_signals.py) -- previously zero Prometheus visibility,
+# same "turn organic usage into a graphable fact" approach as the Suricata metrics
+# above rather than a synthetic health ping.
+pihole_gravity_queries_total = Counter("home_ids_pihole_gravity_queries_total", "Cumulative Pi-hole gravity-list API lookups by outcome", ["outcome"])
+pihole_gravity_last_success_timestamp = Gauge("home_ids_pihole_gravity_last_success_timestamp", "Unix timestamp of the last successful (non-cached) Pi-hole gravity-list API response")

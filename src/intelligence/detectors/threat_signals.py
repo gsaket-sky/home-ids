@@ -325,8 +325,20 @@ class ThreatSignalDetector:
         arp_sweep_count = float(features.get("zeek_arp_sweep_count", 0.0) or 0.0)
         if arp_sweep_count >= arp_sweep_threshold:
             conf = min(1.0, 0.5 + (arp_sweep_count - arp_sweep_threshold) * 0.05)
-            add("arp_sweep", arp_sweep_count, conf, "lan_recon",
-                f"ARP-requested {int(arp_sweep_count)} distinct targets (host-discovery sweep)")
+            # BUGFIX (live audit): no domain= was ever attached here -- an arp_sweep-
+            # driven CONNECTION_ABUSE alert had nothing evidence-linked to show, so
+            # pipeline.py's attribution override (which checks `ev.domain`) silently
+            # never matched, and the alert fell back to a coincidental, unrelated
+            # domain/port from the device's own last connection. One representative
+            # swept IP (not "the" target -- a sweep touches many) is still far more
+            # honest than an unrelated bystander domain; the full example list goes in
+            # the note text for the "WHY" reasoning detail.
+            swept_examples = features.get("zeek_arp_swept_ip_examples", []) or []
+            rep_swept_ip = swept_examples[0] if swept_examples else None
+            note = f"ARP-requested {int(arp_sweep_count)} distinct targets (host-discovery sweep)"
+            if swept_examples:
+                note += f"; e.g.={','.join(swept_examples)}"
+            add("arp_sweep", arp_sweep_count, conf, "lan_recon", note, domain=rep_swept_ip)
 
         # ── Long-lived / covert-tunnel connections ───────────────────────────────────
         max_dur = float(features.get("zeek_max_duration", 0.0) or 0.0)

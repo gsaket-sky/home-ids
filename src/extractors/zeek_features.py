@@ -898,6 +898,13 @@ class ZeekFeatureExtractor:
             # (pruned by prune()) -- host-discovery-sweep signal, broadcast so it reaches
             # WiFi devices already.
             "zeek_arp_sweep_count": len({tpa for ip in ips for _ts, tpa in self._arp_targets.get(ip, [])}),
+            # BUGFIX (live audit): zeek_arp_sweep_count only ever exposed the COUNT,
+            # never which IPs -- so an arp_sweep-driven CONNECTION_ABUSE alert had no
+            # real destination to attribute to, and pipeline.py's alert display fell
+            # back to a coincidental, unrelated domain/port from the device's own last
+            # connection. Same pattern as zeek_s0_rej_ip_examples/
+            # zeek_lateral_target_examples above.
+            "zeek_arp_swept_ip_examples": sorted({tpa for ip in ips for _ts, tpa in self._arp_targets.get(ip, [])})[:5],
             # PHASE 21-LGBM-EXTEND: most recent dns_evasion.py finding across this
             # device's known addresses (max, not sum -- it's a ratio per burst, not an
             # accumulating count). 0.0 for a device with no reactive-capture burst yet,

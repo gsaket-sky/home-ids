@@ -1591,7 +1591,7 @@ class AutonomousFPEngine:
                            f"CONNECTION_ABUSE alert for {hostname} (zeek_conn_abuse/s0_rej "
                            f"evidence) — raising this device's own rejected-connection "
                            f"unique-IP threshold instead of the global default.",
-                    sample_count=1,
+                    sample_count=1, hostname=hostname,
                 )
                 bumped_any = True
             current_long_conn_threshold = self.get_device_long_conn_duration_threshold(device_id, default=14400.0)
@@ -1604,7 +1604,7 @@ class AutonomousFPEngine:
                     reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
                            f"CONNECTION_ABUSE alert for {hostname} (zeek_long_conn evidence) — "
                            f"raising this device's own long-connection duration threshold.",
-                    sample_count=1,
+                    sample_count=1, hostname=hostname,
                 )
                 bumped_any = True
             if arp_count > 0:
@@ -1834,15 +1834,29 @@ class AutonomousFPEngine:
         return self._get_device_profile_value(device_id, "long_conn_duration_threshold", default)
 
     def apply_device_fp_profile(self, device_id: str, key: str, value: float, baseline: float,
-                                 set_by: str, reason: str, sample_count: int = 0) -> None:
+                                 set_by: str, reason: str, sample_count: int = 0, hostname: str = "") -> None:
         """Writes ONE calibrated value into ONE device's profile, preserving every other
         key/device already present. Called by train_fp_classifier.py's per-device
-        calibration pass — see get_device_suppress_threshold() for how it's read back."""
+        calibration pass — see get_device_suppress_threshold() for how it's read back.
+
+        PHASE 30: this function is never called in-process from pipeline.py itself (only
+        from the FastAPI webhook subprocess via mark_false_positive(), from
+        scripts/ollama_soc.py, and from scripts/train_fp_classifier.py -- three separate
+        processes, none running this project's scraped Prometheus registry). `hostname`
+        and the new `correction_count` field (incremented, not overwritten, unlike every
+        other field here) exist so metrics_sync.py's device_fp_profiles.json relay can
+        expose a live effective-value gauge and a cumulative correction counter from
+        pipeline.py's own process -- see sync_relay_metrics(). `hostname` is optional
+        because train_fp_classifier.py's two existing call sites don't have it in scope
+        and don't need it (their keys already have their own dedicated, correctly-relayed
+        metrics via autotune_stats.json)."""
         with self._lock:
             profile = self._device_fp_profiles.setdefault(device_id, {})
+            prior_correction_count = profile.get(key, {}).get("correction_count", 0)
             profile[key] = {
                 "value": value, "baseline": baseline, "set_at": time.time(),
                 "set_by": set_by, "reason": reason, "sample_count": sample_count,
+                "hostname": hostname, "correction_count": prior_correction_count + 1,
             }
         self._save_device_fp_profiles()
         LOGGER.info(

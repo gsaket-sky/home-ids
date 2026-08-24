@@ -2,20 +2,11 @@
   "apiVersion": "dashboard.grafana.app/v2",
   "kind": "Dashboard",
   "metadata": {
-    "name": "home_ids_v3_mitigation",
+    "name": "home_ids_v3_transparency",
     "namespace": "default",
-    "uid": "a258bbcb-61a1-4829-8251-edc0f3b07407",
-    "resourceVersion": "1786732620769004",
-    "generation": 1,
-    "creationTimestamp": "2026-08-14T18:37:00Z",
-    "labels": {
-      "grafana.app/deprecatedInternalID": "3167461197160448"
-    },
-    "annotations": {
-      "grafana.app/createdBy": "user:afm28i0ltxcsga",
-      "grafana.app/folder": "",
-      "grafana.app/saved-from-ui": "Grafana v13.1.1 (a9cee6e172)"
-    }
+    "uid": "d5331fd1-e3d9-4663-a9d4-c81627a7da72",
+    "labels": {},
+    "annotations": {}
   },
   "spec": {
     "annotations": [
@@ -43,15 +34,15 @@
       }
     ],
     "cursorSync": "Off",
-    "description": "IPS, Trust Cache, and AI Decisions Now also includes Layer-1 process health (CPU, memory, uptime) alongside the existing IPS mitigation, Continuous-Learning False-Positive Engine, and Ollama SOC transparency panels.",
+    "description": "PHASE 30: purpose-built around four questions the other five dashboards answer piecemeal -- what did the system learn (per-device thresholds), how did it tune itself (calibration history), what did it suppress (autonomous FP suppression funnel and releases, by source), and what couldn't it do (subsystem health/failures). Every panel here already exists elsewhere except the two new learned-threshold tables, the device-profile-correction breakdown, the persistence-escalation panel, and the four new health metrics -- this dashboard curates them into one narrative rather than duplicating logic. Prometheus-only.",
     "editable": true,
     "elements": {
       "panel-1": {
         "kind": "Panel",
         "spec": {
           "id": 1,
-          "title": "🛡️ IPS Mitigations & Tarpitting",
-          "description": "Section header. The three tiles below show what's ACTIVELY isolated right now, in real time.",
+          "title": "🔍 What is this dashboard?",
+          "description": "Section header.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -64,7 +55,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "code": {
@@ -72,7 +63,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "Real-time state of the Intrusion Prevention System.",
+                "content": "**Is the system actually getting smarter, and can I trust what it does while I'm not watching?** This dashboard answers that in four parts, top to bottom: **what it learned** (per-device thresholds it has calibrated for itself), **how it tuned** (the calibration history behind those numbers -- applied vs refused, not just applied), **what it suppressed** (autonomous false-positive suppression, broken down by stage and by source -- autonomous vs LLM-validated vs a human tap), and **what it couldn't do** (every subsystem's live health, so a quiet dashboard elsewhere can be told apart from a genuinely healthy one). Most panels here are curated copies of panels that already exist on the Autonomous Behavior and System Health dashboards -- this view exists to answer the four questions directly, not to replace those.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -83,610 +74,12 @@
           }
         }
       },
-      "panel-10": {
-        "kind": "Panel",
-        "spec": {
-          "id": 10,
-          "title": "Confirmed Threats (Hard-Stop Bypass)",
-          "description": "How many alerts were stopped at Stage 1 — the deterministic hard-stop security filter that runs BEFORE any ML model, on signals like a confirmed honeypot hit or a Tier-5 threat-intel match. These bypass the false-positive engine entirely and always fire as confirmed threats (see fp_engine.py: 'hard-stop signals fired → CONFIRMED THREAT despite trust cache hit').",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_confirmed_threats_total"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-11": {
-        "kind": "Panel",
-        "spec": {
-          "id": 11,
-          "title": "LGBM Model Status",
-          "description": "Is the LightGBM ONNX false-positive classifier model currently loaded and serving Stage 2 of the CL-AFPE pipeline? Red means Stage 2 scoring is unavailable and the engine is relying only on Stage 1 hard-stops and Stage 3 FastEmbed similarity.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_lgbm_model_status",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-12": {
-        "kind": "Panel",
-        "spec": {
-          "id": 12,
-          "title": "📜 AFPE Suppressed/Muted Log",
-          "description": "Every alert the false-positive engine has AUTONOMOUSLY suppressed, with its exact reasoning — this is the transparency guarantee: nothing is ever silently discarded. 'Type' tells you which of the 3 suppression paths fired: TRUST_CACHE_HIT (instant, domain was already immunized), AUTONOMOUS_FP_SUPPRESSED (passed the full Stage 1→2→3 pipeline and cleared fp_combined_suppress_threshold = 0.8), or OPERATOR_MARKED_FALSE_POSITIVE (you corrected it manually). PREREQUISITE: this panel needs a Loki scrape target for state/autonomous_muted.jsonl with job=\"home_ids_muted\" — see the setup panel below if this table is empty.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_muted\"} | json ts=\"ts_human\", type=\"type\", confidence=\"confidence\", reasons=\"reasons\", domain=\"domain\", risk_score=\"risk_score\", device_ip=\"device.ip\"",
-                        "format": "table",
-                        "instant": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "renameByName": {
-                        "ts": "When",
-                        "type": "Suppression Path",
-                        "confidence": "FP Confidence",
-                        "reasons": "Reasoning",
-                        "domain": "Domain",
-                        "risk_score": "Original Risk",
-                        "device_ip": "Device IP"
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-13": {
-        "kind": "Panel",
-        "spec": {
-          "id": 13,
-          "title": "🤖 AI Reasoning & Tuning Transparency",
-          "description": "Two things happen here: (1) 'ollama_transparency' entries are Brain 3's full LLM reasoning for every alert it batch-analyzed — model used, its classification, confidence, reasoning, recommended action, and whether the deterministic threat-intel guardrail (validator_passed) approved or overrode it. (2) 'afpe_tuning' entries, if present, would represent autonomous threshold retuning — this event type was not found in the reviewed engine source during the Version 7.0 audit, so treat rows of that type as unverified/legacy until confirmed against your actual deployed code.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} |= \"ollama_transparency\" or \"afpe_tuning\" | json ts=\"timestamp\", device_ip=\"device.ip\", risk=\"risk\", model=\"model\", classification=\"response.classification\", ai_confidence=\"response.confidence\", reason=\"response.reason\", action=\"response.recommended_action\", validator_passed=\"validator_passed\"",
-                        "format": "table",
-                        "instant": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "renameByName": {
-                        "ts": "When",
-                        "device_ip": "Device IP",
-                        "risk": "Original Risk",
-                        "model": "AI Model",
-                        "classification": "AI Verdict",
-                        "ai_confidence": "AI Confidence",
-                        "reason": "AI Reasoning",
-                        "action": "Recommended Action",
-                        "validator_passed": "Guardrail Passed"
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-2": {
         "kind": "Panel",
         "spec": {
           "id": 2,
-          "title": "Active L2 ARP Tarpits",
-          "description": "Devices currently trapped by the Layer-2 Scapy ARP/NDP tarpit. This is usually the FASTEST mitigation to take effect since it needs no external API — a device can be tarpitted even if your router or Pi-hole integration is down.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_tarpit_active",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 1,
-                        "color": "red"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3,
-          "title": "Active WAN Isolations",
-          "description": "Devices currently cut off from WAN access via the Fritz!Box TR-064 integration (Layer 3). Local LAN access is deliberately left intact so you can still SSH in and remediate the machine.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_router_isolated_active",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 1,
-                        "color": "red"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4,
-          "title": "Active Pi-Hole Blocks",
-          "description": "Devices/domains currently under an active Pi-hole DNS block (Layer 7). This is a live gauge of enforcement, not the lifetime counter — compare against the 'Lifetime Threats Blocked' tile on the Overview dashboard to see cumulative vs. currently-active blocks.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_active_blocks",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 1,
-                        "color": "red"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5,
-          "title": "🧠 Autonomous False-Positive Elimination (AFPE)",
-          "description": "Section header for the Continuous-Learning False-Positive Engine (CL-AFPE) metrics below — the system that keeps Home-IDS from crying wolf over your smart TV's firmware checks.",
+          "title": "📚 What It Learned — Per-Device Thresholds",
+          "description": "Section header.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -699,7 +92,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "code": {
@@ -707,8 +100,254 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "Metrics tracking the dynamic Trust Cache and AI overrides.",
+                "content": "Devices that have earned their own calibrated threshold, distinct from the global config.yaml default -- a device not listed in a given table below still uses that global value. Four independent learned thresholds now exist: the general FP-suppress threshold, and three detector-specific ones (ARP-sweep unique-targets, connection-abuse unique-IP, long-connection duration) added as false-positive patterns specific to each detector were found.",
                 "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3,
+          "title": "⚙️ Suppress Threshold — Effective (Per-Device)",
+          "description": "home_ids_autotune_device_threshold_effective -- devices with >=3 pooled corrections of their own evidence get their own calibrated fp_combined_suppress_threshold.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_device_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "id": 4,
+          "title": "⚙️ ARP-Sweep Threshold — Effective (Per-Device)",
+          "description": "home_ids_autotune_arp_sweep_threshold_effective -- PHASE 30 gap fix, had sibling calibration/evidence panels but was never itself plotted anywhere until this session.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_arp_sweep_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "id": 5,
+          "title": "⚙️ Connection-Abuse Unique-IP Threshold — Effective (Per-Device)",
+          "description": "PHASE 30 (new this session): home_ids_autotune_conn_abuse_threshold_effective -- threat_signals.py's zeek_conn_abuse check (s0_rej_unique > threshold) per device.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_conn_abuse_threshold_effective",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
               },
               "fieldConfig": {
                 "defaults": {},
@@ -722,8 +361,8 @@
         "kind": "Panel",
         "spec": {
           "id": 6,
-          "title": "AFPE Total Evaluations",
-          "description": "Total alerts that crossed alert_threshold and were routed into the false-positive engine for a suppress/confirm decision — the denominator for everything below (Stage 1 Hardstops, Suppressed, Confidence Score).",
+          "title": "⚙️ Long-Connection Duration Threshold — Effective (Per-Device)",
+          "description": "PHASE 30 (new this session): home_ids_autotune_long_conn_threshold_effective -- threat_signals.py's zeek_long_conn check (max_duration > threshold) per device.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -740,7 +379,9 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_evaluations_total"
+                        "expr": "home_ids_autotune_long_conn_threshold_effective",
+                        "format": "table",
+                        "instant": true
                       }
                     },
                     "refId": "A",
@@ -748,70 +389,50 @@
                   }
                 }
               ],
-              "transformations": [],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "hostname",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "device": true
+                      },
+                      "renameByName": {
+                        "Value": "Effective Threshold (s)"
+                      }
+                    }
+                  }
+                }
+              ],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
+            "group": "table",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
+                "cellHeight": "sm",
+                "showHeader": true
               },
               "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
+                "defaults": {},
                 "overrides": []
               }
             }
@@ -822,8 +443,8 @@
         "kind": "Panel",
         "spec": {
           "id": 7,
-          "title": "AFPE Alerts Suppressed",
-          "description": "How many of those evaluations were autonomously suppressed as false positives (Stage 2/3 combined confidence >= fp_combined_suppress_threshold = 0.8, from config.yaml). The gap between 'Total Evaluations' and this number is how many alerts actually reached you as real threats.",
+          "title": "⚙️ Global Suppress Threshold — Effective vs Baseline",
+          "description": "The single most direct 'is the system healing itself' chart: the live effective fp_combined_suppress_threshold against your hand-set config.yaml baseline. Effective should trend at or below baseline over time, never above.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -840,10 +461,34 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_suppressed_total"
+                        "expr": "home_ids_autotune_global_threshold_effective",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "Effective (live)"
                       }
                     },
                     "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_global_threshold_baseline",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "Baseline (config.yaml)"
+                      }
+                    },
+                    "refId": "B",
                     "hidden": false
                   }
                 }
@@ -855,7 +500,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
@@ -864,8 +509,8 @@
                   "placement": "bottom"
                 },
                 "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
+                  "mode": "multi",
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
@@ -875,7 +520,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       }
                     ]
@@ -906,9 +551,8 @@
                     },
                     "showPoints": "auto",
                     "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
+                    "thresholdsStyle": {
+                      "mode": "off"
                     }
                   }
                 },
@@ -918,220 +562,12 @@
           }
         }
       },
-      "panel-8": {
+      "panel-10": {
         "kind": "Panel",
         "spec": {
-          "id": 8,
-          "title": "Trust Cache Size",
-          "description": "How many unique domains are currently held in the 14-day trust cache (fp_revoke_action_ttl_seconds-adjacent TTL logic). Queries matching this cache skip the ML pipeline entirely for near-zero-latency suppression — this is Brain 2's short-term memory.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_trust_cache_size"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9,
-          "title": "AFPE Confidence Score",
-          "description": "The combined Stage 2 (LightGBM) + Stage 3 (FastEmbed) confidence that an alert is a false positive. Thresholds now reflect the real config.yaml values: below 0.55 (fp_combined_uncertain_threshold) is treated as still-a-real-threat territory (🔴), 0.55-0.79 is the 'uncertain, tagged low-confidence' band (🟡), and 0.8+ (fp_combined_suppress_threshold) is confidently auto-suppressed (🟢).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_confidence_score"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "red"
-                      },
-                      {
-                        "value": 0.55,
-                        "color": "yellow"
-                      },
-                      {
-                        "value": 0.8,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5001": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5001,
-          "title": "🔌 Prerequisite: Wire Up the Missing Loki Stream",
-          "description": "The exact promtail config needed to make the AFPE Suppressed/Muted Log panel actually receive data.",
+          "id": 10,
+          "title": "⚙️ How It Tuned — Calibration History",
+          "description": "Section header.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1144,7 +580,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "code": {
@@ -1152,7 +588,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "**Why the AFPE Suppressed/Muted Log panel above might be empty.** Home-IDS writes suppressed-alert audit entries to `state/autonomous_muted.jsonl` — a SEPARATE file from `alerts.json`. The Promtail scrape config in INSTALL.md only ships `alerts.json` (job=`home_ids_alerts`) to Loki by default; `autonomous_muted.jsonl` isn't wired up unless you add a second scrape target. Add this to `/etc/promtail/config.yml` under `scrape_configs`, then `sudo systemctl restart promtail`:\n\n```yaml\n  - job_name: home_ids_muted\n    static_configs:\n      - targets: [localhost]\n        labels:\n          job: home_ids_muted\n          __path__: /home/user/home_ids/state/autonomous_muted.jsonl\n```\n\n(Path assumes the standard project layout from INSTALL.md — adjust if yours differs.) Once wired up, the panel above will show every alert the false-positive engine silently resolved, with its exact reasoning — nothing is ever discarded without a trace.",
+                "content": "Refusals are as informative as applications -- proof the system isn't blindly loosening just because it can. Two calibration mechanisms exist: a weekly bidirectional pass (train_fp_classifier.py, covers the suppress and ARP-sweep thresholds) and immediate reactive corrections (fp_engine.py, covers all four thresholds whenever a specific alert is corrected -- the bottom table breaks these down by threshold key and by who/what made the correction).",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -1163,12 +599,12 @@
           }
         }
       },
-      "panel-5002": {
+      "panel-11": {
         "kind": "Panel",
         "spec": {
-          "id": 5002,
-          "title": "⚙️ Engine CPU Usage",
-          "description": "CPU time consumed by the Home-IDS process itself (process_cpu_seconds_total, a standard metric automatically exposed by the prometheus_client library — confirmed in requirements.txt). Sustained high usage can slow down the 5-phase detection loop and delay alerting; compare against Alert Queue on the Overview dashboard if you suspect the engine is falling behind.",
+          "id": 11,
+          "title": "⚙️ Global Calibration Pass Outcomes (Cumulative)",
+          "description": "applied / refused_ambiguous / insufficient_samples / no_change_needed, across both scope=global and scope=device.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1185,110 +621,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "rate(process_cpu_seconds_total{job=\"home_ids\"}[5m]) * 100",
-                        "format": "time_series",
-                        "instant": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percent",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5003": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5003,
-          "title": "💾 Engine Memory (RSS)",
-          "description": "Resident memory used by the Home-IDS process (process_resident_memory_bytes). Grows with max_device_states and the size of your ML models — a slow, steady climb over days/weeks with no plateau can indicate a memory leak worth investigating.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "process_resident_memory_bytes{job=\"home_ids\"}",
-                        "format": "time_series",
+                        "expr": "sum by (scope, outcome) (home_ids_autotune_calibration_total)",
+                        "format": "table",
                         "instant": true
                       }
                     },
@@ -1303,14 +637,12 @@
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
+            "group": "bargauge",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
+                "displayMode": "gradient",
+                "orientation": "horizontal",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -1318,85 +650,12 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showUnfilled": true,
+                "valueMode": "color"
               },
               "fieldConfig": {
                 "defaults": {
-                  "unit": "bytes",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5004": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5004,
-          "title": "⏱️ Engine Uptime",
-          "description": "How long the current Home-IDS process has been running without a restart (time() - process_start_time_seconds). Drops to zero unexpectedly = the service crashed and systemd restarted it — worth checking journalctl if this doesn't match your last intentional deploy/restart.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "time() - process_start_time_seconds{job=\"home_ids\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
+                  "unit": "none",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
@@ -1405,6 +664,9 @@
                         "color": "blue"
                       }
                     ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
                   }
                 },
                 "overrides": []
@@ -1413,12 +675,349 @@
           }
         }
       },
-      "panel-5005": {
+      "panel-12": {
         "kind": "Panel",
         "spec": {
-          "id": 5005,
+          "id": 12,
+          "title": "⚙️ ARP-Sweep Calibration Outcomes (Cumulative)",
+          "description": "Same shape as the global calibration panel, for the separate bidirectional ARP-sweep-threshold rule (train_fp_classifier.py's calibrate_arp_sweep_threshold()).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (outcome) (home_ids_autotune_arp_sweep_calibration_total)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "displayMode": "gradient",
+                "orientation": "horizontal",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showUnfilled": true,
+                "valueMode": "color"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "blue"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-13": {
+        "kind": "Panel",
+        "spec": {
+          "id": 13,
+          "title": "⚙️ Evidence Samples Pooled (Global)",
+          "description": "How close the global pass is to its next calibration decision: corrected = confirmed FPs pooled since the last write, uncorrected = never-corrected UNCERTAIN alerts in the same window.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_evidence_count{scope=\"global\"}",
+                        "format": "table",
+                        "instant": true,
+                        "legendFormat": "{{kind}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "displayMode": "gradient",
+                "orientation": "horizontal",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showUnfilled": true,
+                "valueMode": "color"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "blue"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-14": {
+        "kind": "Panel",
+        "spec": {
+          "id": 14,
+          "title": "⚙️ ARP-Sweep Evidence Pool (corrected vs confirmed)",
+          "description": "Per-device CONNECTION_ABUSE correction/confirmation counts feeding the ARP-sweep calibration pass.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (kind) (home_ids_autotune_arp_sweep_evidence_count)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "displayMode": "gradient",
+                "orientation": "horizontal",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showUnfilled": true,
+                "valueMode": "color"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "blue"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-15": {
+        "kind": "Panel",
+        "spec": {
+          "id": 15,
+          "title": "⚙️ Device-Profile Corrections by Threshold Key & Source",
+          "description": "PHASE 30 (new this session): home_ids_autotune_device_profile_correction_total -- cumulative reactive/calibration corrections applied to a device's learned-threshold profile, by which threshold key was touched and who/what made the correction (operator = a Telegram 'Mark False Positive' tap, llm_validated = Ollama's autonomous validation pass, or a train_fp_classifier.py calibration tag). set_by reflects the MOST RECENT correction for that device+key, not a full history across every source ever used.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_autotune_device_profile_correction_total",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true
+                      },
+                      "renameByName": {
+                        "Value": "Correction Count"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-20": {
+        "kind": "Panel",
+        "spec": {
+          "id": 20,
+          "title": "🚫 What It Suppressed",
+          "description": "Section header.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "The full suppression funnel (evaluated -> hard-stopped -> suppressed), then the by-source breakdown of every autonomous self-healing action: domains immunized, sensitivity adjustments, Pi-hole unblocks, and router-isolation releases. The goal of this whole self-calibration system is for 'autonomous' and 'llm_validated' to dominate 'operator' over time -- a human shouldn't need to keep pace with every alert for the system to keep healing itself.",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-21": {
+        "kind": "Panel",
+        "spec": {
+          "id": 21,
           "title": "🧪 CL-AFPE 3-Stage Funnel (Evaluated → Hard-Stopped → Suppressed)",
-          "description": "Three CL-AFPE counters plotted together as a funnel: Total Evaluations (everything that crossed alert_threshold), Stage 1 Hardstops (bypassed straight to CONFIRMED THREAT on a honeypot/reputation hit — never even gets an FP chance), and Suppressed (autonomously resolved as false positives). The gap between Evaluations and (Hardstops + Suppressed) is what actually reached you as a real, unresolved alert — the smaller that gap relative to Evaluations, the quieter and more trustworthy your SOC feed is.",
+          "description": "How many alerts CL-AFPE evaluated, how many were confirmed threats (hard-stop bypass, never eligible for suppression), and how many were actually suppressed as false positives.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1492,7 +1091,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
@@ -1555,11 +1154,435 @@
           }
         }
       },
-      "panel-6001": {
+      "panel-22": {
         "kind": "Panel",
         "spec": {
-          "id": 6001,
-          "title": "🩺 Subsystem Health",
+          "id": 22,
+          "title": "🛡️ Domains Immunized by Source",
+          "description": "fp_engine_domains_immunized_total split by source (autonomous / operator / llm_validated).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (source) (increase(home_ids_fp_domains_immunized_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{source}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-23": {
+        "kind": "Panel",
+        "spec": {
+          "id": 23,
+          "title": "🛡️ Sensitivity Adjustments by Source",
+          "description": "fp_engine_sigma_shifts_total split by source (autonomous / operator / llm_validated).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (source) (increase(home_ids_fp_sigma_shifts_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{source}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-24": {
+        "kind": "Panel",
+        "spec": {
+          "id": 24,
+          "title": "🔓 Pi-hole Unblocks by Reason",
+          "description": "'immunized' = an autonomous or operator correction released a block that was no longer warranted. 'manual' = an explicit operator release. The release-side counterpart to the block-side count on the Main Overview dashboard.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (reason) (increase(home_ids_ips_pihole_unblocks_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{reason}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-25": {
+        "kind": "Panel",
+        "spec": {
+          "id": 25,
+          "title": "🔓 Router Isolation Releases by Reason",
+          "description": "home_ids_ips_router_releases_total split by reason (immunized / manual) -- the release-side counterpart to router isolation on the Main Overview dashboard.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (reason) (increase(home_ids_ips_router_releases_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{reason}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-30": {
+        "kind": "Panel",
+        "spec": {
+          "id": 30,
+          "title": "🩺 What It Couldn't Do — Subsystem Health",
           "description": "Section header.",
           "links": [],
           "data": {
@@ -1581,7 +1604,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "**What couldn't the system do, right now?** PHASE 30: this dashboard is titled \"System Tuning, Healing & Health\" but had zero general subsystem up/down visibility until this row -- Pi-hole/Zeek status lived on the Overview dashboard, and Suricata/Pi-hole-gravity had none anywhere. Consolidated here so every subsystem's health is in one glanceable place.",
+                "content": "Every subsystem's live health in one place, plus one honesty signal: how often an alert's severity grew from a signal simply persisting rather than genuine new corroboration. A quiet 'What It Learned'/'How It Tuned' section above can mean either a genuinely calm network, or a subsystem below silently failing to feed it evidence -- this section is what tells the two apart.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -1592,12 +1615,255 @@
           }
         }
       },
-      "panel-6002": {
+      "panel-31": {
         "kind": "Panel",
         "spec": {
-          "id": 6002,
-          "title": "🦈 Suricata Health",
-          "description": "home_ids_suricata_scan_total's live success/error ratio over the last 30m -- see the Overview dashboard's identical panel for full description.",
+          "id": 31,
+          "title": "Zeek Network Monitor",
+          "description": "home_ids_zeek_status -- reference copy of the Overview dashboard's identical panel.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-32": {
+        "kind": "Panel",
+        "spec": {
+          "id": 32,
+          "title": "Pi-hole IPS",
+          "description": "home_ids_ips_pihole_status -- reference copy of the Overview dashboard's identical panel.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ips_pihole_status",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-33": {
+        "kind": "Panel",
+        "spec": {
+          "id": 33,
+          "title": "🦈 Suricata Binary Health (Boot-Time)",
+          "description": "PHASE 30: home_ids_suricata_binary_health -- the one-shot --build-info smoke test result from main.py's boot sequence. No data = reactive_capture_suricata_enabled is false. See the next panel for the live scan success rate.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_suricata_binary_health",
+                        "format": "time_series",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "colorMode": "value",
+                "graphMode": "area",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "percentChangeColorMode": "standard",
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-34": {
+        "kind": "Panel",
+        "spec": {
+          "id": 34,
+          "title": "🦈 Suricata Live Scan Health",
+          "description": "PHASE 30: home_ids_suricata_scan_total's live success/error ratio over the last 30m -- the actual batch-scan invocations reactive-capture bursts dispatch.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1677,12 +1943,12 @@
           }
         }
       },
-      "panel-6003": {
+      "panel-35": {
         "kind": "Panel",
         "spec": {
-          "id": 6003,
+          "id": 35,
           "title": "🌐 Pi-hole Gravity-List API Health",
-          "description": "Time since the last successful home_ids_pihole_gravity_last_success_timestamp -- see the Overview dashboard's identical panel for full description.",
+          "description": "PHASE 30: time since the last successful home_ids_pihole_gravity_last_success_timestamp -- the live CDN/telemetry-recognition lookup against your own Pi-hole's gravity list.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1762,12 +2028,12 @@
           }
         }
       },
-      "panel-6004": {
+      "panel-36": {
         "kind": "Panel",
         "spec": {
-          "id": 6004,
-          "title": "Zeek Network Monitor",
-          "description": "home_ids_zeek_status -- reference copy of the Overview dashboard's identical panel, so Zeek's status is visible here alongside every other subsystem too.",
+          "id": 36,
+          "title": "📅 Scheduled-Job Health",
+          "description": "Time since each scheduled job's last successful completion, and how long that run took. Expected staleness: ollama_soc ~4h, retro_hunter/top_domains_report/train_fp_classifier ~24h.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1784,9 +2050,112 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_zeek_status",
-                        "format": "time_series",
+                        "expr": "time() - home_ids_job_last_success_timestamp",
+                        "format": "table",
                         "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_job_last_duration_seconds",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "job",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true
+                      },
+                      "renameByName": {
+                        "Value #A": "Time Since Last Success (s)",
+                        "Value #B": "Last Duration (s)"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-37": {
+        "kind": "Panel",
+        "spec": {
+          "id": 37,
+          "title": "Reactive-Capture Errors by Stage (Cumulative Rate)",
+          "description": "Where in the pipeline a reactive-capture burst failed: capture, conversion, zeek_reprocess, suricata_scan, or dns_evasion_audit. Should trend toward zero.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (stage) (increase(home_ids_reactive_capture_errors_total[1h]))",
+                        "format": "time_series",
+                        "instant": false,
+                        "legendFormat": "{{stage}}"
                       }
                     },
                     "refId": "A",
@@ -1800,25 +2169,19 @@
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "stat",
+            "group": "timeseries",
             "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
                 },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
               },
               "fieldConfig": {
                 "defaults": {
@@ -1828,13 +2191,43 @@
                     "steps": [
                       {
                         "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
                         "color": "green"
                       }
                     ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
                   }
                 },
                 "overrides": []
@@ -1843,12 +2236,12 @@
           }
         }
       },
-      "panel-6005": {
+      "panel-38": {
         "kind": "Panel",
         "spec": {
-          "id": 6005,
-          "title": "Pi-hole IPS",
-          "description": "home_ids_ips_pihole_status -- reference copy of the Overview dashboard's identical panel, so Pi-hole's status is visible here alongside every other subsystem too.",
+          "id": 38,
+          "title": "🧭 Persistence-Escalated Alerts by Signature",
+          "description": "PHASE 30 (new this session): home_ids_persistence_escalation_total -- alerts whose confidence/state was escalated purely because the SAME uncorroborated signal kept recurring, not because of new independent evidence. Deliberately capped below every genuinely-corroborated HIGH and excluded from authorizing IPS containment on its own -- a form of 'what it couldn't do' (couldn't get independent corroboration, escalated on persistence alone instead).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1865,9 +2258,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ips_pihole_status",
+                        "expr": "sum by (signature) (increase(home_ids_persistence_escalation_total[1h]))",
                         "format": "time_series",
-                        "instant": true
+                        "instant": false,
+                        "legendFormat": "{{signature}}"
                       }
                     },
                     "refId": "A",
@@ -1881,25 +2275,19 @@
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "stat",
+            "group": "timeseries",
             "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
+                "legend": {
+                  "calcs": [],
+                  "displayMode": "list",
+                  "placement": "bottom"
                 },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
               },
               "fieldConfig": {
                 "defaults": {
@@ -1909,13 +2297,43 @@
                     "steps": [
                       {
                         "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
                         "color": "green"
                       }
                     ]
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "drawStyle": "line",
+                    "fillOpacity": 1,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "spanNulls": false,
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    },
+                    "stacking": {
+                      "mode": "normal",
+                      "group": "A"
+                    }
                   }
                 },
                 "overrides": []
@@ -1935,7 +2353,7 @@
               "x": 0,
               "y": 0,
               "width": 24,
-              "height": 4,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-1"
@@ -1946,9 +2364,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 4,
-              "width": 8,
-              "height": 6,
+              "y": 3,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-2"
@@ -1958,10 +2376,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 4,
-              "width": 8,
-              "height": 6,
+              "x": 0,
+              "y": 6,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-3"
@@ -1971,10 +2389,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 4,
-              "width": 8,
-              "height": 6,
+              "x": 12,
+              "y": 6,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-4"
@@ -1985,9 +2403,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 10,
-              "width": 24,
-              "height": 4,
+              "y": 14,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-5"
@@ -1997,9 +2415,9 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
+              "x": 12,
               "y": 14,
-              "width": 8,
+              "width": 12,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
@@ -2010,9 +2428,9 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 14,
-              "width": 8,
+              "x": 0,
+              "y": 22,
+              "width": 24,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
@@ -2023,36 +2441,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 14,
-              "width": 8,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-8"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
               "x": 0,
-              "y": 22,
-              "width": 8,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 22,
-              "width": 8,
-              "height": 8,
+              "y": 30,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-10"
@@ -2062,9 +2454,9 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 22,
-              "width": 8,
+              "x": 0,
+              "y": 33,
+              "width": 12,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
@@ -2075,10 +2467,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 30,
-              "width": 24,
-              "height": 12,
+              "x": 12,
+              "y": 33,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-12"
@@ -2089,9 +2481,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 42,
-              "width": 24,
-              "height": 16,
+              "y": 41,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-13"
@@ -2101,13 +2493,13 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 58,
-              "width": 24,
-              "height": 7,
+              "x": 12,
+              "y": 41,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-5001"
+                "name": "panel-14"
               }
             }
           },
@@ -2115,51 +2507,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 65,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5002"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 65,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5003"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 16,
-              "y": 65,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5004"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 72,
+              "y": 49,
               "width": 24,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-5005"
+                "name": "panel-15"
               }
             }
           },
@@ -2167,12 +2520,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 80,
+              "y": 57,
               "width": 24,
               "height": 3,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6001"
+                "name": "panel-20"
               }
             }
           },
@@ -2180,25 +2533,25 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 83,
-              "width": 6,
-              "height": 7,
+              "y": 60,
+              "width": 24,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6002"
+                "name": "panel-21"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 6,
-              "y": 83,
-              "width": 6,
-              "height": 7,
+              "x": 0,
+              "y": 68,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6003"
+                "name": "panel-22"
               }
             }
           },
@@ -2206,12 +2559,90 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 12,
-              "y": 83,
+              "y": 68,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-23"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 76,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-24"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 76,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-25"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 84,
+              "width": 24,
+              "height": 3,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-30"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 87,
               "width": 6,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6004"
+                "name": "panel-31"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 6,
+              "y": 87,
+              "width": 6,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-32"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 87,
+              "width": 6,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-33"
               }
             }
           },
@@ -2219,12 +2650,64 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 18,
-              "y": 83,
+              "y": 87,
               "width": 6,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6005"
+                "name": "panel-34"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 94,
+              "width": 8,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-35"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 8,
+              "y": 94,
+              "width": 16,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-36"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 102,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-37"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 102,
+              "width": 12,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-38"
               }
             }
           }
@@ -2282,11 +2765,11 @@
         "keepTime": true
       },
       {
-        "title": "🤖 Go to Autonomous Behavior",
+        "title": "🛡️ Go to System Tuning, Healing & Health",
         "type": "link",
         "icon": "external link",
-        "tooltip": "🤖 Go to Autonomous Behavior",
-        "url": "/d/home_ids_v3_autonomous",
+        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
+        "url": "/d/home_ids_v3_mitigation",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -2294,11 +2777,11 @@
         "keepTime": true
       },
       {
-        "title": "🔍 Go to Transparency",
+        "title": "🤖 Go to Autonomous Behavior",
         "type": "link",
         "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
+        "tooltip": "🤖 Go to Autonomous Behavior",
+        "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -2312,9 +2795,9 @@
       "home-ids-v2"
     ],
     "timeSettings": {
-      "from": "now-1h",
+      "from": "now-24h",
       "to": "now",
-      "autoRefresh": "5s",
+      "autoRefresh": "1m",
       "autoRefreshIntervals": [
         "5s",
         "10s",
@@ -2330,7 +2813,7 @@
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
     },
-    "title": "4. 🛡️ System Tuning, Healing & Health",
+    "title": "6. 🔍 Transparency: What It Learned, Tuned, Suppressed & Couldn't Do",
     "variables": [
       {
         "kind": "DatasourceVariable",
@@ -2348,57 +2831,6 @@
           "includeAll": false,
           "hide": "dontHide",
           "skipUrlSync": false,
-          "allowCustomValue": true
-        }
-      },
-      {
-        "kind": "DatasourceVariable",
-        "spec": {
-          "name": "LOKI_DS",
-          "pluginId": "loki",
-          "refresh": "onDashboardLoad",
-          "regex": "",
-          "current": {
-            "text": "default",
-            "value": "default"
-          },
-          "options": [],
-          "multi": false,
-          "includeAll": false,
-          "hide": "dontHide",
-          "skipUrlSync": false,
-          "allowCustomValue": true
-        }
-      },
-      {
-        "kind": "QueryVariable",
-        "spec": {
-          "name": "device",
-          "current": {
-            "text": "All",
-            "value": "$__all"
-          },
-          "hide": "dontHide",
-          "refresh": "onDashboardLoad",
-          "skipUrlSync": false,
-          "query": {
-            "kind": "DataQuery",
-            "group": "prometheus",
-            "version": "v0",
-            "datasource": {
-              "name": "${PROMETHEUS_DS}"
-            },
-            "spec": {
-              "query": "label_values(home_ids_threat_confidence, hostname)",
-              "refId": "StandardVariableQuery"
-            }
-          },
-          "regex": "",
-          "sort": "alphabeticalAsc",
-          "definition": "label_values(home_ids_threat_confidence, hostname)",
-          "options": [],
-          "multi": true,
-          "includeAll": true,
           "allowCustomValue": true
         }
       }

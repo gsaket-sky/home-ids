@@ -1,44 +1,91 @@
-# 🛡️ Home-IDS: Autonomous Threat Defense (Version 12.0)
+# 🛡️ Home-IDS
 
-**Home-IDS** is a self-hosted, autonomous Intrusion Detection and Prevention System (IDS/IPS) for home and edge networks. It fuses network metadata from **Zeek** (and, optionally, batch-mode **Suricata** signature scans) with DNS telemetry from **Pi-hole** into a real-time evidence-and-hypothesis engine, backs every alert with a false-positive-suppression layer that learns from its own mistakes, and now learns each device's own normal behavior over time — not just a global reputation tier.
+**A self-hosted intrusion detection and prevention system that watches your entire home or small-office network, figures out what's actually happening on its own, and steps in when something's genuinely wrong — without sending your traffic to anyone else's cloud, without a monthly fee, and without needing you to babysit it.**
 
-It is not a toy project pretending to be enterprise-grade. It is a genuinely careful piece of engineering with known, documented limitations — and as of this release, a full third-party review of a real production alert history (8,400+ records) has been worked through: verified against the running code, fixed where the review found a real live bug, and explicitly declined where the review's assumption didn't match what the code actually does.
-
----
-
-## ✨ What's New in 11.0
-
-**11.0 is a response to a third-party architectural review of a real production alert history**, not a single feature. The review's core finding — two subsystems (the Hypothesis & Evidence Engine and the false-positive engine's hard-stop filter) could independently reach different verdicts on the same alert, because the hard-stop filter re-derived signals from raw features instead of reading what the HEE had already decided — is fixed at the root. Everything else below followed from working through the review's findings one by one against live data.
-
-| | |
-|---|---|
-| 🔗 **The two-verdict problem, fixed at the source** | `fp_engine.py`'s Stage-1 hard-stop filter now recognizes `decision_engine.py`'s own CRITICAL verdict directly instead of independently re-deriving the same signal from raw features with separately-drifting thresholds. Two concrete live bugs this exact gap caused are fixed: a weak ThreatIntel score could hard-stop far below the bar `decision_engine.py` itself requires, and an exfiltration-burst check was missing the absolute-byte floor and telemetry exemption its own equivalent check elsewhere already had — confirmed live against a real Amazon Echo device wrongly hard-stopped by a byte-count z-score spike on 261 actual bytes. |
-| 🎯 **`DNS_EVASION` now says what it actually found** | A device with zero DNS footprint at all, a device with otherwise-normal history missing one connection's attribution window, and a device making a direct port-53 bypass to a non-Pi-hole resolver were all the same alarming `DNS_EVASION` name. Now three names — `DNS_EVASION` / `DNS_ATTRIBUTION_GAP` / `DNS_POLICY_BYPASS` — same detection thresholds, honest severity. |
-| 🧬 **Per-device learned behavioral baseline** | Beyond the existing category-level device profiles (smart TV, IoT, ...), each device now learns its own normal ports/ASNs/domains over time — fully generic, no hardcoded list, nothing to keep in sync with a vendor catalog. Deliberately only learns from cycles the HEE itself already called benign, so a real compromise can't launder itself into a trusted baseline through repetition. |
-| 🔎 **Real signature/exploit detection, batch-mode** | Optional Suricata integration, run only against already-captured reactive-capture burst pcaps — never continuously against live traffic — so idle cost is zero and it stays workable on a Raspberry Pi target, not just the dev box. A genuine high-severity match is a new explicit hard-stop (`Confirmed Exploit/Malware Signature`); anything weaker is ordinary corroborating evidence. Disabled by default — see `reactive_capture_suricata_*` in `config.yaml`. |
-| 📐 **A LightGBM score that's actually calibrated, when the data supports it** | `train_fp_classifier.py` now holds out a real validation split and fits isotonic regression against it — never against the same data the model trained on. Labeled `FP_MODEL_SCORE` (not `P(FP)`) either way, since the raw classifier output was never a calibrated probability regardless. |
-| 🏷️ **Honest labeling elsewhere too** | Kill-chain phase labels (`RECON`/`C2`/`LATERAL`/`EXFIL`) are now `SUSPECTED_`-prefixed — they're heuristic feature-threshold guesses, not confirmed stages, and nothing in decision-making ever consumed the bare form anyway. A payload-size classifier stopped guessing protocol from byte count alone (a sub-128-byte TCP/ICMP/anything packet no longer displays as "Standard DNS/Control Packet"). |
-| 🕸️ **A real parent-domain signal for DNS tunneling** | Subdomain-fanout detection now factors in average label entropy across the fanout parent's own children, not just the raw count — distinguishes "many meaningfully-named subdomains" (legitimate multi-tenant SaaS) from "many randomized/encoded chunks" (the actual tunneling shape). |
-
-## ✨ What's New in 12.0
-
-**12.0 started as a false-positive-storm investigation** (a Pi-hole/unbound resolver's own recursive DNS traffic misread as policy bypass, a smart monitor's normal multicast/retry traffic misread as exfiltration/connection-abuse) **and a direct question — is anything on this network actually infected?** Both led somewhere bigger: the same "alert attribution doesn't trace to the evidence that fired" pattern recurring in four more places, and a self-poisoning gap that had 357 legitimate infrastructure IPs (including Google's own 8.8.8.8) sitting in the confirmed-malicious store, some still actively renewing. No sign of real compromise was found anywhere in the alert history.
-
-| | |
-|---|---|
-| 🎯 **Attribution audit, continued** | CONNECTION_ABUSE, NETWORK_INTRUSION, and ARP-spoofing alerts now trace `destination_ip` to the specific evidence that fired — confirmed live, 3,179 alerts across 18 devices had displayed a completely unrelated device's DNS resolver as the "destination." |
-| 🧠 **Per-device learned thresholds, not hardcoded ones** | The connection-abuse detector now learns each device's own normal rejected-connection pattern (same self-healing shape as the existing ARP-sweep threshold) and cross-checks it against that device's own DNS-blocking rate before flagging abuse. |
-| 🤖 **The fully-autonomous correction path actually corrects now** | The local classifier that suppresses false positives without needing Ollama or a human now applies the *right* fix for what actually fired, instead of always trying a domain immunization that does nothing for connection-abuse-shaped alerts — plus a new hard-stop guard so no correction source can ever immunize a genuinely confirmed threat. |
-| 🌐 **CDN/telemetry recognition, redesigned** | Wired to your Pi-hole's own live gravity classification and a Tranco-popularity + ASN-organization check, instead of an ever-growing hardcoded domain list that kept needing one-off patches. |
-| 🧹 **Self-poisoning fixed for known public infrastructure** | Google's 8.8.8.8 had 64 "confirmed malicious" recordings, still renewing same-day — a device's own direct-resolver traffic re-poisoning itself. Now protected on both the write and read path, matching the existing private/multicast-IP protection. |
-| 📲 **Boot-time health checks are now real** | Every subsystem in the startup Telegram message used to either be a hardcoded "Online" or a weak proxy check — now an actual filesystem write, an actual HTTP round-trip, an actual raw-socket probe, an actual Suricata invocation (now included, previously absent entirely). |
-| 🔁 **Control-loop honesty** | Telegram's unblock/release/block buttons now report what actually happened instead of always claiming success; a device released outside this IDS's own flow (e.g. directly in the Fritz!Box admin UI) no longer stays stuck "trapped" in Grafana forever. |
-
-See [CHANGELOG.md](Documentation/CHANGELOG.md) for the complete, dated technical write-up of every fix (10.0 through 12.0), and [USER_MANUAL.md](Documentation/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
+Point your router's DNS at it and give it a mirror of your network traffic, and it starts learning. Not "learning" as a marketing word — it builds a real statistical baseline of what *your* devices normally do, watches for the ways that actually get exploited, and gets measurably quieter and more accurate over time because it grades its own mistakes and corrects itself. Everything it decides, blocks, and learns is visible on a dashboard, in plain language, in real time.
 
 ---
 
-## 🌟 The Tri-Brain Architecture
+## What it actually does for you
+
+Most of what threatens a home or small-office network today doesn't look like a movie hacking scene — it's a smart-TV app phoning an ad network it shouldn't, an IoT device that got dragged into a botnet quietly beaconing out, a laptop's DNS traffic tunneling data past a filter, or a genuinely infected device scanning the rest of your LAN for a way in. Home-IDS watches for exactly these shapes, continuously, on every device on your network:
+
+| It's built to catch | How |
+|---|---|
+| **DNS tunneling & covert exfiltration** | Encoded/oversized subdomain labels, TXT/NULL query abuse, suspicious-TLD concentration, and label-entropy clustering across a domain family — not just "is this domain on a blocklist." |
+| **DGA / botnet command-and-control domains** | Entropy, vowel/digit ratios, and burst patterns that distinguish algorithmically-generated malware domains from a normal one, filtered against real CDN/telemetry infrastructure so it doesn't cry wolf on your smart speaker. |
+| **Data exfiltration** | Outbound byte-volume anomalies against that specific device's own baseline, not a network-wide guess. |
+| **Lateral movement & internal scanning** | The exact signature of one compromised device probing the rest of your LAN. |
+| **C2 beaconing** | Timing-uniformity analysis — the periodic "check in" pattern of malware calling home, a technique borrowed from real threat-hunting practice. |
+| **ARP spoofing / man-in-the-middle attempts** | MAC-identity correlation across your network's connection history. |
+| **Malicious TLS fingerprints & known-bad infrastructure** | Cross-referenced live against VirusTotal, AbuseIPDB, and curated threat-intel feeds — plus a private, self-growing "confirmed malicious" memory that's entirely your own network's. |
+| **Real exploit and malware signatures** | Optional batch-mode Suricata scanning against captured traffic bursts — the same rule-matching engine serious network security appliances use, running only when something's already worth a closer look, so it costs nothing the rest of the time. |
+
+When it catches something, it doesn't just log it and hope you notice. It responds in layers, matched to how serious the evidence actually is:
+
+- **DNS sinkholing** — the malicious domain stops resolving, network-wide, instantly, via your own Pi-hole.
+- **Router-level isolation** — the device's internet access gets cut at the router while it keeps talking to the rest of your LAN, so you can still investigate it.
+- **Full network quarantine** — a Layer-2 tarpit severs the device from everything, reserved for the alerts with the strongest evidence.
+
+Every one of those actions is reversible with one tap from your phone, and every one is logged with the exact evidence that triggered it — nothing happens silently.
+
+---
+
+## The part that makes this genuinely different
+
+**It doesn't just alert. It reasons, and it shows its reasoning.**
+
+Instead of one opaque risk score, Home-IDS runs a real evidence-and-hypothesis engine: it collects distinct, typed signals (DNS entropy, connection patterns, reputation hits, timing anomalies...) and weighs them against explicit models of what an actual attack looks like versus what normal device behavior looks like. A single weak signal never triggers a network-wide block on its own — corroborating evidence has to actually agree before anything drastic happens, with a small set of exceptions (a confirmed malicious IOC, a honeypot trip, a spoofing attempt) serious enough to act on immediately.
+
+**It grades its own alerts before you ever see them, and gets quieter the longer it runs.**
+
+A second, independent system — think of it as a continuously-learning false-positive filter — checks every alert before it reaches you. It combines a fast rule-based check, a trained machine-learning classifier, and a semantic similarity model, and if it's confident something is a false alarm, it suppresses it and remembers the pattern so the same false alarm doesn't come back. When it's *not* sure, it still tells you — clearly labeled as low-confidence, never silently dropped and never silently escalated.
+
+**It learns each of your devices individually, not a generic profile.**
+
+Beyond knowing "this is a smart TV, TVs are chatty," it builds a per-device behavioral fingerprint — the ports, destinations, and patterns *that specific device* actually uses over time — and only ever learns from activity it already independently judged benign, so a genuinely compromised device can't talk its way into a trusted baseline just by repeating itself.
+
+**One confirmed threat protects your whole network immediately.**
+
+If Home-IDS confirms a real threat from one device, that domain or IP is remembered network-wide. A different device touching the same infrastructure later gets stopped instantly instead of having to independently earn the same suspicion all over again — and a retroactive scan checks whether anything already touched it before it was confirmed.
+
+**It has a local, private, optional AI analyst — with a built-in lie detector.**
+
+A locally-run language model (via Ollama — nothing leaves your network) does a deeper batch review of the alerts that made it through, a few times a day, and can autonomously confirm false positives on its own. But it's never trusted blindly: a dedicated validator rejects any AI verdict that contradicts the hard evidence already on file, so a hallucinated "this looks fine" can't override a confirmed indicator of compromise.
+
+**It heals itself, safely, without you touching a config file.**
+
+When enough evidence accumulates that a detection threshold is a little too sensitive for your specific network, it tunes itself — conservatively, one-directionally (it will loosen a threshold with evidence, but never silently tighten one back up without you), and only ever into an override file layered on top of your own configuration, never overwriting it. Delete the override, and it falls straight back to your original settings. Every autonomous adjustment is fully explained: what changed, why, and how much evidence justified it.
+
+---
+
+## Total transparency — you can watch it think
+
+Every one of the claims above is a **graph, not a promise.** Home-IDS ships with six pre-built Grafana dashboards and well over one hundred live Prometheus metrics covering:
+
+- Real-time threat state, per device, network-wide
+- Exactly which reasoning path resolved every decision it made
+- What it learned about each device, and how its own thresholds have shifted from your original defaults
+- What it suppressed as a false positive, broken down by *who or what* made that call
+- The live health of every subsystem it depends on — so a quiet dashboard means a quiet network, never a silently-broken sensor
+
+There's a dashboard built for exactly one question: **"what did the system learn, how did it tune itself, what did it suppress, and what couldn't it do?"** — because a security tool you can't audit isn't one you can actually trust.
+
+And when it does alert you, the alert itself is designed to be read in five seconds, not decoded: **what happened** (the observed facts), **why** (the evidence, strongest first, in plain language), and **how confident** it is — split explicitly into "is this really the attack pattern" versus "could this still be a false alarm," because those are genuinely different questions and conflating them into one number was the old way of doing this. One tap approves an isolation, releases a block, or corrects a false positive — and the system remembers that correction so it doesn't repeat the mistake.
+
+---
+
+## Why not just buy a commercial box?
+
+Commercial home-network security appliances exist, and they work — but they typically mean sending a summary of your network activity to someone else's cloud, paying an ongoing subscription to keep detection current, and trusting a closed system you can't inspect when it makes a decision about your own network.
+
+Home-IDS is the alternative: **fully self-hosted, fully inspectable, and free.** It runs comfortably on hardware you likely already have sitting around (a small Linux box, and it's been engineered specifically to stay workable on something as modest as a Raspberry Pi), its optional AI analyst runs locally instead of calling out to a cloud API, and every single decision it makes is backed by evidence you can read yourself, in a dashboard you control, on infrastructure that never leaves your house. That combination — continuous autonomous learning, a full evidence trail for every action, and genuine self-correction over time — is the kind of thing you'd otherwise expect to pay a real subscription for, if you could find it running anywhere other than an expensive commercial or enterprise-grade appliance at all.
+
+**We'd rather undersell this than oversell it, so here's the honest version too:** it's not clairvoyant, it doesn't see inside an encrypted VPN tunnel (nothing at the network level can), and its deepest traffic inspection is strongest for wired devices, with WiFi coverage that's real but currently triggered rather than continuous on typical all-in-one router setups. It's a serious, actively-defended piece of engineering with a documented, honest account of exactly where its coverage is strongest and where it's still maturing — see the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md#10-detection-coverage--known-limitations) for the full, unvarnished breakdown, threat category by threat category.
+
+---
+
+## The architecture, briefly
 
 ```mermaid
 flowchart LR
@@ -47,118 +94,50 @@ flowchart LR
         Pihole["Pi-hole<br/>(DNS query log)"]
     end
 
-    subgraph Brain1["🧠 Brain 1 — Real-Time Pipeline"]
+    subgraph Brain1["🧠 Real-Time Decision Engine"]
         direction TB
-        Extract["Feature extraction<br/>(entropy, z-scores, kill-chain phase)"]
-        HEE["Hypothesis & Evidence Engine<br/>(decision_engine.py)"]
+        Extract["Feature extraction"]
+        HEE["Evidence & Hypothesis Engine"]
         Extract --> HEE
     end
 
-    subgraph Brain2["🛡️ Brain 2 — CL-AFPE"]
+    subgraph Brain2["🛡️ Self-Healing False-Positive Filter"]
         direction TB
-        Stage1["Stage 1: Hard-stop filter<br/>(reads the HEE's own verdict first)"]
-        Stage2["Stage 2: LightGBM FP_MODEL_SCORE<br/>(calibrated when data supports it)"]
-        Stage3["Stage 3: FastEmbed similarity"]
-        Combine["Weighted combine<br/>(per-device threshold)"]
+        Stage1["Hard-stop recheck"]
+        Stage2["ML classifier"]
+        Stage3["Semantic similarity"]
+        Combine["Combined confidence"]
         Stage1 --> Stage2 --> Stage3 --> Combine
     end
 
-    subgraph Brain3["🕵️ Brain 3 — Batch LLM Analyst"]
+    subgraph Brain3["🕵️ Local AI Analyst"]
         direction TB
-        Dedup["Group by device+target+signature"]
+        Dedup["Group similar alerts"]
         Cache["7-day verdict cache"]
-        LLM["Ollama query<br/>(capped per run)"]
+        LLM["Local LLM (Ollama)<br/>— never leaves your network"]
         Dedup --> Cache --> LLM
     end
 
     Zeek --> Extract
     Pihole --> Extract
     HEE -->|evidence + verdict| Brain2
-    Combine -->|suppress| Muted["state/autonomous_muted.jsonl"]
-    Combine -->|publish| Alerts["alerts.json + Telegram"]
-    Alerts -.every 4h, capped.-> Brain3
+    Combine -->|suppress, quietly| Muted["Learned & remembered"]
+    Combine -->|publish| Alerts["Telegram + Grafana"]
+    Alerts -.every few hours, capped.-> Brain3
     LLM -->|validated correction| Muted
 ```
 
-### 🧠 Brain 1: The Statistical Engine (Real-Time Pipeline)
-`src/core/pipeline.py` and `src/main.py`. A strict, threaded (not `asyncio`) polling loop with a disciplined 5-phase lock/release pattern per cycle — snapshot state under a short lock, pre-fetch Zeek data with no lock held, compute local features under a short lock, do expensive threat-intel I/O with no lock held, then finalize scoring under a short lock. This is what lets thousands of events get processed per second without one slow HTTP call to a threat-intel API stalling every other device's evaluation.
-
-Detection itself runs through the **Hypothesis & Evidence Engine (HEE)**: instead of one additive risk number, the engine collects typed `Evidence` objects (DNS entropy, Zeek lateral-movement counts, reputation signals, ...) and evaluates them against explicit attack and benign hypotheses. A hard-stop (confirmed IOC, honeypot access, ARP spoofing, geofencing violation) can escalate straight to `CRITICAL`; everything else has to actually explain itself through corroborating evidence before it can auto-block anything.
-
-### 🛡️ Brain 2: The Continuous Learning False-Positive Engine (CL-AFPE)
-`src/intelligence/fp_engine.py`. Sits between detection and containment. A 3-stage pipeline (hard-stop re-check → LightGBM tabular classifier → FastEmbed semantic domain-similarity) produces a combined confidence that an alert is a false positive. Above the suppress threshold, the alert is silently muted and the domain is trust-cached for 14 days. Below the uncertain threshold, it's published as a full-confidence threat. In between, it's published but explicitly labeled low-confidence — never silently dropped, never silently escalated.
-
-As of 8.0, the suppress threshold is **per-device aware** (falls back to the global default for devices without their own calibrated profile — see below) and Stage 3 no longer runs semantic similarity against the literal string `"unknown"` for raw-IP connections with no resolved hostname. As of 9.0, Stage 2's LightGBM classifier is an 11-dimension vector (up from 9 — ARP-sweep and DNS-evasion signals added once those detectors existed to feed it), and its Tranco-rank feature — read since the vector's introduction but never actually populated by anything — is now real. As of 11.0, Stage 1 checks `decision_engine.py`'s own verdict FIRST — a hard-stop no longer means "fp_engine independently decided this is confirmed," it means "the HEE already decided this, and fp_engine recognizes it" — and Stage 2's score is genuinely isotonic-calibrated against a real held-out validation split whenever there's enough labeled data to support one (an explicit "unreliable" marker, not a fabricated curve, when there isn't).
-
-### 🕵️ Brain 3: The Batch Cognitive Analyst (Local LLM)
-`src/scripts/ollama_soc.py`, launched every 4 hours by `src/scripts/scheduler.py`. Reads the last 24h of *published, non-suppressed* alerts (CL-AFPE already resolved the rest cheaply), groups them by device+target+signature so a single noisy pattern only costs one LLM call no matter how many times it fired, checks a 7-day verdict cache before spending a call at all, and hard-caps fresh calls per run. A `DeterministicValidator` rejects any LLM "benign" verdict that contradicts a confirmed IOC or bad reputation signal in the actual evidence — the model cannot hallucinate its way past a real threat signal. Validated corrections feed the exact same closed loop an operator's Telegram tap does (see below) — just running continuously, with zero human involvement required.
+Three cooperating systems, not one monolith: a real-time engine that decides, a continuous-learning filter that keeps it honest and quiet, and an optional local AI analyst that does deeper batch review without ever touching an external service. Every action either system takes flows through the same evidence trail — visible, explainable, and reversible.
 
 ---
 
-## 🧬 Autonomous Evolution & Self-Healing
-
-### 1. False-Positive Self-Healing (per-alert, immediate)
-When CL-AFPE or the batch LLM analyst confirms a false positive, four things happen immediately: the base domain is added to a 14-day trust cache (`state/fp_trust_cache.json`), the device's own anomaly-sensitivity baseline is widened slightly (`state/fp_sigma_shifts.json`), a labeled training-correction entry is written (`state/autonomous_muted.jsonl`) so the weekly model retrain learns from the correction instead of re-reinforcing the mistake it just fixed — and, **new in 8.0.1**, if an earlier cycle had already blocked that domain in Pi-hole before the pattern was learned as safe, that block is released too. Immunizing a domain only ever stops *future* alerts; it doesn't undo a block already in place, so both autonomous correction paths (CL-AFPE's own suppression and the LLM-validated path) now check and release a stale block, not just the human-operator "Mark False Positive" path that already did. The goal is to block only what's actually still necessary — an over-eager block that outlives its own justification just breaks a device's normal function for no remaining reason.
-
-Every Pi-hole block also carries a `"Home-IDS Auto-Block | Device: ... | Trigger: ..."` comment, so anyone looking at Pi-hole's own blocklist can see it was the script, and why — and that same text is now stored durably in `state/ids_state.json` too, so it's answerable locally even for the two Pi-hole fallback paths that can't verifiably carry a comment through to Pi-hole itself.
-
-### 2. Autonomous Self-Calibration (new in 8.0)
-Effectively daily (piggybacking on the existing model-retrain schedule — a 3am cron with no freshness gate, plus a second, independent ~weekly in-process pass layered on top, see the User Manual's Automation Timeline for the full breakdown), `scripts/train_fp_classifier.py` looks at every confirmed false positive from the last cycle — from *either* an operator's Telegram tap or the LLM's own validated corrections — and asks a narrow, conservative question: **"is there a clean, unambiguous gap between confirmed-safe scores and everything else, that would let us safely catch more false positives automatically?"**
-
-- Needs at least 5 pooled confirmations (or 3 for a device's own profile) before touching anything.
-- Only ever *lowers* the suppression threshold — raising it back up after over-tuning stays a human decision.
-- Refuses outright if any never-corrected alert scored as high as a confirmed false positive — that ambiguity is never auto-resolved toward suppression.
-- Has a hard floor it will never cross regardless of evidence.
-- **Never writes to `config.yaml`.** Adjustments live in `state/config_overrides.json` (global) and `state/device_fp_profiles.json` (per-device) — separate, human-readable, deletable files that layer on top of your hand-authored config at read time. Delete the file, or just the one key inside it, and the system reverts to your `config.yaml` value on its next reload. No restart, no `config.yaml` edit, no risk of your own configuration being silently rewritten underneath you.
-
-```mermaid
-flowchart LR
-    A["Operator Telegram tap<br/>OR LLM validated correction"] --> B["state/autonomous_muted.jsonl<br/>(labeled evidence)"]
-    B --> C["Weekly calibration pass<br/>(conservative, gated, one-directional)"]
-    C -->|enough clean evidence| D["state/config_overrides.json<br/>(global) or<br/>device_fp_profiles.json (per-device)"]
-    C -->|ambiguous or too little evidence| E["No change — logged why"]
-    D -->|watched, live, no restart| F["config.py: effective value<br/>= override ?? config.yaml baseline"]
-    G["config.yaml<br/>(human-authored, never touched)"] --> F
-```
-
-### 4. Network-Effect Threat Learning (new in 9.0)
-Once any device's traffic confirms a real threat — a Stage-1 hard-stop or a genuinely-corroborated HIGH/CRITICAL verdict — the triggering domain/IP is remembered network-wide (`state/local_confirmed_intel.json`, 30-day TTL). A *different* device touching the same infrastructure later gets an immediate hard-stop instead of re-earning independent corroboration from scratch, and `retro_hunter.py`'s retroactive scan cross-references the same store to catch devices that touched an IOC before it was confirmed. Matching is deliberately conservative — known-safe CDN/vendor domains and private/multicast/`safe_ips`-listed addresses are excluded on both the write and read path, closing a real production incident where a single bad hit against a shared vendor domain or this network's own router IP got "confirmed malicious" permanently and then kept renewing itself on every subsequent match.
-
-### 5. Reactive Fritzbox WLAN Capture (new in 9.0)
-On an all-in-one router (modem+router+AP, this deployment's Fritzbox included), neither a mirror port nor an inline bridge can see WiFi-to-WiFi traffic — Zeek had zero real flow visibility into WiFi devices before this release. Short, triggered capture bursts on the router's own diagnostic radios (`ath0`/`ath1`), reprocessed through the same live Zeek policy, close part of that gap without the ~3GB/hour cost of continuous capture: WiFi devices get real lateral-movement detection, JA3/JA4 fingerprinting, and a blind-spot audit (destinations with real traffic but no matching DNS history) for the first time. Six independent trigger sources share one hourly capture budget. Fritzbox-specific — disabled by default, see [ENGINEERING_MANUAL.md §7](Documentation/ENGINEERING_MANUAL.md#7-reactive-fritzbox-wlan-capture).
-
-### 6. Per-Device Learned Behavioral Baseline (new in 11.0)
-Beneath the existing category-level device profiles (a smart TV/IoT/NAS/router/gateway is *expected* to phone its own vendor's infrastructure frequently), each individual device now builds its own learned baseline of ports/ASN-owners/domain-bases it has actually used — persisted in the same `state/device_fp_profiles.json` the category profiles already live in. An unclassified (tier 3) destination this specific device has talked to repeatedly, without that ever becoming a confirmed threat, becomes real counter-evidence for it specifically — not a global reputation change, not a hardcoded list, fully portable to any home network. Deliberately only records from cycles the HEE itself already called benign/anomalous, so a device actually compromised and beaconing every cycle can never launder itself into a trusted baseline through sheer repetition.
-
-### 7. Batch-Mode Suricata Signature Scanning (new in 11.0, optional, disabled by default)
-Real exploit/malware-signature detection was a genuine gap: Zeek is a behavioral/flow analyzer, not a signature-matching engine. Rather than running Suricata continuously (the resource-heavy way, and a poor fit for a Raspberry Pi target), it runs in batch mode against the exact same reactive-capture burst pcap Zeek already reprocesses — a few seconds of analysis, only when a burst was already triggered, never a standing process. A genuine high-severity match becomes an explicit hard-stop; anything weaker is ordinary corroborating evidence, same as every other detector here. No rules are shipped or authored by this project — point `reactive_capture_suricata_rules_path` at a ruleset you manage yourself (e.g. `suricata-update --etopen` with a trimmed policy). See `config.yaml`'s `reactive_capture_suricata_*` keys.
-
----
-
-## 💥 Multi-Tier Hardware Containment
-
-Upon a genuinely confirmed critical threat, Home-IDS executes a latched, multi-tier isolation protocol — latched meaning it is never auto-released purely because traffic decayed to zero (that would create an isolate → silence → auto-release → re-beacon flapping loop):
-* **Layer 2 (ARP/NDP Dual-Stack Tarpit)** — Scapy forges ARP/NDP responses to sever the device from the rest of the LAN.
-* **Layer 3 (Router WAN Isolation)** — TR-064 calls a Fritz!Box to cut the device's internet access while leaving LAN access intact for remediation.
-* **Layer 7 (DNS Sinkholing)** — Pi-hole blocks the malicious domain network-wide, with a persistent retry queue if the Pi-hole API is briefly unreachable.
-
----
-
-## 📊 Observability
-
-- **Telegram**: interactive alerts showing the full reasoning trail, one-tap hardware-isolation approval (only offered when something is actually pending — a monitor-only alert no longer shows an "Approve" button that approves nothing), and one-tap false-positive correction.
-- **Markdown reports**: daily SOC and top-domains reports in `reports/`, plus a durable `state/retro_hunt_findings.jsonl` for anything the retroactive threat hunter finds.
-- **Prometheus & Grafana**: 80+ metrics covering HEE decision states, per-device feature telemetry, CL-AFPE efficacy, and containment status — see the User Manual for the full catalog.
-
----
-
-## 📚 Documentation Map
+## 📚 Documentation
 
 | Document | What's in it |
 |---|---|
-| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | The exhaustive reference: every `config.yaml` key, the full state-file and autonomous-override layer, service lifecycle, test suite, and the complete Prometheus metric catalog. |
-| [INSTALL.md](Documentation/INSTALL.md) | Step-by-step installation of Home-IDS and every subsystem it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, Ollama). |
-| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The internal mathematics and architecture, verified line-by-line against the actual code — for developers extending or debugging the engine. |
-| [CHANGELOG.md](Documentation/CHANGELOG.md) | The full, dated version history including this release's audit write-up. |
+| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | The exhaustive reference: every configuration option, the full autonomous-override system, service lifecycle, and the complete Prometheus metric catalog. |
+| [INSTALL.md](Documentation/INSTALL.md) | Step-by-step installation of Home-IDS and everything it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, and the optional local AI analyst). |
+| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The internal architecture and mathematics, verified line-by-line against the running code — including the full, honest detection-coverage and known-limitations breakdown — for anyone extending or auditing the engine. |
+| [CHANGELOG.md](Documentation/CHANGELOG.md) | The complete, dated technical history of every release. |
 
-For detailed configuration, architecture diagrams, and metric definitions, start with the [USER_MANUAL.md](Documentation/USER_MANUAL.md).
+Start with [INSTALL.md](Documentation/INSTALL.md) if you're setting this up for the first time, or [USER_MANUAL.md](Documentation/USER_MANUAL.md) if it's already running and you want to understand what it's telling you.

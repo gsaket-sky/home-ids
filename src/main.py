@@ -422,15 +422,20 @@ def main():
             # -- Suricata: real check -- binary executable, rules present, --build-info actually runs --
             try:
                 from intelligence.detectors.suricata_scan import check_suricata_health
+                from metrics import suricata_binary_health
                 suricata_enabled = bool(CONFIG.get("reactive_capture_suricata_enabled", True))
                 if not suricata_enabled:
                     suricata_status = "⚠️ Disabled"
+                    # PHASE 30: left unset (absent from scrapes) rather than forced to 0/1 --
+                    # "disabled" isn't a health state, and an absent series is the correct
+                    # way to tell Grafana "not applicable" instead of "unhealthy."
                 else:
                     ok, detail = check_suricata_health(
                         CONFIG.get("reactive_capture_suricata_bin", "/usr/bin/suricata"),
                         CONFIG.get("reactive_capture_suricata_rules_path", ""),
                     )
                     suricata_status = f"✅ Online ({detail})" if ok else f"❌ Failed ({detail})"
+                    suricata_binary_health.set(1.0 if ok else 0.0)
             except Exception as exc:
                 suricata_status = f"❌ Failed ({exc})"
 

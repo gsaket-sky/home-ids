@@ -2,6 +2,25 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.1.0] - 2026-08-24
+
+Two threads: a follow-up live-alert audit found two more instances of the attribution/wording bug classes v12.0 was built to close, and a full Prometheus/Grafana transparency pass closed the remaining gaps between what the system actually does autonomously and what's visible on a dashboard without reading logs.
+
+### 🎯 Attribution & Wording, Two More Instances Closed
+
+- `pipeline.py`'s CONNECTION_ABUSE attribution now prefers `zeek_conn_abuse` evidence's domain over `arp_sweep` evidence's when both fired on the same alert — a `zeek_conn_abuse` hit is one specific rejected connection, while an `arp_sweep` hit is one arbitrarily-picked IP out of potentially hundreds swept, chosen only by evidence-store insertion order, not meaningfulness.
+- `zeek_features.py` gained `zeek_arp_swept_ip_examples` (the actual swept IPs, not just the count) and `threat_signals.py`'s `arp_sweep` evidence now attaches a real `.domain` — previously an ARP-sweep-driven CONNECTION_ABUSE alert had nothing evidence-linked to attribute to, so the alert silently fell back to a coincidental, unrelated domain/port from the device's own last connection.
+- `pipeline.py`'s containment-status wording no longer shares one template across all three containment types. A Pi-hole domain block previously used the exact same "device auto-blocked from the network" / "the block stays in place" language as router isolation and Layer-2 tarpit — both of which really do cut a device off; a single blocked domain does not. Each containment type now gets its own accurate, plain-language description of what actually happened and what staying idle actually means.
+
+### 🔍 Full Prometheus/Grafana Transparency Pass
+
+Two per-device learned thresholds shipped in this release (`conn_abuse_unique_ip_threshold`, `long_conn_duration_threshold`) had zero Prometheus visibility, and two live subsystems (Suricata batch scanning, the Pi-hole gravity-list API) had never been instrumented at all.
+
+- **9 new metrics** in `src/metrics.py`: per-device effective-threshold gauges for both new thresholds, a generic `home_ids_autotune_device_profile_correction_total` covering every learned-threshold correction by key and source, `home_ids_persistence_escalation_total` (alerts escalated by signal persistence alone, not new evidence), boot-time and live Suricata health, and Pi-hole gravity-API query health.
+- New `device_fp_profiles.json` relay in `metrics_sync.py` — the two new thresholds are corrected from the FastAPI webhook subprocess (Telegram "Mark False Positive" taps), a separate process from the one running the scraped Prometheus registry, so they need the same JSON-relay pattern already used for `train_fp_classifier.py`'s calibration output.
+- All 5 existing Grafana dashboards updated (new threshold panels, a consolidated Subsystem Health row, cross-navigation links), plus one gap fix found along the way: `home_ids_autotune_arp_sweep_threshold_effective` had sibling calibration/evidence panels since 9.0 but was never itself plotted anywhere.
+- New **`6_transparency.json`** dashboard, purpose-built around four questions the other five answer piecemeal: what did the system learn (per-device thresholds), how did it tune itself (calibration history — applied vs. refused), what did it suppress (the CL-AFPE funnel and every autonomous release, by source), and what couldn't it do (every subsystem's live health in one place).
+
 ## [v12.0.0] - 2026-08-24
 
 Triggered by investigating two live false-positive storms (`paperless`'s DNS_POLICY_BYPASS, a Samsung Smart Monitor's CONNECTION_ABUSE/NETWORK_INTRUSION/DATA_EXFILTRATION) and a direct question about whether any device showed real signs of compromise. Both threads led to broader, systemic gaps: the "attribution doesn't trace to firing evidence" bug class (v11's own pre-flight-checklist item #1) recurring across four more signature types never covered by that fix, and a self-poisoning gap in the confirmed-intel IP store — 357 legitimate infrastructure IPs, including Google's own 8.8.8.8, actively mislabeled "confirmed malicious" as of this release, some still renewing same-day. No evidence of actual compromise was found anywhere in `alerts.json`, `local_confirmed_intel.json`, or `retro_hunt_findings.jsonl` — every reputation-tier hit traced to legitimate shared infrastructure (Google/Cloudflare/Apple/AWS/Telegram) or LAN multicast noise.
