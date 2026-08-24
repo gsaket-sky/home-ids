@@ -1,143 +1,105 @@
 # 🛡️ Home-IDS
 
-**A self-hosted intrusion detection and prevention system that watches your entire home or small-office network, figures out what's actually happening on its own, and steps in when something's genuinely wrong — without sending your traffic to anyone else's cloud, without a monthly fee, and without needing you to babysit it.**
+### Your network has a security guard now. One that never sleeps, never gossips about you to anyone, and gets sharper the longer it watches.
 
-Point your router's DNS at it and give it a mirror of your network traffic, and it starts learning. Not "learning" as a marketing word — it builds a real statistical baseline of what *your* devices normally do, watches for the ways that actually get exploited, and gets measurably quieter and more accurate over time because it grades its own mistakes and corrects itself. Everything it decides, blocks, and learns is visible on a dashboard, in plain language, in real time.
+Home-IDS is a self-hosted network security system for people and small businesses who want real protection without a monthly bill, a cloud account, or a black box they're just supposed to trust. It watches every device on your network, tells the difference between "normal" and "something's wrong" *for your specific devices* — not a generic checklist — and steps in automatically when it's genuinely sure. When it's not sure, it asks you, in plain English, with a one-tap answer.
 
----
-
-## What it actually does for you
-
-Most of what threatens a home or small-office network today doesn't look like a movie hacking scene — it's a smart-TV app phoning an ad network it shouldn't, an IoT device that got dragged into a botnet quietly beaconing out, a laptop's DNS traffic tunneling data past a filter, or a genuinely infected device scanning the rest of your LAN for a way in. Home-IDS watches for exactly these shapes, continuously, on every device on your network:
-
-| It's built to catch | How |
-|---|---|
-| **DNS tunneling & covert exfiltration** | Encoded/oversized subdomain labels, TXT/NULL query abuse, suspicious-TLD concentration, and label-entropy clustering across a domain family — not just "is this domain on a blocklist." |
-| **DGA / botnet command-and-control domains** | Entropy, vowel/digit ratios, and burst patterns that distinguish algorithmically-generated malware domains from a normal one, filtered against real CDN/telemetry infrastructure so it doesn't cry wolf on your smart speaker. |
-| **Data exfiltration** | Outbound byte-volume anomalies against that specific device's own baseline, not a network-wide guess. |
-| **Lateral movement & internal scanning** | The exact signature of one compromised device probing the rest of your LAN. |
-| **C2 beaconing** | Timing-uniformity analysis — the periodic "check in" pattern of malware calling home, a technique borrowed from real threat-hunting practice. |
-| **ARP spoofing / man-in-the-middle attempts** | MAC-identity correlation across your network's connection history. |
-| **Malicious TLS fingerprints & known-bad infrastructure** | Cross-referenced live against VirusTotal, AbuseIPDB, and curated threat-intel feeds — plus a private, self-growing "confirmed malicious" memory that's entirely your own network's. |
-| **Real exploit and malware signatures** | Optional batch-mode Suricata scanning against captured traffic bursts — the same rule-matching engine serious network security appliances use, running only when something's already worth a closer look, so it costs nothing the rest of the time. |
-
-When it catches something, it doesn't just log it and hope you notice. It responds in layers, matched to how serious the evidence actually is:
-
-- **DNS sinkholing** — the malicious domain stops resolving, network-wide, instantly, via your own Pi-hole.
-- **Router-level isolation** — the device's internet access gets cut at the router while it keeps talking to the rest of your LAN, so you can still investigate it.
-- **Full network quarantine** — a Layer-2 tarpit severs the device from everything, reserved for the alerts with the strongest evidence.
-
-Every one of those actions is reversible with one tap from your phone, and every one is logged with the exact evidence that triggered it — nothing happens silently.
+It's not a toy. It's been running against a real home network for months, catching real things, and it's brutally honest with itself about what it still can't do — you'll find that list further down, not buried.
 
 ---
 
-## The part that makes this genuinely different
+## The problem it solves
 
-**It doesn't just alert. It reasons, and it shows its reasoning.**
+Your smart TV, your kid's tablet, your work laptop, the smart plug you forgot you own — every one of them is a door. Most home and small-office networks have no idea what's actually happening on them: which device just got roped into a botnet, which "smart" gadget is quietly phoning data somewhere it shouldn't, which laptop just started scanning the rest of the network the way malware does right before it spreads.
 
-Instead of one opaque risk score, Home-IDS runs a real evidence-and-hypothesis engine: it collects distinct, typed signals (DNS entropy, connection patterns, reputation hits, timing anomalies...) and weighs them against explicit models of what an actual attack looks like versus what normal device behavior looks like. A single weak signal never triggers a network-wide block on its own — corroborating evidence has to actually agree before anything drastic happens, with a small set of exceptions (a confirmed malicious IOC, a honeypot trip, a spoofing attempt) serious enough to act on immediately.
+Enterprise security teams have tools for this. Homes and small offices usually have nothing, or a $300 box that phones your traffic summary to a vendor's cloud and charges you every month to keep working.
 
-**It grades its own alerts before you ever see them, and gets quieter the longer it runs.**
-
-A second, independent system — think of it as a continuously-learning false-positive filter — checks every alert before it reaches you. It combines a fast rule-based check, a trained machine-learning classifier, and a semantic similarity model, and if it's confident something is a false alarm, it suppresses it and remembers the pattern so the same false alarm doesn't come back. When it's *not* sure, it still tells you — clearly labeled as low-confidence, never silently dropped and never silently escalated.
-
-**It learns each of your devices individually, not a generic profile.**
-
-Beyond knowing "this is a smart TV, TVs are chatty," it builds a per-device behavioral fingerprint — the ports, destinations, and patterns *that specific device* actually uses over time — and only ever learns from activity it already independently judged benign, so a genuinely compromised device can't talk its way into a trusted baseline just by repeating itself.
-
-**One confirmed threat protects your whole network immediately.**
-
-If Home-IDS confirms a real threat from one device, that domain or IP is remembered network-wide. A different device touching the same infrastructure later gets stopped instantly instead of having to independently earn the same suspicion all over again — and a retroactive scan checks whether anything already touched it before it was confirmed.
-
-**It has a local, private, optional AI analyst — with a built-in lie detector.**
-
-A locally-run language model (via Ollama — nothing leaves your network) does a deeper batch review of the alerts that made it through, a few times a day, and can autonomously confirm false positives on its own. But it's never trusted blindly: a dedicated validator rejects any AI verdict that contradicts the hard evidence already on file, so a hallucinated "this looks fine" can't override a confirmed indicator of compromise.
-
-**It heals itself, safely, without you touching a config file.**
-
-When enough evidence accumulates that a detection threshold is a little too sensitive for your specific network, it tunes itself — conservatively, one-directionally (it will loosen a threshold with evidence, but never silently tighten one back up without you), and only ever into an override file layered on top of your own configuration, never overwriting it. Delete the override, and it falls straight back to your original settings. Every autonomous adjustment is fully explained: what changed, why, and how much evidence justified it.
+**Home-IDS is what a security team would run for you, running on hardware you own, watching only your own network, answering only to you.**
 
 ---
 
-## Total transparency — you can watch it think
+## What it catches, and what it does about it
 
-Every one of the claims above is a **graph, not a promise.** Home-IDS ships with six pre-built Grafana dashboards and well over one hundred live Prometheus metrics covering:
+It watches for the real shapes threats actually take — data being smuggled out through DNS traffic, devices calling home to command-and-control servers, one infected device trying to spread to the rest of your network, malware fingerprints matched against live threat intelligence feeds, and — with an optional add-on — the same signature-matching technology serious network security appliances use for catching known exploits and malware outright.
 
-- Real-time threat state, per device, network-wide
-- Exactly which reasoning path resolved every decision it made
-- What it learned about each device, and how its own thresholds have shifted from your original defaults
-- What it suppressed as a false positive, broken down by *who or what* made that call
-- The live health of every subsystem it depends on — so a quiet dashboard means a quiet network, never a silently-broken sensor
+When it's confident, it acts immediately and automatically, in the smallest way that actually solves the problem:
 
-There's a dashboard built for exactly one question: **"what did the system learn, how did it tune itself, what did it suppress, and what couldn't it do?"** — because a security tool you can't audit isn't one you can actually trust.
+- **Block just the bad destination** — the malicious domain stops resolving, network-wide, instantly. The device keeps working normally otherwise.
+- **Cut a misbehaving device off from the internet** — while it stays reachable on your own LAN, so you can still get to it and clean it up.
+- **Quarantine it completely** — reserved for the strongest evidence, this fully isolates a device from everything until you release it.
 
-And when it does alert you, the alert itself is designed to be read in five seconds, not decoded: **what happened** (the observed facts), **why** (the evidence, strongest first, in plain language), and **how confident** it is — split explicitly into "is this really the attack pattern" versus "could this still be a false alarm," because those are genuinely different questions and conflating them into one number was the old way of doing this. One tap approves an isolation, releases a block, or corrects a false positive — and the system remembers that correction so it doesn't repeat the mistake.
+Every action shows up on your phone the moment it happens, with a plain-English explanation of why, and a single tap to undo it if it's wrong.
+
+---
+
+## The part nobody else does: it grades its own work
+
+Most alerting tools cry wolf constantly, and people learn to ignore them — which is exactly how the real alert gets missed. Home-IDS has a second system whose entire job is checking the first one's work before you ever see it:
+
+- **It double-checks itself before bothering you.** A trained classifier and a semantic-similarity check run on every alert; if it's confident something's a false alarm, it quietly suppresses it and remembers the pattern so it doesn't happen again. If it's not sure, you still get told — clearly marked as low-confidence, never hidden and never oversold.
+- **It learns each device individually.** Not "this is a smart speaker, speakers are chatty" — it learns *your* smart speaker's actual behavior, over time, and only from behavior it already independently judged safe, so a genuinely compromised device can't talk its way into a trusted history just by repeating itself.
+- **One confirmed threat protects everything else instantly.** The moment it confirms something is genuinely malicious, every other device on your network is immediately protected from that exact threat too — no re-learning, no waiting.
+- **It tunes itself, safely, without touching your settings.** When enough real evidence says a threshold is a little too twitchy for your network, it loosens it — never the other way around without your say-so — and every adjustment it makes is fully explained and instantly reversible.
+- **It has an optional private AI analyst.** A local AI model — nothing sent to any outside service, ever — does a deeper review of what made it through, a few times a day, and can independently confirm false positives on its own. It's never taken at its word, either: a separate check rejects any AI judgment that contradicts the hard evidence already on file.
+
+The net effect: it gets quieter and more accurate the longer it runs, instead of noisier.
+
+---
+
+## Who this is for
+
+**Prosumers** — you already run Pi-hole, you already care about your home network more than most, and you want the next step up without paying a SaaS company to watch your family's traffic.
+
+**Small companies and small offices** — you don't have a security team, you can't justify an enterprise appliance and its subscription, but "we have no idea what's happening on our network" isn't an acceptable answer either. This gives you a real, always-on watchdog without adding headcount or a recurring line item.
+
+---
+
+## See it in action
+
+A real alert isn't a wall of numbers — it's built to be understood in five seconds:
+
+> **⚠️ HIGH — laptop-gs, auto-blocked**
+> **What happened:** Contacted a suspicious domain over DNS. The domain name itself was structured like an encoding scheme — a common way malware smuggles data out past normal filters.
+> **Why:** Two independent things agree: the domain matches a known malware-tracking blocklist, *and* the traffic pattern matches DNS tunneling.
+> **How confident:**
+> — Is this really the attack pattern? **91%** (two independent signals agree)
+> — Could this still be a false alarm? **8%** (checked against every known-safe pattern — none matched)
+>
+> [🛡️ Mark False Positive]  [↩️ Undo Block]
+
+That's it. What happened, why, how sure it is, and a one-tap way to correct it if it's wrong — no decoding required.
+
+---
+
+## You can watch it think, not just trust it
+
+Every claim above is backed by a live dashboard, not a promise. Home-IDS ships with six pre-built dashboards and well over a hundred live metrics covering exactly what it's doing right now: what it's learned about your devices, what it's suppressed as noise and why, how its own settings have shifted from the defaults, and the live health of every piece it depends on. There's a dashboard built around one question specifically — *what did it learn, how did it tune itself, what did it quiet down, and what couldn't it do* — because a security tool you can't audit isn't one you should trust with your network.
 
 ---
 
 ## Why not just buy a commercial box?
 
-Commercial home-network security appliances exist, and they work — but they typically mean sending a summary of your network activity to someone else's cloud, paying an ongoing subscription to keep detection current, and trusting a closed system you can't inspect when it makes a decision about your own network.
+Commercial home-network security appliances are real products that work. They also usually mean your traffic summary goes to someone else's cloud, you pay for it every month to keep working, and when it makes a call about your own network, you have no way to see why.
 
-Home-IDS is the alternative: **fully self-hosted, fully inspectable, and free.** It runs comfortably on hardware you likely already have sitting around (a small Linux box, and it's been engineered specifically to stay workable on something as modest as a Raspberry Pi), its optional AI analyst runs locally instead of calling out to a cloud API, and every single decision it makes is backed by evidence you can read yourself, in a dashboard you control, on infrastructure that never leaves your house. That combination — continuous autonomous learning, a full evidence trail for every action, and genuine self-correction over time — is the kind of thing you'd otherwise expect to pay a real subscription for, if you could find it running anywhere other than an expensive commercial or enterprise-grade appliance at all.
+Home-IDS trades that for: **it's free, it's entirely yours, and nothing about your network ever leaves your house** — including its optional AI analyst, which runs locally instead of calling out to anyone. It runs comfortably on modest hardware you likely already own. That combination of always-on autonomous protection, full transparency into every decision, and genuine self-improvement over time is normally something you'd pay a real subscription for, if you could find it at all outside of expensive commercial or enterprise-grade gear.
 
-**We'd rather undersell this than oversell it, so here's the honest version too:** it's not clairvoyant, it doesn't see inside an encrypted VPN tunnel (nothing at the network level can), and its deepest traffic inspection is strongest for wired devices, with WiFi coverage that's real but currently triggered rather than continuous on typical all-in-one router setups. It's a serious, actively-defended piece of engineering with a documented, honest account of exactly where its coverage is strongest and where it's still maturing — see the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md#10-detection-coverage--known-limitations) for the full, unvarnished breakdown, threat category by threat category.
-
----
-
-## The architecture, briefly
-
-```mermaid
-flowchart LR
-    subgraph Sensors
-        Zeek["Zeek NDR<br/>(packet/flow metadata)"]
-        Pihole["Pi-hole<br/>(DNS query log)"]
-    end
-
-    subgraph Brain1["🧠 Real-Time Decision Engine"]
-        direction TB
-        Extract["Feature extraction"]
-        HEE["Evidence & Hypothesis Engine"]
-        Extract --> HEE
-    end
-
-    subgraph Brain2["🛡️ Self-Healing False-Positive Filter"]
-        direction TB
-        Stage1["Hard-stop recheck"]
-        Stage2["ML classifier"]
-        Stage3["Semantic similarity"]
-        Combine["Combined confidence"]
-        Stage1 --> Stage2 --> Stage3 --> Combine
-    end
-
-    subgraph Brain3["🕵️ Local AI Analyst"]
-        direction TB
-        Dedup["Group similar alerts"]
-        Cache["7-day verdict cache"]
-        LLM["Local LLM (Ollama)<br/>— never leaves your network"]
-        Dedup --> Cache --> LLM
-    end
-
-    Zeek --> Extract
-    Pihole --> Extract
-    HEE -->|evidence + verdict| Brain2
-    Combine -->|suppress, quietly| Muted["Learned & remembered"]
-    Combine -->|publish| Alerts["Telegram + Grafana"]
-    Alerts -.every few hours, capped.-> Brain3
-    LLM -->|validated correction| Muted
-```
-
-Three cooperating systems, not one monolith: a real-time engine that decides, a continuous-learning filter that keeps it honest and quiet, and an optional local AI analyst that does deeper batch review without ever touching an external service. Every action either system takes flows through the same evidence trail — visible, explainable, and reversible.
+**And here's the part most product pages leave out:** it's not psychic, it can't see inside an encrypted VPN tunnel (nothing legitimately can), and its deepest inspection is strongest for wired devices — WiFi coverage is real but currently more targeted than continuous on a typical all-in-one router. We'd rather tell you that up front than have you discover it later. The full, unvarnished, threat-by-threat account of exactly where it's strong and where it's still maturing lives in the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md#10-detection-coverage--known-limitations) — written for the technically curious, not hidden from anyone.
 
 ---
 
-## 📚 Documentation
+## What it's built on
 
-| Document | What's in it |
+Three systems working together — a real-time watchdog that decides, a self-correcting judge that keeps it honest and quiet, and an optional local AI analyst for deeper review — all built on open, well-respected foundations (Pi-hole for DNS, Grafana for dashboards, and industry-standard network-monitoring and signature-detection tools underneath). If you want the actual architecture diagrams, the mathematics, and every design decision explained and justified, that's what the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md) is for.
+
+---
+
+## Getting started
+
+| Document | For |
 |---|---|
-| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | The exhaustive reference: every configuration option, the full autonomous-override system, service lifecycle, and the complete Prometheus metric catalog. |
-| [INSTALL.md](Documentation/INSTALL.md) | Step-by-step installation of Home-IDS and everything it depends on (Pi-hole, Zeek, Prometheus, Loki, Grafana, and the optional local AI analyst). |
-| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The internal architecture and mathematics, verified line-by-line against the running code — including the full, honest detection-coverage and known-limitations breakdown — for anyone extending or auditing the engine. |
-| [CHANGELOG.md](Documentation/CHANGELOG.md) | The complete, dated technical history of every release. |
+| [INSTALL.md](Documentation/INSTALL.md) | Setting it up for the first time — step by step, including everything it depends on. |
+| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | Running it day to day — every setting, every dashboard, what everything means. |
+| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The technical deep-dive — architecture, mathematics, and the full honest limitations breakdown. |
+| [CHANGELOG.md](Documentation/CHANGELOG.md) | What's changed, release by release. |
 
-Start with [INSTALL.md](Documentation/INSTALL.md) if you're setting this up for the first time, or [USER_MANUAL.md](Documentation/USER_MANUAL.md) if it's already running and you want to understand what it's telling you.
+New here? Start with [INSTALL.md](Documentation/INSTALL.md).
