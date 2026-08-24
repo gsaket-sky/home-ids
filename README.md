@@ -1,4 +1,4 @@
-# 🛡️ Home-IDS: Autonomous Threat Defense (Version 11.0)
+# 🛡️ Home-IDS: Autonomous Threat Defense (Version 12.0)
 
 **Home-IDS** is a self-hosted, autonomous Intrusion Detection and Prevention System (IDS/IPS) for home and edge networks. It fuses network metadata from **Zeek** (and, optionally, batch-mode **Suricata** signature scans) with DNS telemetry from **Pi-hole** into a real-time evidence-and-hypothesis engine, backs every alert with a false-positive-suppression layer that learns from its own mistakes, and now learns each device's own normal behavior over time — not just a global reputation tier.
 
@@ -20,7 +20,21 @@ It is not a toy project pretending to be enterprise-grade. It is a genuinely car
 | 🏷️ **Honest labeling elsewhere too** | Kill-chain phase labels (`RECON`/`C2`/`LATERAL`/`EXFIL`) are now `SUSPECTED_`-prefixed — they're heuristic feature-threshold guesses, not confirmed stages, and nothing in decision-making ever consumed the bare form anyway. A payload-size classifier stopped guessing protocol from byte count alone (a sub-128-byte TCP/ICMP/anything packet no longer displays as "Standard DNS/Control Packet"). |
 | 🕸️ **A real parent-domain signal for DNS tunneling** | Subdomain-fanout detection now factors in average label entropy across the fanout parent's own children, not just the raw count — distinguishes "many meaningfully-named subdomains" (legitimate multi-tenant SaaS) from "many randomized/encoded chunks" (the actual tunneling shape). |
 
-See [CHANGELOG.md](Documentation/CHANGELOG.md) for the complete, dated technical write-up of every fix (10.0 and 11.0), and [USER_MANUAL.md](Documentation/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
+## ✨ What's New in 12.0
+
+**12.0 started as a false-positive-storm investigation** (a Pi-hole/unbound resolver's own recursive DNS traffic misread as policy bypass, a smart monitor's normal multicast/retry traffic misread as exfiltration/connection-abuse) **and a direct question — is anything on this network actually infected?** Both led somewhere bigger: the same "alert attribution doesn't trace to the evidence that fired" pattern recurring in four more places, and a self-poisoning gap that had 357 legitimate infrastructure IPs (including Google's own 8.8.8.8) sitting in the confirmed-malicious store, some still actively renewing. No sign of real compromise was found anywhere in the alert history.
+
+| | |
+|---|---|
+| 🎯 **Attribution audit, continued** | CONNECTION_ABUSE, NETWORK_INTRUSION, and ARP-spoofing alerts now trace `destination_ip` to the specific evidence that fired — confirmed live, 3,179 alerts across 18 devices had displayed a completely unrelated device's DNS resolver as the "destination." |
+| 🧠 **Per-device learned thresholds, not hardcoded ones** | The connection-abuse detector now learns each device's own normal rejected-connection pattern (same self-healing shape as the existing ARP-sweep threshold) and cross-checks it against that device's own DNS-blocking rate before flagging abuse. |
+| 🤖 **The fully-autonomous correction path actually corrects now** | The local classifier that suppresses false positives without needing Ollama or a human now applies the *right* fix for what actually fired, instead of always trying a domain immunization that does nothing for connection-abuse-shaped alerts — plus a new hard-stop guard so no correction source can ever immunize a genuinely confirmed threat. |
+| 🌐 **CDN/telemetry recognition, redesigned** | Wired to your Pi-hole's own live gravity classification and a Tranco-popularity + ASN-organization check, instead of an ever-growing hardcoded domain list that kept needing one-off patches. |
+| 🧹 **Self-poisoning fixed for known public infrastructure** | Google's 8.8.8.8 had 64 "confirmed malicious" recordings, still renewing same-day — a device's own direct-resolver traffic re-poisoning itself. Now protected on both the write and read path, matching the existing private/multicast-IP protection. |
+| 📲 **Boot-time health checks are now real** | Every subsystem in the startup Telegram message used to either be a hardcoded "Online" or a weak proxy check — now an actual filesystem write, an actual HTTP round-trip, an actual raw-socket probe, an actual Suricata invocation (now included, previously absent entirely). |
+| 🔁 **Control-loop honesty** | Telegram's unblock/release/block buttons now report what actually happened instead of always claiming success; a device released outside this IDS's own flow (e.g. directly in the Fritz!Box admin UI) no longer stays stuck "trapped" in Grafana forever. |
+
+See [CHANGELOG.md](Documentation/CHANGELOG.md) for the complete, dated technical write-up of every fix (10.0 through 12.0), and [USER_MANUAL.md](Documentation/USER_MANUAL.md) for the full `config.yaml` and state-file reference.
 
 ---
 

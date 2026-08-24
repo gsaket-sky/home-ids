@@ -164,6 +164,16 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("an IPv6 multicast address (ff02::fb, mDNS) is refused too",
           fp.local_intel.check("ip", "ff02::fb") is None)
 
+    # BUGFIX (live audit, same session): well-known PUBLIC DNS resolvers -- found live
+    # with 8.8.8.8 at 64 "confirmed malicious" recordings, still actively renewing,
+    # from devices' own direct-resolver DNS traffic (the DNS_POLICY_BYPASS shape).
+    # KNOWN_PUBLIC_DNS_RESOLVERS (utils.py) is shared with dns_evasion.py's existing
+    # known-resolver exemption -- same list, same reasoning, now also protecting this
+    # store's write AND read paths.
+    fp.record_confirmed_threat("dev_H2", "", "8.8.8.8", reason="STAGE_1_HARD_STOP")
+    check("THE FIX: a well-known public DNS resolver (8.8.8.8) is refused too",
+          fp.local_intel.check("ip", "8.8.8.8") is None)
+
     # Read-side guard: an ALREADY-poisoned private IP (simulating what production found
     # on disk before this fix existed) must stop being honored, same as the domain case.
     fp.local_intel.record("ip", "192.168.1.1", "some_other_device", reason="STAGE_1_HARD_STOP")
@@ -192,11 +202,23 @@ with tempfile.TemporaryDirectory() as tmpdir:
               fp_with_config.local_intel.check("ip", "203.0.113.50") is None)
 
     # REGRESSION GUARD: a genuinely unrelated public IP is completely unaffected.
-    fp.record_confirmed_threat("dev_K", "", "8.8.4.4", reason="STAGE_1_HARD_STOP")
+    # BUGFIX (live audit, same session): 8.8.4.4 used to be a fine "ordinary public IP"
+    # example -- but it's Google's own secondary public DNS resolver, which is now
+    # ALSO correctly protected (KNOWN_PUBLIC_DNS_RESOLVERS, utils.py) for the exact
+    # same reason 8.8.8.8 needed to be: found live with 64 false "confirmed malicious"
+    # recordings from devices' own direct-resolver DNS traffic. 93.184.216.34 (a
+    # long-standing example.com IP, already used as a plain "ordinary public IP" test
+    # fixture elsewhere in this suite -- test_phase24_dns_evasion.py) is genuinely
+    # unrelated: not private/multicast/reserved (unlike RFC 5737 TEST-NET ranges like
+    # 203.0.113.0/24, which Python's stdlib ipaddress actually classifies as
+    # is_private=True -- confirmed live, that was this test's first replacement
+    # attempt and it ALSO failed, for a reason unrelated to this fix) and not a known
+    # resolver.
+    fp.record_confirmed_threat("dev_K", "", "93.184.216.34", reason="STAGE_1_HARD_STOP")
     check("REGRESSION GUARD: a genuinely unrelated public IP is still recorded and "
           "still hard-stops normally -- the fix is scoped to private/multicast/"
-          "safe-listed IPs only",
-          fp.local_intel.check("ip", "8.8.4.4") is not None)
+          "safe-listed/known-public-resolver IPs only",
+          fp.local_intel.check("ip", "93.184.216.34") is not None)
 
     # THE CORE FIX: a DIFFERENT device connecting to the same confirmed IOC gets an
     # immediate hard-stop via evaluate(), without needing its own hard-stop signal.

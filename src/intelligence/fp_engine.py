@@ -604,11 +604,54 @@ class AutonomousFPEngine:
             elif lgbm_prob >= self.lgbm_fp_threshold:
                 fp_engine_stage2_lgbm_hits.inc()
 
-            # Self-healing Action 1: Add base domain to 14-day trust cache
-            is_new_immunization = self._immunize_domain(base_domain, hostname)
-
-            # Self-healing Action 2: Widen device's EWMA sigma by +0.25
-            self._apply_sigma_shift(device_id, hostname)
+            # BUGFIX (live audit): this used to ALWAYS immunize `base_domain` regardless
+            # of signature -- fine for a domain-shaped false positive, but CONNECTION_
+            # ABUSE (and the DNS_EVASION family) don't have a meaningful base_domain to
+            # immunize at all (mark_false_positive()'s own signature-routing exists
+            # specifically because a domain immunization does nothing for those). That
+            # meant this fully-autonomous path (the ONE self-correction mechanism that
+            # works without Ollama or a human -- it's a local LightGBM+FastEmbed
+            # classifier, not an LLM) kept re-suppressing the SAME CONNECTION_ABUSE
+            # false positive every cycle forever, immunizing an empty/meaningless
+            # domain each time instead of ever actually raising the device's own
+            # threshold the way mark_false_positive()'s CONNECTION_ABUSE branch does.
+            # Routing through the SAME shared method the Telegram/LLM paths already use
+            # means this now gets the correct per-signature correction (and the
+            # hard-stop guard below) for free, instead of a second, narrower
+            # reimplementation that only ever knew how to do one kind of fix.
+            mark_result = self.mark_false_positive(
+                alert_payload, hostname, target_domain=domain, source="autonomous_stage23"
+            )
+            if mark_result.get("refused"):
+                # The alert this classifier wanted to autonomously suppress turned out
+                # to carry hard-stop/verifiable-fact evidence (honeypot, arp_spoofing,
+                # confirmed exploit, tier-5 IOC) -- do NOT suppress it. A local
+                # statistical classifier being confident this "looks like" a false
+                # positive is not grounds to override real corroborated evidence.
+                # Publishes normally (UNCERTAIN, not suppressed) rather than fabricating
+                # a CONFIRMED_THREAT tune-up here -- decision_engine.py's own hard-stop
+                # already carries the real severity for this alert; this verdict is
+                # advisory context, not the authority on whether it's dangerous.
+                LOGGER.warning(
+                    "🛡️ [FP ENGINE » AUTONOMOUS] %s: Stage 2/3 wanted to suppress this "
+                    "alert (confidence=%.3f) but mark_false_positive() refused it as a "
+                    "hard-stop verdict -- NOT suppressing, publishing normally instead.",
+                    hostname, combined
+                )
+                return {
+                    "verdict": "UNCERTAIN",
+                    "confidence": combined,
+                    "calibrated_confidence": calibrated_prob,
+                    "stage": "STAGE_3_COMBINED",
+                    "reasons": [
+                        f"Stage 2/3 combined confidence={combined:.3f} >= suppress threshold, "
+                        f"but this alert carries hard-stop/verifiable-fact evidence — "
+                        f"mark_false_positive() refused the correction: "
+                        f"{mark_result.get('refused_reason', '')}",
+                    ],
+                    "suppress": False,
+                }
+            is_new_immunization = mark_result.get("is_new_immunization", False)
 
             # Self-healing Action 3: Write full audit log entry (never silently lost)
             # VERSION 11 (P2, review #13/#14): labeled FP_MODEL_SCORE, not P(FP) -- this is
@@ -622,7 +665,14 @@ class AutonomousFPEngine:
                 f"FastEmbed similarity (contextual evidence, not a verdict)={embed_sim_str} → closest known pattern: '{embed_match}' (Stage 3)",
                 f"Combined confidence={combined:.3f} >= {effective_suppress_threshold} (suppress threshold)",
             ]
-            self._write_muted_log(alert_payload, "AUTONOMOUS_FP_SUPPRESSED", reasons, combined)
+            # BUGFIX (live audit): mark_false_positive() above already writes its OWN
+            # muted-log entry (event_type="AUTONOMOUS_FP_SUPPRESSED") for this same
+            # alert -- a second _write_muted_log() call here used to double-write the
+            # SAME event, the exact "same event trained twice" class of bug this
+            # codebase has already fixed once for the label=0/label=1 conflict
+            # elsewhere. `reasons` (the richer LightGBM/FastEmbed detail) is still
+            # returned to the caller below for the Telegram/audit-trail text; it's
+            # just not written to the training log a second time here.
 
             return {
                 "verdict": "FALSE_POSITIVE",
@@ -749,10 +799,26 @@ class AutonomousFPEngine:
         True if `ip` should NEVER be recordable/matchable via the local confirmed-intel
         store: private/multicast/loopback/link-local/reserved (stdlib ipaddress -- these
         structurally cannot be "malicious external infrastructure," which is the entire
-        premise of this store), OR explicitly listed in config.yaml's safe_ips (the
-        user's own "never suspicious" list, which this store should have always honored)."""
+        premise of this store), explicitly listed in config.yaml's safe_ips (the user's
+        own "never suspicious" list, which this store should have always honored), or a
+        well-known public DNS resolver.
+
+        BUGFIX (live audit): this guard covered private/multicast/safe_ips but had no
+        equivalent for well-known PUBLIC infrastructure -- confirmed live: 8.8.8.8
+        (Google Public DNS) had 64 "confirmed malicious" recordings, still actively
+        renewing, from devices whose own direct-resolver DNS traffic (the same
+        DNS_POLICY_BYPASS shape dns_evasion.py's policy-bypass check flags) kept
+        re-confirming it. Cloudflare/Google/GCP/Apple/AWS-owned IPs were ALSO found
+        poisoned this same audit (357 total entries) -- those need an ASN-org lookup
+        (utils.is_cloud_cdn_provider_org()) this method can't do without a geoip_engine
+        reference, which AutonomousFPEngine doesn't currently take as a dependency; the
+        exact-match public-resolver list below is the write/read-side fix that doesn't
+        require adding one."""
         if not ip or ip == "unknown":
             return False
+        from utils import KNOWN_PUBLIC_DNS_RESOLVERS
+        if ip in KNOWN_PUBLIC_DNS_RESOLVERS:
+            return True
         safe_ips = self.config.get("safe_ips", []) if self.config else []
         if ip in safe_ips:
             return True
@@ -1436,6 +1502,44 @@ class AutonomousFPEngine:
         signature = alert_payload.get("signature", "")
         device_id = alert_payload.get("device", {}).get("id", "unknown")
 
+        # BUGFIX (live audit): this method had no guard at all against being called on
+        # a HARD-STOP-sourced alert -- decision_engine.py's honeypot/arp_spoofing/
+        # geofencing/confirmed_exploit/tier-5-reputation branches are the system's
+        # "verifiable fact" verdicts (real evidence: a honeypot was touched, a
+        # confirmed exploit signature matched, a domain is corroborated-malicious
+        # across independent TI sources), deliberately bypassing hypothesis competition
+        # entirely because they need zero corroboration to be trusted. Without this
+        # check, an operator's single mistaken Telegram tap (or, once the autonomous
+        # Stage2/3 path also calls this method, a misfiring classifier) could
+        # immunize a genuinely malicious domain/IP into the 14-day trust cache. These
+        # explanation strings are decision_engine.py's own fixed text for exactly
+        # those branches -- stripped of any " (persisted Ns)" suffix defensively,
+        # though hard-stops are always CRITICAL and never go through the
+        # SUSPICIOUS-persistence-escalation path that adds that suffix.
+        _HARD_STOP_SIGNATURES = frozenset({
+            "Internal Honeypot Accessed",
+            "Layer-2 ARP Spoofing Detected",
+            "Geofencing Policy Violation",
+            "Confirmed Exploit/Malware Signature (Suricata)",
+            "Confirmed Malicious IOC",
+        })
+        signature_base = signature.split(" (persisted ", 1)[0]
+        if signature_base in _HARD_STOP_SIGNATURES:
+            LOGGER.warning(
+                "🛡️ [FP ENGINE » MARK FP] %s: REFUSED — '%s' is a hard-stop/verifiable-fact "
+                "verdict, not a hypothesis-competition alert. Marking it false positive would "
+                "immunize a source the system has real corroborated evidence against. If this "
+                "genuinely was a false positive, it must be corrected at the evidence source "
+                "(e.g. remove the confirmed-IOC entry), not via this closed-loop mechanism.",
+                hostname, signature,
+            )
+            return {
+                "base_domain": "", "is_new_immunization": False, "domain": "",
+                "ip_immunized": "", "threshold_bumped": False,
+                "refused": True,
+                "refused_reason": f"'{signature}' is a hard-stop verdict — cannot be marked false positive.",
+            }
+
         domain, base_domain, ip_immunized = "", "", ""
         is_new_immunization = False
         threshold_bumped = False
@@ -1456,16 +1560,83 @@ class AutonomousFPEngine:
                     "recording the training correction and sigma widening below.", hostname
                 )
         elif signature == "CONNECTION_ABUSE":
-            current = self.get_device_arp_sweep_threshold(device_id, default=8.0)
-            new_threshold = current + 4.0
-            self.apply_device_fp_profile(
-                device_id, "arp_sweep_unique_targets_threshold", new_threshold, baseline=current,
-                set_by=source,
-                reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
-                       f"CONNECTION_ABUSE alert for {hostname} — raising this device's own "
-                       f"ARP-sweep threshold instead of the global default.",
-                sample_count=1,
-            )
+            # BUGFIX (live audit): this used to ALWAYS bump arp_sweep_unique_targets_
+            # threshold, no matter which of ConnectionAbuseHypothesis's three evidence
+            # types (zeek_conn_abuse/zeek_long_conn/arp_sweep -- hypotheses/engine.py)
+            # actually fired. Confirmed live: a device's 245 CONNECTION_ABUSE alerts
+            # were 100% zeek_conn_abuse (s0_rej), 0% arp_sweep (count 1-2, threshold 8)
+            # -- correcting one via this branch bumped a threshold with zero bearing on
+            # what fired, so the alert kept recurring exactly as before the "fix".
+            # Inspect the SAME features this alert's own evidence was computed from
+            # (threat_signals.py's own trigger conditions, mirrored here) and bump
+            # every threshold whose condition is actually true for this alert -- never
+            # just guess one. Bumping an unrelated threshold that WASN'T the cause is
+            # harmless (that device becomes marginally less sensitive to a signal it
+            # wasn't even tripping); missing the real cause is what kept this bug alive.
+            feats = alert_payload.get("features", {}) or {}
+            s0_rej = float(feats.get("zeek_s0_rej_count", 0.0) or 0.0)
+            s0_rej_unique = float(feats.get("zeek_s0_rej_unique_ips", 0.0) or 0.0)
+            max_dur = float(feats.get("zeek_max_duration", 0.0) or 0.0)
+            arp_count = float(feats.get("zeek_arp_sweep_count", 0.0) or 0.0)
+
+            bumped_any = False
+            current_unique_ip_threshold = self.get_device_conn_abuse_unique_ip_threshold(device_id, default=5.0)
+            if s0_rej > 25 and s0_rej_unique > current_unique_ip_threshold:
+                current = current_unique_ip_threshold
+                new_threshold = current + 4.0
+                self.apply_device_fp_profile(
+                    device_id, "conn_abuse_unique_ip_threshold", new_threshold, baseline=current,
+                    set_by=source,
+                    reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
+                           f"CONNECTION_ABUSE alert for {hostname} (zeek_conn_abuse/s0_rej "
+                           f"evidence) — raising this device's own rejected-connection "
+                           f"unique-IP threshold instead of the global default.",
+                    sample_count=1,
+                )
+                bumped_any = True
+            current_long_conn_threshold = self.get_device_long_conn_duration_threshold(device_id, default=14400.0)
+            if max_dur > current_long_conn_threshold:
+                current = current_long_conn_threshold
+                new_threshold = current * 1.5
+                self.apply_device_fp_profile(
+                    device_id, "long_conn_duration_threshold", new_threshold, baseline=current,
+                    set_by=source,
+                    reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
+                           f"CONNECTION_ABUSE alert for {hostname} (zeek_long_conn evidence) — "
+                           f"raising this device's own long-connection duration threshold.",
+                    sample_count=1,
+                )
+                bumped_any = True
+            if arp_count > 0:
+                current = self.get_device_arp_sweep_threshold(device_id, default=8.0)
+                new_threshold = current + 4.0
+                self.apply_device_fp_profile(
+                    device_id, "arp_sweep_unique_targets_threshold", new_threshold, baseline=current,
+                    set_by=source,
+                    reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
+                           f"CONNECTION_ABUSE alert for {hostname} (arp_sweep evidence) — "
+                           f"raising this device's own ARP-sweep threshold instead of the "
+                           f"global default.",
+                    sample_count=1,
+                )
+                bumped_any = True
+
+            if not bumped_any:
+                # None of the three conditions still hold against this alert's own
+                # feature snapshot (e.g. corrected well after the fact, or from a
+                # persistence-escalated re-fire with stale numbers) -- fall back to the
+                # old blanket behavior rather than silently doing nothing.
+                current = self.get_device_arp_sweep_threshold(device_id, default=8.0)
+                new_threshold = current + 4.0
+                self.apply_device_fp_profile(
+                    device_id, "arp_sweep_unique_targets_threshold", new_threshold, baseline=current,
+                    set_by=source,
+                    reason=f"{'LLM-' if source == 'llm_validated' else 'Operator-'}corrected "
+                           f"CONNECTION_ABUSE alert for {hostname} — no evidence-specific "
+                           f"features available on this alert, falling back to the ARP-sweep "
+                           f"threshold.",
+                    sample_count=1,
+                )
             threshold_bumped = True
         else:
             domain = target_domain or alert_payload.get("network_context", {}).get("queried_domain", "") or ""
@@ -1487,8 +1658,19 @@ class AutonomousFPEngine:
         self._apply_sigma_shift(device_id, hostname, source=source)
 
         is_llm = source == "llm_validated"
-        event_type = "LLM_VALIDATED_FALSE_POSITIVE" if is_llm else "OPERATOR_MARKED_FALSE_POSITIVE"
-        origin_text = "Ollama LLM (DeterministicValidator-passed)" if is_llm else "operator via Telegram"
+        # BUGFIX (live audit): a third source now calls this method -- the fully
+        # autonomous Stage 2/3 classifier (evaluate()'s AUTONOMOUS_FP_SUPPRESSED path,
+        # no LLM or human involved at all) -- which used to fall into the bare
+        # is_llm-else branch and get mislabeled "OPERATOR_MARKED_FALSE_POSITIVE" in
+        # training data / the audit log, misattributing a statistical-classifier
+        # decision to a human judgment call.
+        is_autonomous = source == "autonomous_stage23"
+        if is_llm:
+            event_type, origin_text = "LLM_VALIDATED_FALSE_POSITIVE", "Ollama LLM (DeterministicValidator-passed)"
+        elif is_autonomous:
+            event_type, origin_text = "AUTONOMOUS_FP_SUPPRESSED", "the fully-autonomous Stage 2/3 classifier (LightGBM+FastEmbed, no LLM)"
+        else:
+            event_type, origin_text = "OPERATOR_MARKED_FALSE_POSITIVE", "operator via Telegram"
 
         # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other possible name
         # (hypotheses/engine.py) -- same dns_evasion_anomaly evidence, same "no domain,
@@ -1611,6 +1793,18 @@ class AutonomousFPEngine:
             return float(profile["fp_combined_suppress_threshold"]["value"])
         return self.combined_suppress_threshold
 
+    def _get_device_profile_value(self, device_id: Optional[str], key: str, default: float) -> float:
+        """Shared read-path for every per-device learned threshold below -- all of them
+        are the exact same layered-fallback shape (this device's own calibrated value if
+        apply_device_fp_profile() has ever written one, else the global default), just
+        keyed on a different profile key. Factored out so a new learned threshold is a
+        two-line wrapper, not a fourth copy of this lookup."""
+        with self._lock:
+            profile = self._device_fp_profiles.get(device_id or "")
+        if profile and key in profile:
+            return float(profile[key]["value"])
+        return default
+
     def get_device_arp_sweep_threshold(self, device_id: Optional[str], default: float) -> float:
         """PHASE 21D2: same layered-fallback shape as get_device_suppress_threshold()
         above, reused for arp_sweep_unique_targets_threshold -- a device whose ARP
@@ -1619,11 +1813,25 @@ class AutonomousFPEngine:
         immediately (mark_false_positive()'s CONNECTION_ABUSE routing below), not just
         a contribution to next week's retrain. Everything else shares the global
         config.yaml default, same as before this existed."""
-        with self._lock:
-            profile = self._device_fp_profiles.get(device_id or "")
-        if profile and "arp_sweep_unique_targets_threshold" in profile:
-            return float(profile["arp_sweep_unique_targets_threshold"]["value"])
-        return default
+        return self._get_device_profile_value(device_id, "arp_sweep_unique_targets_threshold", default)
+
+    def get_device_conn_abuse_unique_ip_threshold(self, device_id: Optional[str], default: float) -> float:
+        """BUGFIX (live audit): same per-device self-healing shape as
+        get_device_arp_sweep_threshold() above, applied to threat_signals.py's
+        zeek_conn_abuse check's `s0_rej_unique > N` requirement -- the earlier gap was
+        that mark_false_positive()'s CONNECTION_ABUSE routing ONLY ever touched the
+        arp_sweep threshold, regardless of which of ConnectionAbuseHypothesis's three
+        evidence types (zeek_conn_abuse/zeek_long_conn/arp_sweep) actually fired.
+        Confirmed live: a device generating 100-165 rejected connections against only
+        6 unique IPs per window (a retry-storm shape, not a scan) kept re-alerting
+        because correcting it only ever raised a threshold (arp_sweep) that had
+        nothing to do with what actually fired."""
+        return self._get_device_profile_value(device_id, "conn_abuse_unique_ip_threshold", default)
+
+    def get_device_long_conn_duration_threshold(self, device_id: Optional[str], default: float) -> float:
+        """Same shape as get_device_conn_abuse_unique_ip_threshold() above, for
+        threat_signals.py's zeek_long_conn check's duration threshold."""
+        return self._get_device_profile_value(device_id, "long_conn_duration_threshold", default)
 
     def apply_device_fp_profile(self, device_id: str, key: str, value: float, baseline: float,
                                  set_by: str, reason: str, sample_count: int = 0) -> None:

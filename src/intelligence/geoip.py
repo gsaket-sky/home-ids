@@ -62,6 +62,15 @@ class GeoIPEngine:
         # findings without touching that detector's own logic.
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="rev-dns")
 
+    # BUGFIX (live audit): unlike reverse_dns() below (already @lru_cache'd), these two
+    # had no caching at all despite being pure functions of `ip` against a static,
+    # in-process-lifetime-immutable MaxMind DB. Confirmed live: the same destination IP
+    # gets looked up via lookup_asn() at least twice in one alert cycle (the reasoning-
+    # trail asn_owner lookup, then again per-IP in the geofencing scan over the device's
+    # whole destination set) with more callers being added (CDN/ASN-org exemption
+    # checks) -- each a real, wasted DB re-read. Not a network call like reverse_dns
+    # (no timeout risk), just redundant local work.
+    @lru_cache(maxsize=4096)
     def lookup(self, ip):
         if not self.reader:
             return None
@@ -76,6 +85,7 @@ class GeoIPEngine:
             LOGGER.debug("GeoIP City lookup exception for %s: %s", ip, exc)
             return None
 
+    @lru_cache(maxsize=4096)
     def lookup_asn(self, ip):
         if not self.asn_reader:
             return None
@@ -90,8 +100,17 @@ class GeoIPEngine:
             LOGGER.debug("GeoIP ASN lookup exception for %s: %s", ip, exc)
             return None
 
+    # BUGFIX (live audit, self-diagnosed in this class's own prior comment but never
+    # fixed): a timeout and a genuine "no PTR record" both collapsed to the same `None`
+    # return, so every caller (dns_evasion.py's _reverse_dns_explains()) treated a
+    # lookup that simply got queued behind other work under load identically to one
+    # that cleanly confirmed there's no record -- i.e. "inconclusive" silently became
+    # "unexplained" (suspicious). Now returns a (host, timed_out) tuple so callers can
+    # tell the two apart and skip evidence generation on a timeout instead of treating
+    # it as a negative result. reverse_dns() below keeps the old host-only contract for
+    # existing callers that don't need the distinction.
     @lru_cache(maxsize=2048)
-    def _timed_reverse_dns(self, ip: str) -> Optional[str]:
+    def _timed_reverse_dns_status(self, ip: str) -> "tuple[Optional[str], bool]":
         def _resolve():
             # Set socket timeout for the thread worker
             old_timeout = socket.getdefaulttimeout()
@@ -104,26 +123,32 @@ class GeoIPEngine:
 
         future = self._executor.submit(_resolve)
         try:
-            return future.result(timeout=2.6)
+            return future.result(timeout=2.6), False
         except concurrent.futures.TimeoutError:
             LOGGER.debug("Reverse DNS timeout (>2.5s) for IP: %s", ip)
-            return None
+            return None, True
         except socket.herror:
             LOGGER.debug("Reverse DNS host not found for IP: %s", ip)
-            return None
+            return None, False
         except Exception as exc:
             LOGGER.debug("Reverse DNS exception for %s: %s", ip, exc)
-            return None
+            return None, False
 
     def reverse_dns(self, ip):
+        return self.reverse_dns_status(ip)[0]
+
+    def reverse_dns_status(self, ip):
+        """Same as reverse_dns(), but returns (host_or_None, timed_out) so a caller
+        that needs to treat "inconclusive under load" differently from "confirmed no
+        record" can do so -- see the BUGFIX comment on _timed_reverse_dns_status()."""
         try:
             parsed = ipaddress.ip_address(ip)
             if parsed.version in (4, 6):
-                return self._timed_reverse_dns(ip)
+                return self._timed_reverse_dns_status(ip)
         except ValueError:
             LOGGER.debug("Invalid IP address format for reverse DNS: %s", ip)
-            return None
-        return None
+            return None, False
+        return None, False
 
     def geo_labels(self, ip):
         """Constructs safe dictionaries for metric exports, preventing NoneType errors."""

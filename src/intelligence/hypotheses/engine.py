@@ -70,13 +70,21 @@ class NetworkIntrusionHypothesis(Hypothesis):
         # Check requirements: Zeek evidence
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
         has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
-        
-        self.required_satisfied = has_lateral_scan or has_malicious_tls
+        # BUGFIX (live audit): a single genuinely-new MAC flip on an IP (zeek_features.py's
+        # _bind_mac()) is now corroboration-required weak evidence, not an instant
+        # zero-corroboration hard-stop -- a lone flip is also the normal signature of
+        # MAC-randomization ("private Wi-Fi address") reconnecting/roaming. A second
+        # genuine flip within the same 600s window still hard-stops directly
+        # (decision_engine.py's has_arp_spoof, unaffected by this). This weak single-flip
+        # case needs a second independent source, same as every other hypothesis here.
+        has_mac_flip = any(e.type == "arp_spoof_pending" for e in ev_store)
+
+        self.required_satisfied = has_lateral_scan or has_malicious_tls or has_mac_flip
         if not self.required_satisfied:
             return 0.0
 
         # Strong
-        if has_lateral_scan and has_malicious_tls:
+        if sum([has_lateral_scan, has_malicious_tls, has_mac_flip]) >= 2:
             self.strong_score += 1.0
 
         # Contradicting
@@ -454,6 +462,7 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
         "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
         "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
+        "arp_spoof_pending",
     })
 
     # VERSION 11 (P1 follow-up, review #9/#10): matches

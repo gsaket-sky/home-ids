@@ -51,13 +51,40 @@ def _is_local_dest(ip: str) -> bool:
 
 class ThreatSignalDetector:
     def detect(self, device: str, features: Dict[str, Any], top_domain: Optional[str] = None,
-               arp_sweep_threshold: int = 8) -> List[Evidence]:
+               arp_sweep_threshold: int = 8, conn_abuse_unique_ip_threshold: int = 5,
+               long_conn_duration_threshold: float = 14400.0, ti_engine=None) -> List[Evidence]:
         ev_list: List[Evidence] = []
         now = time.time()
 
         top_domain = (top_domain or "").lower().strip(".")
-        is_telemetry = bool(top_domain) and is_telemetry_domain(top_domain)
+        # BUGFIX (live audit): is_telemetry_domain() alone is the same hardcoded-list
+        # shape as the CDN check above. ti_engine.is_pihole_gravity_domain() (optional,
+        # None-safe) adds your OWN Pi-hole's already-maintained ad/tracker gravity
+        # classification -- a domain Pi-hole itself already recognizes as ad/telemetry
+        # is real, regularly-updated evidence this is routine traffic, not a hardcoded
+        # guess. A gravity lookup failure (Pi-hole unreachable, timeout) returns None,
+        # not False -- correctly falls through to just the static list, never treated
+        # as "confirmed not telemetry."
+        is_telemetry = bool(top_domain) and (
+            is_telemetry_domain(top_domain) or bool(ti_engine and ti_engine.is_pihole_gravity_domain(top_domain))
+        )
         is_vendor_cloud_api = bool(top_domain) and any(top_domain.endswith(d) for d in _VENDOR_CLOUD_API_DOMAINS)
+
+        # BUGFIX (live audit): _is_cdn_or_cloud_domain() alone is a fully hardcoded,
+        # disconnected check -- kept needing one-off patches every time a legitimate
+        # domain wasn't already enumerated (nflximg.com, samsungqbe.com, both found only
+        # after already false-positiving live). ti_engine.is_allowlisted() layers in the
+        # live Tranco popularity feed + the persisted CL-AFPE self-healing trust cache
+        # (a domain corrected once via "Mark False Positive" stops needing a manual
+        # code patch here), same pattern dns_evasion.py's _reverse_dns_explains() now
+        # uses. ti_engine is optional (None-safe) so this stays a no-op for any caller
+        # that doesn't have one wired.
+        def is_known_safe_domain(domain: Optional[str]) -> bool:
+            if not domain:
+                return False
+            if _is_cdn_or_cloud_domain(domain):
+                return True
+            return bool(ti_engine and ti_engine.is_allowlisted(domain))
 
         def add(etype: str, value: float, confidence: float, group: str, note: str,
                 subtag: Optional[str] = None, domain: Optional[str] = None) -> None:
@@ -167,7 +194,7 @@ class ThreatSignalDetector:
         # CDN-recognized, even though the domain that actually triggered max_label>55
         # was. The exemption must test the evidence's own domain, not a bystander.
         evidence_domain = max_label_domain if max_label > 55 else (tunnel_domain_examples[0] if tunnel_domain_examples else None)
-        if (tunnel_domains >= 2 or max_label > 55) and not (evidence_domain and _is_cdn_or_cloud_domain(evidence_domain)):
+        if (tunnel_domains >= 2 or max_label > 55) and not is_known_safe_domain(evidence_domain):
             examples_note = f" e.g.={','.join(tunnel_domain_examples)}" if tunnel_domain_examples else ""
             add("dns_tunnel_v2", max_label, min(1.0, 0.5 + tunnel_domains * 0.15), "dns_tunnel_v2",
                 f"encoded/long labels max={int(max_label)} domain={max_label_domain or '?'} count={int(tunnel_domains)}{examples_note}",
@@ -181,7 +208,7 @@ class ThreatSignalDetector:
         # (e.g. a content-hash-per-request CDN pattern) can also produce many distinct
         # labels under one parent; this never had any CDN exemption at all. Uses
         # fanout_domain (the parent this evidence is actually about), not top_domain.
-        if fanout_count >= 8 and not _is_cdn_or_cloud_domain(fanout_domain):
+        if fanout_count >= 8 and not is_known_safe_domain(fanout_domain):
             # VERSION 11 (P2, review #17): fanout COUNT alone can't distinguish "many
             # meaningfully-named subdomains" (legitimate multi-tenant SaaS) from "many
             # randomized/encoded chunks" (real tunneling) -- a high average label
@@ -203,9 +230,20 @@ class ThreatSignalDetector:
                 f"suspicious tld ratio {susp_tld_ratio:.2f}", subtag="suspicious_tld")
 
         # ── Exfiltration byte bursts ─────────────────────────────────────────────────
+        # BUGFIX (live audit): this had no destination-scope check at all -- purely raw
+        # byte volume/z-score, regardless of where the bytes went. Confirmed live: a
+        # Samsung Smart Monitor's own local multicast group traffic (224.0.0.7:8001,
+        # AllShare/SmartView LAN discovery) tripped this 3x with z-scores in the
+        # thousands. Multicast/broadcast/private/loopback traffic (_is_local_dest(),
+        # already defined above and already used by the beaconing check just below)
+        # structurally cannot leave the LAN, so no volume of it can be exfiltration.
         outbound_z = float(features.get("outbound_bytes_z", 0.0) or 0.0)
         outbound_bytes = float(features.get("zeek_outbound_bytes", 0.0) or 0.0)
-        if outbound_z > 5.0 and outbound_bytes > 2500000 and not is_vendor_cloud_api:
+        exfil_dest_ip = str(features.get("last_dest_ip", "unknown") or "unknown")
+        is_local_exfil_dest = _is_local_dest(exfil_dest_ip)
+        if is_local_exfil_dest:
+            pass
+        elif outbound_z > 5.0 and outbound_bytes > 2500000 and not is_vendor_cloud_api:
             add("zeek_exfiltration", outbound_z, 0.9, "zeek_network",
                 f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}")
         elif outbound_z > 3.5 and outbound_bytes > 250000 and not is_telemetry:
@@ -237,12 +275,46 @@ class ThreatSignalDetector:
                 f"uniform check-in jitter {int(c2_jitter)} hits")
 
         # ── TCP connection abuse / port scan ─────────────────────────────────────────
+        # BUGFIX (live audit): this only ever looked at raw counts -- 165 rejected
+        # connections across just 6 unique IPs (a 27x-repeat-per-IP shape, the OPPOSITE
+        # of a scan's "many IPs, 1-2 attempts each" shape) scored identically to a real
+        # broad scan. Confirmed live: a Samsung Smart Monitor generated 245 CONNECTION_
+        # ABUSE alerts this way, correlated in the SAME cycles with 40-44% of its own
+        # DNS queries being Pi-hole-blocked and 51-67% NXDOMAIN -- i.e. its own name
+        # resolution was substantially failing/blocked right then, the classic signature
+        # of a device retrying now-unreachable/blocked endpoints, not probing new
+        # targets. A high per-IP repetition ratio ALONE can't safely distinguish that
+        # from a real single-target brute-force (which also repeats against few IPs) --
+        # what actually distinguishes them is THIS device's own blocked/nxdomain ratio
+        # being elevated in the same window, so that's the dampener, not the ratio
+        # alone. s0_rej_unique_threshold is per-device LEARNED (fp_engine.py's
+        # get_device_conn_abuse_unique_ip_threshold(), same self-healing shape as the
+        # existing arp_sweep_threshold parameter) rather than the old hardcoded 5.
         s0_rej = float(features.get("zeek_s0_rej_count", 0.0) or 0.0)
         s0_rej_unique = float(features.get("zeek_s0_rej_unique_ips", 0.0) or 0.0)
-        if s0_rej > 25 and s0_rej_unique > 5:
+        if s0_rej > 25 and s0_rej_unique > conn_abuse_unique_ip_threshold:
             conf = 0.9 if s0_rej_unique > 15 else 0.6
-            add("zeek_conn_abuse", s0_rej, conf, "zeek_network",
-                f"rejected connections {int(s0_rej)} across {int(s0_rej_unique)} unique IPs")
+            blocked_ratio = float(features.get("blocked_ratio", 0.0) or 0.0)
+            nxdomain_ratio = float(features.get("nxdomain_ratio", 0.0) or 0.0)
+            rejects_per_unique_ip = s0_rej / max(s0_rej_unique, 1.0)
+            is_retry_storm_shaped = rejects_per_unique_ip >= 10.0
+            own_dns_failing = (blocked_ratio + nxdomain_ratio) >= 0.5
+            note = f"rejected connections {int(s0_rej)} across {int(s0_rej_unique)} unique IPs"
+            if is_retry_storm_shaped and own_dns_failing:
+                # Halve confidence rather than suppress outright -- this device's own
+                # DNS being substantially blocked/failing right now is real corroborating
+                # context for "retrying dead endpoints," not proof; a second independent
+                # source can still legitimately push this to HIGH.
+                conf *= 0.5
+                note += (f" (dampened: {rejects_per_unique_ip:.1f}x repeat-per-IP + this "
+                         f"device's own blocked_ratio={blocked_ratio:.2f}/nxdomain_ratio="
+                         f"{nxdomain_ratio:.2f} suggest retrying blocked/dead endpoints, "
+                         f"not probing new targets)")
+            rej_ip_examples = features.get("zeek_s0_rej_ip_examples", []) or []
+            rej_evidence_ip = rej_ip_examples[0] if rej_ip_examples else None
+            if rej_ip_examples:
+                note += f"; e.g.={','.join(rej_ip_examples)}"
+            add("zeek_conn_abuse", s0_rej, conf, "zeek_network", note, domain=rej_evidence_ip)
 
         # ── ARP host-discovery sweep (recon precursor) ───────────────────────────────
         # PHASE 21B: broadcast-visible, so this reaches WiFi devices the same way MAC
@@ -260,7 +332,7 @@ class ThreatSignalDetector:
         max_dur = float(features.get("zeek_max_duration", 0.0) or 0.0)
         if max_dur > 43200:
             add("zeek_long_conn", max_dur, 0.85, "zeek_network", f"extreme duration {int(max_dur)}s")
-        elif max_dur > 14400:
+        elif max_dur > long_conn_duration_threshold:
             add("zeek_long_conn", max_dur, 0.5, "zeek_network", f"long duration {int(max_dur)}s")
 
         return ev_list

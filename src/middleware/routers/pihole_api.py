@@ -59,6 +59,19 @@ def _ipc_immunize_logic(action_id: str):
         fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
         result = fp.mark_false_positive(alert_payload, hostname, target)
 
+        # BUGFIX: mark_false_positive() now refuses hard-stop/verifiable-fact alerts
+        # (honeypot, arp_spoofing, geofencing, confirmed exploit, tier-5 confirmed IOC)
+        # outright -- must not fall through to the blast-radius fp_count reset / Pi-hole
+        # unblock below when it did, or a refused correction would still silently
+        # unblock a genuinely malicious domain.
+        if result.get("refused"):
+            return {
+                "status": "refused",
+                "action_id": action_id,
+                "reason": result.get("refused_reason", "Cannot mark this alert as a false positive."),
+                "device_id": device_id,
+            }
+
         # FIX #1 (blast radius): only the device this specific alert was about, not every
         # tracked device on the network.
         if device_id and device_id != "unknown" and sm.has_device(device_id):

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -57,9 +57,19 @@ _INFRA_DEVICE_TYPES = frozenset({"dns_server", "router", "gateway"})
 # reputation/honeypot/lateral-movement/malicious-TLS evidence is NEVER stripped, so a
 # genuinely compromised router still alerts.
 _INFRA_NOISY_TYPES = {"dns_dga_burst", "dns_tunnel_v2", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn",
-                       "arp_sweep"}  # BUGFIX: same gap as the is_safe noisy_types set above -- a router
+                       "arp_sweep",  # BUGFIX: same gap as the is_safe noisy_types set above -- a router
                        # ARPing its own LAN is routine gateway behavior, not recon, for an
                        # operator-confirmed infra device either.
+                       # BUGFIX (live audit): dns_evasion_anomaly (Phase 21C2, added well after
+                       # this set was first written) was missing here too -- an operator-
+                       # confirmed DNS server/resolver doing its own recursive resolution
+                       # (querying root/TLD/authoritative servers directly, never through
+                       # another Pi-hole) is EXACTLY what dns_evasion.py's policy_bypass check
+                       # flags as "direct port-53/853 query to a non-Pi-hole resolver".
+                       # Confirmed live: a real Pi-hole/unbound box generated 1,000+
+                       # DNS_POLICY_BYPASS alerts over a week purely from its own normal
+                       # upstream resolution traffic.
+                       "dns_evasion_anomaly"}
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
@@ -324,6 +334,7 @@ class EnginePipeline:
             ti_engine=self.ti_engine, geoip_engine=self.geoip_engine,
             safe_ips=safe_ips, honeypot_ips=honeypot_ips, safe_patterns=safe_patterns,
             wired_probe_ips=wired_probe_ips,
+            lateral_ports=set(self.config.get("lateral_movement_ports", [22, 445, 3389, 5900, 23])),
         )
 
         self.zeek_collector = ZeekCollector(log_dir=self.config.get("zeek_log_dir", "/opt/zeek/logs/current"), poll_interval=float(self.config.get("poll_interval", 2.0)), state_dir=state_dir)
@@ -406,9 +417,15 @@ class EnginePipeline:
                 self.zeek_fx.honeypot_ips = set(self.config.get("honeypot_ips", []))
             if "zeek_log_dir" in changed_keys:
                 self.zeek_collector.update_log_dir(self.config.get("zeek_log_dir", "/opt/zeek/logs/current"))
+            if "safe_cdn_base_domains" in changed_keys:
+                register_safe_cdn_base_domains(self.config.get("safe_cdn_base_domains", []))
 
         if hasattr(self.config, "set_notify"):
             self.config.set_notify(_on_config_reload)
+
+        # Initial population at boot -- the reload hook above only fires on a LATER
+        # change, not the config this process already started with.
+        register_safe_cdn_base_domains(self.config.get("safe_cdn_base_domains", []))
 
     def run(self) -> None:
         metrics_port = int(self.config.get("metrics_port", 9105))
@@ -849,8 +866,28 @@ class EnginePipeline:
                     )
                 else:
                     LOGGER.critical(f"Adding HARD-STOP evidence for ARP Spoofing on {client_ip}")
-                    self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}"))
+                    # BUGFIX (live audit): domain=client_ip so this alert's destination_ip
+                    # attributes to what's ACTUALLY being spoofed (this device's own
+                    # identity), not the generic "last connection" fallback -- confirmed
+                    # live, 191 historical alerts showing hostname=unknown + an unrelated
+                    # DNS-query/broadcast destination_ip on this exact signature.
+                    self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}", domain=client_ip))
                 del self.zeek_fx.layer2_spoofs[client_ip]
+
+            # BUGFIX (live audit): a single genuinely-new MAC flip (weaker than the 2nd-
+            # flip hard-stop above) -- corroboration-required evidence, same is_safe
+            # dampening as the hard-stop for consistency (a mesh repeater's single flip
+            # shouldn't count here either), feeding NetworkIntrusionHypothesis instead
+            # of bypassing hypothesis competition.
+            if hasattr(self.zeek_fx, "pending_spoof_evidence") and client_ip in self.zeek_fx.pending_spoof_evidence:
+                pending_info = self.zeek_fx.pending_spoof_evidence.pop(client_ip)
+                if not is_safe:
+                    self.evidence_store.add(Evidence(
+                        type="arp_spoof_pending", source="zeek", timestamp=now, device=dev_id,
+                        value=1.0, confidence=0.5, independence_group="zeek_network",
+                        provenance=f"MAC flip (1st, uncorroborated): {pending_info['old']} -> {pending_info['new']}",
+                        domain=client_ip,
+                    ))
 
             mitigation_pending = None
             with self.state_manager.lock_device(dev_id) as state:
@@ -879,8 +916,23 @@ class EnginePipeline:
                     self.fp_engine.get_device_arp_sweep_threshold(dev_id, default=global_arp_sweep_threshold)
                     if self.fp_engine else global_arp_sweep_threshold
                 )
+                # BUGFIX (live audit): same self-healing shape as arp_sweep_threshold just
+                # above, now also covering zeek_conn_abuse's unique-IP requirement and
+                # zeek_long_conn's duration requirement -- previously hardcoded, so a
+                # correction to either had nowhere to actually take effect.
+                conn_abuse_unique_ip_threshold = int(
+                    self.fp_engine.get_device_conn_abuse_unique_ip_threshold(dev_id, default=5.0)
+                    if self.fp_engine else 5.0
+                )
+                long_conn_duration_threshold = float(
+                    self.fp_engine.get_device_long_conn_duration_threshold(dev_id, default=14400.0)
+                    if self.fp_engine else 14400.0
+                )
                 threat_signal_ev = self.threat_signal_detector.detect(
-                    dev_id, features, top_domain=top_domain, arp_sweep_threshold=arp_sweep_threshold
+                    dev_id, features, top_domain=top_domain, arp_sweep_threshold=arp_sweep_threshold,
+                    conn_abuse_unique_ip_threshold=conn_abuse_unique_ip_threshold,
+                    long_conn_duration_threshold=long_conn_duration_threshold,
+                    ti_engine=self.ti_engine,
                 )
                 for ev in threat_signal_ev: self.evidence_store.add(ev)
 
@@ -913,7 +965,9 @@ class EnginePipeline:
                 lateral_unique_targets = int(features.get("zeek_lateral_unique_targets", 0) or 0)
                 lateral_evidence_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
                 if features.get("zeek_lateral_moves", 0) > 0 and lateral_unique_targets >= lateral_evidence_threshold:
-                    self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan"))
+                    lateral_target_examples = features.get("zeek_lateral_target_examples", []) or []
+                    lateral_evidence_target = lateral_target_examples[0] if lateral_target_examples else None
+                    self.evidence_store.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=now, device=dev_id, value=features["zeek_lateral_moves"], confidence=0.9, independence_group="zeek_network", provenance="detector:zeek:lateral_scan", domain=lateral_evidence_target))
 
                 # BUGFIX (reviewer suggestion, implemented): a device's own real-time
                 # HTTP/SSDP/DIAL requests to OTHER local devices for media-discovery
@@ -993,7 +1047,13 @@ class EnginePipeline:
                     # the single most predictable false-positive case for this detector and
                     # exactly the class of behavioral noise this exclusion already exists to
                     # dampen for infrastructure devices.
-                    noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon"}
+                    # BUGFIX (live audit): dns_evasion_anomaly (Phase 21C2, added well after
+                    # this set was first written) was missing here too, for the exact same
+                    # reason as _INFRA_NOISY_TYPES below -- a safe_ips/safe_host_patterns
+                    # device doing its own DNS-resolver traffic (e.g. Pi-hole/unbound's own
+                    # recursive resolution to upstream root/TLD/authoritative servers) is not
+                    # "policy bypass," it's that device's normal job.
+                    noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon", "dns_evasion_anomaly"}
                     active_evidence = [ev for ev in active_evidence if ev.type not in noisy_types and ev.independence_group not in noisy_types]
 
                 # PHASE 1 FIX (device-sensitivity source): only dampen the new Phase-1
@@ -1160,7 +1220,18 @@ class EnginePipeline:
                             # reflect the escalation exactly as before.
                             decision["escalated_via_persistence"] = True
                             decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
-                            decision["threat_confidence"] = max(decision["threat_confidence"], 0.75)
+                            # BUGFIX (live audit): 0.75 put a persistence-escalated alert's
+                            # confidence in the SAME range as decision_engine.py's genuine
+                            # 2-independent-source HIGH (0.85) -- indistinguishable in the
+                            # number itself, only in a text suffix a human/LLM/downstream
+                            # model reader might not weight properly. This is honestly a
+                            # weaker claim: the SAME single uncorroborated signal simply kept
+                            # recurring, not new evidence. 0.55 keeps it visibly below every
+                            # genuine-HIGH path (hypothesis_high=0.85, tier5=0.99,
+                            # hard_stop=0.98-1.0) while still above a bare SUSPICIOUS (0.40),
+                            # reflecting "worth escalated attention" without overclaiming
+                            # "corroborated."
+                            decision["threat_confidence"] = max(decision["threat_confidence"], 0.55)
                             risk = decision["threat_confidence"] * 10.0
                             factors = [{"name": decision["explanation"], "score": risk}]
                             primary_sig = factors[0]["name"]
@@ -1322,6 +1393,34 @@ class EnginePipeline:
                                 alert_target_domain = "unknown"
                             except (ValueError, TypeError):
                                 alert_target_domain = reputation_target or "unknown"
+                        # BUGFIX (live audit): same attribution gap as the branches above,
+                        # for the signature types that had NO branch at all until now --
+                        # confirmed live, 3,179 alerts across 18 devices where these four
+                        # signatures displayed some OTHER device's DNS resolver or a
+                        # broadcast address as "destination_ip", purely because dest_ip
+                        # defaulted to "whatever this device connected to most recently,"
+                        # with zero relation to which evidence actually fired. Each of
+                        # these evidence types now carries a real .domain (zeek_features.py/
+                        # threat_signals.py/zeek_network.py changes, this same session) --
+                        # this just consumes it, same pattern as every branch above.
+                        elif primary_sig_base == "CONNECTION_ABUSE":
+                            for ev in active_evidence:
+                                if ev.type in ("zeek_conn_abuse", "arp_sweep") and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
+                        elif primary_sig_base == "NETWORK_INTRUSION":
+                            for ev in active_evidence:
+                                if ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice") and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
+                        elif primary_sig_base == "Layer-2 ARP Spoofing Detected":
+                            for ev in active_evidence:
+                                if ev.type == "arp_spoofing" and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
 
                         # VERSION 10 (incident aggregation): computed here, once, using the
                         # already-corrected alert_dest_ip/alert_target_domain (not the raw
@@ -1350,6 +1449,15 @@ class EnginePipeline:
                             "hypothesis_weight": decision.get("hypothesis_weight", 0.0),
                             "reasoning_trail": decision.get("reasoning_trail", []),
                             "incident_id": incident_id,
+                            # BUGFIX (live audit): previously only lived on the in-memory
+                            # `decision` dict (read once for the mitigation gate at the
+                            # severity-gate check below) and was never persisted onto the
+                            # alert record itself -- train_fp_classifier.py had no way to
+                            # tell a persistence-escalated alert (same single uncorroborated
+                            # signal recurring, confidence capped at 0.55, no NEW evidence)
+                            # apart from a genuine 2-independent-source HIGH when reading
+                            # alerts.json back for training.
+                            "escalated_via_persistence": bool(decision.get("escalated_via_persistence", False)),
                         }
 
                         # =============================================================

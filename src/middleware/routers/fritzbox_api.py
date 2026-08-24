@@ -109,6 +109,37 @@ async def get_dhcp_hosts(token: str = Depends(verify_token)):
         LOGGER.error("Failed to fetch hosts from FritzBox: %s", errors)
         raise HTTPException(status_code=503, detail="FritzBox connection failed.")
 
+@router.get("/api/ipc/router_isolation_status")
+def router_isolation_status(ip: str, token: str = Depends(verify_token)):
+    """Queries Fritz!Box directly for whether this IP's WAN access is CURRENTLY
+    disallowed (real router state), for ips.py's reconciliation worker -- so a
+    device unblocked outside this IDS's own flow (e.g. an operator toggling it
+    directly in the Fritz!Box admin UI) doesn't leave `_router_isolated_devices`
+    (and therefore Grafana's containment panel) stuck reporting "still isolated"
+    forever. Mirrors execute_fritzbox_isolation()'s own connection/action pattern,
+    just a Get instead of a Set on the same X_AVM-DE_HostFilter:1 TR-064 service."""
+    fritz_ip = CONFIG.get("fritz_ip", "192.168.1.1")
+    fritz_user = CONFIG.get("fritz_user", "admin")
+    fritz_pass = CONFIG.get("fritz_password", "")
+    if not fritz_pass:
+        raise HTTPException(status_code=500, detail="FritzBox credentials not configured.")
+
+    timeout_seconds = float(CONFIG.get("router_webhook_timeout_seconds", 5.0))
+    if timeout_seconds <= 0:
+        timeout_seconds = 5.0
+
+    try:
+        fc = FritzConnection(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
+        result = fc.call_action("X_AVM-DE_HostFilter:1", "GetWANAccessByIP", NewIPv4Address=ip)
+        is_disallowed = bool(result.get("NewDisallow", 0))
+        return {"ip": ip, "isolated": is_disallowed}
+    except FritzActionError as e:
+        LOGGER.error("❌ [API ERROR] Fritz!Box refused TR-064 status query for %s: %s", ip, e)
+        raise HTTPException(status_code=502, detail=f"FritzBox refused status query: {e}")
+    except FritzConnectionException as e:
+        LOGGER.error("❌ [NETWORK ERROR] Could not reach Fritz!Box at %s: %s", fritz_ip, e)
+        raise HTTPException(status_code=503, detail="FritzBox connection failed.")
+
 class IPCReleaseRequest(BaseModel):
     target: str = Field(..., description="Target IP, MAC, hostname, or 'all'")
 

@@ -137,6 +137,22 @@ network_and_devices:
   # [LIVE]
   safe_domains: []
 
+  # eTLD+1 base domains treated as known-safe CDN/vendor/cloud infrastructure for the
+  # DNS-tunneling (threat_signals.py) and DNS-evasion blind-spot (dns_evasion.py)
+  # exemption checks specifically -- distinct from safe_domains above (which is a
+  # broader "never suspicious anywhere" exact-match exclusion). Most legitimate vendor
+  # domains are already caught automatically by ti_engine.is_allowlisted() (Tranco
+  # popularity + the CL-AFPE self-healing trust cache) or by recognizing the
+  # destination's hosting ASN as a known cloud/CDN operator (utils.py's
+  # is_cloud_cdn_provider_org()) -- this list is only for the residual case: a
+  # legitimate but low-traffic, single-vendor domain that's neither popular enough for
+  # Tranco nor hosted on infrastructure an ASN-org match would catch. Add an entry here
+  # (base domain only, e.g. "samsungcloudsolution.net" not
+  # "lcprd1.samsungcloudsolution.net") and it applies on the next config reload -- no
+  # code change/deploy needed. [LIVE]
+  safe_cdn_base_domains:
+    - samsungcloudsolution.net
+
   # Hostname substrings that mark a device as "safe infrastructure" (Pi-hole,
   # your repeater, etc.) — dampens noisy behavioral evidence for these
   # devices without excluding real threat signals (reputation/honeypot
@@ -152,7 +168,14 @@ network_and_devices:
   # Manual device-type overrides by hostname or IP, where auto-classification
   # gets it wrong or you want to lock it down. Values: laptop, desktop,
   # phone, tablet, smart_tv, gaming_console, printer, nas, iot, camera,
-  # server, unknown. [LIVE]
+  # server, unknown, dns_server, router, gateway. The last three additionally
+  # grant "verified infra" status (device_type_is_override=True) -- see
+  # pipeline.py's _INFRA_DEVICE_TYPES/_INFRA_NOISY_TYPES -- which dampens that
+  # device's own DNS/connection-volume noise without touching reputation/
+  # honeypot/lateral-movement evidence. Matching is by hostname SUBSTRING
+  # (case-insensitive), first entry wins in file order -- pick a specific
+  # pattern to avoid an unintended collision with an unrelated device sharing
+  # part of the same name. [LIVE]
   device_type_overrides:
     MY-LAPTOP-A1B2: laptop
     lghometheater: smart_tv
@@ -161,11 +184,25 @@ network_and_devices:
     dreame: iot
     Chromecast: iot
     Watch: phone
+    # More specific pattern listed BEFORE the generic "Samsung" one below --
+    # first-match-wins, so this stops "Samsung" from incidentally also catching
+    # this Samsung Smart Monitor (its hostname contains "samsung" too). Same
+    # resulting classification either way (a Tizen smart monitor behaves like a
+    # smart_tv in practice -- apps, Netflix, discovery protocols), just now an
+    # intentional match instead of an accidental substring collision.
+    samsungsmartmonitor: smart_tv
     Samsung: smart_tv
     linux-server: server
     Kindle: tablet
     "192.168.1.28": nas
     android_4: smart_tv
+    # Your Pi-hole/unbound resolver host -- device_type_overrides is the ONLY way to
+    # reach "verified infra" status (device_type_is_override=True), which is what
+    # pipeline.py's _INFRA_NOISY_TYPES gate requires before dampening this device's
+    # own DNS-evasion/connection-abuse noise; infer_device_type() alone can't get here
+    # since "paperless" doesn't match any of its pihole/unbound/adguard hostname
+    # keywords. [LIVE]
+    paperless: dns_server
 
 
 # -----------------------------------------------------------------------------
@@ -246,6 +283,12 @@ detection_engine:
   # consequential gates treats it as "lateral movement" rather than routine access
   # to a single internal service (a NAS, a home server via SSH/RDP). [LIVE]
   lateral_movement_unique_targets_threshold: 2
+
+  # Destination ports treated as "lateral-movement-relevant" -- a real attacker isn't
+  # limited to these, so this is here to be EXTENDED (add a custom app/service port
+  # your network actually runs) rather than treated as exhaustive. [RESTART -- read
+  # once at ZeekFeatureExtractor construction]
+  lateral_movement_ports: [22, 445, 3389, 5900, 23]
 
 
 # -----------------------------------------------------------------------------
@@ -419,6 +462,18 @@ pihole_integration:
   # HTTP timeout (seconds) for Pi-hole API calls. [LIVE]
   pihole_api_timeout_seconds: 5.0
 
+  # Pi-hole v6 REST API path for domain SEARCH (gravity/blocklist match lookup) --
+  # deliberately a different endpoint from pihole_api_path above (that one manages
+  # this IDS's own block/unblock entries; this one queries Pi-hole's already-
+  # maintained ad/tracker gravity classification). Used by
+  # ThreatIntel.is_pihole_gravity_domain() to dampen DNS-tunneling/telemetry checks
+  # for domains your own Pi-hole already recognizes as routine ad/telemetry traffic,
+  # reusing the same pihole_api_url/pihole_api_password auth as the block/unblock
+  # calls above. NEEDS LIVE VALIDATION against your Pi-hole version -- written against
+  # v6's documented REST API shape, fails safely to "unknown" (never a false
+  # negative) if your instance's response shape differs. [LIVE]
+  pihole_search_api_path: /api/search
+
 
 # -----------------------------------------------------------------------------
 # fritzbox_router — Fritz!Box hardware isolation integration
@@ -437,6 +492,14 @@ fritzbox_router:
 
   # HTTP timeout (seconds) for that hosts-list poll. [LIVE]
   router_hosts_timeout_seconds: 5.0
+
+  # How often (seconds) ips.py's reconcile worker asks Fritz!Box for each
+  # router-isolated device's REAL current WAN-access state, and clears this IDS's
+  # own record for any device Fritz!Box no longer actually has blocked (e.g. an
+  # operator released it directly in the Fritz!Box admin UI, bypassing this IDS
+  # entirely) -- without this, that device shows "still isolated" in Grafana
+  # forever, since nothing else ever tells this IDS to forget it. [LIVE]
+  router_reconcile_interval_seconds: 300.0
 
 
 # -----------------------------------------------------------------------------

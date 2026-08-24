@@ -31,9 +31,9 @@ DNSEvasionHypothesis in hypotheses/engine.py and Phase A's Telegram-gating chang
 """
 import ipaddress
 from dataclasses import dataclass, field
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
-from utils import etld1, _is_cdn_or_cloud_domain, is_vpn_provider_org
+from utils import etld1, _is_cdn_or_cloud_domain, is_vpn_provider_org, is_cloud_cdn_provider_org, KNOWN_PUBLIC_DNS_RESOLVERS
 from intelligence.hypotheses.evidence import Evidence
 
 
@@ -93,52 +93,68 @@ def _is_private_lan_ip(ip: str) -> bool:
 # short, stable, name-brand list -- these IPs are as close to universally-recognized
 # internet infrastructure as exists, unlike a general "trust this cloud provider" list
 # that would create a real blind spot for C2 hosted on the same infrastructure.
-_KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
-    "8.8.8.8", "8.8.4.4",              # Google Public DNS
-    "1.1.1.1", "1.0.0.1",              # Cloudflare
-    "9.9.9.9", "149.112.112.112",      # Quad9
-    "208.67.222.222", "208.67.220.220",  # OpenDNS
-    "94.140.14.14", "94.140.15.15",    # AdGuard DNS
-    "2001:4860:4860::8888", "2001:4860:4860::8844",  # Google Public DNS, IPv6
-    "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
-})
+# Moved to utils.py (KNOWN_PUBLIC_DNS_RESOLVERS) so fp_engine.py's confirmed-intel
+# write/read guards can share the exact same list -- see that constant's docstring.
+_KNOWN_PUBLIC_DNS_RESOLVERS = KNOWN_PUBLIC_DNS_RESOLVERS
 
 
 def _is_known_dns_resolver(ip: str) -> bool:
     return ip in _KNOWN_PUBLIC_DNS_RESOLVERS
 
 
-def _reverse_dns_explains(ip: str, queried_domains: Set[str], geoip_engine) -> bool:
-    """True if this IP's reverse-DNS hostname shares an eTLD+1 base domain with
-    something the device actually queried, or is itself known CDN/cloud
-    infrastructure. Deliberately a base-domain match, not a domain->IP forward-resolve
-    comparison -- CDNs commonly rotate/load-balance across many IPs for one domain, so
-    an exact IP-set comparison would false-positive on completely ordinary CDN
-    traffic."""
+def _asn_explains(ip: str, geoip_engine) -> bool:
+    """True if this IP's GeoIP ASN organization matches a recognized commercial VPN
+    provider OR a major cloud/CDN operator (utils.is_vpn_provider_org() /
+    is_cloud_cdn_provider_org() -- both name-based against MaxMind's ASN org field, not
+    a CIDR list, so this refreshes automatically with MaxMind's own DB updates and
+    needs no per-domain maintenance). A single local lookup_asn() call (now @lru_cache'd
+    -- geoip.py) covers both checks. Deliberately checked BEFORE _reverse_dns_explains()
+    below: this is a fast, reliable, purely local DB read with no timeout risk, so
+    resolving it first means an IP it already explains never needs the slower,
+    load-sensitive reverse-DNS network round-trip at all."""
     if not geoip_engine:
         return False
-    host = geoip_engine.reverse_dns(ip)
+    asn = geoip_engine.lookup_asn(ip)
+    if not asn:
+        return False
+    org = asn.autonomous_system_organization or ""
+    return is_vpn_provider_org(org) or is_cloud_cdn_provider_org(org)
+
+
+def _reverse_dns_explains(ip: str, queried_domains: Set[str], geoip_engine, ti_engine=None) -> Optional[bool]:
+    """True if this IP's reverse-DNS hostname shares an eTLD+1 base domain with
+    something the device actually queried, is itself known CDN/cloud infrastructure, or
+    is allowlisted (ti_engine.is_allowlisted() -- live Tranco popularity feed + the
+    persisted CL-AFPE self-healing trust cache, so a domain corrected once via "Mark
+    False Positive" or the autonomous path stops needing a manual code patch here).
+    Deliberately a base-domain match, not a domain->IP forward-resolve comparison --
+    CDNs commonly rotate/load-balance across many IPs for one domain, so an exact
+    IP-set comparison would false-positive on completely ordinary CDN traffic.
+
+    BUGFIX (live audit, self-diagnosed in geoip.py's own prior comment but never
+    fixed): returns None (not False) when the reverse-DNS lookup TIMED OUT under load,
+    distinct from a lookup that cleanly confirmed there's no PTR record. A timeout is
+    inconclusive, not evidence of anything -- the caller must not count it as
+    "unexplained." Confirmed live: a reactive-capture burst's reverse-DNS sweep across
+    every unexplained IP in one pass could saturate the lookup pool, and several
+    genuinely-innocent devices got flagged purely from queueing behind each other,
+    not from anything about their own traffic."""
+    if not geoip_engine:
+        return False
+    host, timed_out = geoip_engine.reverse_dns_status(ip)
+    if timed_out:
+        return None
     if not host:
         return False
     if _is_cdn_or_cloud_domain(host):
+        return True
+    if ti_engine and ti_engine.is_allowlisted(host):
         return True
     host_base = etld1(host)
     if not host_base:
         return False
     queried_bases = {etld1(d) for d in queried_domains}
     return host_base in queried_bases
-
-
-def _vpn_explains(ip: str, geoip_engine) -> bool:
-    """True if this IP's GeoIP ASN organization matches a recognized commercial VPN
-    provider (see utils.is_vpn_provider_org's docstring for why this is name-based,
-    not a CIDR list)."""
-    if not geoip_engine:
-        return False
-    asn = geoip_engine.lookup_asn(ip)
-    if not asn:
-        return False
-    return is_vpn_provider_org(asn.autonomous_system_organization or "")
 
 
 def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
@@ -171,14 +187,27 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     # by construction, anything landing here on port 53/853 is an external resolver.
     policy_bypass_ips: List[str] = []
 
+    inconclusive_timeouts = 0
     for ip in audit.dest_ips:
         if _is_private_lan_ip(ip):
             continue
         if _is_known_dns_resolver(ip):
             continue
-        if _reverse_dns_explains(ip, audit.queried_domains, geoip_engine):
+        # BUGFIX (live audit): _asn_explains() (fast, local, no timeout risk) now runs
+        # BEFORE _reverse_dns_explains() (slow, network, timeout-prone under load) --
+        # any IP the ASN check already explains never pays the reverse-DNS round-trip
+        # at all, directly shrinking exposure to the exact load-driven timeout cascade
+        # geoip.py's own comment describes.
+        if _asn_explains(ip, geoip_engine):
             continue
-        if _vpn_explains(ip, geoip_engine):
+        explained = _reverse_dns_explains(ip, audit.queried_domains, geoip_engine, ti_engine)
+        if explained is None:
+            # Inconclusive (reverse-DNS timed out under load) -- not evidence of
+            # anything, must not be counted as "unexplained." Skip this IP entirely
+            # rather than silently treating "couldn't check" as "checked, suspicious."
+            inconclusive_timeouts += 1
+            continue
+        if explained:
             continue
         unexplained.append(ip)
         if audit.dest_ports.get(ip) in (53, 853):
@@ -238,6 +267,9 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         note += " (device has NO DNS history at all in this window)"
     if policy_bypass_ips:
         note += f"; {len(policy_bypass_ips)} connection(s) are direct port-53/853 queries to a non-Pi-hole resolver"
+    if inconclusive_timeouts:
+        note += (f"; {inconclusive_timeouts} additional connection(s) skipped -- reverse-DNS "
+                 f"timed out under load, inconclusive rather than counted as unexplained")
 
     # VERSION 11 (P1, review #3/#4): a stable subtag distinguishing WHY this is
     # unexplained, matching threat_signals.py's provenance subtag convention.

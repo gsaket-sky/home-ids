@@ -124,6 +124,9 @@ class _FakeGeoIPVpn:
     def reverse_dns(self, ip):
         return None
 
+    def reverse_dns_status(self, ip):
+        return None, False
+
 
 vpn_audit = DeviceBurstAudit(dest_ips={"185.1.2.3"}, queried_domains=set())
 vpn_evidence = audit_device("dev_iphone", vpn_audit, geoip_engine=_FakeGeoIPVpn())
@@ -192,6 +195,9 @@ class _FakeGeoIPUnknown:
 
     def reverse_dns(self, ip):
         return None
+
+    def reverse_dns_status(self, ip):
+        return None, False
 
 
 # F1: genuinely zero DNS footprint -> strong DNS_EVASION

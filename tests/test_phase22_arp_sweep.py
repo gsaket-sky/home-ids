@@ -139,7 +139,7 @@ _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "co
 check("THE FIX: the is_safe noisy_types set now includes 'lan_recon' (arp_sweep's "
       "independence_group), alongside the pre-existing zeek_network/dns/ml_anomaly "
       "exclusions",
-      'noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon"}' in _pipeline_src)
+      'noisy_types = {"ml_anomaly", "dns_rate", "dns_entropy", "dns_unique_ratio", "zeek_network", "lan_recon", "dns_evasion_anomaly"}' in _pipeline_src)
 check("THE FIX: the sibling _INFRA_NOISY_TYPES set (operator-confirmed infra devices) "
       "now includes 'arp_sweep' too",
       '"arp_sweep"' in _pipeline_src.split("_INFRA_NOISY_TYPES = {")[1].split("}")[0])

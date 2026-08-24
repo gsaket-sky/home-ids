@@ -149,6 +149,13 @@ def main():
         cache_dir=str(ti_cache),
         otx_api_key=CONFIG.get("otx_api_key", ""),
         refresh_interval=int(CONFIG.get("ti_refresh_interval", 3600)),
+        # BUGFIX (live audit): reuses the SAME Pi-hole v6 REST API config ips.py's
+        # block/unblock already uses, for is_pihole_gravity_domain() -- your own
+        # Pi-hole's already-maintained ad/tracker classification, wired into the
+        # telemetry-domain dampening in threat_signals.py.
+        pihole_api_url=CONFIG.get("pihole_api_url", ""),
+        pihole_api_password=CONFIG.get("pihole_api_password", ""),
+        pihole_search_api_path=CONFIG.get("pihole_search_api_path", "/api/search"),
     )
     ti_engine.start_refresh_thread()
 
@@ -295,32 +302,154 @@ def main():
         telegram_token = CONFIG.get("telegram_token", "")
         telegram_chat_id = CONFIG.get("telegram_chat_id", "")
         if telegram_token and telegram_chat_id:
-            geoip_status = "✅ Online" if geoip_engine else "❌ Failed/Disabled"
-            webhook_enabled = CONFIG.get("ips_router_enabled", False)
-            webhook_status = "✅ Online" if webhook_enabled and fastapi_proc and fastapi_proc.poll() is None else ("❌ Failed" if webhook_enabled else "⚠️ Disabled")
-            
+            # BUGFIX (live audit): every line below used to be either a hardcoded
+            # "✅ Online" string (StateManager/ML Registry/IPS Mitigator/Zeek+PiHole
+            # Collectors/Master Pipeline -- never actually checked at all) or a weak
+            # proxy (webhook: "is the process still alive," not "does it actually
+            # respond"; geoip: "is the object non-None," not "did the DB file actually
+            # load"). None of those catch the exact failure mode being guarded against
+            # here: the constructor didn't raise, but the thing doesn't actually work
+            # (wrong path, no permission, bad credentials, empty file). Every line
+            # below now does the real thing -- an actual read, an actual HTTP call, an
+            # actual raw-socket probe, or an actual subprocess invocation -- and reports
+            # the real reason on failure instead of a blanket "Online"/"Offline".
+            import os as _os
+
+            # -- StateManager: real filesystem check, not just "constructor returned" --
+            try:
+                state_dir = Path(state_path).parent
+                state_writable = _os.access(str(state_dir), _os.W_OK)
+                sm_status = f"✅ Online ({loaded} device(s) loaded, state dir writable)" if state_writable \
+                    else f"❌ Failed ({loaded} device(s) loaded, but state dir NOT writable: {state_dir})"
+            except Exception as exc:
+                sm_status = f"❌ Failed ({exc})"
+
+            # -- ThreatIntel: already a real check (did a feed refresh actually complete) --
             ti_status = "✅ Online" if (getattr(ti_engine, "_stats", None) and ti_engine._stats["last_refresh"] != "never") else "⚠️ Sync Failed/Timeout"
-            
+
+            # -- ML/Anomaly Registry: real check -- can it actually persist models? --
+            try:
+                ml_dir = getattr(ml_registry, "model_dir", None)
+                if ml_dir is None:
+                    ml_status = "⚠️ In-memory only (no model_dir configured)"
+                elif _os.access(str(ml_dir), _os.W_OK):
+                    warm = "warmed up" if getattr(ml_registry, "global_warmed_up", False) else "warming up"
+                    ml_status = f"✅ Online (model dir writable, global model {warm})"
+                else:
+                    ml_status = f"❌ Failed (model dir NOT writable: {ml_dir})"
+            except Exception as exc:
+                ml_status = f"❌ Failed ({exc})"
+
+            # -- FP Validation Engine: already a real check (are both models actually loaded) --
             fp_status = "⚠️ Partial/Timeout"
             if pipeline and getattr(pipeline, "fp_engine", None):
                 if pipeline.fp_engine._lgbm_session and pipeline.fp_engine._embed_model:
                     fp_status = "✅ Online"
             else:
                 fp_status = "❌ Disabled"
-                
+
+            # -- GeoIP: real check -- did the MaxMind DB file actually open? --
+            if geoip_engine is None:
+                geoip_status = "❌ Failed/Disabled (construction failed)"
+            elif getattr(geoip_engine, "reader", None) is None:
+                geoip_status = "❌ Failed (City DB did not load)"
+            else:
+                asn_note = "with ASN DB" if getattr(geoip_engine, "asn_reader", None) else "no ASN DB configured"
+                geoip_status = f"✅ Online ({asn_note})"
+
+            # -- IPS Mitigator sub-systems: real reachability/auth/permission checks --
+            pihole_line = "⚠️ Not initialized"
+            router_line = "⚠️ Not initialized"
+            tarpit_line = "⚠️ Not initialized"
+            if ips_mitigator is not None:
+                try:
+                    ok, detail = ips_mitigator.check_pihole_health()
+                    pihole_line = f"✅ Online ({detail})" if ok else f"❌ Failed ({detail})"
+                except Exception as exc:
+                    pihole_line = f"❌ Failed ({exc})"
+
+                router_enabled = bool(CONFIG.get("ips_router_enabled", False))
+                if not router_enabled:
+                    router_line = "⚠️ Disabled"
+                else:
+                    try:
+                        fritz_ip = CONFIG.get("fritz_ip", "")
+                        fritz_pass = CONFIG.get("fritz_password", "")
+                        if not fritz_pass:
+                            router_line = "❌ Failed (fritz_password not configured)"
+                        else:
+                            from fritzconnection import FritzConnection
+                            FritzConnection(address=fritz_ip, user=CONFIG.get("fritz_user", "admin"),
+                                             password=fritz_pass, timeout=3.0)
+                            router_line = f"✅ Online (authenticated to {fritz_ip})"
+                    except Exception as exc:
+                        router_line = f"❌ Failed ({exc})"
+
+                tarpit_line = "✅ Online (raw socket access verified)" if getattr(ips_mitigator, "tarpit_armed", False) \
+                    else ("⚠️ Disabled" if not bool(CONFIG.get("ips_tarpit_enabled", True)) else "❌ Failed (no raw socket access -- needs root/CAP_NET_RAW)")
+
+            # -- Zeek/PiHole Collectors: real check -- do the actual data sources exist and have recent data? --
+            try:
+                pihole_db = Path(CONFIG.get("pihole_db", "/etc/pihole/pihole-FTL.db"))
+                pihole_db_status = "✅ found" if pihole_db.exists() else f"❌ not found at {pihole_db}"
+            except Exception as exc:
+                pihole_db_status = f"❌ error ({exc})"
+            try:
+                zeek_dir = Path(CONFIG.get("zeek_log_dir", "/opt/zeek/logs/current"))
+                if not zeek_dir.exists():
+                    zeek_status = f"❌ log dir not found at {zeek_dir}"
+                else:
+                    recent = any((time.time() - f.stat().st_mtime) < 3600 for f in zeek_dir.glob("*.log"))
+                    zeek_status = "✅ producing recent logs" if recent else "⚠️ log dir exists but no recent (<1h) activity"
+            except Exception as exc:
+                zeek_status = f"❌ error ({exc})"
+            collectors_status = f"Pi-hole DB {pihole_db_status}, Zeek {zeek_status}"
+
+            # -- FastAPI Webhook: real check -- hit its actual /health endpoint, not just "is the process alive" --
+            fastapi_needed_now = fastapi_proc is not None
+            if not fastapi_needed_now:
+                webhook_status = "⚠️ Disabled"
+            elif fastapi_proc.poll() is not None:
+                webhook_status = f"❌ Failed (process exited, code {fastapi_proc.returncode})"
+            else:
+                try:
+                    import urllib.request as _ur
+                    with _ur.urlopen(f"http://127.0.0.1:{CONFIG.get('fastapi_port', 8010)}/health", timeout=3) as r:
+                        webhook_status = "✅ Online (process alive, /health responded)" if r.status == 200 else f"❌ Failed (/health returned {r.status})"
+                except Exception as exc:
+                    webhook_status = f"❌ Failed (process alive but /health unreachable: {exc})"
+
+            # -- Suricata: real check -- binary executable, rules present, --build-info actually runs --
+            try:
+                from intelligence.detectors.suricata_scan import check_suricata_health
+                suricata_enabled = bool(CONFIG.get("reactive_capture_suricata_enabled", True))
+                if not suricata_enabled:
+                    suricata_status = "⚠️ Disabled"
+                else:
+                    ok, detail = check_suricata_health(
+                        CONFIG.get("reactive_capture_suricata_bin", "/usr/bin/suricata"),
+                        CONFIG.get("reactive_capture_suricata_rules_path", ""),
+                    )
+                    suricata_status = f"✅ Online ({detail})" if ok else f"❌ Failed ({detail})"
+            except Exception as exc:
+                suricata_status = f"❌ Failed ({exc})"
+
             msg_lines = [
                 "🚀 <b>Home-IDS NDR Platform Boot Complete</b>",
                 "",
-                "<b>Subsystem Status:</b>",
-                "• Master StateManager: ✅ Online",
+                "<b>Subsystem Status (real checks, not just \"constructed\"):</b>",
+                f"• Master StateManager: {sm_status}",
                 f"• Threat Intelligence: {ti_status}",
-                "• ML/Anomaly Registry: ✅ Online",
+                f"• ML/Anomaly Registry: {ml_status}",
                 f"• FP Validation Engine: {fp_status}",
                 f"• GeoIP Engine: {geoip_status}",
-                "• IPS Mitigator: ✅ Online",
-                "• Zeek/PiHole Collectors: ✅ Online",
+                f"• IPS · Pi-hole: {pihole_line}",
+                f"• IPS · Router (Fritz!Box): {router_line}",
+                f"• IPS · Layer-2 Tarpit: {tarpit_line}",
+                f"• Zeek/PiHole Collectors: {collectors_status}",
                 f"• FastAPI Webhook: {webhook_status}",
-                "• Master Pipeline: ✅ Online"
+                f"• Suricata (batch scan): {suricata_status}",
+                "• Master Pipeline: ✅ Initialized",
             ]
             
             try:

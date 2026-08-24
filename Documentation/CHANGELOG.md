@@ -2,6 +2,69 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.0.0] - 2026-08-24
+
+Triggered by investigating two live false-positive storms (`paperless`'s DNS_POLICY_BYPASS, a Samsung Smart Monitor's CONNECTION_ABUSE/NETWORK_INTRUSION/DATA_EXFILTRATION) and a direct question about whether any device showed real signs of compromise. Both threads led to broader, systemic gaps: the "attribution doesn't trace to firing evidence" bug class (v11's own pre-flight-checklist item #1) recurring across four more signature types never covered by that fix, and a self-poisoning gap in the confirmed-intel IP store — 357 legitimate infrastructure IPs, including Google's own 8.8.8.8, actively mislabeled "confirmed malicious" as of this release, some still renewing same-day. No evidence of actual compromise was found anywhere in `alerts.json`, `local_confirmed_intel.json`, or `retro_hunt_findings.jsonl` — every reputation-tier hit traced to legitimate shared infrastructure (Google/Cloudflare/Apple/AWS/Telegram) or LAN multicast noise.
+
+### 🎯 Alert Attribution Audit, Continued
+
+- `zeek_features.py` gained real per-evidence attribution data it never exposed before: `zeek_s0_rej_ip_examples` (which IPs were actually rejected, for CONNECTION_ABUSE), `zeek_lateral_target_examples` (for NETWORK_INTRUSION's lateral-scan case), and `dest_ip` on JA3/JA4/notice records (`get_alerts()`) — `zeek_network.py` and `pipeline.py`'s `zeek_lateral_scan`/`arp_spoofing` evidence now attach a real `.domain`.
+- `pipeline.py`'s per-signature attribution-override block gained branches for `CONNECTION_ABUSE`, `NETWORK_INTRUSION`, and `Layer-2 ARP Spoofing Detected` — confirmed live: 3,179 alerts across 18 devices had displayed some unrelated device's DNS resolver or a broadcast address as `destination_ip`, purely from the generic "last connection" fallback.
+
+### 🧠 Per-Device Learned Thresholds Replace Hardcoded Ones
+
+- `threat_signals.py`'s `zeek_conn_abuse` check gained a per-device learned unique-IP threshold (`AutonomousFPEngine.get_device_conn_abuse_unique_ip_threshold()`, same self-healing shape as the existing `arp_sweep_unique_targets_threshold`) plus a blocked/nxdomain-ratio correlation dampener — confirmed live: 245 CONNECTION_ABUSE alerts on one device were 100-165 rejected connections against only 6 unique IPs, correlated with 40-44% of that device's own DNS being Pi-hole-blocked in the same cycles (retrying blocked endpoints, not scanning).
+- `mark_false_positive()`'s CONNECTION_ABUSE routing now inspects which of the three possible evidence types (`zeek_conn_abuse`/`zeek_long_conn`/`arp_sweep`) actually fired this specific alert and bumps the matching per-device threshold, instead of always bumping `arp_sweep_unique_targets_threshold` regardless of cause.
+
+### 🛡️ DNS_POLICY_BYPASS Dampening for Infrastructure Devices
+
+- `dns_evasion_anomaly` evidence added to both existing infra-dampening sets (`is_safe`'s `noisy_types`, `_INFRA_NOISY_TYPES`) — a Pi-hole/unbound resolver's own recursive DNS resolution (querying root/TLD/authoritative servers directly) was being flagged as "policy bypass," generating 1,000+ alerts over a week from one device's completely normal operation.
+
+### 📡 Multicast Exclusion for Exfiltration
+
+- `zeek_exfiltration`'s byte-burst check now excludes `_is_local_dest()` destinations (multicast/broadcast/private/loopback) — a Samsung Smart Monitor's own local AllShare/SmartView multicast group traffic (224.0.0.7) was hitting z-scores in the thousands and firing DATA_EXFILTRATION.
+
+### 🔓 ARP-Spoofing: MAC-Randomization Hardening
+
+- A single genuinely-new MAC on an IP now produces weak, corroboration-required evidence (`arp_spoof_pending`, feeding `NetworkIntrusionHypothesis`) instead of an instant zero-corroboration CRITICAL hard-stop — consistent with normal MAC-randomization ("private Wi-Fi address," default since iOS 14/Android 10) reconnect/roam behavior. A second genuinely-new MAC on the same IP within the same 600s window still hard-stops directly, unchanged.
+
+### 🤖 Autonomous Self-Correction Closes the Loop
+
+- The fully-autonomous Stage 2/3 classifier path (`AUTONOMOUS_FP_SUPPRESSED` — local LightGBM+FastEmbed, no LLM, no human, works on modest hardware) now calls the same signature-aware correction `mark_false_positive()` already provides for Telegram/LLM corrections, instead of unconditionally immunizing a `base_domain` that's meaningless for CONNECTION_ABUSE/DNS_EVASION-shaped alerts — that gap meant this path kept re-suppressing the same false positive every cycle forever without ever fixing the underlying threshold.
+- `mark_false_positive()` gained a hard-stop guard: refuses to immunize an alert carrying honeypot/arp_spoofing/geofencing/confirmed-exploit/tier-5-IOC evidence, across all three callers (Telegram, LLM, and the newly-closed autonomous path) — previously nothing stopped a single mistaken correction from immunizing a genuinely-confirmed threat.
+
+### 🌐 CDN/Telemetry Allowlist Redesign
+
+- `dns_evasion.py`'s exemption chain reordered — the fast, local, no-timeout-risk ASN-org check (`utils.is_cloud_cdn_provider_org()`, new, same name-based pattern as the existing `is_vpn_provider_org()`) now runs before the slow, network-bound reverse-DNS check, and both are wired to `ti_engine.is_allowlisted()` (live Tranco feed + the persisted CL-AFPE self-healing trust cache).
+- `geoip.py`'s reverse-DNS timeout is now distinguishable from a confirmed no-PTR-record (`reverse_dns_status()` returns `(host, timed_out)`) — a lookup that simply queued behind others under load was previously indistinguishable from "genuinely unexplained," inflating false `dns_evasion_anomaly` findings during a reactive-capture burst.
+- `ThreatIntel.is_pihole_gravity_domain()` (new) queries your own Pi-hole's REST API for its already-maintained ad/tracker gravity classification — reuses the same `pihole_api_url`/`pihole_api_password` auth `ips.py` already uses for block/unblock, wired into `threat_signals.py`'s telemetry-domain dampening.
+- The residual hardcoded CDN/vendor domain list moved to `config.yaml`'s `safe_cdn_base_domains` (hot-reloads via the existing config watcher, no code change needed to add an entry) instead of growing forever in `utils.py`.
+
+### 🗺️ GeoIP: Caching Added
+
+- `lookup()`/`lookup_asn()` gained `@lru_cache` (matching `reverse_dns()`'s existing cache) — the same destination IP was being re-looked-up from the local MaxMind DB at least twice per alert cycle with no caching at all.
+
+### ⏱️ Persistence-Escalation Confidence Honesty
+
+- A SUSPICIOUS alert escalated to HIGH purely by the same single uncorroborated signal persisting for `suspicious_escalation_seconds` (no new evidence) now caps at confidence 0.55, visibly below a genuine 2-independent-source HIGH's 0.85 — previously both reached 0.75+, indistinguishable in the number itself except for a text suffix. `escalated_via_persistence` is now persisted onto the alert record and excluded from `train_fp_classifier.py`'s positive-threat training set.
+
+### 🧹 Confirmed-Intel Self-Poisoning: Public DNS Resolvers Protected
+
+- `KNOWN_PUBLIC_DNS_RESOLVERS` (moved to `utils.py`, shared with `dns_evasion.py`'s existing known-resolver exemption) now also protects `local_confirmed_intel.json`'s write AND read paths — confirmed live: 8.8.8.8 (Google Public DNS) had 64 "confirmed malicious" recordings, still actively renewing same-day, from devices' own direct-resolver DNS traffic (the DNS_POLICY_BYPASS shape). The broader cloud/CDN-ASN case (Cloudflare/GCP/Apple/AWS ranges, also found poisoned) needs `geoip_engine` threaded into `AutonomousFPEngine` for the equivalent ASN-org check — documented as a follow-up, not yet wired.
+
+### 📲 Boot-Time Health Checks Are Now Real
+
+- The startup Telegram message's subsystem status lines were either hardcoded `"✅ Online"` strings (StateManager, ML Registry, IPS Mitigator, Zeek/PiHole Collectors, Master Pipeline — never actually checked) or weak proxies (webhook: process-alive, not response-alive; GeoIP: object-truthy, not DB-loaded). Every line now does the real thing: an actual filesystem write-check, an actual HTTP call to the FastAPI `/health` endpoint, an actual Pi-hole API round-trip (`IPSMitigator.check_pihole_health()`, new), an actual `FritzConnection` handshake, an actual raw-socket probe for the Layer-2 tarpit (`_init_arp_tarpit()` previously claimed "verified" without ever touching a socket), and an actual `suricata --build-info` invocation (`check_suricata_health()`, new — Suricata was previously absent from this report entirely).
+
+### 🔁 Control-Loop Fixes
+
+- Telegram's `unblock`/`release`/`block` button handlers now check the real HTTP response (status code + JSON body's `released` field) before claiming success — previously always showed "✅ released" regardless of outcome.
+- `ips.py` gained a background worker (`reconcile_router_isolation_state()`) that periodically queries Fritz!Box's actual current WAN-access-filter state (new `/api/ipc/router_isolation_status` endpoint) and clears any device this IDS still thinks is router-isolated but Fritz!Box doesn't — fixes a device staying "trapped" in Grafana forever after being released directly in the Fritz!Box admin UI, outside this IDS's own flow.
+
+### Verification
+
+Full 29-file phase test suite passes (`test_phase0` through `test_phase38`). Three test files' fake GeoIP fixtures updated to match the new `reverse_dns_status()` contract; `test_phase22`'s source-string assertion updated for the new `noisy_types` member; `test_phase27`'s "unrelated public IP" fixture swapped off an address that turned out to itself be a protected public DNS resolver; `test_phase30` rewritten for the new weak-evidence-then-corroborate MAC-flip behavior, with new coverage for the 2-genuine-flips escalation being correctly scoped per-IP.
+
 ## [v11.0.0] - 2026-08-23
 
 A response to a full third-party architectural review of a real production alert history (8,443+ JSONL records, `state/alerts.json`). Every review finding was checked against the live running code — several turned out to already be fixed by v10.0.0 (dated correctly against the review, since the review's data predated that release); the rest are fixed here, or explicitly declined with the reasoning recorded, never silently ignored. New golden-regression and comprehensive end-to-end scenario test suites (`tests/test_phase36_review_regression.py`, `tests/test_phase37_suricata_batch_scan.py`, `tests/test_phase38_comprehensive_scenarios.py`) pin down both the specific bugs found and the full decision-making behavior across every major signature type.

@@ -97,7 +97,14 @@ class IPSMitigator:
         LOGGER.info("Starting IPS Retry Worker Thread...")
         threading.Thread(target=self._retry_worker, daemon=True, name="ips_retry_worker").start()
 
+        LOGGER.info("Starting Router Isolation Reconcile Worker Thread...")
+        threading.Thread(target=self._router_reconcile_worker, daemon=True, name="ips_router_reconcile_worker").start()
+
     def _init_arp_tarpit(self) -> None:
+        # BUGFIX (live audit): tarpit_armed is what the boot-time Telegram status
+        # message reads -- must reflect whether this subsystem can ACTUALLY function,
+        # not just "the constructor didn't raise." Real (functional) check.
+        self.tarpit_armed = False
         tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True))
         ips_tarpit_status.set(1.0 if tarpit_enabled else 0.0)
 
@@ -110,10 +117,33 @@ class IPSMitigator:
             ips_tarpit_status.set(0.0)
             return
 
+        # BUGFIX (live audit): the old code claimed "RAW socket access verified" right
+        # after `conf.verb = 0` -- which doesn't touch a socket at all, so this always
+        # logged "ARMED" regardless of whether the process actually had CAP_NET_RAW.
+        # A permission failure would only surface later, deep inside sniff()/send()
+        # calls on the background threads, with no correction to this claim. Actually
+        # attempt a raw socket open/close here so a real permission problem (e.g. not
+        # running as root, no CAP_NET_RAW) is caught and reported honestly right now.
+        try:
+            import socket as _socket
+            probe = _socket.socket(_socket.AF_PACKET if hasattr(_socket, "AF_PACKET") else _socket.AF_INET,
+                                    _socket.SOCK_RAW, 0x0003 if hasattr(_socket, "AF_PACKET") else 0)
+            probe.close()
+        except PermissionError:
+            LOGGER.error("⚠️ Scapy ARP Tarpit disabled: no permission to open a raw socket "
+                         "(needs root or CAP_NET_RAW).")
+            ips_tarpit_status.set(0.0)
+            return
+        except Exception as exc:
+            LOGGER.error("⚠️ Scapy ARP Tarpit disabled: raw socket probe failed: %s", exc)
+            ips_tarpit_status.set(0.0)
+            return
+
         try:
             conf.verb = 0
             LOGGER.info("🛡️ Scapy RAW socket access verified. Layer-2 Dual-Stack (ARP & NDP) Tarpit module ARMED.")
-            
+            self.tarpit_armed = True
+
             self._tarpit_thread = threading.Thread(target=self._arp_tarpit_loop, daemon=True, name="arp_tarpit_worker")
             self._tarpit_thread.start()
             
@@ -123,6 +153,7 @@ class IPSMitigator:
         except Exception as exc:
             LOGGER.error("⚠️ Scapy Dual-Stack Tarpit bypassing. Lacks raw socket privileges: %s", exc)
             ips_tarpit_status.set(0.0)
+            self.tarpit_armed = False
 
     def _ndp_tarpit_loop(self) -> None:
         def handle_ndp(pkt):
@@ -223,6 +254,79 @@ class IPSMitigator:
             ips_state["router_isolated_devices"] = self._router_isolated_devices
             ips_state["operator_released_devices"] = self._operator_released_devices
             self.state_manager.save_ips_state(ips_state)
+
+    def _router_reconcile_worker(self) -> None:
+        """BUGFIX (live audit): `_router_isolated_devices` is a LATCHED state (see
+        release_device()'s own docstring) -- it only clears via this IDS's OWN
+        _unisolate_device_router() call, never by observing what Fritz!Box's WAN
+        access filter actually says right now. Confirmed live: an operator toggling
+        a device's block off directly in the Fritz!Box admin UI (bypassing this IDS
+        entirely) left the device permanently shown as "still isolated" in Grafana's
+        containment panel, since nothing ever told this dict to forget it. Polls
+        Fritz!Box's real state periodically and drops any entry Fritz!Box no longer
+        actually has isolated, instead of assuming this IDS is the only actor that
+        can ever change it."""
+        interval = float(self.config.get("router_reconcile_interval_seconds", 300.0))
+        if interval <= 0:
+            interval = 300.0
+        while True:
+            time.sleep(interval)
+            if not self.config.get("ips_router_enabled", False):
+                continue
+            try:
+                self.reconcile_router_isolation_state()
+            except Exception as e:
+                LOGGER.debug("Router isolation reconcile pass failed: %s", e)
+
+    def reconcile_router_isolation_state(self) -> int:
+        """Queries Fritz!Box's actual current WAN-access-filter state for every
+        device this IDS still THINKS is router-isolated, and clears any that
+        Fritz!Box no longer has blocked. Returns how many stale entries were
+        cleared. Public (not just the worker's private call) so it can also be
+        triggered on-demand, e.g. from a future Telegram /sync command."""
+        with self._lock:
+            targets = [(mac, dict(meta)) for mac, meta in self._router_isolated_devices.items()]
+
+        fastapi_port = int(self.config.get("fastapi_port", 8010))
+        api_token = self.config.get("fritz_api_token", "")
+        headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
+        timeout_seconds = float(self.config.get("router_webhook_timeout_seconds", 5.0))
+        if timeout_seconds <= 0:
+            timeout_seconds = 5.0
+
+        cleared = 0
+        for mac, meta in targets:
+            ip = meta.get("ip")
+            hostname = meta.get("hostname", "unknown")
+            dev_id = meta.get("dev_id", "unknown")
+            if not ip or ip == "unknown":
+                continue
+            try:
+                status_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/router_isolation_status"
+                resp = self.session.get(status_url, params={"ip": ip}, headers=headers, timeout=timeout_seconds)
+                if resp.status_code != 200:
+                    # Query itself failed (Fritz!Box unreachable, etc.) -- leave the
+                    # existing state alone rather than guess; a real un-isolation
+                    # will still clear it via _unisolate_device_router() as normal.
+                    continue
+                if not bool(resp.json().get("isolated", True)):
+                    with self._lock:
+                        if mac in self._router_isolated_devices:
+                            del self._router_isolated_devices[mac]
+                            self._save_queues()
+                    try:
+                        ips_router_isolated_active.labels(dev_id, hostname, mac).set(0.0)
+                        ips_router_isolated_active.remove(dev_id, hostname, mac)
+                    except Exception:
+                        pass
+                    cleared += 1
+                    LOGGER.warning(
+                        "🔄 [RECONCILE] %s (%s) reported no longer isolated by Fritz!Box directly -- "
+                        "clearing stale IDS-side router-isolation record.", hostname, ip
+                    )
+            except Exception as e:
+                LOGGER.debug("Router isolation status query failed for %s (%s): %s", hostname, ip, e)
+        return cleared
 
     def _ensure_tarpit_target(self, client_ip: str, mac_addr: str, hostname: str, dev_id: str) -> None:
         """Create or refresh a tarpit target using the latest MAC if it becomes known later."""
@@ -429,6 +533,35 @@ class IPSMitigator:
         """
         base = f"{api_url}{api_path}/deny/exact"
         return f"{base}/{domain}" if domain else base
+
+    def check_pihole_health(self, timeout: float = 3.0) -> "tuple[bool, str]":
+        """BUGFIX (live audit): real, on-demand Pi-hole reachability+auth check for the
+        boot-time Telegram status message -- previously that message either hardcoded
+        "Online" or never checked Pi-hole at all. Reuses the exact same endpoint/auth
+        this class's own _block_domain() desync check already exercises successfully in
+        production, so a green result here means blocking will actually work, not just
+        that config values are non-empty."""
+        if not bool(self.config.get("ips_pihole_enabled", True)):
+            return False, "disabled in config (ips_pihole_enabled=false)"
+        api_url = self.config.get("pihole_api_url", "")
+        if not api_url:
+            return False, "pihole_api_url not configured"
+        api_path = self.config.get("pihole_api_path", "/api/domains")
+        api_password = self.config.get("pihole_api_password", "")
+        headers = {"sid": api_password} if api_password else {}
+        try:
+            resp = self.session.get(self._pihole_domain_url(api_url, api_path), headers=headers, timeout=timeout)
+        except Exception as exc:
+            return False, f"connection failed: {exc}"
+        if resp.status_code == 401:
+            return False, "authentication rejected (wrong pihole_api_password)"
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}"
+        try:
+            resp.json()
+        except Exception:
+            return False, "response was not valid JSON (wrong pihole_api_path?)"
+        return True, "reachable, authenticated, real response"
 
     def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "") -> bool:
         ips_state = self.state_manager.get_ips_state()

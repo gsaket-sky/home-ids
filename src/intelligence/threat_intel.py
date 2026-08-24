@@ -22,6 +22,7 @@ import time
 import heapq
 import zipfile
 import io
+import requests
 from pathlib import Path
 from typing import Optional, Dict, Set
 from urllib.request import urlopen, Request
@@ -58,11 +59,28 @@ _OTX_URL = "https://otx.alienvault.com/api/v1/pulses/subscribed?modified_since={
 _TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
 
 class ThreatIntel:
-    def __init__(self, cache_dir: str = "state/ti_cache", otx_api_key: str = "", refresh_interval: int = 3600):
+    def __init__(self, cache_dir: str = "state/ti_cache", otx_api_key: str = "", refresh_interval: int = 3600,
+                 pihole_api_url: str = "", pihole_api_password: str = "", pihole_search_api_path: str = "/api/search"):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.otx_api_key = otx_api_key
         self.refresh_interval = refresh_interval
+
+        # PHASE (live audit): Pi-hole gravity/blocklist lookup -- your OWN Pi-hole
+        # already maintains a regularly-updated ad/tracker classification (its gravity
+        # list), reachable via the same v6 REST API (pihole_api_url/pihole_api_password)
+        # ips.py already uses for block/unblock. Distinct endpoint (search, not
+        # domains) since Pi-hole's search API is a different path from its
+        # domain-management API. Pi-hole is a hard dependency of this project (both
+        # this deployment and IDS_Product), not an optional/deployment-specific
+        # integration -- unlike a raw gravity.db file mount, which would require
+        # filesystem access to a separate host.
+        self.pihole_api_url = pihole_api_url
+        self.pihole_api_password = pihole_api_password
+        self.pihole_search_api_path = pihole_search_api_path
+        self._pihole_gravity_cache: Dict[str, tuple] = {}  # domain -> (is_gravity_match, cached_at_ts)
+        self._pihole_gravity_cache_ttl = 21600.0  # 6h -- gravity itself refreshes ~daily on Pi-hole's own schedule
+        self.session = requests.Session() if pihole_api_url else None
 
         # Per-feed storage to prevent a single feed error from wiping total memory
         self._feed_ips: Dict[str, Dict[str, dict]] = {}
@@ -145,6 +163,61 @@ class ThreatIntel:
         except Exception as exc:
             LOGGER.warning("Allowlist evaluation failed for %s: %s", domain, exc)
             return False
+
+    def is_pihole_gravity_domain(self, domain: str) -> Optional[bool]:
+        """Queries YOUR OWN Pi-hole's REST API (v6 /api/search) for whether `domain`
+        matches its gravity list (the downloaded ad/tracker blocklists Pi-hole already
+        maintains and refreshes on its own schedule) or an explicit blocklist entry.
+
+        This is the "regularly updated online source" for ad/telemetry domain
+        classification -- not a new external dependency, since Pi-hole is already a
+        hard requirement of this project (both this deployment and IDS_Product), and
+        it's already actively curating exactly this classification for its own
+        blocking purpose. Reuses the same pihole_api_url/pihole_api_password (v6 `sid`
+        header) config keys ips.py's block/unblock calls already use.
+
+        Returns True/False on a successful query, None if Pi-hole is unreachable/
+        unconfigured/the query failed for any reason -- callers must treat None as
+        "couldn't check," never as a negative result (same "don't let inconclusive
+        collapse into unexplained/suspicious" principle as geoip.py's
+        reverse_dns_status()).
+
+        NEEDS LIVE VALIDATION: written against Pi-hole v6's documented REST API shape
+        (GET /api/search/{domain}?partial=false, sid header auth) -- not exercised
+        against a live Pi-hole instance in this session. Fails closed to None (safe:
+        treated as "unknown," never as a false negative that would suppress real
+        evidence) if the response shape doesn't match what's expected here.
+        """
+        if not self.pihole_api_url or not self.session:
+            return None
+        domain = (domain or "").lower().strip(".")
+        if not domain:
+            return None
+
+        with self._lock:
+            cached = self._pihole_gravity_cache.get(domain)
+        if cached and (time.time() - cached[1]) < self._pihole_gravity_cache_ttl:
+            return cached[0]
+
+        try:
+            url = f"{self.pihole_api_url.rstrip('/')}{self.pihole_search_api_path}/{domain}"
+            headers = {"sid": self.pihole_api_password} if self.pihole_api_password else {}
+            resp = self.session.get(url, params={"partial": "false"}, headers=headers, timeout=3.0)
+            if resp.status_code != 200:
+                LOGGER.debug("Pi-hole gravity search for %s returned HTTP %s", domain, resp.status_code)
+                return None
+            data = resp.json()
+            # v6 response shape: {"search": {"domains": [...], "gravity": [...]}, ...} --
+            # a non-empty match in either list means Pi-hole itself already recognizes
+            # this domain as ad/tracker/gravity-listed.
+            search = data.get("search", {}) if isinstance(data, dict) else {}
+            matched = bool(search.get("domains")) or bool(search.get("gravity"))
+            with self._lock:
+                self._pihole_gravity_cache[domain] = (matched, time.time())
+            return matched
+        except Exception as exc:
+            LOGGER.debug("Pi-hole gravity search failed for %s: %s", domain, exc)
+            return None
 
     def lookup_ip(self, ip: str) -> Optional[dict]:
         if not ip or ip == "unknown": 

@@ -880,6 +880,16 @@ def load_dataset(state_dir: Path) -> tuple:
             # in autonomous_muted.jsonl; do not ALSO train it as label=0 here.
             stats["threat_skipped_corrected"] += 1
             continue
+        if payload.get("escalated_via_persistence"):
+            # BUGFIX (live audit): this alert's HIGH state/confidence came from the SAME
+            # single, uncorroborated hypothesis simply recurring for suspicious_escalation_
+            # seconds -- decision_engine.py never found a 2nd independent evidence source.
+            # Training it as a clean label=0 "this is what a genuine HIGH looks like"
+            # sample would reinforce exactly the pattern pipeline.py's own confidence cap
+            # (0.55, well below a real hypothesis_high's 0.85) already treats as weaker
+            # evidence, not stronger.
+            stats["threat_skipped_corrected"] += 1
+            continue
         if _alert_dedup_key(payload) in corrected_keys:
             # Corrected after the fact (autonomous or operator) — same reasoning.
             stats["threat_skipped_corrected"] += 1

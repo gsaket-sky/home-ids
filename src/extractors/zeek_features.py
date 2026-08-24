@@ -228,7 +228,13 @@ class ZeekFeatureExtractor:
     _SUSPICIOUS_PORTS = frozenset([4444, 4445, 8888, 9999, 1337, 31337, 6667, 6697, 1080, 3128, 5353])
     _EXCLUDED_HONEYPOT_PORTS = frozenset([137, 138, 139, 1900, 5353])
     
-    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None):
+    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None, lateral_ports: set = None):
+        # BUGFIX (live audit): was a fixed 5-port module-level constant (LATERAL_PORTS)
+        # -- a real attacker isn't limited to SSH/SMB/RDP/VNC/Telnet, and extending
+        # coverage to a new port used to require a code change/deploy. Config-driven,
+        # same pattern as arp_sweep_unique_targets_threshold and every other detection
+        # knob in this class; falls back to the same 5 ports as before if unset.
+        self.lateral_ports = frozenset(lateral_ports) if lateral_ports else LATERAL_PORTS
         self._conn_ts = defaultdict(lambda: deque(maxlen=5000))
         self._new_ips = defaultdict(dict)
         # VERSION 11 (P1, review #3/#4 follow-up): parallel to _new_ips -- last-seen
@@ -252,6 +258,10 @@ class ZeekFeatureExtractor:
         self._honeypot_hits = defaultdict(lambda: deque(maxlen=500))
         self._rejected_ips = defaultdict(lambda: deque(maxlen=5000))
         self._last_connection_meta = {}
+        # BUGFIX (live audit): timestamps of GENUINE (never-seen-before-for-this-IP)
+        # MAC flips per IP -- see _bind_mac()'s corroboration-gated hard-stop below.
+        self._genuine_flip_ts = defaultdict(lambda: deque(maxlen=5))
+        self.pending_spoof_evidence: Dict[str, dict] = {}
         
         self.honeypot_ips = honeypot_ips if honeypot_ips is not None else set()
         # PHASE 21D: "wired-device-visible probe" reactive-capture trigger. The two
@@ -496,9 +506,32 @@ class ZeekFeatureExtractor:
             # hijacker, and does not reach the hard-stop evidence pipeline.
             mac_is_known_for_ip = mac in self._mac_history.get(ip, {})
             if (ts - last_seen) < 600 and not mac_is_known_for_ip:
-                LOGGER.critical(f"🚨 LAYER-2 ARP/NDP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s")
-                if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
-                self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
+                # BUGFIX (live audit): a single genuinely-new MAC on an IP is ALSO the
+                # normal signature of MAC-randomization ("private Wi-Fi address," on by
+                # default since iOS 14/Android 10) reconnecting/roaming -- not just a
+                # real hijack. The mesh-repeater fix above already handles a mac
+                # RE-appearing; this handles the DIFFERENT case of a mac that's
+                # genuinely never been seen before. A real MITM takeover holds control
+                # and, per the comment above, doesn't hand it back and re-attack every
+                # 15-20s -- but it VERY plausibly re-establishes a session (a second
+                # genuine flip) within a short window if the attacker is actively
+                # working the target, which a one-off privacy-driven reconnect does
+                # not. Require a SECOND genuine flip within the same 600s window before
+                # the hard-stop; a lone first flip is real but weaker SUSPICIOUS-tier
+                # evidence, corroboration-required like every other behavioral signal,
+                # not an instant zero-corroboration CRITICAL block.
+                self._genuine_flip_ts[ip].append(ts)
+                recent_genuine_flips = [t for t in self._genuine_flip_ts[ip] if (ts - t) < 600]
+                if len(recent_genuine_flips) >= 2:
+                    LOGGER.critical(f"🚨 LAYER-2 ARP/NDP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s (2nd genuine flip within window)")
+                    if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
+                    self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
+                    self.pending_spoof_evidence.pop(ip, None)
+                else:
+                    LOGGER.warning(f"⚠️ IP {ip} MAC flip {existing_mac} -> {mac} to a genuinely new MAC -- "
+                                    f"weak/uncorroborated evidence only (needs a 2nd flip within 600s to hard-stop; "
+                                    f"consistent with normal MAC-randomization reconnect otherwise).")
+                    self.pending_spoof_evidence[ip] = {"old": existing_mac, "new": mac, "ts": ts}
             elif (ts - last_seen) < 600:
                 LOGGER.debug(f"IP {ip} MAC flip {existing_mac} -> {mac} is a known-oscillation "
                              f"(mac previously seen for this ip) -- not treated as a new spoof.")
@@ -626,7 +659,7 @@ class ZeekFeatureExtractor:
                 self._honeypot_hits[src].append(ts)
                 
             if self._is_home_ip(src) and self._is_home_ip(dst_ip):
-                if dst_port in LATERAL_PORTS and not self._is_safe_device(dst_ip) and not self._is_safe_device(src):
+                if dst_port in self.lateral_ports and not self._is_safe_device(dst_ip) and not self._is_safe_device(src):
                     self._lateral_moves[src].append((ts, dst_ip, dst_port))
                     self._new_lateral_events[src].append((dst_ip, dst_port))
 
@@ -705,8 +738,13 @@ class ZeekFeatureExtractor:
             is_malicious_ja4 = True
             LOGGER.debug("Malicious JA4+ fingerprint identified: %s", ja4)
                 
-        if is_malicious_ja3: self._ja3_hits[src].append({"ja3": ja3, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
-        if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0)})
+        # BUGFIX (live audit): dest_ip added so NetworkIntrusionHypothesis's evidence
+        # (malicious_ja3/malicious_ja4, zeek_network.py) can carry a real attribution
+        # target -- previously only dest_port was captured, so a NETWORK_INTRUSION
+        # alert built from this evidence had nothing evidence-linked to attach and fell
+        # back to pipeline.py's generic "last connection" fallback.
+        if is_malicious_ja3: self._ja3_hits[src].append({"ja3": ja3, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
+        if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
 
         # PHASE 4: track *every* JA4 seen (not just malicious ones) as a benign per-device
         # behavioral fingerprint, used for MAC-rotation re-identification. Capped at 50
@@ -729,8 +767,8 @@ class ZeekFeatureExtractor:
         if ua and len(self._http_uas[src]) < 500: self._http_uas[src][ua] = ts
         if host and uri and len(self._http_reqs[src]) < 1000: self._http_reqs[src][f"{host}{uri}"] = ts
 
-    def _process_notice(self, src: str, ev: dict) -> None: self._notices[src].append({"note": ev.get("note", ""), "msg": ev.get("msg", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0)})
-    def _process_weird(self, src: str, ev: dict) -> None: self._notices[src].append({"note": f"weird:{ev.get('name', '')}", "msg": ev.get("addl", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0)})
+    def _process_notice(self, src: str, ev: dict) -> None: self._notices[src].append({"note": ev.get("note", ""), "msg": ev.get("msg", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
+    def _process_weird(self, src: str, ev: dict) -> None: self._notices[src].append({"note": f"weird:{ev.get('name', '')}", "msg": ev.get("addl", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
 
     def get_scanned_ports(self, device_ip: str) -> list[str]:
         """Returns readable string list of distinct destination ports scanned by device (e.g. ['22 (SSH)', '445 (SMB)'])."""
@@ -841,8 +879,18 @@ class ZeekFeatureExtractor:
             "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
             "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),
             "zeek_lateral_unique_targets": len(lateral_targets),
+            # BUGFIX (live audit): same attribution gap as zeek_s0_rej_ip_examples above --
+            # zeek_lateral_scan evidence (pipeline.py) had a count but no actual targets.
+            "zeek_lateral_target_examples": sorted(lateral_targets)[:5],
             "zeek_s0_rej_count": sum(1 for s in states if s in ("S0", "REJ")),
             "zeek_s0_rej_unique_ips": len(rejected_ips),
+            # BUGFIX (live audit): zeek_s0_rej_unique_ips only ever exposed the COUNT,
+            # never which IPs -- so a CONNECTION_ABUSE alert built from this evidence had
+            # no real destination to attribute to and fell back to pipeline.py's generic
+            # "last connection" fallback (often a totally unrelated DNS query). Exposes a
+            # short, deterministic (sorted) sample so threat_signals.py can attach a real
+            # one to Evidence.domain, same pattern dns_tunnel_v2/dns_dga_burst already use.
+            "zeek_s0_rej_ip_examples": sorted(rejected_ips)[:5],
             "zeek_max_duration": max(durations) if durations else 0.0,
             "zeek_honeypot_hits": sum(len(self._honeypot_hits.get(ip, [])) for ip in ips),
             # PHASE 21B: distinct ARP-requested targets across this device's known
@@ -864,9 +912,11 @@ class ZeekFeatureExtractor:
     def get_alerts(self, device_ip) -> list[dict]:
         alerts = []
         for ip in self._as_ip_list(device_ip):
-            for h in self._ja3_hits.get(ip, []): alerts.append({"type": "malicious_ja3", "ja3": h["ja3"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
-            for h in self._ja4_hits.get(ip, []): alerts.append({"type": "malicious_ja4", "ja4": h["ja4"], "dest_port": h.get("dest_port", 0), "confidence": 0.95})
-            for n in self._notices.get(ip, []): alerts.append({"type": "zeek_notice", "note": n["note"], "msg": n["msg"], "dest_port": n.get("dest_port", 0), "confidence": 0.75})
+            # BUGFIX (live audit): dest_ip/server now included so zeek_network.py can
+            # attach a real attribution target to this evidence.
+            for h in self._ja3_hits.get(ip, []): alerts.append({"type": "malicious_ja3", "ja3": h["ja3"], "dest_port": h.get("dest_port", 0), "dest_ip": h.get("dest_ip", ""), "server": h.get("server", ""), "confidence": 0.95})
+            for h in self._ja4_hits.get(ip, []): alerts.append({"type": "malicious_ja4", "ja4": h["ja4"], "dest_port": h.get("dest_port", 0), "dest_ip": h.get("dest_ip", ""), "server": h.get("server", ""), "confidence": 0.95})
+            for n in self._notices.get(ip, []): alerts.append({"type": "zeek_notice", "note": n["note"], "msg": n["msg"], "dest_port": n.get("dest_port", 0), "dest_ip": n.get("dest_ip", ""), "confidence": 0.75})
         return alerts
 
     def reset_all(self) -> None:

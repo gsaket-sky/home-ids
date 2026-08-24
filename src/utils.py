@@ -279,6 +279,23 @@ _CLOUD_PUSH_PATTERNS = (
     ".quickconnect.to", ".synology.me", ".synology.com", ".sentry.io", ".spotify.com", ".roku.com"
 )
 
+# Operator-editable ADDITION to _SYSTEM_SAFE_BASE_DOMAINS above, populated from
+# config.yaml's `safe_cdn_base_domains` (see core/pipeline.py's _on_config_reload) --
+# for the residual case a niche single-vendor domain (e.g. samsungcloudsolution.net)
+# is neither popular enough for Tranco nor hosted on infrastructure a recognized
+# cloud/CDN ASN-org match would catch (is_cloud_cdn_provider_org() above), so it needs
+# a manual entry -- but that entry now lives in config.yaml, hot-reloads with every
+# other [LIVE] config key, and never requires a code change/deploy to add one. This is
+# additive only, on top of every hardcoded set above -- never replaces them.
+_CONFIG_SAFE_CDN_BASE_DOMAINS: set = set()
+
+def register_safe_cdn_base_domains(domains) -> None:
+    """Replaces the config-supplied CDN/vendor base-domain set wholesale (not additive
+    across calls -- each call reflects the CURRENT config.yaml `safe_cdn_base_domains`
+    list in full, so a removed entry actually stops being trusted on the next reload)."""
+    global _CONFIG_SAFE_CDN_BASE_DOMAINS
+    _CONFIG_SAFE_CDN_BASE_DOMAINS = {str(d).lower().strip().strip(".") for d in (domains or []) if str(d).strip()}
+
 def _is_cdn_or_cloud_domain(domain: str) -> bool:
     """True if domain or its eTLD+1 base domain is a known safe CDN/Cloud/Vendor infrastructure."""
     norm = domain.lower().strip(".")
@@ -287,7 +304,9 @@ def _is_cdn_or_cloud_domain(domain: str) -> bool:
     if any(norm.endswith(pat) for pat in _CLOUD_PUSH_PATTERNS):
         return True
     base = etld1(norm)
-    return base in _SYSTEM_SAFE_BASE_DOMAINS
+    if base in _SYSTEM_SAFE_BASE_DOMAINS:
+        return True
+    return base in _CONFIG_SAFE_CDN_BASE_DOMAINS
 
 # PHASE 21C2: recognized commercial VPN provider ASN organization-name substrings.
 # Used by dns_evasion.py's blind-spot audit to avoid flagging legitimate VPN traffic as
@@ -312,6 +331,56 @@ def is_vpn_provider_org(org_name: str) -> bool:
         return False
     norm = org_name.lower()
     return any(kw in norm for kw in _VPN_PROVIDER_ORG_KEYWORDS)
+
+# BUGFIX (live audit): _SYSTEM_SAFE_BASE_DOMAINS/_CDN_PARENT_ALLOWLIST above kept
+# needing one-off patches every time a legitimate vendor domain string wasn't already
+# enumerated (nflximg.com, samsungqbe.com, samsungcloudsolution.net -- each found only
+# after it had already false-positived live). Most of those domains aren't hosted on
+# the vendor's OWN infrastructure at all -- they're sitting on AWS/Azure/GCP/a major
+# CDN, the same way countless other legitimate services are. Matching the ASN
+# ORGANIZATION that actually owns the IP (same name-based-not-CIDR-based reasoning as
+# is_vpn_provider_org() above, MaxMind's DB refreshes this automatically) catches any
+# such domain the FIRST time it's seen, popular or not, without ever needing its exact
+# domain string enumerated anywhere. Deliberately a short, recognizable list of major
+# cloud/CDN operators -- not a blanket "any registered business" match, which would
+# create a real blind spot for C2 hosted on the same infrastructure.
+_CLOUD_CDN_ORG_KEYWORDS = frozenset({
+    "akamai", "fastly", "cloudflare", "amazon.com", "amazon technologies",
+    "aws", "google llc", "google cloud", "microsoft corporation", "microsoft azure",
+    "netflix", "digitalocean", "ovh", "hetzner", "oracle corporation", "alibaba",
+    "tencent", "fly.io", "linode", "akamai technologies",
+})
+
+def is_cloud_cdn_provider_org(org_name: str) -> bool:
+    """True if a GeoIP ASN organization name matches a known major cloud/CDN operator.
+    Deliberately name-based, not IP/CIDR-based -- same reasoning as
+    is_vpn_provider_org() above, just for "this destination is on recognized cloud/CDN
+    infrastructure" instead of "this destination is a VPN exit node"."""
+    if not org_name:
+        return False
+    norm = org_name.lower()
+    return any(kw in norm for kw in _CLOUD_CDN_ORG_KEYWORDS)
+
+# Deliberately a short, stable, name-brand list -- these IPs are as close to
+# universally-recognized internet infrastructure as exists, unlike a general "trust
+# this cloud provider" list that would create a real blind spot for C2 hosted on the
+# same infrastructure. Originally lived only in dns_evasion.py (a device's own DNS
+# QUERY traffic to a well-known public resolver, e.g. a Chromecast querying 8.8.8.8
+# directly, was guaranteed to be flagged as "unexplained" -- the connection itself IS
+# how domain resolution happens, so no domain lookup can ever explain it). Shared here
+# so fp_engine.py's confirmed-intel write/read guards can protect the exact same IPs --
+# found live: 8.8.8.8 itself had 64 "confirmed malicious" recordings in production,
+# from devices whose OWN direct-resolver traffic (the same DNS_POLICY_BYPASS shape)
+# kept re-confirming Google's public resolver as attacker infrastructure.
+KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
+    "8.8.8.8", "8.8.4.4",              # Google Public DNS
+    "1.1.1.1", "1.0.0.1",              # Cloudflare
+    "9.9.9.9", "149.112.112.112",      # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+    "94.140.14.14", "94.140.15.15",    # AdGuard DNS
+    "2001:4860:4860::8888", "2001:4860:4860::8844",  # Google Public DNS, IPv6
+    "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
+})
 
 def suspicious_dga(domain):
     """

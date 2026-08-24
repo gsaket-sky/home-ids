@@ -272,6 +272,10 @@ class _FakeGeoIPForAudit:
     def reverse_dns(self, ip):
         return {"1.1.1.1": "server.example.com"}.get(ip)
 
+    def reverse_dns_status(self, ip):
+        """Matches the real GeoIPEngine's (host, timed_out) contract (geoip.py)."""
+        return self.reverse_dns(ip), False
+
     def lookup_asn(self, ip):
         return None
 

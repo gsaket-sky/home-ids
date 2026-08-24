@@ -43,13 +43,23 @@ class _FakeASN:
         self.autonomous_system_organization = org
 
 class _FakeGeoIP:
-    """reverse_dns_map: ip -> hostname (or None). asn_org_map: ip -> org name (or None)."""
+    """reverse_dns_map: ip -> hostname (or None), or the sentinel "TIMEOUT" to simulate
+    a reverse-DNS timeout. asn_org_map: ip -> org name (or None)."""
     def __init__(self, reverse_dns_map=None, asn_org_map=None):
         self.reverse_dns_map = reverse_dns_map or {}
         self.asn_org_map = asn_org_map or {}
 
     def reverse_dns(self, ip):
-        return self.reverse_dns_map.get(ip)
+        val = self.reverse_dns_map.get(ip)
+        return None if val == "TIMEOUT" else val
+
+    def reverse_dns_status(self, ip):
+        """Matches the real GeoIPEngine's (host, timed_out) contract (geoip.py) --
+        _reverse_dns_explains() now calls this instead of the plain reverse_dns()."""
+        val = self.reverse_dns_map.get(ip)
+        if val == "TIMEOUT":
+            return None, True
+        return val, False
 
     def lookup_asn(self, ip):
         org = self.asn_org_map.get(ip)
@@ -88,6 +98,24 @@ ev_vpn = audit_device(DEV, audit_vpn, geoip_engine=geoip_vpn)
 check("THE CORE REGRESSION GUARD: a real NordVPN destination with zero DNS history is NOT "
       "flagged as an evasion anomaly (this is the exact iPhone/NordVPN case found live this session)",
       ev_vpn == [])
+
+# B3c (THE FIX): a destination hosted on a recognized cloud/CDN ASN (e.g. AWS) is
+# explained even with zero DNS history AND zero reverse-DNS data at all -- this is
+# what would have caught samsungcloudsolution.net on day one without ever needing its
+# exact domain string enumerated anywhere, since niche vendor domains are almost always
+# hosted on major cloud infrastructure rather than the vendor's own network.
+geoip_cloud = _FakeGeoIP(asn_org_map={"9.8.7.6": "Amazon.com, Inc."})
+audit_cloud = DeviceBurstAudit(dest_ips={"9.8.7.6"}, queried_domains=set())
+ev_cloud = audit_device(DEV, audit_cloud, geoip_engine=geoip_cloud)
+check("THE FIX: a destination hosted on a recognized cloud/CDN ASN (Amazon) is explained "
+      "with zero DNS/reverse-DNS data at all -- no domain string enumeration needed",
+      ev_cloud == [])
+
+geoip_isp = _FakeGeoIP(asn_org_map={"9.8.7.5": "Deutsche Telekom AG"})
+audit_isp = DeviceBurstAudit(dest_ips={"9.8.7.5"}, queried_domains=set())
+ev_isp = audit_device(DEV, audit_isp, geoip_engine=geoip_isp)
+check("REGRESSION GUARD: an ordinary consumer-ISP ASN is NOT treated as known cloud/CDN infra",
+      len(ev_isp) == 1)
 
 # B3b (BUGFIX regression guard): a connection to a private/LAN IP (e.g. the IDS server's
 # own address, a NAS, another local device) must never be flagged, even with zero DNS
@@ -356,9 +384,7 @@ check("REGRESSION GUARD: DNS_EVASION with no resolved IP at all falls back to 'u
 # triggering one) could genuinely saturate the pool: a caller-side future timeout does
 # NOT stop the underlying worker thread, which keeps running and occupying a slot
 # regardless, so later lookups queue behind busy workers and hit the ceiling before
-# even starting. _reverse_dns_explains() has no way to tell "genuinely no PTR record"
-# apart from "timed out under load" -- both collapse to a None return and count as
-# unexplained. Confirmed live: 4 unrelated devices (including this network's own IDS
+# even starting. Confirmed live: 4 unrelated devices (including this network's own IDS
 # server) all flagged "no matching DNS lookup history" within the same ~2-minute
 # window, right after a reactive-capture burst -- the signature of a shared-resource
 # bottleneck, not four coincidentally-evasive devices.
@@ -368,6 +394,25 @@ check("THE FIX: reverse-DNS worker pool widened from 4 to reduce queueing under 
       "ThreadPoolExecutor(max_workers=12" in geoip_src)
 check("THE FIX: reverse-DNS timeout widened from the original tight 1.0s/1.05s pairing",
       "socket.setdefaulttimeout(2.5)" in geoip_src and "future.result(timeout=2.6)" in geoip_src)
+
+# BUGFIX (follow-up, same session): widening the pool/timeout above only reduces HOW
+# OFTEN a timeout happens, not what happens when one still does -- _reverse_dns_explains
+# had no way to tell "genuinely no PTR record" apart from "timed out under load," both
+# collapsed to the same None and counted as unexplained. geoip.py's reverse_dns_status()
+# now returns (host, timed_out) so a timeout is inconclusive (skipped), never treated as
+# "checked, suspicious."
+geoip_timeout = _FakeGeoIP(reverse_dns_map={"9.9.9.1": "TIMEOUT", "9.9.9.2": None})
+audit_timeout_only = DeviceBurstAudit(dest_ips={"9.9.9.1"}, queried_domains={"unrelated.example"})
+ev_timeout_only = audit_device("dev-timeout", audit_timeout_only, geoip_engine=geoip_timeout)
+check("THE FIX: an IP whose reverse-DNS TIMED OUT produces NO evidence at all "
+      "(inconclusive, not unexplained) when it's the only unexplained candidate",
+      ev_timeout_only == [])
+
+audit_timeout_mixed = DeviceBurstAudit(dest_ips={"9.9.9.1", "9.9.9.2"}, queried_domains={"unrelated.example"})
+ev_timeout_mixed = audit_device("dev-timeout-mixed", audit_timeout_mixed, geoip_engine=geoip_timeout)
+check("THE FIX: a genuinely-confirmed no-PTR-record IP (9.9.9.2) still counts as "
+      "unexplained even when a DIFFERENT IP in the same burst timed out",
+      len(ev_timeout_mixed) == 1 and ev_timeout_mixed[0].value == 1.0)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # BUGFIX (found via a live alert): a device's own DNS QUERY traffic to a well-known

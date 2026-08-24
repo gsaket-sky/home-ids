@@ -16,6 +16,16 @@ genuine new spoof when the new MAC has NEVER been seen for that IP before. A MAC
 re-appearing that's already on record for this IP is a known oscillation, not suppressed
 into invisibility (still logged at DEBUG) but no longer reaching the hard-stop pipeline.
 Detection of an actually-new hijacker MAC is unchanged.
+
+FOLLOW-UP (same session, live audit): a single genuinely-new MAC is ALSO the normal
+signature of MAC-randomization ("private Wi-Fi address," on by default since iOS 14/
+Android 10) reconnecting or roaming between APs -- not just a hijack. A lone first-time
+flip now produces weak, corroboration-required evidence (pending_spoof_evidence,
+consumed by pipeline.py into NetworkIntrusionHypothesis, not decision_engine.py's
+zero-corroboration hard-stop) instead of an instant CRITICAL. Only a SECOND genuinely-new
+MAC on the same IP within the same 600s window still reaches the instant hard-stop
+(layer2_spoofs) -- a real, actively-worked takeover plausibly re-establishes a session
+in that window; a one-off privacy reconnect does not.
 """
 import sys
 from pathlib import Path as _PathForSysPath
@@ -44,12 +54,16 @@ zfx._bind_mac(IP, MAC_A, ts=1000.0)
 check("initial binding for a fresh IP never fires a spoof",
       not hasattr(zfx, "layer2_spoofs") or IP not in zfx.layer2_spoofs)
 
-# First flip to a genuinely never-seen MAC, well within the 600s window -- must still fire.
+# First flip to a genuinely never-seen MAC, well within the 600s window -- weak,
+# corroboration-required evidence now, NOT an instant hard-stop (MAC-randomization
+# reconnect produces this exact same shape).
 zfx._bind_mac(IP, MAC_B, ts=1010.0)
-check("THE REGRESSION GUARD: a flip to a genuinely NEW mac still fires the hard-stop",
-      hasattr(zfx, "layer2_spoofs") and IP in zfx.layer2_spoofs)
-if hasattr(zfx, "layer2_spoofs") and IP in zfx.layer2_spoofs:
-    del zfx.layer2_spoofs[IP]  # simulate pipeline.py consuming it (del on read)
+check("THE FIX: a lone flip to a genuinely NEW mac produces weak pending evidence, "
+      "not an instant hard-stop",
+      (not hasattr(zfx, "layer2_spoofs") or IP not in zfx.layer2_spoofs)
+      and IP in zfx.pending_spoof_evidence)
+if hasattr(zfx, "pending_spoof_evidence") and IP in zfx.pending_spoof_evidence:
+    del zfx.pending_spoof_evidence[IP]  # simulate pipeline.py consuming it (pop on read)
 
 # Flip BACK to MAC_A (already on record for this IP) -- known oscillation, must NOT fire.
 zfx._bind_mac(IP, MAC_A, ts=1020.0)
@@ -61,17 +75,35 @@ zfx._bind_mac(IP, MAC_B, ts=1030.0)
 check("a second oscillation back to the other already-known mac also does not fire",
       not hasattr(zfx, "layer2_spoofs") or IP not in zfx.layer2_spoofs)
 
-# A genuinely new third MAC arrives -- this IS a novel hijacker, must fire.
+# A genuinely new third MAC arrives -- this is this IP's SECOND genuine (never-before-
+# seen) flip within the 600s window (the first was MAC_B at ts=1010.0 above) -- THE
+# NEW HARD-STOP CONDITION: a real, actively-worked takeover plausibly re-establishes a
+# session quickly; still must fire, same as before, just via the 2-genuine-flips path
+# now instead of any single new mac.
 zfx._bind_mac(IP, MAC_C, ts=1040.0)
-check("THE REGRESSION GUARD: a THIRD, never-before-seen mac for this IP still fires",
+check("THE FIX: a SECOND genuine (never-before-seen) flip within the 600s window still "
+      "fires the hard-stop",
       hasattr(zfx, "layer2_spoofs") and IP in zfx.layer2_spoofs)
 
 # Different IP entirely -- MAC_A being known for 192.168.1.3 must not suppress a
-# genuine first-time flip on an unrelated IP using that same MAC value.
+# genuine first-time flip on an unrelated IP using that same MAC value. Only ONE
+# genuine flip happens on IP2 below, so it's the weak/pending case, not a hard-stop --
+# proves the per-IP known-mac history AND the per-IP genuine-flip-count tracking are
+# both correctly scoped (not accidentally shared across IP3's own flip count above).
 IP2 = "192.168.1.4"
 zfx._bind_mac(IP2, MAC_A, ts=1050.0)
 zfx._bind_mac(IP2, MAC_B, ts=1055.0)
-check("known-mac history is scoped PER-IP, not global -- a fresh IP's first flip still fires",
+check("known-mac/genuine-flip history is scoped PER-IP, not global -- a fresh IP's "
+      "FIRST flip is still only the weak/pending case, not an instant hard-stop",
+      (not hasattr(zfx, "layer2_spoofs") or IP2 not in zfx.layer2_spoofs)
+      and IP2 in zfx.pending_spoof_evidence)
+
+# A SECOND genuine flip on IP2, still within the window -- now it hard-stops too,
+# proving the 2-flip escalation logic is genuinely per-IP and not a one-time global
+# latch left over from IP's own earlier escalation above.
+zfx._bind_mac(IP2, "dd:dd:dd:dd:dd:dd", ts=1060.0)
+check("THE FIX: the 2-genuine-flips-within-window escalation works independently on a "
+      "second IP, not just once globally",
       hasattr(zfx, "layer2_spoofs") and IP2 in zfx.layer2_spoofs)
 
 # A flip outside the 600s window was already correctly ignored before this fix -- confirm

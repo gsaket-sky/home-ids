@@ -296,13 +296,32 @@ class AlertManager:
             headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
             
             if action in ("unblock", "release"):
+                # BUGFIX: this used to fire the POST and immediately claim success without
+                # checking the response -- unlike the immunize/revoke branches below, which
+                # already check resp.status_code. A failed release (backend error, IPC
+                # timeout, Fritzbox webhook failure) still showed "✅ released" in Telegram,
+                # so an operator had no way to tell a real failure apart from success.
+                # fritzbox_api.py's /api/ipc/release always returns HTTP 200 on a clean
+                # request -- whether the target was ACTUALLY isolated is in the JSON body's
+                # `released`/`released_count`, not the status code, so both must be checked.
                 ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/release"
-                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
-                msg_text = f"✅ Target '{target}' released from containment."
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                if resp.status_code != 200:
+                    msg_text = f"⚠️ Release failed: HTTP {resp.status_code}"
+                else:
+                    body = resp.json()
+                    released = body.get("released", body.get("released_count", 0))
+                    if released:
+                        msg_text = f"✅ Target '{target}' released from containment."
+                    else:
+                        msg_text = f"ℹ️ '{target}' was not currently tracked as isolated — nothing to release."
             elif action == "block":
                 ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/block"
-                self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
-                msg_text = f"🔒 Hardware containment block approved for '{target}'."
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    msg_text = f"🔒 Hardware containment block approved for '{target}'."
+                else:
+                    msg_text = f"⚠️ Block failed: HTTP {resp.status_code}"
             elif action == "immunize":
                 # PHASE 6 (closed-loop self-healing): `target` here is the action_id from a
                 # published alert's "🛡️ Mark False Positive" button (see pipeline.py's
@@ -315,9 +334,15 @@ class AlertManager:
                 resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
                 if resp.status_code == 200:
                     body = resp.json()
-                    immunized_domain = body.get("immunized", "the domain")
-                    unblock_note = " Pi-hole block released." if body.get("unblocked") else ""
-                    msg_text = f"🛡️ Marked false positive — '{immunized_domain}' immunized.{unblock_note}"
+                    if body.get("status") == "refused":
+                        # BUGFIX: mark_false_positive() now refuses hard-stop/verifiable-fact
+                        # alerts (honeypot, arp_spoofing, geofencing, confirmed exploit,
+                        # tier-5 confirmed IOC) -- must not be reported as a success.
+                        msg_text = f"⛔ Not marked — {body.get('reason', 'this alert cannot be marked as a false positive.')}"
+                    else:
+                        immunized_domain = body.get("immunized", "the domain")
+                        unblock_note = " Pi-hole block released." if body.get("unblocked") else ""
+                        msg_text = f"🛡️ Marked false positive — '{immunized_domain}' immunized.{unblock_note}"
                 elif resp.status_code == 404:
                     msg_text = "⚠️ Alert already expired or unknown — nothing to mark."
                 else:

@@ -35,6 +35,7 @@ detector here can produce.
 """
 import json
 import logging
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -113,6 +114,54 @@ def _parse_eve_json_alerts(eve_path: Path) -> List[dict]:
     except Exception as exc:
         LOGGER.error("Failed reading Suricata eve.json at %s: %s", eve_path, exc)
     return alerts
+
+
+def check_suricata_health(suricata_bin: str, rules_path: Optional[str], timeout: float = 5.0) -> "tuple[bool, str]":
+    """BUGFIX (live audit): the boot-time Telegram status message previously reported
+    every subsystem as a hardcoded "Online" string, or at best checked "did the
+    constructor not raise" -- neither proves anything actually WORKS (a misconfigured
+    path, a binary with no execute permission, or an empty rules file would all still
+    report healthy). This does the real thing: confirms the binary exists AND is
+    executable AND actually runs successfully (`suricata --build-info`, a real
+    read-only smoke test with no pcap/interface needed), and that the configured rules
+    file exists and is non-empty. Never raises -- returns (False, reason) for every
+    failure mode instead. Suricata itself only ever runs in short batch bursts against
+    a captured pcap (see this module's own docstring) so there's no long-running
+    process to check the way there is for the FastAPI webhook -- a successful
+    --build-info invocation is the closest equivalent "is this actually usable" proof.
+    """
+    if not suricata_bin:
+        return False, "reactive_capture_suricata_bin not configured"
+    bin_path = Path(suricata_bin)
+    if not bin_path.exists():
+        return False, f"binary not found at {suricata_bin}"
+    if not os.access(str(bin_path), os.X_OK):
+        return False, f"binary at {suricata_bin} is not executable (permission issue)"
+    if not rules_path:
+        return False, "reactive_capture_suricata_rules_path not configured"
+    rules_file = Path(rules_path)
+    if not rules_file.exists():
+        return False, f"rules file not found at {rules_path}"
+    try:
+        if rules_file.stat().st_size == 0:
+            return False, f"rules file at {rules_path} is empty"
+    except OSError as exc:
+        return False, f"could not stat rules file: {exc}"
+    try:
+        result = subprocess.run(
+            [suricata_bin, "--build-info"], capture_output=True, text=True, timeout=timeout, check=False,
+        )
+        if result.returncode != 0:
+            return False, f"'{suricata_bin} --build-info' exited {result.returncode} (stderr: {(result.stderr or '')[-200:]})"
+    except FileNotFoundError:
+        return False, f"binary at {suricata_bin} could not be executed (not found at exec time)"
+    except PermissionError:
+        return False, f"binary at {suricata_bin} could not be executed (permission denied)"
+    except subprocess.TimeoutExpired:
+        return False, f"'{suricata_bin} --build-info' timed out after {timeout:.0f}s"
+    except Exception as exc:
+        return False, f"unexpected error running '{suricata_bin} --build-info': {exc}"
+    return True, "binary executable, rules file present, --build-info succeeded"
 
 
 def build_ip_to_device_map(state_manager) -> Dict[str, str]:
