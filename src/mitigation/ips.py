@@ -97,6 +97,27 @@ class IPSMitigator:
         LOGGER.info("Starting IPS Retry Worker Thread...")
         threading.Thread(target=self._retry_worker, daemon=True, name="ips_retry_worker").start()
 
+        # BUGFIX (live audit): _router_reconcile_worker() sleeps for
+        # router_reconcile_interval_seconds (default 300s) BEFORE its first check, so a
+        # device released directly in the Fritz!Box admin UI while this process was
+        # down stayed shown as isolated (ips_router_isolated_active=1, stale
+        # router_isolated_devices loaded straight from disk above) for up to 5 minutes
+        # after every restart, with nothing to correct it in that window -- the
+        # per-cycle garbage_collect_ips_metrics() pass (pipeline.py) only reconciles
+        # the gauge against this process's OWN on-disk belief, not against what
+        # Fritz!Box actually has isolated right now, so it can't catch this case
+        # either. Run one reconcile pass immediately at boot, before the periodic
+        # worker's first sleep, so a restart converges to Fritz!Box's real state
+        # right away regardless of how the device was released while this IDS wasn't
+        # running to observe it.
+        if bool(self.config.get("ips_router_enabled", False)) and self._router_isolated_devices:
+            try:
+                cleared = self.reconcile_router_isolation_state()
+                if cleared:
+                    LOGGER.warning("🔄 [BOOT RECONCILE] Cleared %d stale router-isolation record(s) no longer isolated by Fritz!Box.", cleared)
+            except Exception as exc:
+                LOGGER.debug("Boot-time router isolation reconcile failed: %s", exc)
+
         LOGGER.info("Starting Router Isolation Reconcile Worker Thread...")
         threading.Thread(target=self._router_reconcile_worker, daemon=True, name="ips_router_reconcile_worker").start()
 
@@ -409,8 +430,26 @@ class IPSMitigator:
             with self._lock:
                 if client_ip in self._tarpit_active_targets:
                     LOGGER.info("Device %s marked safe. Releasing from ARP/NDP Tarpit.", client_ip)
-                    del self._tarpit_active_targets[client_ip]
+                    tarpit_meta = self._tarpit_active_targets.pop(client_ip, {})
                     self._save_queues()
+                    # BUGFIX (live metrics audit): every other tarpit-release path
+                    # (sync_state_from_manager, unisolate_all) clears the
+                    # ips_tarpit_active gauge alongside the dict entry -- this
+                    # "device marked safe" auto-release path deleted the dict entry
+                    # but never cleared the gauge, so Prometheus/Grafana kept
+                    # reporting the device as actively tarpitted indefinitely (until
+                    # process restart) even though containment had genuinely lifted.
+                    # Confirmed live via a Prometheus snapshot showing
+                    # ips_tarpit_active=1 for a device long since released.
+                    try:
+                        ips_tarpit_active.labels(
+                            tarpit_meta.get("dev_id", dev_id), tarpit_meta.get("hostname", hostname), tarpit_meta.get("mac", mac_addr)
+                        ).set(0.0)
+                        ips_tarpit_active.remove(
+                            tarpit_meta.get("dev_id", dev_id), tarpit_meta.get("hostname", hostname), tarpit_meta.get("mac", mac_addr)
+                        )
+                    except Exception:
+                        pass
                 if mac_addr in self._router_isolated_devices:
                     should_unisolate_router = True
 

@@ -272,22 +272,22 @@ def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_
         return "Very High", "Very High -- matched a known-bad signature directly _(not a probabilistic estimate)_", False
 
     fp_risk_pct = fp_calibrated_pct if fp_calibrated_pct is not None else fp_pct
-    calib_note = "" if fp_calibrated_pct is not None else " _(uncalibrated estimate)_"
+    calib_suffix = "" if fp_calibrated_pct is not None else " _(uncalibrated estimate)_"
 
     if fp_risk_pct >= 50:
         label = "Mixed"
         detail = (f"attack pattern matches ({threat_conf_pct}%), but our false-positive check leans "
-                  f"benign ({fp_risk_pct}%{calib_note} chance this is a false positive) -- worth a manual look")
+                  f"benign ({fp_risk_pct}% chance this is a false positive) -- worth a manual look")
     elif fp_risk_pct >= 25:
         label = "Moderate"
         detail = (f"attack pattern matches ({threat_conf_pct}%); some chance this is benign "
-                  f"({fp_risk_pct}%{calib_note}) -- quick review recommended")
+                  f"({fp_risk_pct}%) -- quick review recommended")
     else:
         label = "High"
         detail = (f"attack pattern strongly matches ({threat_conf_pct}%), and our false-positive check "
-                  f"disagrees only weakly ({fp_risk_pct}%{calib_note} chance this is benign)")
+                  f"disagrees only weakly ({fp_risk_pct}% chance this is benign)")
 
-    return label, f"{label} -- {detail}", fp_risk_pct >= 50
+    return label, f"{label} -- {detail}{calib_suffix}", fp_risk_pct >= 50
 
 
 class EnginePipeline:
@@ -540,9 +540,11 @@ class EnginePipeline:
                     )
 
         active_ids_dns = self.identity_manager.process_dns_identities(
-            dns_rows, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator)
+            dns_rows, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator,
+            fp_engine=self.fp_engine, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
         active_ids_zeek = self.identity_manager.process_zeek_identities(
-            zeek_events, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator)
+            zeek_events, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator,
+            fp_engine=self.fp_engine, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
         all_active_ids = set(active_ids_dns + active_ids_zeek)
         LOGGER.debug("Identity mapping complete: %d active devices tracking", len(all_active_ids))
 
@@ -979,7 +981,18 @@ class EnginePipeline:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
                 
                 if features.get("zeek_honeypot_hits", 0) > 0:
-                    self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot"))
+                    # BUGFIX (live alert audit): the same attribution gap already fixed for
+                    # CONNECTION_ABUSE/DGA_BOTNET_C2/NETWORK_INTRUSION/ARP-spoofing below --
+                    # this evidence previously carried no .domain at all, so a CRITICAL
+                    # "Internal Honeypot Accessed" alert's "Contacted" line fell back to
+                    # whatever this device connected to most recently (confirmed live:
+                    # mDNS multicast addresses and unrelated DNS hostnames), even though the
+                    # evidence text says "Connected to the internal honeypot decoy server."
+                    # get_last_honeypot_ip() (zeek_features.py) now tracks which honeypot_ips
+                    # entry was actually hit -- attach it here, consumed by the
+                    # "Internal Honeypot Accessed" branch below.
+                    honeypot_hit_ip = self.zeek_fx.get_last_honeypot_ip(known_ips_snapshot) if self.zeek_fx else None
+                    self.evidence_store.add(Evidence(type="honeypot_access", source="zeek", timestamp=now, device=dev_id, value=features["zeek_honeypot_hits"], confidence=1.0, independence_group="honeypot", provenance="detector:honeypot", domain=honeypot_hit_ip))
                 
                 # BUGFIX: found via a third-party review of a real tarpit alert, verified
                 # against production data -- this fed NetworkIntrusionHypothesis's own
@@ -1465,6 +1478,12 @@ class EnginePipeline:
                         elif primary_sig_base == "Layer-2 ARP Spoofing Detected":
                             for ev in active_evidence:
                                 if ev.type == "arp_spoofing" and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
+                        elif primary_sig_base == "Internal Honeypot Accessed":
+                            for ev in active_evidence:
+                                if ev.type == "honeypot_access" and ev.domain:
                                     alert_dest_ip = ev.domain
                                     alert_target_domain = "unknown"
                                     break
@@ -1966,8 +1985,15 @@ class EnginePipeline:
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📍 *WHAT HAPPENED* _(facts)_\n"
                                     f"- Contacted `{target_display}` ({service_name} / Port {dest_port})\n"
-                                    f"- Application: `{app_name}`\n"
                                 )
+                                # BUGFIX (live alert audit): get_app_context()'s generic fallback
+                                # (no HTTP User-Agent seen) is literally f"{proto} Port {port}" --
+                                # e.g. "Application: TCP Port 55443" directly under "Contacted ...
+                                # Port 55443" -- restating the exact same port with zero added
+                                # information, confirmed live on several alerts. Only show the line
+                                # when it says something the Contacted line doesn't already.
+                                if app_name and not app_name.endswith(f"Port {dest_port}"):
+                                    alert_msg += f"- Application: `{app_name}`\n"
                                 if scanned_ports:
                                     # BUGFIX (reviewer suggestion, implemented): this used to show
                                     # only the port list ("445 (SMB)"), reading like a confirmed
@@ -1985,13 +2011,25 @@ class EnginePipeline:
                                     )
                                 if recent_http_reqs:
                                     alert_msg += f"- Recent HTTP requests: `{', '.join(recent_http_reqs)}`\n"
-                                # BUGFIX (dead-code audit): _killchain_hist was snapshotted under
-                                # lock every cycle (line ~501) and then never read anywhere --
-                                # unfinished work toward showing the kill-chain phase trajectory
-                                # in the alert. Only shown when it contains genuine progression
-                                # (more than just NORMAL), to avoid noise on routine alerts.
-                                if _killchain_hist and any(p != "NORMAL" for p in _killchain_hist):
-                                    alert_msg += f"- Kill-chain trajectory: `{' → '.join(_killchain_hist)}`\n"
+                                # BUGFIX (live alert audit): state.killchain_history is a
+                                # per-cycle rolling window -- it appends the current phase EVERY
+                                # cycle, not just on a transition (see dns_features.py's own
+                                # comment on this) -- so "not all NORMAL" let a device that's
+                                # simply been sitting in the SAME phase for 5 straight cycles
+                                # through, and joining 5 identical entries with " -> " arrows
+                                # visually implies movement that never happened. Confirmed live:
+                                # "SUSPECTED_RECON -> SUSPECTED_RECON -> SUSPECTED_RECON ->
+                                # SUSPECTED_RECON -> SUSPECTED_RECON" on a device that hadn't
+                                # actually progressed anywhere. Collapsing consecutive repeats
+                                # turns the raw per-cycle log into a genuine transition sequence
+                                # -- only shown when that sequence actually has more than one
+                                # distinct phase in it.
+                                killchain_transitions = [
+                                    p for i, p in enumerate(_killchain_hist)
+                                    if i == 0 or p != _killchain_hist[i - 1]
+                                ]
+                                if len(killchain_transitions) > 1:
+                                    alert_msg += f"- Kill-chain trajectory: `{' → '.join(killchain_transitions)}`\n"
                                 alert_msg += f"- Action taken: `{containment_status}`\n"
 
                                 alert_msg += f"\n🧠 *WHY* _({len(grouped_evidence)} independent signal(s), strongest first)_\n"
@@ -2089,7 +2127,8 @@ class EnginePipeline:
                 self.metrics_exporter.export_device_telemetry(
                     state=state, features=features, risk_score=risk, ml_score=ml_score, ti_risk=ti_risk,
                     ti_match=ti_match, abuse_risk=abuse_risk, vt_risk=vt_risk, is_safe=is_safe,
-                    is_poisoned=is_poisoned, current_threshold_limit=threshold_limit, decision=decision
+                    is_poisoned=is_poisoned, current_threshold_limit=threshold_limit, decision=decision,
+                    fp_engine=self.fp_engine,
                 )
 
                 for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):
@@ -2116,6 +2155,12 @@ class EnginePipeline:
             for e_dev_id, e_hostname, e_dev_type in pruned_list:
                 self.metrics_exporter.remove_device_metric_labels(e_dev_id, e_hostname, e_dev_type)
                 if hasattr(self, 'evidence_store'): self.evidence_store.clear_device(e_dev_id)
+                # BUGFIX (device-identity fragmentation audit): device_fp_profiles.json had
+                # NO cleanup on ordinary eviction either -- a pruned device's learned FP
+                # calibration stayed in that file forever with nothing to remove it. Closes
+                # the same gap the merge path's discard_device_profile() closes, here for
+                # the age-out eviction path instead of the retroactive-merge path.
+                if hasattr(self, 'fp_engine') and self.fp_engine: self.fp_engine.discard_device_profile(e_dev_id, reason="prune")
             self.state_manager.prune_expired_actions(now)  # PHASE 3: drop expired revoke-ledger entries
             self._last_prune = now
 

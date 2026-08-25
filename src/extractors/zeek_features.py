@@ -425,7 +425,7 @@ class ZeekFeatureExtractor:
         prune_tuple_deque_dict(self._conn_states)
         prune_tuple_deque_dict(self._conn_durations)
         prune_tuple_deque_dict(self._rejected_ips)
-        prune_deque_dict(self._honeypot_hits)
+        prune_tuple_deque_dict(self._honeypot_hits)
         prune_tuple_deque_dict(self._arp_targets)
         
         prune_ts_dict(self._new_ips)
@@ -656,7 +656,7 @@ class ZeekFeatureExtractor:
             self._enrich_ptr(dst_ip)
             if dst_ip in self.honeypot_ips and dst_port not in self._EXCLUDED_HONEYPOT_PORTS:
                 LOGGER.warning("Honeypot hit! Src: %s, Dst: %s:%d", src, dst_ip, dst_port)
-                self._honeypot_hits[src].append(ts)
+                self._honeypot_hits[src].append((ts, dst_ip))
                 
             if self._is_home_ip(src) and self._is_home_ip(dst_ip):
                 if dst_port in self.lateral_ports and not self._is_safe_device(dst_ip) and not self._is_safe_device(src):
@@ -788,6 +788,24 @@ class ZeekFeatureExtractor:
             name = port_names.get(p, f"Port {p}")
             result.append(f"{p} ({name})")
         return result
+
+    def get_last_honeypot_ip(self, ips) -> Optional[str]:
+        """Returns the honeypot IP most recently hit by any of this device's known
+        addresses, or None. honeypot_access evidence (pipeline.py) previously had no
+        way to attach a real .domain -- _honeypot_hits only ever stored bare
+        timestamps, not which honeypot_ips entry was actually touched -- so a CRITICAL
+        "Internal Honeypot Accessed" alert fell back to pipeline.py's generic "last
+        connection" (often unrelated multicast/DNS traffic), same attribution gap
+        already fixed for CONNECTION_ABUSE/DGA_BOTNET_C2/etc via their own evidence
+        .domain fields.
+        """
+        ip_list = ips if isinstance(ips, (list, set, tuple)) else [ips]
+        best_ts, best_ip = None, None
+        for ip in ip_list:
+            for ts, dst_ip in self._honeypot_hits.get(ip, []):
+                if best_ts is None or ts > best_ts:
+                    best_ts, best_ip = ts, dst_ip
+        return best_ip
 
     def get_app_context(self, device_ip: str) -> str:
         """Returns the primary application or process/User-Agent signature for Telegram alerts."""
