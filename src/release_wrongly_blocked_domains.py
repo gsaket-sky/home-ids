@@ -74,6 +74,17 @@ SAFE_REVIEWED_BASE_DOMAINS = {
     "amazon.eu", "amazon-dss.com", "amazoncrl.com", "amazonsilk.com",  # Amazon family,
                                    # distinct eTLD+1s from amazon.com already covered
     "snapdeal.com",               # Indian e-commerce
+    "https",                      # garbage/legacy entry, not a real domain -- pre-dates
+                                   # the current comment-on-every-block convention
+    "githubcopilot.com",          # GitHub Copilot's own telemetry
+    "hrnmtech.de",                # ZDF (German public broadcaster) video-segment CDN
+    "nintendo.net",                # Nintendo's own console CDN
+    "pki.goog",                   # Google Certificate Transparency infrastructure
+    "samsungnyc.com",             # Samsung's own image-resize CDN
+    "rollingstone.com",           # Rolling Stone magazine
+    "exp-tas.com",                # Microsoft/Azure-hosted, no malware/phishing history
+    "nmrodam.com",                # Nielsen Marketing (TV measurement) -- legit company,
+                                   # user accepted it's ad/tracking infra, chose to unblock
 }
 
 # Patterns found in THIS production data with a real malware/DGA signature -- never
