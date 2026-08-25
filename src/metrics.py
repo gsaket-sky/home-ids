@@ -240,7 +240,12 @@ fp_engine_stage3_embed_hits = Counter("home_ids_fp_stage3_embed_hits_total", "Al
 # autonomous vs human-approved," which the whole self-calibration system exists to grow
 # over time. Fixed small enum, safe cardinality.
 fp_engine_domains_immunized_total = Counter("home_ids_fp_domains_immunized_total", "Total unique eTLD+1 base domains added to the trust cache", ["source"])
-fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total automatic baseline sigma-widening adjustments applied to devices", ["device", "hostname", "source"])
+# Dashboard-redesign fix: this counter used to fire identically for BOTH directions of
+# _apply_sigma_shift() (widen on confirmed FP, tighten on confirmed threat), making it
+# impossible to tell "this device got more lenient" from "this device got stricter" from
+# the outside. Added "direction" (widen/tighten) -- backward compatible, existing
+# `sum by (source)` queries are unaffected since Prometheus ignores an unreferenced label.
+fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total automatic baseline sigma adjustments applied to devices (direction=widen: less sensitive after a confirmed FP; direction=tighten: more sensitive after a confirmed threat)", ["device", "hostname", "source", "direction"])
 
 # ===========================================================================
 # PHASE 18: Decision-Path Transparency (Brain 1 / HEE)
@@ -283,8 +288,14 @@ autotune_evidence_count = Gauge("home_ids_autotune_evidence_count", "Pooled corr
 # also start supplying a new disambiguating label, a bigger and riskier blast radius
 # than three small parallel metrics).
 autotune_arp_sweep_threshold_effective = Gauge("home_ids_autotune_arp_sweep_threshold_effective", "Live effective per-device arp_sweep_unique_targets_threshold, only set for devices with their own calibrated profile", ["device", "hostname"])
-autotune_arp_sweep_calibration_total = Gauge("home_ids_autotune_arp_sweep_calibration_total", "Cumulative arp-sweep-threshold calibration pass outcomes per device (applied/no_change_needed/insufficient_samples)", ["device", "outcome"])
-autotune_arp_sweep_evidence_count = Gauge("home_ids_autotune_arp_sweep_evidence_count", "Per-device CONNECTION_ABUSE correction/confirmation counts feeding arp-sweep threshold calibration", ["device", "kind"])
+# Dashboard redesign fix: "hostname" added -- metrics_sync.py's sync_relay_metrics()
+# already reads dev.get("hostname") into a local variable for the sibling
+# arp_sweep_threshold_effective gauge right above, it just wasn't threaded through to
+# these two as well. Without it, these couldn't be filtered by the $device dashboard
+# variable (whose own values are hostnames, from label_values(home_ids_threat_confidence,
+# hostname) -- same as every other per-device panel), only the fleet-wide table shown.
+autotune_arp_sweep_calibration_total = Gauge("home_ids_autotune_arp_sweep_calibration_total", "Cumulative arp-sweep-threshold calibration pass outcomes per device (applied/no_change_needed/insufficient_samples)", ["device", "hostname", "outcome"])
+autotune_arp_sweep_evidence_count = Gauge("home_ids_autotune_arp_sweep_evidence_count", "Per-device CONNECTION_ABUSE correction/confirmation counts feeding arp-sweep threshold calibration", ["device", "hostname", "kind"])
 
 # ===========================================================================
 # PHASE 21-METRICS: Reactive Capture (Fritzbox burst) Transparency
@@ -352,7 +363,35 @@ autotune_long_conn_threshold_effective = Gauge("home_ids_autotune_long_conn_thre
 # (not just the two above) -- closes the "no source label on corrections" gap noted in
 # context/metrics_audit_report_2026-08.md Sec.3 for the whole device-profile mechanism
 # at once, not just these two thresholds.
-autotune_device_profile_correction_total = Gauge("home_ids_autotune_device_profile_correction_total", "Cumulative reactive/calibration corrections applied to a device's learned-threshold profile via apply_device_fp_profile(), by threshold key and correction source", ["device", "key", "set_by"])
+# Dashboard redesign fix: "hostname" added, same reasoning as the two arp-sweep gauges
+# above -- metrics_sync.py already reads entry.get("hostname") into a local variable for
+# the sibling conn_abuse/long_conn gauges right above, just wasn't threaded through here.
+autotune_device_profile_correction_total = Gauge("home_ids_autotune_device_profile_correction_total", "Cumulative reactive/calibration corrections applied to a device's learned-threshold profile via apply_device_fp_profile(), by threshold key and correction source", ["device", "hostname", "key", "set_by"])
+
+# ===========================================================================
+# Dashboard redesign: full per-device self-healing/self-learning transparency
+# ===========================================================================
+# Every self-adaptive per-device mechanism in the codebase that previously only
+# produced a log line (or none at all) -- an audit found these while investigating why
+# the autonomous-behavior dashboards had no true per-device drill-down.
+transfer_learning_seeds_total = Counter("home_ids_transfer_learning_seeds_total", "New devices whose starting baselines were seeded from peer devices of the same device_type (cold-start transfer learning)", ["device_type"])
+identity_merges_total = Counter("home_ids_identity_merges_total", "Retroactive device-identity merges: a fragmented orphan device_id folded into its canonical identity", ["device", "hostname"])
+device_profile_discards_total = Counter("home_ids_device_profile_discards_total", "Per-device FP-calibration profiles discarded, by reason", ["reason"])
+identity_reidentify_migrations_total = Counter("home_ids_identity_reidentify_migrations_total", "DHCP/JA4-fingerprint MAC-rotation re-identifications: a device kept its identity across a MAC change", ["device", "hostname"])
+identity_reidentify_ambiguous_total = Counter("home_ids_identity_reidentify_ambiguous_total", "Re-identification candidates strong enough to log but below the merge-confidence bar -- a reactive capture is dispatched to try to resolve them", ["device", "hostname"])
+baseline_poisoning_transitions_total = Counter("home_ids_baseline_poisoning_transitions_total", "Device baseline poisoning state transitions (direction=entered: risk score crossed the poisoning threshold, baseline ingestion froze; direction=recovered: dropped back below it)", ["device", "hostname", "direction"])
+probation_transitions_total = Counter("home_ids_probation_transitions_total", "Device probation state transitions (direction=entered: new/reset baseline below the sample-count floor; direction=graduated: crossed it)", ["device", "hostname", "direction"])
+device_type_reclassifications_total = Counter("home_ids_device_type_reclassifications_total", "A device's inferred device_type changed after its very first classification (e.g. the 'laptop' cold-start fallback replaced once a real hostname resolved)", ["device", "hostname", "to_type"])
+# These 4 use "device" only (no "hostname") -- DeviceMLEngine (ml_engine.py) only ever
+# stores its own device_id, not a hostname, so that's genuinely all that's available at
+# the event site. Join against home_ids_threat_confidence's "device" label in Grafana if
+# a hostname is needed for display.
+ml_warmup_completions_total = Counter("home_ids_ml_warmup_completions_total", "Per-device anomaly model reached its warmup sample threshold and received its first fit", ["device"])
+ml_retrain_events_total = Counter("home_ids_ml_retrain_events_total", "Per-device anomaly model retrain cycles (every N new samples past warmup)", ["device"])
+ml_poisoning_rejections_total = Counter("home_ids_ml_poisoning_rejections_total", "Training samples rejected from a device's anomaly-model baseline during its post-confirmed-threat anti-poisoning window", ["device"])
+ml_model_invalidations_total = Counter("home_ids_ml_model_invalidations_total", "A device's anomaly model was discarded and reset due to feature-shape drift (stale/incompatible model)", ["device"])
+baseline_familiarity_entries_total = Gauge("home_ids_baseline_familiarity_entries_total", "Size of a device's learned port/ASN/domain behavioral-familiarity fingerprint (VERSION 11 per-device baseline)", ["device", "hostname"])
+retro_hunt_findings_by_device = Gauge("home_ids_retro_hunt_findings_by_device", "Per-device breakdown of cumulative retroactive threat-intel matches found by retro_hunter.py", ["device", "hostname"])
 
 # ===========================================================================
 # PHASE 30: Persistence-Escalation Transparency

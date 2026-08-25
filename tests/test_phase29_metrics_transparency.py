@@ -123,9 +123,9 @@ with tempfile.TemporaryDirectory() as tmpdir:
           "Phase D3 but was never synced before this)",
           gauge_value(autotune_arp_sweep_threshold_effective, device="dev_arp_test", hostname="arp-test-host") == 16.0)
     check("sync_relay_metrics() reads arp_sweep_calibration_outcomes into the new gauge",
-          gauge_value(autotune_arp_sweep_calibration_total, device="dev_arp_test", outcome="applied") == 1.0)
+          gauge_value(autotune_arp_sweep_calibration_total, device="dev_arp_test", hostname="arp-test-host", outcome="applied") == 1.0)
     check("sync_relay_metrics() reads arp_sweep_evidence_counts into the new gauge",
-          gauge_value(autotune_arp_sweep_evidence_count, device="dev_arp_test", kind="corrected") == 2.0)
+          gauge_value(autotune_arp_sweep_evidence_count, device="dev_arp_test", hostname="arp-test-host", kind="corrected") == 2.0)
     from metrics import autotune_evidence_count
     check("the existing global 'confirmed' evidence count (added earlier this session, "
           "inside the SAME evidence_counts dict as corrected/uncorrected) was already "

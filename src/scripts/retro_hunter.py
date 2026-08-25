@@ -56,6 +56,39 @@ def _send_telegram(msg: str) -> None:
     except Exception as e:
         LOGGER.error("Failed to send Telegram retro-hunt alert: %s", e)
 
+def _count_findings_by_device(state_dir: Path) -> dict:
+    """Per-device breakdown of retro-hunt findings, for the dashboard-redesign per-device
+    metric. Scoped to "local_intel_retro_match" records ONLY -- the other record type
+    ("retro_hunt_match", the external-ThreatIntel historical-domain re-scan) is
+    genuinely device-agnostic by construction: load_historical_domains() extracts a
+    fleet-wide SET of unique domains with no per-device attribution retained at all, so
+    there is no device to attribute those findings to. Returns {device_id: {"hostname":
+    str, "count": int}}."""
+    findings_path = state_dir / "retro_hunt_findings.jsonl"
+    if not findings_path.exists():
+        return {}
+    by_device: dict = {}
+    try:
+        with open(findings_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                if entry.get("type") != "local_intel_retro_match":
+                    continue
+                dev_id = entry.get("device_id")
+                if not dev_id or dev_id == "unknown":
+                    continue
+                bucket = by_device.setdefault(dev_id, {"hostname": entry.get("hostname") or "unknown", "count": 0})
+                bucket["count"] += 1
+    except Exception:
+        return {}
+    return by_device
+
 def _count_findings(state_dir: Path) -> int:
     """Cumulative retro-hunt match count, read straight from the append-only findings
     file itself rather than a separately-maintained running counter -- avoids any
@@ -281,7 +314,10 @@ def run_retro_hunt(days: int = 14) -> None:
         LOGGER.info("✅ No historical connections match the local confirmed-intel store.")
     local_intel.prune_expired()
 
-    write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={"findings_count": _count_findings(state_dir)})
+    write_job_health(state_dir, "retro_hunter", time.time() - run_start, extra={
+        "findings_count": _count_findings(state_dir),
+        "findings_by_device": _count_findings_by_device(state_dir),
+    })
 
 def main():
     parser = argparse.ArgumentParser(description="Retroactive Zero-Day Threat Hunter")

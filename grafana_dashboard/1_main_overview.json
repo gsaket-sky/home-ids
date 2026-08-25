@@ -465,7 +465,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 BYPASS",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 ONLINE",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -546,7 +563,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 OFFLINE",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 ONLINE",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -627,7 +661,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 NOT LOADED",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 LOADED",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -708,7 +759,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 UNAVAILABLE",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 ARMED",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -789,7 +857,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 UNAVAILABLE",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 ARMED",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -870,7 +955,24 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 DEGRADED",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 ALL ACTIVE",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
                 },
                 "overrides": []
               }
@@ -3402,6 +3504,39 @@
             }
           }
         }
+      },
+      "panel-9032": {
+        "kind": "Panel",
+        "spec": {
+          "id": 9032,
+          "title": "",
+          "description": "Caption for the subsystem status row below.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "🟢/ONLINE/ARMED = working right now. 🔴/OFFLINE/UNAVAILABLE = that specific layer is down -- the other containment layers keep working independently, hover any tile for exactly what to check.",
+                "mode": "markdown"
+              }
+            }
+          }
+        }
       }
     },
     "layout": {
@@ -3412,7 +3547,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 0,
+              "y": 2,
               "width": 4,
               "height": 7,
               "element": {
@@ -3425,7 +3560,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 4,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3438,7 +3573,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 7,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3451,7 +3586,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 10,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3464,7 +3599,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 13,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3477,7 +3612,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 16,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3490,7 +3625,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 19,
-              "y": 0,
+              "y": 2,
               "width": 2,
               "height": 7,
               "element": {
@@ -3503,7 +3638,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 21,
-              "y": 0,
+              "y": 2,
               "width": 3,
               "height": 7,
               "element": {
@@ -3516,7 +3651,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 7,
+              "y": 9,
               "width": 24,
               "height": 24,
               "element": {
@@ -3529,7 +3664,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 31,
+              "y": 33,
               "width": 24,
               "height": 4,
               "element": {
@@ -3542,7 +3677,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 35,
+              "y": 37,
               "width": 6,
               "height": 6,
               "element": {
@@ -3555,7 +3690,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 6,
-              "y": 35,
+              "y": 37,
               "width": 6,
               "height": 6,
               "element": {
@@ -3568,7 +3703,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 12,
-              "y": 35,
+              "y": 37,
               "width": 6,
               "height": 6,
               "element": {
@@ -3581,7 +3716,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 18,
-              "y": 35,
+              "y": 37,
               "width": 6,
               "height": 6,
               "element": {
@@ -3594,7 +3729,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 41,
+              "y": 43,
               "width": 24,
               "height": 12,
               "element": {
@@ -3607,7 +3742,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 53,
+              "y": 55,
               "width": 24,
               "height": 6,
               "element": {
@@ -3620,7 +3755,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 59,
+              "y": 61,
               "width": 12,
               "height": 8,
               "element": {
@@ -3633,7 +3768,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 12,
-              "y": 59,
+              "y": 61,
               "width": 12,
               "height": 8,
               "element": {
@@ -3646,7 +3781,7 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 67,
+              "y": 69,
               "width": 12,
               "height": 7,
               "element": {
@@ -3659,12 +3794,25 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 12,
-              "y": 67,
+              "y": 69,
               "width": 12,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-9031"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 0,
+              "width": 24,
+              "height": 2,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-9032"
               }
             }
           }

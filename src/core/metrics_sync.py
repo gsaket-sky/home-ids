@@ -54,6 +54,8 @@ from metrics import (
     ollama_deferred_last_run, ollama_validated_total,
     job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
     geo_country_marker,
+    baseline_poisoning_transitions_total, probation_transitions_total,
+    baseline_familiarity_entries_total, retro_hunt_findings_by_device,
 )
 from core.country_centroids import country_centroid
 import json
@@ -76,7 +78,21 @@ _DEVICE_GAUGES = (
     ndr_exfil_z_metric, ndr_delta_exfil_metric, abuseipdb_risk_metric,
     virustotal_risk_metric, beaconing_volume_metric, jitter_cv_metric,
     ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric,
-    ndr_arp_sweep_metric, ndr_dns_evasion_ratio_metric
+    ndr_arp_sweep_metric, ndr_dns_evasion_ratio_metric,
+    # BUGFIX (live Prometheus snapshot audit): these 7 are set with the identical
+    # (dev_id, hostname, device_type) label pattern as every metric above, via the
+    # same export_device_telemetry() call (see lines ~309-316) -- but were never
+    # added to this tuple, so _purge_stale_device_labels() never cleaned up their
+    # old hostname row when a dual/IPv6+IPv4-stack device's identity manager later
+    # reassigns it a different IP-as-hostname fallback. Confirmed live: a device
+    # showed a SINGLE row in threat_confidence (purged correctly) but THREE rows
+    # in killchain_phase for the same device -- one per link-local/ULA/IPv4 address
+    # it had been seen under -- purely because killchain_phase_metric was missing
+    # from this list, not because of any real state difference.
+    killchain_phase_metric, dns_txt_null_ratio_metric, suspicious_tld_ratio_metric,
+    outbound_bytes_1h_metric, beaconing_c2_1h_metric, dns_tunneling_domains_metric,
+    max_label_length_metric,
+    baseline_familiarity_entries_total,
 )
 
 
@@ -91,6 +107,14 @@ class MetricsExporter:
         # that hasn't changed since the last cycle, mirroring config.py's own live-watcher
         # mtime-check pattern instead of re-reading 3 tiny files every ~2s for nothing.
         self._relay_mtimes: Dict[str, float] = {}
+        # In-memory caches for #7/#8's transition-detection (dashboard redesign): the
+        # underlying poisoned/probation flags are stateless per-cycle recomputes with no
+        # memory of the previous value, so a transition (entered/recovered, entered/
+        # graduated) can only be detected here by comparing against the last-seen value.
+        # In-memory only (resets on service restart) -- these are informational counters,
+        # not security-critical state, so losing one transition across a restart is fine.
+        self._last_poisoned: Dict[str, bool] = {}
+        self._last_probation: Dict[str, bool] = {}
 
     def _get_metric_keys(self, metric) -> list:
         keys = []
@@ -186,6 +210,18 @@ class MetricsExporter:
         except Exception as exc:
             LOGGER.debug("Failed to garbage collect IPS metrics: %s", exc)
 
+    def _track_transition(self, cache: Dict[str, bool], device_id: str, hostname: str,
+                           current: bool, entered_label: str, exited_label: str, metric) -> None:
+        """Shared #7/#8 edge-detection helper. First-ever sighting of a device just seeds
+        the cache and does NOT count as a transition -- otherwise every device would
+        register a spurious "entered" event on the cycle right after a service restart
+        (cache empty) or the moment it's first created."""
+        previous = cache.get(device_id)
+        cache[device_id] = current
+        if previous is None or previous == current:
+            return
+        metric.labels(device=device_id, hostname=hostname, direction=(entered_label if current else exited_label)).inc()
+
     def export_device_telemetry(
         self,
         state: Any,
@@ -199,7 +235,8 @@ class MetricsExporter:
         is_safe: bool,
         is_poisoned: bool,
         current_threshold_limit: float,
-        decision: Dict[str, Any] = None
+        decision: Dict[str, Any] = None,
+        fp_engine: Any = None,
     ) -> None:
         try:
             str_dev_id = str(state.device_id)
@@ -229,9 +266,19 @@ class MetricsExporter:
 
             safe_device_metric.labels(str_dev_id, str_host, str_type).set(1.0 if is_safe else 0.0)
             baseline_poisoned_metric.labels(str_dev_id, str_host, str_type).set(1.0 if is_poisoned else 0.0)
-            
+            self._track_transition(self._last_poisoned, str_dev_id, str_host, is_poisoned,
+                                    "entered", "recovered", baseline_poisoning_transitions_total)
+
             rate_baseline_n = sum(getattr(state.rate_baseline, "n", [0, 0])) if hasattr(state, "rate_baseline") else 0
-            probation_status_metric.labels(str_dev_id, str_host, str_type).set(1.0 if rate_baseline_n < 288 else 0.0)
+            in_probation = rate_baseline_n < 288
+            probation_status_metric.labels(str_dev_id, str_host, str_type).set(1.0 if in_probation else 0.0)
+            self._track_transition(self._last_probation, str_dev_id, str_host, in_probation,
+                                    "entered", "graduated", probation_transitions_total)
+
+            if fp_engine is not None:
+                baseline_familiarity_entries_total.labels(str_dev_id, str_host).set(
+                    fp_engine.get_baseline_entry_count(str_dev_id)
+                )
 
             if decision:
                 threat_confidence_metric.labels(str_dev_id, str_host, str_type).set(decision.get("threat_confidence", 0.0))
@@ -289,7 +336,8 @@ class MetricsExporter:
             ndr_doh_bypass_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_doh_bypass", 0))
             ndr_lateral_moves_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_lateral_moves", 0))
             ndr_jitter_c2_metric.labels(str_dev_id, str_host, str_type).set(features.get("beaconing_c2_count", 0))
-            ndr_exfil_z_metric.labels(str_dev_id, str_host, str_type).set(features.get("outbound_bytes_z", 0.0))
+            outbound_bytes_z = max(-10.0, min(10.0, features.get("outbound_bytes_z", 0.0)))
+            ndr_exfil_z_metric.labels(str_dev_id, str_host, str_type).set(outbound_bytes_z)
             ndr_delta_exfil_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_outbound_bytes", 0.0))
             ndr_tcp_scan_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_s0_rej_count", 0))
             ndr_max_duration_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_max_duration", 0.0))
@@ -472,9 +520,9 @@ class MetricsExporter:
                     if "arp_sweep_effective" in dev:
                         autotune_arp_sweep_threshold_effective.labels(device=dev_id, hostname=hostname).set(dev["arp_sweep_effective"])
                     for outcome, count in dev.get("arp_sweep_calibration_outcomes", {}).items():
-                        autotune_arp_sweep_calibration_total.labels(device=dev_id, outcome=outcome).set(count)
+                        autotune_arp_sweep_calibration_total.labels(device=dev_id, hostname=hostname, outcome=outcome).set(count)
                     for kind, count in dev.get("arp_sweep_evidence_counts", {}).items():
-                        autotune_arp_sweep_evidence_count.labels(device=dev_id, kind=kind).set(count)
+                        autotune_arp_sweep_evidence_count.labels(device=dev_id, hostname=hostname, kind=kind).set(count)
             except Exception as exc:
                 LOGGER.debug("Failed to sync autotune relay metrics: %s", exc)
 
@@ -514,7 +562,7 @@ class MetricsExporter:
                         hostname = entry.get("hostname") or "unknown"
                         gauge.labels(device=dev_id, hostname=hostname).set(entry["value"])
                         autotune_device_profile_correction_total.labels(
-                            device=dev_id, key=key, set_by=entry.get("set_by", "unknown")
+                            device=dev_id, hostname=hostname, key=key, set_by=entry.get("set_by", "unknown")
                         ).set(entry.get("correction_count", 0))
             except Exception as exc:
                 LOGGER.debug("Failed to sync device-FP-profile relay metrics: %s", exc)
@@ -529,5 +577,12 @@ class MetricsExporter:
                         job_last_duration_seconds.labels(job=job_name).set(meta["duration_seconds"])
                     if job_name == "retro_hunter" and "findings_count" in meta:
                         retro_hunt_findings_total.set(meta["findings_count"])
+                    if job_name == "retro_hunter" and isinstance(meta.get("findings_by_device"), dict):
+                        for dev_id, entry in meta["findings_by_device"].items():
+                            if not isinstance(entry, dict) or "count" not in entry:
+                                continue
+                            retro_hunt_findings_by_device.labels(
+                                device=dev_id, hostname=entry.get("hostname", "unknown")
+                            ).set(entry["count"])
             except Exception as exc:
                 LOGGER.debug("Failed to sync job-health relay metrics: %s", exc)
