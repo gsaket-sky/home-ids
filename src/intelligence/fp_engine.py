@@ -72,6 +72,7 @@ from metrics import (
     fp_engine_sigma_shifts_total,
     local_confirmed_intel_size,
     local_confirmed_intel_hits_total,
+    device_profile_discards_total,
 )
 from intelligence.local_intel import LocalConfirmedIntel
 
@@ -1732,7 +1733,8 @@ class AutonomousFPEngine:
                 new_val = max(current - 0.50, -1.5)
             self._sigma_shifts[device_id] = new_val
 
-        fp_engine_sigma_shifts_total.labels(device=device_id, hostname=hostname, source=source).inc()
+        shift_direction = "widen" if direction == "TUNE_DOWN" else "tighten"
+        fp_engine_sigma_shifts_total.labels(device=device_id, hostname=hostname, source=source, direction=shift_direction).inc()
         self._save_sigma_shifts()
 
         if direction == "TUNE_DOWN":
@@ -1873,6 +1875,27 @@ class AutonomousFPEngine:
         except Exception:
             LOGGER.error("Failed to save device FP profiles.", exc_info=True)
 
+    def discard_device_profile(self, device_id: str, reason: str = "merge") -> bool:
+        """Drops a device's learned FP-calibration profile (suppress/arp-sweep/conn-abuse/
+        long-conn thresholds, baseline observations) entirely. Used by two callers: (1)
+        the device-identity fragmentation fix's merge_into_canonical(), for an orphan
+        device_id being folded into a richer canonical identity -- the orphan's learned
+        calibration is discarded, not blended, matching that fix's discard-not-blend
+        policy for all per-device state; (2) pipeline.py's ordinary prune_stale_devices()
+        eviction cleanup loop, closing a pre-existing gap where a pruned device's profile
+        stayed in device_fp_profiles.json forever with nothing to remove it (this store
+        had no migrate/discard function of any kind before this). Safe no-op, returns
+        False, if the device has no profile. `reason` ("merge" vs "prune") only
+        distinguishes which caller triggered this for dashboard transparency -- it has
+        no effect on behavior."""
+        with self._lock:
+            had_profile = self._device_fp_profiles.pop(device_id, None) is not None
+        if had_profile:
+            self._save_device_fp_profiles()
+            LOGGER.info("🔧 [FP ENGINE » DEVICE PROFILE] Discarded profile for %s.", device_id)
+            device_profile_discards_total.labels(reason=reason).inc()
+        return had_profile
+
     def _load_device_fp_profiles(self):
         path = self._state_dir / "device_fp_profiles.json"
         if not path.exists():
@@ -1961,6 +1984,19 @@ class AutonomousFPEngine:
                     count = int(entry.get("count", 0))
                     best = max(best, min(1.0, count / float(self._BASELINE_FAMILIARITY_OBSERVATIONS)))
         return best
+
+    def get_baseline_entry_count(self, device_id: str) -> int:
+        """Total distinct (port/ASN/domain) keys currently tracked in this device's
+        learned behavioral-familiarity baseline, across all three kinds -- a rough
+        size/maturity signal for the dashboard ("how much has this device's fingerprint
+        grown"), mirroring how home_ids_fp_trust_cache_size exposes the fleet-wide
+        trust-cache size but per-device instead. 0 for an unknown device or one with no
+        baseline entries yet."""
+        if not device_id or device_id == "unknown":
+            return 0
+        with self._lock:
+            baseline = self._device_fp_profiles.get(device_id, {}).get("_baseline", {})
+            return sum(len(bucket) for bucket in baseline.values())
 
     # ==========================================================================
     # TRUST CACHE PERSISTENCE

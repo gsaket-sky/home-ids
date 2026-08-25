@@ -22,6 +22,13 @@ import threading
 from typing import Optional, Any
 import time
 from config import CONFIG
+from metrics import (
+    ml_warmup_completions_total,
+    ml_retrain_events_total,
+    ml_poisoning_rejections_total,
+    ml_model_invalidations_total,
+    device_profile_discards_total,
+)
 LOGGER = logging.getLogger("home_ids.ml_engine")
 
 ML_FEATURE_KEYS = (
@@ -109,6 +116,7 @@ class DeviceMLEngine:
                 "🛡️ [ML ANTI-POISONING] Device %s: skipping training sample (within post-threat rejection window, %.0fs remaining)",
                 self.device_id, self._reject_until - time.time()
             )
+            ml_poisoning_rejections_total.labels(device=self.device_id).inc()
             return
 
         vec = self._extract_vector(features)
@@ -116,11 +124,13 @@ class DeviceMLEngine:
 
         if not self.warmed_up and len(self.training) >= CONFIG.get("ml_warmup_samples", 5000):
             LOGGER.info("Device %s reached warmup phase (%d samples). Initiating background fit.", self.device_id, len(self.training))
+            ml_warmup_completions_total.labels(device=self.device_id).inc()
             self._fit_background()
         elif self.warmed_up:
             self._samples_since_retrain += 1
             if self._samples_since_retrain >= _RETRAIN_N:
                 LOGGER.debug("Device %s reached retrain threshold (%d new samples). Retraining in background.", self.device_id, _RETRAIN_N)
+                ml_retrain_events_total.labels(device=self.device_id).inc()
                 self._fit_background()
 
     def reject_threat(self, features: dict):
@@ -183,6 +193,7 @@ class DeviceMLEngine:
                 "⚠️ [ML ENGINE] Feature count mismatch for device %s (model expected %d, got %d). Invalidating legacy model.",
                 self.device_id, model.n_features_in_, vec.shape[1]
             )
+            ml_model_invalidations_total.labels(device=self.device_id).inc()
             with self._fit_lock:
                 self.warmed_up = False
                 self.model = IsolationForest(contamination=0.01, random_state=42)
@@ -393,6 +404,31 @@ class MultiDeviceMLEngine:
 
         LOGGER.debug("Successfully migrated ML Engine state for %s to %s", old_id, new_id)
         return True
+
+    def discard_device(self, device_id: str, reason: str = "merge") -> bool:
+        """Drops a device's in-memory ML engine and deletes its on-disk model file, if
+        any. Used by the device-identity fragmentation fix's merge_into_canonical(): an
+        orphan device_id being folded into a richer canonical identity has its own
+        engine/model DISCARDED (not moved) since migrate_device()'s overwrite-the-
+        destination semantics would be wrong here — the destination (canonical_id)
+        already has its own live engine that must not be clobbered by the orphan's
+        near-empty one. Safe no-op if the device has no in-memory engine and no model
+        file on disk. `reason` ("merge" vs "prune") only distinguishes which caller
+        triggered this for dashboard transparency -- it has no effect on behavior."""
+        had_engine = self.devices.pop(device_id, None) is not None
+        removed_file = False
+        if self.model_dir:
+            model_path = self.model_dir / f"{device_id}.pkl"
+            if model_path.exists():
+                try:
+                    model_path.unlink()
+                    removed_file = True
+                except OSError as exc:
+                    LOGGER.error("Failed to remove discarded ML model file for %s: %s", device_id, exc)
+        if had_engine or removed_file:
+            LOGGER.info("Discarded ML Engine state for merged-away device %s (model file removed: %s)", device_id, removed_file)
+            device_profile_discards_total.labels(reason=reason).inc()
+        return had_engine or removed_file
 
     def save_models(self):
         if not self.model_dir:

@@ -196,6 +196,18 @@ DEFAULT_CONFIG = {
     "identity_reidentify_enabled": True,
     "identity_reidentify_min_confidence": 0.75,
     "identity_reidentify_window_seconds": 1800.0,
+
+    # Device-identity fragmentation fix: the LAN's own gateway/router IP. A router
+    # genuinely has multiple distinct physical MACs (one per LAN/WLAN/WAN interface), so
+    # MAC-based cross-address-family correlation (identity_reidentify_* above) can never
+    # fully unify it into one device_id on its own -- resolve_device_id() special-cases
+    # this exact IP to always resolve to one fixed canonical device_id instead. Default
+    # empty ("") so the special-case is inert until explicitly configured -- deliberately
+    # NOT auto-derived from fritzbox_router.fritz_ip, which is a Fritz!Box-mitigation-
+    # specific config value that happens to hold the same value on THIS deployment; kept
+    # decoupled so device-identity resolution doesn't implicitly depend on the Fritz!Box
+    # integration being configured/enabled.
+    "gateway_ip": "",
 }
 
 class LiveConfig:

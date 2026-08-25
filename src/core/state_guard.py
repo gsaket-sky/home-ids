@@ -27,6 +27,12 @@ from core.device_matching import (
     MIN_CANDIDATE_CONFIDENCE,
     AUTO_MERGE_CONFIDENCE,
 )
+from metrics import (
+    transfer_learning_seeds_total,
+    identity_merges_total,
+    identity_reidentify_migrations_total,
+    identity_reidentify_ambiguous_total,
+)
 
 LOGGER = logging.getLogger("home_ids.state_guard")
 
@@ -87,6 +93,15 @@ class StateManager:
         # pop_last_migrated_isolation_target() right after the get_or_create() call that
         # produced it, entirely outside any lock.
         self._last_migrated_isolation_target: Optional[Dict[str, str]] = None
+        # Consume-once side channel for a RETROACTIVE ORPHAN MERGE's cleanup info, same
+        # pattern as the two channels above. merge_into_canonical() (device-identity
+        # fragmentation fix) discards an orphan device_id's own state once its MAC/IP is
+        # discovered to already belong to a richer canonical identity -- callers with an
+        # evidence store / metrics exporter need the orphan's (device_id, hostname,
+        # device_type) to purge its now-stale evidence/metric rows. Kept separate from
+        # _last_migrated_isolation_target (which only carries mac/ip) rather than widening
+        # that struct for a caller its original mechanism doesn't need.
+        self._last_orphan_merge_cleanup: Optional[Dict[str, str]] = None
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -116,6 +131,26 @@ class StateManager:
             # caller a dangling reference.
             if dev_id and dev_id not in self._states:
                 del self._mac_to_device_id[mac_address]
+                return None
+            return dev_id
+
+    def get_device_id_for_ip(self, ip: str) -> Optional[str]:
+        """Returns the device_id an IP is CURRENTLY tracked under (via the reverse
+        _ip_to_device_id index), or None if this IP has never been seen. Used by the
+        device-identity fragmentation fix: identity.py's resolve_device_id() can mint a
+        DIFFERENT (MAC-anchored) device_id for the same client_ip once that IP's MAC
+        becomes known -- this lets the caller detect that an orphan device_id already
+        exists for the IP and merge it into the newly-resolved canonical one, instead of
+        silently leaving the orphan permanently disconnected (the actual fragmentation
+        bug). Same self-healing guard as get_device_id_for_mac() -- a stale mapping to a
+        since-pruned/merged device_id is treated as "not tracked" rather than handed back
+        as a dangling reference, and the stale entry is cleaned up in the process."""
+        if not ip or ip == "unknown":
+            return None
+        with self._global_lock:
+            dev_id = self._ip_to_device_id.get(ip)
+            if dev_id and dev_id not in self._states:
+                del self._ip_to_device_id[ip]
                 return None
             return dev_id
 
@@ -170,6 +205,7 @@ class StateManager:
                         "new_device_id": device_id, "candidate_id": best_candidate_id,
                         "confidence": best_conf, "ts": time.time(),
                     }
+                    identity_reidentify_ambiguous_total.labels(device=device_id, hostname=hostname or "unknown").inc()
                 if matched_old_id:
                     self.migrate_device_id(matched_old_id, device_id, ml_registry=ml_registry)
                     state = self._states[device_id]
@@ -192,6 +228,7 @@ class StateManager:
                         "DHCP/JA4/hostname fingerprint, treating as a MAC rotation of a known "
                         "device rather than a cold start.", matched_old_id, device_id, hostname, client_ip
                     )
+                    identity_reidentify_migrations_total.labels(device=device_id, hostname=hostname or "unknown").inc()
                     self._prune_lru_capacity()
                     return state
 
@@ -209,6 +246,7 @@ class StateManager:
             peer_states = [s for s in self._states.values() if getattr(s, "device_type", "") == dev_type and sum(getattr(s.rate_baseline, "n", [0])) >= 10]
             if peer_states:
                 LOGGER.info("🌱 [TRANSFER LEARNING] Seeding initial baselines for new %s (%s) from %d peer %s profiles", hostname, dev_type, len(peer_states), dev_type)
+                transfer_learning_seeds_total.labels(device_type=dev_type or "unknown").inc()
                 try:
                     for hour in range(24):
                         peer_rate = sum(p.rate_baseline.get_stats(hour)[0] for p in peer_states) / len(peer_states)
@@ -302,6 +340,20 @@ class StateManager:
             self._last_migrated_isolation_target = None
             return val
 
+    def pop_last_orphan_merge_cleanup(self) -> Optional[Dict[str, str]]:
+        """Consume-once accessor for the "a retroactive orphan merge just discarded this
+        device_id" cleanup side channel (see __init__'s comment). Returns None if
+        nothing's pending, or {"orphan_id", "orphan_hostname", "orphan_device_type",
+        "canonical_id"} identifying the just-discarded orphan — a caller with an
+        evidence store / metrics exporter should purge the orphan's now-stale
+        evidence/metric rows using this info. Clears the value either way so a caller
+        that doesn't check every cycle can't act on a stale result from a much earlier
+        merge."""
+        with self._global_lock:
+            val = self._last_orphan_merge_cleanup
+            self._last_orphan_merge_cleanup = None
+            return val
+
     def has_device(self, device_id: str) -> bool:
         with self._global_lock:
             return device_id in self._states
@@ -339,11 +391,7 @@ class StateManager:
             # (which only fires on a lookup that lands on a since-removed id) — a stale
             # window where a MAC-based cross-address-family lookup could still resolve
             # to the pre-migration id instead of following the migration immediately.
-            # Scans the index itself (not just old_state.mac_address) so this stays
-            # correct even if a device somehow accumulated more than one bound MAC.
-            for mac_key, mapped_id in list(self._mac_to_device_id.items()):
-                if mapped_id == old_id:
-                    self._mac_to_device_id[mac_key] = new_id
+            self._repoint_mac_index(old_id, new_id)
             mac = getattr(old_state, "mac_address", "unknown")
             if mac and mac != "unknown":
                 self._mac_to_device_id[mac] = new_id
@@ -355,6 +403,120 @@ class StateManager:
 
         if ml_registry is not None:
             ml_registry.migrate_device(old_id, new_id)
+        return True
+
+    def _repoint_mac_index(self, old_id: str, new_id: str) -> None:
+        """Repoints every _mac_to_device_id entry currently mapped to old_id so it maps
+        to new_id instead. Scans the index itself (not just one state's own
+        mac_address field) so this stays correct even if a device somehow accumulated
+        more than one bound MAC. Shared by migrate_device_id() (DHCP/JA4-fingerprint
+        re-identify merge) and merge_into_canonical() (retroactive orphan merge) — the
+        one piece of index bookkeeping that's identical between those two otherwise
+        differently-shaped operations. Must be called with self._global_lock already
+        held."""
+        for mac_key, mapped_id in list(self._mac_to_device_id.items()):
+            if mapped_id == old_id:
+                self._mac_to_device_id[mac_key] = new_id
+
+    def merge_into_canonical(self, orphan_id: str, canonical_id: str,
+                              ml_registry: Any = None, fp_engine: Any = None) -> bool:
+        """Folds an ORPHAN device_id into an already-existing, richer CANONICAL identity
+        -- the opposite direction from migrate_device_id(). migrate_device_id() assumes
+        its destination (new_id) does NOT already exist yet (it overwrites
+        self._states[new_id] with the old state — correct for "this device just rotated
+        identity, continue its history under a fresh id"). That would be DESTRUCTIVE
+        here: canonical_id already has its own accumulated baselines/history that must
+        survive untouched. This is the device-identity fragmentation fix's core
+        primitive — see identity.py's _merge_orphan_if_fragmented() for the trigger
+        condition (a client_ip's newly-resolved MAC-anchored device_id differs from the
+        device_id that IP was already tracked under) and
+        src/merge_fragmented_devices.py for the offline one-time cleanup script that
+        also calls this directly against the on-disk state file.
+
+        Per explicit product decision: the orphan's OWN accumulated state (baselines,
+        evidence, learned thresholds) is DISCARDED, not blended into the canonical
+        identity's — the orphan is typically far sparser (cold-started with
+        hostname/mac unresolved) than the canonical identity it's being folded into.
+        Only its identifying pointers (known_ips, MAC bindings, blocked-domain
+        attribution) are redirected so future traffic and existing operator-facing
+        records correctly resolve to the canonical id.
+
+        Idempotent / safe: a no-op returning False if canonical_id isn't a currently
+        tracked device, if orphan_id == canonical_id, or if orphan_id isn't currently
+        tracked (e.g. this exact merge already ran once)."""
+        with self._global_lock:
+            if canonical_id not in self._states:
+                LOGGER.warning(
+                    "merge_into_canonical() aborted: canonical_id %s is not a currently "
+                    "tracked device (orphan_id=%s left untouched).", canonical_id, orphan_id
+                )
+                return False
+            if orphan_id == canonical_id or orphan_id not in self._states:
+                return False
+
+            orphan_state = self._states[orphan_id]
+            canonical_state = self._states[canonical_id]
+
+            # Redirect every address the orphan was known at (its accumulated known_ips
+            # plus its own client_ip, in case client_ip hasn't made it into known_ips
+            # yet) to resolve to the canonical id from now on, and fold those addresses
+            # into the canonical identity's own known_ips so future feature/evidence
+            # aggregation (which reads state.known_ips) sees the full picture.
+            orphan_ips = set(getattr(orphan_state, "known_ips", None) or [])
+            orphan_client_ip = getattr(orphan_state, "client_ip", "")
+            if orphan_client_ip and orphan_client_ip != "unknown":
+                orphan_ips.add(orphan_client_ip)
+            for ip in orphan_ips:
+                self._ip_to_device_id[ip] = canonical_id
+                canonical_state.known_ips.add(ip)
+
+            # Redirect the MAC-correlation index the same way migrate_device_id() does.
+            self._repoint_mac_index(orphan_id, canonical_id)
+            orphan_mac = getattr(orphan_state, "mac_address", "unknown")
+            if orphan_mac and orphan_mac != "unknown":
+                self._mac_to_device_id[orphan_mac] = canonical_id
+
+            # Reattribute any Pi-hole domain-block records that were tagged with the
+            # orphan's device_id/hostname so their "which device caused this" display
+            # doesn't point at a dead id after the merge. blocked_domains is keyed by
+            # domain string with device_id as metadata only — a pure relabel, no
+            # functional block/release behavior change (release-by-identifier already
+            # also matches on IP/MAC/hostname, not just device_id).
+            canonical_hostname = getattr(canonical_state, "hostname", "unknown")
+            for meta in self._ips_state.get("blocked_domains", {}).values():
+                if meta.get("device_id") == orphan_id:
+                    meta["device_id"] = canonical_id
+                    if canonical_hostname and canonical_hostname != "unknown":
+                        meta["hostname"] = canonical_hostname
+
+            # Capture the orphan's OLD mac/ip before discarding its state, and reuse the
+            # existing isolation-release side channel — identity.py's
+            # _release_stale_isolation_if_merged() needs zero changes to pick this up.
+            self._last_migrated_isolation_target = {
+                "mac_addr": orphan_mac or "unknown",
+                "ip_addr": orphan_client_ip or "unknown",
+            }
+            self._last_orphan_merge_cleanup = {
+                "orphan_id": orphan_id,
+                "orphan_hostname": getattr(orphan_state, "hostname", "unknown"),
+                "orphan_device_type": getattr(orphan_state, "device_type", "unknown"),
+                "canonical_id": canonical_id,
+            }
+
+            # Discard the orphan's own DeviceState per the discard-not-blend decision.
+            del self._states[orphan_id]
+            self._states.move_to_end(canonical_id)
+
+            LOGGER.warning(
+                "🔗 IDENTITY MERGE (retroactive): orphan %s discarded, %d address(es) "
+                "redirected to canonical %s (%s)", orphan_id, len(orphan_ips), canonical_id, canonical_hostname
+            )
+            identity_merges_total.labels(device=canonical_id, hostname=canonical_hostname or "unknown").inc()
+
+        if ml_registry is not None:
+            ml_registry.discard_device(orphan_id, reason="merge")
+        if fp_engine is not None:
+            fp_engine.discard_device_profile(orphan_id, reason="merge")
         return True
 
     def get_all_device_ids(self) -> List[str]:
@@ -511,9 +673,19 @@ class StateManager:
                 last_active = max(getattr(state, "last_alert_time", 0.0), getattr(state, "last_baseline_update", 0.0))
                 if last_active > 0 and (now - last_active) > max_idle_seconds:
                     pruned_devices.append((dev_id, state.hostname, state.device_type))
+                    # BUGFIX (device-identity fragmentation audit): this used to only clear
+                    # the single client_ip entry, leaving every OTHER address in this
+                    # device's known_ips dangling in _ip_to_device_id (self-healing on next
+                    # lookup via get_device_id_for_ip()/get_device_id_for_mac()'s stale-
+                    # mapping guards, but a real, needless leak in the meantime). Clear
+                    # every known address, not just the most-recent one.
+                    addrs_to_clear = set(getattr(state, "known_ips", None) or [])
                     client_ip = getattr(state, "client_ip", "")
-                    if client_ip in self._ip_to_device_id:
-                        del self._ip_to_device_id[client_ip]
+                    if client_ip:
+                        addrs_to_clear.add(client_ip)
+                    for ip in addrs_to_clear:
+                        if ip in self._ip_to_device_id:
+                            del self._ip_to_device_id[ip]
                     del self._states[dev_id]
 
         if pruned_devices:

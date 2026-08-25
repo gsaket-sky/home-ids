@@ -22,6 +22,7 @@ from typing import Optional, List, Dict, Set, Any, Tuple
 from utils import sanitize_hostname, infer_device_type
 from core.state_guard import StateManager
 from core.device_matching import AUTO_MERGE_CONFIDENCE
+from metrics import device_type_reclassifications_total
 
 LOGGER = logging.getLogger("home_ids.identity")
 
@@ -151,6 +152,23 @@ class DeviceIdentityManager:
         return hostname
 
     def resolve_device_id(self, client_ip: str, mac_addr: Optional[str] = None, hostname: Optional[str] = None) -> str:
+        # DEVICE-IDENTITY FRAGMENTATION FIX (router special-case): a router genuinely has
+        # multiple distinct physical MACs (one per LAN/WLAN/WAN interface), so the
+        # MAC-first branch below can never fully unify it into one device_id -- its
+        # different interfaces would keep minting separate identities even with the
+        # retroactive-merge fix (_merge_orphan_if_fragmented(), see process_dns_identities()
+        # below) in place. Pin the configured gateway IP to one fixed canonical device_id
+        # instead, checked BEFORE the MAC-first branch so it always wins for this one
+        # address regardless of which MAC happens to be resolved for it. Uses the exact
+        # same hash formula the ordinary trackable-local-IP branch below would already
+        # produce for this literal IP, so a deployment upgrading into this fix sees zero
+        # device_id churn for the router's existing gateway-IP identity. Inert (returns
+        # nothing here, falls through to the normal branches) when gateway_ip is unset —
+        # safe default for any other deployment of this codebase.
+        gateway_ip = self.config.get("gateway_ip", "")
+        if gateway_ip and client_ip == gateway_ip:
+            return stable_device_id(gateway_ip)
+
         # PHASE 6 FIX (cross-address-family correlation): if this MAC address is already
         # bound to a known device_id — most commonly because we've already seen this same
         # physical device's IPv4 side (via DHCPv4, or now via Zeek's mac-logging.zeek
@@ -180,7 +198,8 @@ class DeviceIdentityManager:
         return stable_device_id(client_ip)
 
     def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
-                                ips_mitigator: Any = None) -> List[str]:
+                                ips_mitigator: Any = None, fp_engine: Any = None,
+                                evidence_store: Any = None, metrics_exporter: Any = None) -> List[str]:
         if not dns_rows:
             return []
 
@@ -206,6 +225,12 @@ class DeviceIdentityManager:
             mac_addr, hostname = self._enrich_from_cache(client_ip, mac_addr, hostname)
 
             dev_id = self.resolve_device_id(client_ip, mac_addr, hostname)
+            # DEVICE-IDENTITY FRAGMENTATION FIX: dev_id may differ from a device_id this
+            # exact client_ip was ALREADY tracked under (e.g. its MAC just became known
+            # for the first time and resolves to a different, richer canonical identity)
+            # -- fold that now-orphaned identity in before creating/reusing dev_id below.
+            self._merge_orphan_if_fragmented(client_ip, dev_id, ml_registry, fp_engine,
+                                              ips_mitigator, evidence_store, metrics_exporter)
             # PHASE 6: publish/refresh the MAC->device_id binding as soon as we know it, so
             # the NEXT address family (or the next batch's IPv6 row for this same device)
             # can find it via resolve_device_id()'s MAC-first check above.
@@ -259,6 +284,55 @@ class DeviceIdentityManager:
             return
         ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
 
+    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
+                                     ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> None:
+        """DEVICE-IDENTITY FRAGMENTATION FIX: resolve_device_id() can return a DIFFERENT
+        device_id for client_ip than whatever it was already tracked under -- most
+        commonly because this IP's MAC just became known and resolves (via the MAC-first
+        branch) to a richer, already-established canonical identity, while this exact IP
+        was previously cold-started under its own IP-anchored device_id before that MAC
+        was known. Without this, that earlier device_id is permanently orphaned: nothing
+        ever points traffic, evidence, or containment at it again, but it also never gets
+        folded into the canonical identity it actually belongs to (confirmed live: 24
+        such fragmented groups across 60 of 88 tracked devices in one real deployment).
+
+        Only fires for the actual fragmentation scenario: get_device_id_for_ip(client_ip)
+        returns None (this IP has never been tracked) or the SAME id resolve_device_id()
+        just returned (the ordinary, non-fragmented case) in every other situation --
+        identical to today's behavior when nothing is actually orphaned.
+
+        Called BEFORE bind_mac()/get_or_create() run for this row, so dev_id is already
+        the final canonical id by the time either of those touch it."""
+        orphan_id = self.state_manager.get_device_id_for_ip(client_ip)
+        if not orphan_id or orphan_id == dev_id:
+            return
+        merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, fp_engine=fp_engine)
+        if not merged:
+            return
+        LOGGER.warning(
+            "🔗 RETROACTIVE IDENTITY MERGE: orphan %s folded into canonical %s (ip=%s) -- "
+            "its own accumulated state was discarded per merge policy, not blended.",
+            orphan_id, dev_id, client_ip
+        )
+        self._release_stale_isolation_if_merged(ips_mitigator)
+        self._cleanup_merged_orphan(evidence_store, metrics_exporter)
+
+    def _cleanup_merged_orphan(self, evidence_store: Any, metrics_exporter: Any) -> None:
+        """Consumes the orphan-merge cleanup side channel set by merge_into_canonical()
+        (via _merge_orphan_if_fragmented() above) and purges the discarded orphan's
+        now-stale evidence/metric rows. Mirrors _release_stale_isolation_if_merged()'s
+        own consume-once, no-op-if-nothing-pending, no-op-if-collaborator-not-supplied
+        style exactly."""
+        info = self.state_manager.pop_last_orphan_merge_cleanup()
+        if not info:
+            return
+        if evidence_store is not None:
+            evidence_store.clear_device(info["orphan_id"])
+        if metrics_exporter is not None:
+            metrics_exporter.remove_device_metric_labels(
+                info["orphan_id"], info["orphan_hostname"], info["orphan_device_type"]
+            )
+
     def _refresh_identity_signals(self, locked_state: Any, mac_addr: str, client_ip: str,
                                     hostname: str, zeek_fx: Any, overwrite_hostname: bool = True) -> None:
         """Updates the mutable per-cycle identity fields on an already-locked DeviceState:
@@ -284,7 +358,8 @@ class DeviceIdentityManager:
                 locked_state.ja4_seen.add(ja4_hash)
 
     def process_zeek_identities(self, zeek_events: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
-                                 ips_mitigator: Any = None) -> List[str]:
+                                 ips_mitigator: Any = None, fp_engine: Any = None,
+                                 evidence_store: Any = None, metrics_exporter: Any = None) -> List[str]:
         if not zeek_events:
             return []
 
@@ -309,6 +384,10 @@ class DeviceIdentityManager:
             mac_addr, hostname = self._enrich_from_cache(src_ip, mac_addr, hostname)
 
             dev_id = self.resolve_device_id(src_ip, mac_addr, hostname)
+            # DEVICE-IDENTITY FRAGMENTATION FIX: see matching comment in
+            # process_dns_identities() above.
+            self._merge_orphan_if_fragmented(src_ip, dev_id, ml_registry, fp_engine,
+                                              ips_mitigator, evidence_store, metrics_exporter)
             # PHASE 6: see matching comment in process_dns_identities() above.
             if mac_addr and mac_addr != "unknown":
                 self.state_manager.bind_mac(mac_addr, dev_id)
@@ -352,6 +431,31 @@ class DeviceIdentityManager:
                     state.device_type = dtype
                     state.device_type_is_override = True
                     return
-        if getattr(state, "device_type", "unknown") == "unknown":
-            state.device_type = infer_device_type(hostname)
+        # BUGFIX (found via the device-identity-merge cleanup script's real output): this
+        # used to only re-infer when device_type was still the literal string "unknown" --
+        # but infer_device_type() (utils.py) NEVER returns "unknown"; its own final
+        # fallback is "laptop". So this branch could only ever fire ONCE, on a device's
+        # very first apply_device_type() call (before device_type has been set at all).
+        # A device whose real hostname resolves on a LATER cycle than its first sighting
+        # (the common case -- e.g. a router first seen via an address with no hostname
+        # yet) was PERMANENTLY stuck with whatever infer_device_type("unknown") produced
+        # at cold-start ("laptop"), even after its real hostname became known. Confirmed
+        # live: a router's canonical identity (post device-identity-fragmentation-merge)
+        # still showed device_type="laptop" despite hostname="home-router" having been
+        # known for hours. Re-infer whenever the CURRENT value isn't an explicit operator
+        # override (device_type_is_override reused exactly for this distinction) instead
+        # of only when it's literally unset -- a stable hostname always re-infers to the
+        # same classification, so this is idempotent/self-correcting, not flapping.
+        if not getattr(state, "device_type_is_override", False):
+            new_type = infer_device_type(hostname)
+            old_type = getattr(state, "device_type", None)
+            # Dashboard-redesign metric: only counts an ACTUAL change of the stored
+            # value (e.g. the DeviceState constructor's cold-start guess or an earlier
+            # inference giving way to a hostname-informed one) -- a stable hostname
+            # always re-infers to the same type per the fix above, so this doesn't flap.
+            if old_type and old_type != new_type:
+                device_type_reclassifications_total.labels(
+                    device=device_id, hostname=hostname or "unknown", to_type=new_type
+                ).inc()
+            state.device_type = new_type
             state.device_type_is_override = False

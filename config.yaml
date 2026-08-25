@@ -366,6 +366,15 @@ device_identity:
   # merging after last being seen. Default 1800 = 30 min. [LIVE]
   identity_reidentify_window_seconds: 1800.0
 
+  # Your LAN's own gateway/router IP. A router genuinely has multiple distinct
+  # physical MACs (LAN/WLAN/WAN interfaces), so MAC-based correlation above can
+  # never fully unify it into one device_id on its own -- this pins it to one
+  # fixed canonical device_id instead. Same value as fritzbox_router.fritz_ip
+  # below on this deployment, but kept as its own key so device-identity
+  # resolution doesn't implicitly depend on the Fritz!Box integration being
+  # configured. Leave blank ("") to disable this special-case. [LIVE]
+  gateway_ip: 192.168.1.1
+
 
 # -----------------------------------------------------------------------------
 # geofencing — block traffic to specific countries by GeoIP
