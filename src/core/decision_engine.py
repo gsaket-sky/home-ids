@@ -171,7 +171,7 @@ class DecisionEngine:
             explanation = "Confirmed Malicious IOC"
             threat_confidence = 0.99
             decision_path = "tier5_confirmed"
-            
+
         elif attack_score > benign_score and attack_score >= 2.0:
             explanation = hyp_results["attack"]["name"]
             if num_independent_sources >= 2 and attack_score >= 3.0:
@@ -210,6 +210,66 @@ class DecisionEngine:
 
         trail.append(f"Verdict: {state} / {action} — {explanation} (confidence={threat_confidence:.2f})")
 
+        # SHADOW MODE (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): computed alongside
+        # the real verdict above, never substituted for it here -- state/action/explanation
+        # returned below are UNCHANGED by any of this. Combines both fixes found via a
+        # third-party review + live verification:
+        #   Gap 1 (rep.verified_ioc): tier==5 currently fires identically whether it came
+        #   from a genuine curated-feed IOC match (ti_score) or an aggregate VT/AbuseIPDB
+        #   score alone. Backtest (scripts/shadow_backtest.py, 80 historical "Confirmed
+        #   Malicious IOC" alerts): verified_ioc was True for ZERO of them. A live example
+        #   also showed "corroborating evidence exists" (num_independent_sources>=1) being
+        #   treated as equivalent to "the evidence supports an attack conclusion" when the
+        #   competing BENIGN hypothesis actually scored higher -- attack_wins closes that.
+        #   Gap 2 (shadow_attack_score/name, from HypothesisEngine.evaluate_all()):
+        #   NetworkIntrusionHypothesis.evaluate() currently weighs a generic Zeek `weird`
+        #   notice identically to a real malicious JA3/JA4 TLS fingerprint match under one
+        #   `has_malicious_tls` boolean -- evaluate_shadow() splits them. Only relevant when
+        #   NETWORK_INTRUSION was (or would become) the winning attack hypothesis.
+        # Hard-stops (honeypot/arp_spoof/geofence/confirmed_exploit) are untouched by either
+        # gap -- reused directly from the live computation above rather than recomputed.
+        shadow_attack = hyp_results.get("shadow_attack", hyp_results["attack"])
+        shadow_attack_name = shadow_attack["name"]
+        shadow_attack_score = shadow_attack["score"]
+
+        if has_honeypot or has_arp_spoof or has_geofence or has_confirmed_exploit:
+            shadow_state, shadow_explanation, shadow_decision_path = state, explanation, decision_path
+        elif rep.tier == 5:
+            if rep.verified_ioc:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.CRITICAL, "Confirmed Malicious IOC", "tier5_confirmed"
+                )
+            elif num_independent_sources >= 1 and shadow_attack_score > benign_score:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.CRITICAL, "Corroborated Reputation Signal", "tier5_corroborated"
+                )
+            else:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.HIGH, "Strong Reputation Signal (Uncorroborated)", "tier5_uncorroborated"
+                )
+        elif shadow_attack_score > benign_score and shadow_attack_score >= 2.0:
+            if num_independent_sources >= 2 and shadow_attack_score >= 3.0:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.HIGH, shadow_attack_name, "hypothesis_high"
+                )
+            else:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.SUSPICIOUS, shadow_attack_name, "hypothesis_suspicious"
+                )
+        elif rep.tier == 4 and max(rep_vt, rep_ti, rep_abuse) >= 1.5:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed)", "tier4_unconfirmed"
+            )
+        elif any(e.type == "ml_anomaly" and e.value > 0.90 for e in ev_store):
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.ANOMALOUS, "ML Anomaly Only", "ml_anomaly"
+            )
+        else:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.BENIGN, hyp_results["benign"]["name"], "benign"
+            )
+        shadow_changed = shadow_decision_path != decision_path or shadow_explanation != explanation
+
         return {
             "state": state,
             "action": action,
@@ -221,4 +281,8 @@ class DecisionEngine:
             "hypothesis_weight": hypothesis_weight,
             "reasoning_trail": trail,
             "decision_path": decision_path,
+            "shadow_state": shadow_state,
+            "shadow_explanation": shadow_explanation,
+            "shadow_decision_path": shadow_decision_path,
+            "shadow_changed": shadow_changed,
         }

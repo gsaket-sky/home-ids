@@ -25,6 +25,15 @@ class ReputationVector:
     cl_afpe_similarity: float = 0.0
     first_seen: bool = False
     source_confidence: str = "medium"
+    # SHADOW-MODE GAP 1 (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): True only when
+    # tier 5 was reached via ti_score (a genuine curated-feed IOC match -- Feodo/ThreatFox/
+    # OTX), never via vt_score/abuse_score alone. Currently READ ONLY by decision_engine.py's
+    # shadow computation (does not change the live tier==5 branch's behavior yet) -- see
+    # that file's own comment for why. Verified via a live backtest
+    # (scripts/shadow_backtest.py against state/alerts.json): of 80 historical
+    # "Confirmed Malicious IOC" alerts, ti_score > 2.0 was true for ZERO of them -- every
+    # single one was VT/AbuseIPDB aggregate-score-only.
+    verified_ioc: bool = False
 
 def _suffix_or_domain_match(domain: str, pattern: str) -> bool:
     """PHASE 0 FIX: boundary-safe tier matching. The old `domain.endswith(pattern)` check
@@ -110,9 +119,11 @@ class ReputationClassifier:
         # being escalatable this way. Only an still-unclassified (tier 3) domain/IP can be
         # promoted by a reputation hit now -- an explicit safe classification is a floor,
         # not a suggestion.
+        verified_ioc = False
         if tier == 3:
             if confirmed_ioc:
                 tier = 5
+                verified_ioc = ti_score > 2.0
             elif weak_signal:
                 tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
                          # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).
@@ -126,5 +137,6 @@ class ReputationClassifier:
             abuse_risk=abuse_score,
             cl_afpe_similarity=afpe_score,
             first_seen=is_new,
-            source_confidence="high" if tier in (0,1,5) else "medium"
+            source_confidence="high" if tier in (0,1,5) else "medium",
+            verified_ioc=verified_ioc,
         )

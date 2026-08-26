@@ -66,26 +66,52 @@ class NetworkIntrusionHypothesis(Hypothesis):
         super().__init__("NETWORK_INTRUSION")
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
+        return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=False)
+
+    def evaluate_shadow(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
+        """SHADOW MODE (Gap 2, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): never called
+        by the live HypothesisEngine.evaluate_all() path -- only by its own shadow
+        computation (see that method below). Splits `has_malicious_tls` so a genuine
+        JA3/JA4 malware-TLS-fingerprint match is no longer weighted identically to ANY
+        Zeek `weird.log` policy notice -- most weird types are protocol edge-cases, not
+        malware indicators (third-party review finding: "don't let Zeek weird become
+        confirmed malicious"). A zeek_notice can still corroborate a genuine signal
+        (partial credit, capped below the 2-of-3 "strong" bar), it just can no longer
+        pose as equivalent to a cryptographic fingerprint match on its own."""
+        return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=True)
+
+    def _evaluate_impl(self, ev_store: List[Evidence], rep_vector: ReputationVector, use_gap2_fix: bool) -> float:
         self._reset_eval_state()
         # Check requirements: Zeek evidence
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
-        has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
-        # BUGFIX (live audit): a single genuinely-new MAC flip on an IP (zeek_features.py's
-        # _bind_mac()) is now corroboration-required weak evidence, not an instant
-        # zero-corroboration hard-stop -- a lone flip is also the normal signature of
-        # MAC-randomization ("private Wi-Fi address") reconnecting/roaming. A second
-        # genuine flip within the same 600s window still hard-stops directly
-        # (decision_engine.py's has_arp_spoof, unaffected by this). This weak single-flip
-        # case needs a second independent source, same as every other hypothesis here.
+        if use_gap2_fix:
+            has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4") for e in ev_store)
+            has_notable_notice = any(e.type == "zeek_notice" for e in ev_store)
+        else:
+            # BUGFIX (live audit): a single genuinely-new MAC flip on an IP (zeek_features.py's
+            # _bind_mac()) is now corroboration-required weak evidence, not an instant
+            # zero-corroboration hard-stop -- a lone flip is also the normal signature of
+            # MAC-randomization ("private Wi-Fi address") reconnecting/roaming. A second
+            # genuine flip within the same 600s window still hard-stops directly
+            # (decision_engine.py's has_arp_spoof, unaffected by this). This weak single-flip
+            # case needs a second independent source, same as every other hypothesis here.
+            has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
+            has_notable_notice = False
         has_mac_flip = any(e.type == "arp_spoof_pending" for e in ev_store)
 
-        self.required_satisfied = has_lateral_scan or has_malicious_tls or has_mac_flip
+        self.required_satisfied = has_lateral_scan or has_malicious_tls or has_mac_flip or has_notable_notice
         if not self.required_satisfied:
             return 0.0
 
         # Strong
-        if sum([has_lateral_scan, has_malicious_tls, has_mac_flip]) >= 2:
+        strong_count = sum([has_lateral_scan, has_malicious_tls, has_mac_flip])
+        if strong_count >= 2:
             self.strong_score += 1.0
+        elif use_gap2_fix and has_notable_notice and strong_count >= 1:
+            # A weird notice alongside ONE other real signal is worth partial credit --
+            # capped below the >0.5 "High" bar on its own (see below), never a full
+            # substitute for a second genuinely strong signal.
+            self.strong_score += 0.5
 
         # Contradicting
         if rep_vector.tier in (1, 2):
@@ -510,8 +536,9 @@ class DeviceProfileBenignHypothesis(Hypothesis):
 
 class HypothesisEngine:
     def __init__(self):
+        self._network_intrusion = NetworkIntrusionHypothesis()
         self.attack_hypotheses = [
-            DNSTunnelingHypothesis(), NetworkIntrusionHypothesis(),
+            DNSTunnelingHypothesis(), self._network_intrusion,
             DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
             DNSEvasionHypothesis(), SuricataSignatureHypothesis(),
@@ -525,12 +552,27 @@ class HypothesisEngine:
                       baseline_familiarity: float = 0.0) -> Dict[str, Any]:
         best_attack = None
         best_attack_score = 0.0
-        
+        # SHADOW MODE (Gap 2, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): re-derives
+        # "which attack hypothesis wins" using NetworkIntrusionHypothesis.evaluate_shadow()'s
+        # score in place of its live evaluate() score, every other hypothesis unchanged.
+        # Never affects the "attack"/"benign" keys below -- those stay driven by the live
+        # evaluate() scores exactly as before this existed.
+        shadow_best_attack = None
+        shadow_best_attack_score = 0.0
+
         for h in self.attack_hypotheses:
             score = h.evaluate(ev_store, rep, device_type, baseline_familiarity)
             if score > best_attack_score:
                 best_attack_score = score
                 best_attack = h
+
+            shadow_score = (
+                h.evaluate_shadow(ev_store, rep, device_type, baseline_familiarity)
+                if h is self._network_intrusion else score
+            )
+            if shadow_score > shadow_best_attack_score:
+                shadow_best_attack_score = shadow_score
+                shadow_best_attack = h
 
         best_benign = None
         best_benign_score = 0.0
@@ -543,5 +585,9 @@ class HypothesisEngine:
 
         return {
             "attack": {"name": best_attack.name if best_attack else "DIRECT_IOC_HIT", "score": best_attack_score},
-            "benign": {"name": best_benign.name if best_benign else "UNKNOWN_BENIGN", "score": best_benign_score}
+            "benign": {"name": best_benign.name if best_benign else "UNKNOWN_BENIGN", "score": best_benign_score},
+            "shadow_attack": {
+                "name": shadow_best_attack.name if shadow_best_attack else "DIRECT_IOC_HIT",
+                "score": shadow_best_attack_score,
+            },
         }

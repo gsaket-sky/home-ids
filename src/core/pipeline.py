@@ -12,6 +12,7 @@ RECENT ARCHITECTURAL FIXES:
 """
 
 import ipaddress
+import json
 import logging
 import math
 import time
@@ -1135,6 +1136,14 @@ class EnginePipeline:
                     active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity
                 )
 
+                # SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): log-only,
+                # never alters `decision` or anything downstream of it -- see
+                # decision_engine.evaluate()'s own shadow-computation comment for what this
+                # compares. Only appends when the shadow verdict actually diverges from the
+                # live one, so this file stays small and every line is something worth a look.
+                if decision.get("shadow_changed"):
+                    self._log_shadow_divergence(decision, dev_id, hostname, client_ip)
+
                 # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                 # Deliberately gated on the HEE's OWN verdict for THIS cycle being
                 # BENIGN/ANOMALOUS -- never records a port/ASN/domain the system itself
@@ -2199,6 +2208,28 @@ class EnginePipeline:
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
         if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models()
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
+
+    def _log_shadow_divergence(self, decision: dict, dev_id: str, hostname: str, client_ip: str) -> None:
+        """SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): append-only,
+        best-effort log of every cycle where decision_engine.py's shadow computation would
+        have produced a different verdict than the live one. Never raises -- a logging
+        failure here must not affect real detection/containment in any way. Read
+        state/shadow_decisions.jsonl after a few days' observation to decide whether Gap 1's
+        fix is safe to make live (see the dependency map's acceptance criteria)."""
+        try:
+            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "shadow_decisions.jsonl"
+            entry = {
+                "ts": time.time(), "device_id": dev_id, "hostname": hostname, "client_ip": client_ip,
+                "old_state": decision.get("state"), "old_explanation": decision.get("explanation"),
+                "old_decision_path": decision.get("decision_path"),
+                "new_state": decision.get("shadow_state"), "new_explanation": decision.get("shadow_explanation"),
+                "new_decision_path": decision.get("shadow_decision_path"),
+                "independent_sources": decision.get("independent_sources"),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            LOGGER.debug("Failed to write shadow_decisions.jsonl: %s", e)
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """
