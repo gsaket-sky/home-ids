@@ -1,7 +1,19 @@
-from typing import List, Dict, Any
+import time
+from typing import List, Dict, Any, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
 from intelligence.hypotheses.engine import HypothesisEngine
 from intelligence.reputation.classifier import ReputationVector
+
+# SHADOW MODE (Gap 3, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): how long a hard-stop
+# type (arp_spoofing/geofencing_violation/suricata_signature_match) is trusted as "this cycle's
+# own event" rather than a stale EvidenceStore replay. Deliberately far shorter than
+# EvidenceStore's own 600s general TTL (evidence.py) -- a hard-stop is meant to represent "this
+# verifiable fact just happened," not "this fact happened at some point in the last 10
+# minutes." honeypot_access uses features["zeek_honeypot_hits"] directly instead (the exact
+# same raw signal pipeline.py itself uses to decide whether to create the evidence at all,
+# sidestepping the timing question entirely) -- this constant is for the other three, which
+# don't have as direct a raw-feature equivalent readily available here yet.
+_HARD_STOP_FRESHNESS_SECONDS = 120
 
 def _safe_float(val: Any) -> float:
     try:
@@ -24,13 +36,17 @@ class DecisionEngine:
         self.hypothesis_engine = HypothesisEngine()
 
     def evaluate(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "",
-                 baseline_familiarity: float = 0.0) -> Dict[str, Any]:
+                 baseline_familiarity: float = 0.0, features: Optional[dict] = None) -> Dict[str, Any]:
         # VERSION 10 (#9/#10 per-device benign profiles): device_type is optional and
         # defaults to "" for any existing caller that hasn't been updated -- only
         # DeviceProfileBenignHypothesis (hypotheses/engine.py) actually reads it.
         # VERSION 11 (P1 follow-up): baseline_familiarity is the same kind of optional,
         # defaulted, single-consumer parameter -- see DeviceProfileBenignHypothesis's
         # own docstring for what it means and how it's computed.
+        # SHADOW MODE (Gap 3): features is the same optional/defaulted/single-consumer
+        # pattern -- only the shadow honeypot freshness check below reads it; every
+        # existing caller that hasn't been updated to pass it (tests, regression_tester.py)
+        # is unaffected, since the shadow computation never influences the live verdict.
         hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type, baseline_familiarity)
         
         attack_score = hyp_results["attack"]["score"]
@@ -226,14 +242,55 @@ class DecisionEngine:
         #   notice identically to a real malicious JA3/JA4 TLS fingerprint match under one
         #   `has_malicious_tls` boolean -- evaluate_shadow() splits them. Only relevant when
         #   NETWORK_INTRUSION was (or would become) the winning attack hypothesis.
-        # Hard-stops (honeypot/arp_spoof/geofence/confirmed_exploit) are untouched by either
-        # gap -- reused directly from the live computation above rather than recomputed.
+        #   Gap 3 (fresh_honeypot/fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit):
+        #   has_honeypot etc. above check only PRESENCE in ev_store, which EvidenceStore
+        #   (evidence.py) keeps "active" for up to 600s after creation -- a single real hit
+        #   re-fires the identical hard-stop verdict on every pipeline cycle for up to 10
+        #   minutes afterward, each with that cycle's own unrelated "most notable
+        #   connection" in the display line. Confirmed live: a home-router "Internal
+        #   Honeypot Accessed" CRITICAL alert with features["zeek_honeypot_hits"]==0 in its
+        #   own persisted snapshot -- the verdict's own evidence contradicts it. Backtest
+        #   (state/alerts.json, all "Internal Honeypot Accessed" alerts ever): 6 of 16 were
+        #   this exact stale-echo pattern. honeypot uses features["zeek_honeypot_hits"]
+        #   directly (the same raw signal pipeline.py itself gates evidence-creation on, at
+        #   its own call site) rather than a second timing constant; the other three don't
+        #   have as convenient a raw-feature reference here yet, so they use
+        #   _HARD_STOP_FRESHNESS_SECONDS against e.timestamp as a diagnostic proxy pending
+        #   the same live confirmation honeypot already got.
         shadow_attack = hyp_results.get("shadow_attack", hyp_results["attack"])
         shadow_attack_name = shadow_attack["name"]
         shadow_attack_score = shadow_attack["score"]
 
-        if has_honeypot or has_arp_spoof or has_geofence or has_confirmed_exploit:
-            shadow_state, shadow_explanation, shadow_decision_path = state, explanation, decision_path
+        now_ts = time.time()
+        fresh_honeypot = bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
+        fresh_arp_spoof = any(
+            e.type == "arp_spoofing" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
+        )
+        fresh_geofence = any(
+            e.type == "geofencing_violation" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
+        )
+        fresh_confirmed_exploit = any(
+            e.type == "suricata_signature_match" and e.confidence >= 0.9
+            and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS
+            for e in ev_store
+        )
+
+        if fresh_honeypot:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.CRITICAL, "Internal Honeypot Accessed", "hard_stop"
+            )
+        elif fresh_arp_spoof:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.CRITICAL, "Layer-2 ARP Spoofing Detected", "hard_stop"
+            )
+        elif fresh_geofence:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop"
+            )
+        elif fresh_confirmed_exploit:
+            shadow_state, shadow_explanation, shadow_decision_path = (
+                DecisionState.CRITICAL, "Confirmed Exploit/Malware Signature (Suricata)", "hard_stop"
+            )
         elif rep.tier == 5:
             if rep.verified_ioc:
                 shadow_state, shadow_explanation, shadow_decision_path = (

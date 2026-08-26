@@ -1133,7 +1133,8 @@ class EnginePipeline:
                 # smart TV/IoT/NAS/router-category device gets a named benign explanation
                 # instead of falling through to the generic UNKNOWN_BENIGN catch-all.
                 decision = self.decision_engine.evaluate(
-                    active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity
+                    active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
+                    features=features,
                 )
 
                 # SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): log-only,

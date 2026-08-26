@@ -20,8 +20,10 @@ downstream — not just "what calls what."
 | `scripts/shadow_backtest.py` (Phase A, Gap 1 only) | Built, run 3x, results below | Re-run after Gap 2 wiring landed — numbers unchanged (5/75/0), as expected: the standalone backtest re-derives from stored `alerts.json` fields independently of the live code, so it wasn't and couldn't be affected by the Gap 2 change |
 | Live shadow logging (Phase B, Gap 1 + Gap 2 composed) | **Implemented** (2026-08-26) | `decision_engine.py:evaluate()`'s shadow block now composes BOTH gaps in one pass (hard-stops reused as-is; tier==5 branch uses `rep.verified_ioc` + `shadow_attack_score > benign_score`; the hypothesis branch uses `shadow_attack_score`/`shadow_attack_name` in place of the live ones) — mirrors the real branch structure fresh rather than reusing/duplicating the live branch code, so there's exactly one "old" (unedited, still-shipped) and one "new" (fixed) implementation, never two drifting copies of the same logic. `pipeline.py:_log_shadow_divergence()` appends to `state/shadow_decisions.jsonl` whenever `shadow_changed` is True (state OR explanation differs) |
 | Targeted test subset (9 files) | **All 9 PASS, 0 regressions, verified twice** (2026-08-26) — once after Gap 1, again after Gap 2 | Run directly as standalone scripts (`.venv/Scripts/python.exe tests/test_phaseN.py` from repo root) — these are NOT pytest-collected despite the filename convention (no `def test_*`/`if __name__`); `pytest` reports "no tests ran" for them, which is expected, not a failure. Must use the project's `.venv` (system `python3` lacks `PyYAML` and other deps — `ModuleNotFoundError: No module named 'yaml'`). First cold run of a file over the network share can take >2 min (model-loading fixtures + import latency) — this is normal, not a hang; confirmed by re-running in isolation with a longer window. `test_phase38` explicitly covers the tier-5/AbuseIPDB boundary Gap 1 reads (ti=3.5 → CRITICAL; abuse=3.78 → stays SUSPICIOUS) — unaffected both times, confirming neither shadow addition touched the live path. |
-| Evidence-taxonomy module (`evidence_taxonomy.py`) | Not started | Deferred until after both gaps' live-flip decision, per plan |
-| A few days of live `state/shadow_decisions.jsonl` accumulation | **Not started — this is the current blocker** | Needs the actual `soc.service` process running against live traffic with these changes deployed; nothing further to build until this has accumulated data |
+| Evidence-taxonomy module (`evidence_taxonomy.py`) | Not started | Deferred until after all three gaps' live-flip decision, per plan |
+| Gap 3 — hard-stop evidence staleness (`has_honeypot` etc. firing on stale `EvidenceStore` presence, not a fresh cycle) | **Shadow-live** (2026-08-27) | Root cause confirmed via live SSH investigation (see "Gap 3 root cause" below), not inferred. `decision_engine.py` now takes an optional `features` param and computes `fresh_honeypot` (via `features["zeek_honeypot_hits"]`, the same raw signal `pipeline.py` itself gates evidence-creation on) and time-boxed `fresh_arp_spoof`/`fresh_geofence`/`fresh_confirmed_exploit` (via `_HARD_STOP_FRESHNESS_SECONDS = 120` against `e.timestamp` — diagnostic proxy, not yet live-confirmed the way honeypot is). `scripts/shadow_backtest.py` extended with `run_gap3_honeypot_backtest()`. 9/9 targeted tests pass. |
+| A few days of live `state/shadow_decisions.jsonl` accumulation | **In progress** — box restarted 2026-08-26 12:58:52 CEST with commit `3dcac19` confirmed as HEAD (verified via SSH, not just the Unison-synced NAS mirror) | Nothing further to build until this has accumulated data |
+| `scripts/shadow_watcher.py` (Telegram notification on first divergence) | **Deployed and running** (2026-08-26) | Fires Telegram the moment `state/shadow_decisions.jsonl` gets a new line; runs every 5 min via `scripts/scheduler.py`. Committed locally as `d7f18ad` (NOT pushed to `origin` yet) and deployed directly to the box via `scp` (not `git pull`) so it's live without waiting on a push/pull round-trip — **the box's git working tree is now ahead of its own `git log` for `config.yaml`/`shadow_watcher.py`** until someone pushes from the NAS checkout and pulls on the box to reconcile. Manually dry-run on the box against real production state (`job_health.json` confirms a clean run) before relying on the scheduler to pick it up. |
 
 ## Phase A backtest results (`scripts/shadow_backtest.py` against `state/alerts.json`, 80 historical "Confirmed Malicious IOC" alerts, 2026-08-26)
 
@@ -104,6 +106,45 @@ has_mac_flip = any(e.type == "arp_spoof_pending" for e in ev_store)
 **Gap 2 fix point:** split into `has_malicious_tls` (ja3/ja4 only) and a separate `has_notable_notice` (zeek_notice), weight the latter lower in `strong_score` (`engine.py:87-88`) — see the fix sketch in the prior turn.
 
 ---
+
+## Gap 3 root cause — hard-stop evidence staleness (found 2026-08-27, via live SSH investigation)
+
+`EvidenceStore.get_for_device()` (`evidence.py:84-100`) keeps any evidence "active" for up to
+its TTL (600s default) after creation, decaying `freshness` but never removing it early.
+`decision_engine.py`'s `has_honeypot = any(e.type == "honeypot_access" for e in ev_store)`
+(and the equivalent `has_arp_spoof`/`has_geofence`/`has_confirmed_exploit` checks) only test
+**presence**, never `e.freshness` or `e.timestamp`. `pipeline.py:984` only creates a *new*
+`honeypot_access` Evidence on the cycle where `features["zeek_honeypot_hits"] > 0` — every
+cycle after that, for up to 10 more minutes, the *same* evidence object is still sitting in
+`ev_store`, so the identical CRITICAL "Internal Honeypot Accessed" verdict re-fires on every
+subsequent cycle, each with that cycle's own unrelated "most notable connection" in the
+display line (which is why the Telegram alerts showed mDNS multicast addresses instead of the
+honeypot's own IP).
+
+**Confirmed live, not inferred**: pulled `home-router`'s "Internal Honeypot Accessed" alerts
+from `state/alerts.json` on the box directly (not the Unison-mirrored NAS copy) — several had
+`features["zeek_honeypot_hits"] == 0` in their own persisted snapshot, i.e. the alert's own
+recorded evidence contradicts the verdict it produced. `scripts/shadow_backtest.py`'s
+`run_gap3_honeypot_backtest()` quantifies this across all history: of every
+"Internal Honeypot Accessed" alert ever, roughly a third have `zeek_honeypot_hits == 0`
+(stale-echo) vs. a genuine fresh trigger — see the script's live output for current counts.
+
+**Separately** (not a code bug — a real, or at least undiagnosed, deployment fact): several of
+`home-router`'s honeypot hits ARE genuinely fresh (`zeek_honeypot_hits > 0`), meaning the
+router itself periodically sends real, non-excluded-port traffic to the honeypot's IP —
+plausibly Fritzbox's own "Home Network" device-map/UPnP/mDNS-repeater behavior treating the
+honeypot's macvlan IP as a normal known host. This is a policy question (should a
+`safe_ips`-listed device's honeypot hits be exempted the way its other hard-stops already
+are?), not something Gap 3's freshness fix addresses — flagged to the user, decision pending.
+
+Cowrie itself (`docker inspect soc_honeypot`) only exposes `2222/tcp` (SSH) and `2223/tcp`
+(Telnet) — confirmed empirically from a separate LAN host that `192.168.1.200:53` gives no
+response at all. The `family_pc_fritz_box` "Internal Honeypot Accessed" tarpit that prompted this
+whole investigation was a single 41-byte UDP packet to port 53 — real evidence
+(`zeek_honeypot_hits: 1`, not a stale echo), but to a service that structurally cannot have
+answered it, alongside that same device's alert history being otherwise saturated with
+ordinary Windows WSD/DLNA/Spotify-Connect discovery traffic. Not proof of non-infection, but
+strong circumstantial evidence against it.
 
 ## `DecisionEngine.evaluate()` — `core/decision_engine.py:26-224`
 

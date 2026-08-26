@@ -231,6 +231,63 @@ def run_backtest(alerts_path: Path, state_dir: Path) -> None:
     print("=" * 78)
 
 
+def run_gap3_honeypot_backtest(alerts_path: Path, state_dir: Path) -> None:
+    """Backtest for Gap 3 (decision_engine.py's shadow fresh_honeypot check): for every
+    historical "Internal Honeypot Accessed" alert, checks whether that EXACT alert's own
+    persisted features["zeek_honeypot_hits"] was > 0 (a genuine fresh trigger cycle) or == 0
+    (a stale EvidenceStore replay -- the verdict fired from evidence created on an EARLIER
+    cycle that hadn't yet aged past its 600s TTL, not from anything that happened THIS
+    cycle). Only covers honeypot -- arp_spoofing/geofencing_violation/suricata_signature_match
+    don't have as direct a raw-feature equivalent in the stored alert schema to backtest the
+    same way; those three are shadow-observable only, via state/shadow_decisions.jsonl."""
+    total, fresh, stale = 0, 0, 0
+    by_device_fresh: dict = defaultdict(int)
+    by_device_stale: dict = defaultdict(int)
+
+    if not alerts_path.exists():
+        print(f"ERROR: {alerts_path} does not exist.", file=sys.stderr)
+        return
+
+    with open(alerts_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                alert = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if alert.get("type") != "ids_alert":
+                continue
+            if _strip_persistence_suffix(alert.get("signature", "")) != "Internal Honeypot Accessed":
+                continue
+
+            total += 1
+            hostname = alert.get("device", {}).get("hostname", "unknown")
+            hits = float((alert.get("features", {}) or {}).get("zeek_honeypot_hits", 0) or 0)
+            if hits > 0:
+                fresh += 1
+                by_device_fresh[hostname] += 1
+            else:
+                stale += 1
+                by_device_stale[hostname] += 1
+
+    print("=" * 78)
+    print("GAP 3 SHADOW BACKTEST -- hard-stop evidence-staleness (honeypot only)")
+    print("=" * 78)
+    print(f"Alerts scanned with signature == 'Internal Honeypot Accessed': {total}")
+    print()
+    print(f"  FRESH (zeek_honeypot_hits > 0, genuine trigger this cycle): {fresh}")
+    for host, c in sorted(by_device_fresh.items(), key=lambda kv: -kv[1]):
+        print(f"    {host}: {c}")
+    print(f"  STALE ECHO (zeek_honeypot_hits == 0, EvidenceStore-replay artifact): {stale}")
+    for host, c in sorted(by_device_stale.items(), key=lambda kv: -kv[1]):
+        print(f"    {host}: {c}")
+    print("=" * 78)
+
+
 if __name__ == "__main__":
     alerts_path = STATE_DIR / "alerts.json"
     run_backtest(alerts_path, STATE_DIR)
+    print()
+    run_gap3_honeypot_backtest(alerts_path, STATE_DIR)
