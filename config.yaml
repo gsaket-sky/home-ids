@@ -670,6 +670,14 @@ scheduled_jobs:
       enabled: true
       cron: "0 6 * * *"
 
+    # Shadow-mode divergence watcher (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md) --
+    # fires a Telegram alert the moment state/shadow_decisions.jsonl gets a new entry.
+    # Temporary: remove this job once the evidence-taxonomy fix is either flipped live or
+    # abandoned -- it has nothing to watch once shadow_decisions.jsonl stops being written.
+    shadow_watcher:
+      enabled: true
+      cron: "*/5 * * * *"
+
 
 # =============================================================================
 # Secrets — NOT in this file
