@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import requests
+import urllib.request
 import yaml
 from pathlib import Path
 from collections import defaultdict
@@ -11,6 +12,27 @@ from datetime import datetime, timedelta
 
 # Ensures the script can resolve modules from the src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+
+def _send_telegram(config: dict, msg: str) -> None:
+    """Mirrors retro_hunter.py's own _send_telegram() -- same reasoning: a validated
+    finding deserves the same real-time channel every other finding in this codebase
+    gets, not just a line in a Markdown report nobody has a reason to open. This script
+    reads config via its own flat load_config() (not the config.py CONFIG singleton
+    retro_hunter.py uses), so config is passed in rather than imported."""
+    token = config.get("telegram_token", "")
+    chat_id = config.get("telegram_chat_id", "")
+    if not token or not chat_id:
+        return
+    try:
+        data = json.dumps({"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}).encode("utf-8")
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{token}/sendMessage", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception as e:
+        LOGGER.error(f"Failed to send Telegram ollama_soc alert: {e}")
 
 
 def _flatten_config_categories(raw: dict) -> dict:
@@ -329,6 +351,13 @@ def main():
     cache_hits = 0
     deferred = 0
     run_validated = defaultdict(int)  # classification -> count this run, for the cumulative relay metric
+    # BUGFIX (2026-08-27, third-party review): a validated "malicious" verdict previously
+    # had NO consequence at all -- only benign+suppress ever took autonomous action. This
+    # collects each one so a single batched Telegram digest can be sent after the run
+    # (matching retro_hunter.py's own batched-summary pattern), instead of the finding
+    # sitting silently in reports/soc_daily_report_*.md, which nothing prompts a human to
+    # open on a routine day.
+    validated_malicious_findings = []
 
     # VERSION 10 (#15/#16): explicitly instructs independent reasoning from raw evidence
     # only, matching what the payload itself now actually contains (see
@@ -508,6 +537,36 @@ def main():
                         f"- **Autonomous Action Skipped:** could not safely extract a base domain "
                         f"from `{target_domain}` — no immunization applied."
                     )
+        elif is_valid and response_json.get('classification') == 'malicious' and not already_actioned:
+            # BUGFIX (2026-08-27, third-party review): mirrors exactly what fp_engine's
+            # own two hard-evidence confirmation paths already do together (Stage-1 hard-
+            # stop, and pipeline.py's HIGH/CRITICAL bar) -- record_confirmed_threat() feeds
+            # local_intel.py (so a DIFFERENT device touching the same dest_ip later gets an
+            # immediate hard-stop) and the confirmed-threat counter, and _apply_sigma_shift
+            # TUNE_UP tightens this device's own future sensitivity. base_domain
+            # deliberately omitted (None) here -- ollama_soc.py has no evidence-linked
+            # domain attribution the way pipeline.py's DGA/tunneling branches do, and this
+            # codebase has already fixed the "coincidental most-frequent-domain in window"
+            # poisoning bug once; dest_ip alone is the reliably-attributable part of this
+            # verdict.
+            dest_ip = representative.get("network_context", {}).get("destination_ip", "") or ""
+            device_id = representative.get("device", {}).get("id", "unknown")
+            alert_hostname = representative.get("device", {}).get("hostname", "unknown")
+            fp_engine.record_confirmed_threat(
+                device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
+            )
+            fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
+            if key in cache:
+                cache[key]["action_taken"] = True
+            report_lines.append(
+                f"- **Autonomous Action Taken:** 🤖 Recorded as confirmed threat (local-intel + "
+                f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "
+                f"other device that touches it."
+            )
+            validated_malicious_findings.append({
+                "hostname": alert_hostname, "device_ip": device_ip, "target": target,
+                "reason": response_json.get("reason", ""), "confidence": response_json.get("confidence", 0.0),
+            })
         elif already_actioned:
             report_lines.append("- **Autonomous Action:** already applied for this pattern on a previous run — not repeated.")
 
@@ -542,6 +601,22 @@ def main():
         f"Generated SOC Daily Report: {report_path} "
         f"({queries_made} fresh Ollama calls, {cache_hits} cache hits, {deferred} deferred)"
     )
+
+    if validated_malicious_findings:
+        top = validated_malicious_findings[:10]
+        digest_lines = [
+            f"🤖 <b>Ollama SOC: {len(validated_malicious_findings)} validated malicious finding(s)</b>",
+            "Independently confirmed from raw evidence (not the system's own prior verdict) -- "
+            "local-intel updated, sensitivity tuned up:", "",
+        ]
+        for f_entry in top:
+            digest_lines.append(
+                f"• <code>{f_entry['hostname']}</code> ({f_entry['device_ip']}) → {f_entry['target']} "
+                f"(confidence {f_entry['confidence']:.2f}): {f_entry['reason']}"
+            )
+        if len(validated_malicious_findings) > len(top):
+            digest_lines.append(f"...and {len(validated_malicious_findings) - len(top)} more (see {report_path.name})")
+        _send_telegram(config, "\n".join(digest_lines)[:4000])
 
     state_dir = root_dir / "state"
     _write_ollama_relay_stats(state_dir, calls_made=queries_made, cache_hits=cache_hits, deferred=deferred, run_validated=run_validated)

@@ -817,7 +817,13 @@ class ZeekFeatureExtractor:
             if "python" in top_ua.lower(): return "Python Script"
             if "powershell" in top_ua.lower(): return "PowerShell"
             if "nmap" in top_ua.lower(): return "Nmap Scanner"
-            return top_ua[:40]
+            # BUGFIX (2026-08-27, third-party review): a bare [:40] slice with no
+            # truncation indicator produced alerts like "Netflix/2026.1.5
+            # MDX/undefined(DEVTYPE=1" and "Spotify/129600518 Win32_x86_64/0 (PC lap" --
+            # cut off mid-token, reading as a garbled but seemingly-complete string
+            # rather than an obviously-truncated one. Longer cap, and an explicit "..."
+            # when truncation actually happens so it's honest about being partial.
+            return top_ua if len(top_ua) <= 80 else top_ua[:80] + "..."
         meta = self._last_connection_meta.get(device_ip, {})
         proto = meta.get("dominant_protocol", "")
         port = meta.get("last_dest_port", 0)

@@ -425,10 +425,17 @@ threat_intel_and_ai:
   # PHASE 11: hard cap on FRESH Ollama calls per scheduled ollama_soc.py run (cache hits
   # don't count against this). Keeps one unusually noisy day from turning a 4-hourly job
   # into an hours-long one -- at up to ~15 minutes worst-case per call (the request
-  # timeout), 5 calls is at most ~75 minutes, comfortably inside the 4h gap to the next
+  # timeout), 8 calls is at most ~120 minutes, comfortably inside the 4h gap to the next
   # run. Alerts beyond this cap are deferred to the next scheduled run, prioritized by
   # which threat pattern repeated most often this run. [LIVE]
-  ollama_max_queries_per_run: 3
+  # BUGFIX (2026-08-27): raised from 3 -- the scheduler.py cron entry for this job had
+  # drifted to once/day (see scheduled_jobs.scheduler.ollama_soc below, now corrected
+  # back to the 4-hourly cadence this comment and ollama_soc.py's own code already
+  # assumed) while this cap stayed sized for a single daily run against a day's worth of
+  # traffic. Live data: 839 alerts / 163 distinct patterns in one 24h window, only 3 of
+  # which got a fresh LLM verdict -- the other 160 were deferred and re-evaluated against
+  # a rolling 24h window every subsequent run, rather than ever actually draining.
+  ollama_max_queries_per_run: 8
 
 
 # -----------------------------------------------------------------------------
@@ -655,9 +662,15 @@ scheduled_jobs:
   # CONFIG_AUDIT_REPORT.md's Phase 7 note on why that override exists).
   scheduler:
     # LLM-based alert triage summaries, every 4 hours starting at midnight.
+    # BUGFIX (2026-08-27): this had drifted to "30 4 * * *" -- once/day at 4:30am --
+    # despite the comment (and ollama_soc.py's own DEFAULT_MAX_QUERIES_PER_RUN comment,
+    # config.yaml's ollama_max_queries_per_run comment, and the "well inside the 4h gap
+    # between scheduled runs" reasoning throughout that file) all assuming a 4-hourly
+    # cadence. Corrected to match the documented intent instead of editing the comment
+    # to match the wrong behavior.
     ollama_soc:
       enabled: true
-      cron: "30 4 * * *"
+      cron: "30 */4 * * *"
 
     # Retroactive threat-intel re-scan of recent history. 2am.
     retro_hunter:

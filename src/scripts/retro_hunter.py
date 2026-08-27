@@ -25,6 +25,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
 from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.fp_engine import AutonomousFPEngine
 from utils import write_job_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [RETRO-HUNTER] %(message)s")
@@ -289,6 +290,32 @@ def run_retro_hunt(days: int = 14) -> None:
     if local_matches:
         LOGGER.critical("🌐 RETROACTIVE LOCAL-INTEL MATCHES: %d historical connection(s) from a "
                          "device match an IOC confirmed by a DIFFERENT device since then.", len(local_matches))
+
+        # BUGFIX (2026-08-27, third-party review): this pass used to be notify-only --
+        # check_local_intel_history() found the match, but nothing ever fed it back into
+        # fp_engine's own confirmed-threat bookkeeping (local_intel record/count, sigma
+        # tune-up) for the NEWLY-implicated device, unlike every other confirmation path
+        # in this codebase. Now closes that loop the same way: record_confirmed_threat()
+        # (re-confirms/refreshes the existing local_intel entry rather than duplicating
+        # it -- record() is idempotent per value) + a sigma tune-up for this device.
+        # asn_owner isn't available from historical alert records here, so the
+        # cloud/CDN-org protection layer doesn't apply on this path specifically -- the
+        # entry being matched against already passed through record_confirmed_threat()'s
+        # other guards (safe_ips/private/multicast/telemetry-domain) when it was first
+        # confirmed, so this isn't a new poisoning vector, just missing an extra layer.
+        # CONFIG (config.py's LiveConfig) exposes .get() directly -- confirmed via this
+        # file's own pre-existing _send_telegram() already calling CONFIG.get(...) --
+        # AutonomousFPEngine only ever calls .get() on its config param, so it's passed
+        # through as-is rather than guessing at LiveConfig's internal storage attribute.
+        fp_engine = AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
+        for m in local_matches:
+            base_domain = m["matched_value"] if m["matched_kind"] == "domain" else None
+            dest_ip = m["matched_value"] if m["matched_kind"] == "ip" else None
+            fp_engine.record_confirmed_threat(
+                m["device_id"], base_domain, dest_ip, reason="RETRO_HUNT_LOCAL_INTEL_MATCH",
+            )
+            fp_engine._apply_sigma_shift(m["device_id"], m["hostname"], direction="TUNE_UP", source="autonomous")
+
         try:
             findings_path = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "retro_hunt_findings.jsonl"
             with open(findings_path, "a", encoding="utf-8") as f:

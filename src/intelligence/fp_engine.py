@@ -305,6 +305,7 @@ class AutonomousFPEngine:
         risk_score: float,
         ti_engine=None,
         decision: Optional[dict] = None,
+        asn_owner: str = "",
     ) -> dict:
         """
         Evaluate a breach alert through the 3-stage autonomous pipeline.
@@ -330,6 +331,14 @@ class AutonomousFPEngine:
                             defaults to None so direct/unit-test callers that evaluate
                             fp_engine in isolation (no decision_engine involved at all)
                             are unaffected.
+            asn_owner:      GeoIP ASN organization name for dest_ip, when the caller has
+                             one on hand (pipeline.py does, from its own reputation-
+                             classification lookup). Optional/best-effort -- lets
+                             _is_ip_protected_from_confirmed_intel() recognize a
+                             cloud/CDN-hosted IP so a single noisy reputation hit on
+                             shared vendor infrastructure can't poison the local-intel
+                             store for every device that legitimately shares it. Callers
+                             without a GeoIP result simply don't get this protection layer.
 
         Returns:
             dict with keys:
@@ -379,7 +388,7 @@ class AutonomousFPEngine:
             # already get, every time, even for immunized domains. This closes audit
             # Finding #2 outright.
             # ==============================================================
-            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision)
+            stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision, asn_owner=asn_owner)
             if stage1_triggers:
                 fp_engine_confirmed_threats_total.inc()
                 fp_engine_confidence_score.labels(device=device_id, hostname=hostname).set(0.0)
@@ -390,6 +399,7 @@ class AutonomousFPEngine:
                     dest_ip,
                     reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
                     signature=alert_payload.get("signature", ""),
+                    asn_owner=asn_owner,
                 )
                 LOGGER.warning(
                     "🚨 [FP ENGINE » Trust Cache OVERRIDDEN] %s: '%s' is immunized BUT hard-stop "
@@ -430,7 +440,7 @@ class AutonomousFPEngine:
         # Real malware C2, port scans and honeypot access CANNOT be FPs.
         # ==================================================================
         LOGGER.debug("[FP ENGINE » Stage 1] Running hard-stop security filter...")
-        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision)
+        stage1_triggers = self._stage1_hard_stop(features, ti_engine, hostname, domain, dest_ip, decision=decision, asn_owner=asn_owner)
 
         if stage1_triggers:
             # One or more hard-stop signals fired → this is a real threat
@@ -456,6 +466,7 @@ class AutonomousFPEngine:
                 dest_ip,
                 reason="STAGE_1_HARD_STOP",
                 signature=alert_payload.get("signature", ""),
+                asn_owner=asn_owner,
             )
 
             LOGGER.warning(
@@ -784,7 +795,7 @@ class AutonomousFPEngine:
     # PHASE 21D3: local confirmed-threat store feed + confirmed-count tracking
     # ==========================================================================
 
-    def _is_ip_protected_from_confirmed_intel(self, ip: str) -> bool:
+    def _is_ip_protected_from_confirmed_intel(self, ip: str, asn_owner: str = "") -> bool:
         """BUGFIX: found via a live production check while verifying the domain-side fix
         above -- the SAME poisoning pattern exists on the IP side of this store, and it's
         WORSE: 192.168.1.94 (this network's own IDS server -- already listed in
@@ -817,11 +828,22 @@ class AutonomousFPEngine:
         require adding one."""
         if not ip or ip == "unknown":
             return False
-        from utils import KNOWN_PUBLIC_DNS_RESOLVERS
+        from utils import KNOWN_PUBLIC_DNS_RESOLVERS, is_cloud_cdn_provider_org
         if ip in KNOWN_PUBLIC_DNS_RESOLVERS:
             return True
         safe_ips = self.config.get("safe_ips", []) if self.config else []
         if ip in safe_ips:
+            return True
+        # BUGFIX (2026-08-27, closes the gap this method's own docstring above already
+        # flagged): Cloudflare/Google/GCP/Apple/AWS-owned IPs were found "confirmed
+        # malicious" from a single noisy reputation hit, then re-poisoned every time a
+        # DIFFERENT device's legitimate traffic to the same shared vendor IP space
+        # re-confirmed the same entry -- the exact-match public-resolver list above
+        # doesn't cover this, since it's not a resolver, just ordinary cloud-hosted
+        # vendor infrastructure. asn_owner is optional/best-effort (callers that don't
+        # have a GeoIP lookup result on hand simply don't get this protection layer,
+        # same graceful-degradation as every other optional param in this file).
+        if asn_owner and is_cloud_cdn_provider_org(asn_owner):
             return True
         try:
             import ipaddress
@@ -832,7 +854,7 @@ class AutonomousFPEngine:
             return False
 
     def record_confirmed_threat(self, device_id: str, base_domain: str, dest_ip: str, reason: str,
-                                 signature: str = "") -> None:
+                                 signature: str = "", asn_owner: str = "") -> None:
         """Public: the ONE call BOTH confirmation paths use -- fp_engine's own Stage-1
         hard-stop internally, and pipeline.py's HIGH/CRITICAL decision bar externally
         (a HIGH/CRITICAL can come from 2+ independent hypothesis evidence sources with
@@ -878,7 +900,7 @@ class AutonomousFPEngine:
                 base_domain = None
             if base_domain:
                 self.local_intel.record("domain", base_domain, device_id, reason=reason)
-            if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip):
+            if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner):
                 LOGGER.warning(
                     "[LOCAL INTEL] Refusing to record known-safe/private/multicast IP '%s' "
                     "as confirmed malicious (device=%s, reason=%s).",
@@ -945,7 +967,7 @@ class AutonomousFPEngine:
 
     def _stage1_hard_stop(
         self, features: dict, ti_engine, hostname: str, domain: str, dest_ip: str = "",
-        decision: Optional[dict] = None,
+        decision: Optional[dict] = None, asn_owner: str = "",
     ) -> Optional[list]:
         """
         Fast filter for definitive threat signals that cannot be false positives.
@@ -1083,7 +1105,7 @@ class AutonomousFPEngine:
         # production numbers (this network's own server at 822 false confirmations,
         # multicast addresses in the hundreds). Neutralizes already-poisoned IP entries
         # immediately on restart, without needing to hand-edit the state file.
-        ip_hit_eligible = bool(dest_ip) and not self._is_ip_protected_from_confirmed_intel(dest_ip)
+        ip_hit_eligible = bool(dest_ip) and not self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner)
         local_ip_hit = self.local_intel.check("ip", dest_ip) if ip_hit_eligible else None
         if local_domain_hit or local_ip_hit:
             hit_target = base_domain if local_domain_hit else dest_ip

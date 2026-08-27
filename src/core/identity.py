@@ -81,6 +81,17 @@ class DeviceIdentityManager:
         self._ip_cache: OrderedDict = OrderedDict()
         self._fritz_cache: Dict[str, Dict[str, str]] = {}
         self._lock = threading.Lock()
+        # GENERAL FIX (2026-08-27): the gateway special-case below only ever matched the
+        # single configured gateway_ip literal (IPv4), so the same physical router's IPv6
+        # link-local/ULA traffic still fragmented into a separate identity -- confirmed
+        # live via two independent "home-router" honeypot-hit incidents, one keyed by
+        # 192.168.1.1 and one by an fe80:: address. Deliberately MAC-based rather than a
+        # second hardcoded IP literal (which would need updating on every deployment, and
+        # even on this one if the router's IPv6 address ever rotates) -- learned once from
+        # whichever cycle sees gateway_ip with a real MAC attached, then reused for any
+        # OTHER address presenting the same MAC. Generic: works for any router on any
+        # deployment, not tied to a specific address family or literal value.
+        self._gateway_mac: Optional[str] = None
         
         threading.Thread(target=self._poll_fritzbox_hosts, daemon=True, name="fritz-hosts-poller").start()
 
@@ -167,7 +178,21 @@ class DeviceIdentityManager:
         # safe default for any other deployment of this codebase.
         gateway_ip = self.config.get("gateway_ip", "")
         if gateway_ip and client_ip == gateway_ip:
+            if mac_addr and mac_addr != "unknown":
+                with self._lock:
+                    self._gateway_mac = mac_addr
             return stable_device_id(gateway_ip)
+
+        # GENERAL FIX (2026-08-27): the router's OTHER addresses (most commonly its IPv6
+        # link-local/ULA, which never equals gateway_ip literally) still deserve the same
+        # canonical identity once we've learned its MAC from the branch just above --
+        # checked before the generic MAC-first branch below so it can't be shadowed by a
+        # coincidental existing device_id/MAC binding.
+        if mac_addr and mac_addr != "unknown":
+            with self._lock:
+                learned_gateway_mac = self._gateway_mac
+            if learned_gateway_mac and mac_addr == learned_gateway_mac:
+                return stable_device_id(gateway_ip)
 
         # PHASE 6 FIX (cross-address-family correlation): if this MAC address is already
         # bound to a known device_id — most commonly because we've already seen this same

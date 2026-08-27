@@ -981,7 +981,22 @@ class EnginePipeline:
                 if ml_score > 0.90:
                     self.evidence_store.add(Evidence(type="ml_anomaly", source="ml_engine", timestamp=now, device=dev_id, value=ml_score, confidence=ml_score, independence_group="ml_anomaly", provenance="detector:ml"))
                 
-                if features.get("zeek_honeypot_hits", 0) > 0:
+                # GAP 3 FIX B (2026-08-27, explicit product decision, not a bug fix): a
+                # live investigation found home-router (the router, safe_ips-listed)
+                # genuinely, repeatedly touching the honeypot's IP -- most likely its own
+                # "Home Network"/UPnP/mDNS device-mapping feature treating the honeypot's
+                # macvlan address as a normal known host, not an attack. safe_ips already
+                # means "never treated as suspicious... even if flagged elsewhere" for
+                # every OTHER signal (reputation, behavioral evidence) -- this was the one
+                # exception, and it wasn't containing anything anyway: mitigate() already
+                # no-ops entirely for is_safe devices (see ips.py's "LATCHED CONTAINMENT
+                # PROTECTION" comment), so the only effect of NOT exempting it was a
+                # misleading CRITICAL "Internal Honeypot Accessed" alert with no real
+                # containment behind it. A genuinely compromised safe_ips device would
+                # still show up via every other detection path (reputation, behavioral
+                # hypotheses, DNS anomalies) -- this narrows one specific hard-stop, not
+                # the device's overall exposure.
+                if features.get("zeek_honeypot_hits", 0) > 0 and not is_safe:
                     # BUGFIX (live alert audit): the same attribution gap already fixed for
                     # CONNECTION_ABUSE/DGA_BOTNET_C2/NETWORK_INTRUSION/ARP-spoofing below --
                     # this evidence previously carried no .domain at all, so a CRITICAL
@@ -1553,6 +1568,7 @@ class EnginePipeline:
                             risk_score=risk,
                             ti_engine=self.ti_engine,
                             decision=decision,
+                            asn_owner=asn_owner if asn_owner != "Unknown" else "",
                         )
 
                         # PHASE 12: persist CL-AFPE's own combined confidence into the alert
@@ -1728,10 +1744,24 @@ class EnginePipeline:
                             # decision, WAITING FOR APPROVAL response). 8.5 is the lower of
                             # mitigate()'s two thresholds (router 8.5, tarpit 9.0), so it's the
                             # correct floor for "could plausibly have something pending".
+                            # BUGFIX (2026-08-27): this rewrite fired regardless of `is_safe`,
+                            # but mitigate() (ips.py) returns immediately -- queuing nothing at
+                            # all -- for ANY is_safe device, unconditionally, before it ever
+                            # reaches its own interactive-mode branches. A CRITICAL alert on a
+                            # safe_ips device (e.g. the router touching the honeypot) was
+                            # telling the operator "action is queued, waiting for your
+                            # approval" and "tap Release" for containment that was never
+                            # queued and never will be -- tapping Approve there would either
+                            # no-op or attempt to isolate the device the config explicitly
+                            # promises to never touch. See also Gap 3 Fix B just above, which
+                            # stops the honeypot hard-stop from firing on safe_ips devices at
+                            # all going forward; this fix covers every OTHER hard-stop/HIGH
+                            # path that could still reach this same contradiction.
                             if (
                                 bool(self.config.get("interactive_blocking_enabled", False))
                                 and "UNBLOCKED" in containment_status
                                 and (risk >= 8.5 or lateral_threat)
+                                and not is_safe
                             ):
                                 containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 
@@ -1795,6 +1825,7 @@ class EnginePipeline:
                                 etld1(alert_target_domain) if domain_is_evidence_linked else None,
                                 dest_ip, reason="HIGH_CRITICAL_DECISION",
                                 signature=primary_sig,
+                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
                             )
 
                         # VERSION 10 (incident aggregation): the same device+target+signature
@@ -1832,6 +1863,16 @@ class EnginePipeline:
 
                                 # Filter DNS sequence to show only threat-contributing / suspicious queries
                                 threat_dns_lines = []
+                                # BUGFIX (2026-08-27, third-party review): a known-vendor/telemetry
+                                # domain that happened to get Pi-hole-blocked (e.g. an ad/tracker
+                                # blocklist entry for teams.events.data.microsoft.com or
+                                # wpad.fritz.box) previously fell through into threat_dns_lines with a
+                                # 🔴 tag under a header literally called "Threat-Filtered DNS
+                                # Sequence" -- reading as if it were relevant to the threat, when a
+                                # domain being on an ad/tracker blocklist says nothing about THIS
+                                # alert. Routed to its own section instead of either omitting it
+                                # entirely or presenting it as threat evidence.
+                                benign_blocked_lines = []
                                 omitted_count = 0
                                 if hasattr(state, "rolling") and hasattr(state.rolling, "events"):
                                     for ev_ts, ev_dom, ev_status in list(state.rolling.events)[-25:]:
@@ -1845,15 +1886,20 @@ class EnginePipeline:
                                         if is_trusted and ev_status not in BLOCKED_STATUSES:
                                             omitted_count += 1
                                             continue
-                                    
+
                                         status_tag = "🔴 BLOCKED" if ev_status in BLOCKED_STATUSES else "🟡 NXDOMAIN" if ev_status in NXDOMAIN_STATUSES else "🟢 ALLOWED"
-                                        threat_dns_lines.append(f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}")
+                                        line = f"  {time.strftime('%H:%M:%S', time.localtime(ev_ts))} | {status_tag} | {ev_dom}"
+                                        if is_trusted and ev_status in BLOCKED_STATUSES:
+                                            benign_blocked_lines.append(line)
+                                        else:
+                                            threat_dns_lines.append(line)
 
                                 threat_dns_str = "\n".join(threat_dns_lines[:10]) if threat_dns_lines else "  No suspicious DNS queries detected"
                                 if omitted_count > 0:
                                     threat_dns_header = f"🕒 *Threat-Filtered DNS Sequence (Omitted {omitted_count} harmless queries):*"
                                 else:
                                     threat_dns_header = "🕒 *Threat-Filtered DNS Sequence:*"
+                                benign_blocked_str = "\n".join(benign_blocked_lines[:10]) if benign_blocked_lines else ""
 
                                 # calibrated_confidence is None whenever no reliable calibration is
                                 # loaded (train_fp_classifier.py hasn't run with enough held-out data
@@ -1901,12 +1947,28 @@ class EnginePipeline:
                                 # corroboration count the decision engine itself required to reach
                                 # HIGH/CRITICAL, so citing len(grouped_evidence) in the recommendation
                                 # below is the real number that authorized containment, not a guess.
+                                # BUGFIX (2026-08-27, third-party review): this used to bucket EVERY
+                                # independence_group present, including "local_context" (e.g.
+                                # LOCAL_DEVICE_DISCOVERY) -- which evidence.py's own
+                                # ATTACK_EVIDENCE_FAMILIES registry already explicitly excludes from
+                                # ever counting toward an attack verdict's corroboration. The WHY
+                                # block was showing it side-by-side with genuinely decisive evidence
+                                # as if it carried equal weight, and len(grouped_evidence) (the
+                                # "N independent signal(s)" count) was inflated by evidence that
+                                # structurally cannot have authorized the verdict. Split into
+                                # decisive (counts toward the verdict) vs. context (shown for
+                                # completeness, never decisive) -- same distinction the decision
+                                # engine itself already enforces, just finally reflected in the alert.
                                 grouped_evidence = {}
+                                context_evidence = {}
                                 for ev in active_evidence:
-                                    if ev.independence_group not in grouped_evidence or ev.value > grouped_evidence[ev.independence_group].value:
-                                        grouped_evidence[ev.independence_group] = ev
+                                    bucket = context_evidence if ev.independence_group == "local_context" else grouped_evidence
+                                    if ev.independence_group not in bucket or ev.value > bucket[ev.independence_group].value:
+                                        bucket[ev.independence_group] = ev
                                 why_lines = [_describe_evidence(ev) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
+                                context_lines = [_describe_evidence(ev) for ev in
+                                                  sorted(context_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
 
                                 # BUGFIX: found via a live alert audit -- alert_target_domain never got a
@@ -2015,10 +2077,28 @@ class EnginePipeline:
                                     # zeek_lateral_unique_targets).
                                     lateral_targets_display = int(features.get("zeek_lateral_unique_targets", 0) or 0)
                                     lateral_conns_display = int(features.get("zeek_lateral_moves", 0) or 0)
-                                    alert_msg += (
-                                        f"- Lateral Scans: `{', '.join(scanned_ports)}` "
-                                        f"({lateral_conns_display} connection(s) across {lateral_targets_display} distinct target(s))\n"
-                                    )
+                                    # BUGFIX (2026-08-27, third-party review): counts were already shown
+                                    # (the fix above this comment), but the label itself still said
+                                    # "Lateral Scans" even when zeek_lateral_unique_targets was below the
+                                    # SAME threshold (lateral_movement_unique_targets_threshold) that
+                                    # gates whether this evidence is even allowed to exist / authorize
+                                    # containment (see fp_engine.py Stage-1 Check 2 and this file's own
+                                    # lateral_threat gate) -- a single SMB/SSH/RDP connection to one
+                                    # internal device (e.g. browsing a NAS share) isn't a scan, and
+                                    # calling it one here contradicted the decision the system actually
+                                    # made. One shared threshold for display and containment now, so
+                                    # they can't disagree.
+                                    lateral_scan_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
+                                    if lateral_targets_display >= lateral_scan_threshold:
+                                        alert_msg += (
+                                            f"- Lateral Scans: `{', '.join(scanned_ports)}` "
+                                            f"({lateral_conns_display} connection(s) across {lateral_targets_display} distinct target(s))\n"
+                                        )
+                                    else:
+                                        alert_msg += (
+                                            f"- Connection: `{', '.join(scanned_ports)}` "
+                                            f"({lateral_conns_display} connection(s), {lateral_targets_display} target(s) -- below lateral-scan threshold)\n"
+                                        )
                                 if recent_http_reqs:
                                     alert_msg += f"- Recent HTTP requests: `{', '.join(recent_http_reqs)}`\n"
                                 # BUGFIX (live alert audit): state.killchain_history is a
@@ -2046,17 +2126,29 @@ class EnginePipeline:
                                 for line in why_lines:
                                     alert_msg += f"- {line}\n"
 
+                                if context_lines:
+                                    alert_msg += "\n📎 *Also observed* _(context -- did not independently trigger this)_\n"
+                                    for line in context_lines:
+                                        alert_msg += f"- {line}\n"
+
                                 alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📊 *CONFIDENCE:* {confidence_line}\n"
                                 )
 
-                                if threat_dns_str and "No suspicious" not in threat_dns_str:
+                                has_threat_dns = bool(threat_dns_str) and "No suspicious" not in threat_dns_str
+                                if has_threat_dns or benign_blocked_str:
                                     alert_msg += (
                                         f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                         f"🔧 *Technical detail* _(optional)_\n"
-                                        f"{threat_dns_header}\n{threat_dns_str}\n"
                                     )
+                                    if has_threat_dns:
+                                        alert_msg += f"{threat_dns_header}\n{threat_dns_str}\n"
+                                    if benign_blocked_str:
+                                        alert_msg += (
+                                            f"\n🔕 *Blocked by ad/tracker policy* "
+                                            f"_(known vendor domain, not threat-related)_\n{benign_blocked_str}\n"
+                                        )
 
 
                                 reply_markup = None
