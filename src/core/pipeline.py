@@ -2053,10 +2053,35 @@ class EnginePipeline:
                                         f"🔁 _Incident update — {update_kind}: {incident_notify.occurrence_count} "
                                         f"occurrences over {incident_age_min:.0f}m_\n"
                                     )
+                                # BUGFIX (2026-08-27, explicit request): a raw destination IP told
+                                # the operator nothing about what it actually was -- a WireGuard
+                                # connection to 106.201.214.127 read as an unexplained anomaly until
+                                # manually looked up and found to be Bharti Airtel (India mobile
+                                # carrier), immediately reframing the whole alert. GeoIP ASN/city
+                                # lookups are local mmdb reads (lookup_asn is @lru_cache'd in
+                                # geoip.py) -- cheap enough to do on every alert, unlike the rate-
+                                # limited AbuseIPDB/VT calls elsewhere in this file. Only applies
+                                # when target_display is a raw IP; a domain already carries its own
+                                # meaning and isn't touched.
+                                target_geo_note = ""
+                                try:
+                                    ipaddress.ip_address(target_display)
+                                    is_ip_target_display = True
+                                except ValueError:
+                                    is_ip_target_display = False
+                                if is_ip_target_display and self.geoip_engine:
+                                    asn_res = self.geoip_engine.lookup_asn(target_display)
+                                    city_res = self.geoip_engine.lookup(target_display)
+                                    geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+                                    geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+                                    geo_parts = [p for p in (geo_org, geo_country) if p]
+                                    if geo_parts:
+                                        target_geo_note = f" _({', '.join(geo_parts)})_"
+
                                 alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📍 *WHAT HAPPENED* _(facts)_\n"
-                                    f"- Contacted `{target_display}` ({service_name} / Port {dest_port})\n"
+                                    f"- Contacted `{target_display}`{target_geo_note} ({service_name} / Port {dest_port})\n"
                                 )
                                 # BUGFIX (live alert audit): get_app_context()'s generic fallback
                                 # (no HTTP User-Agent seen) is literally f"{proto} Port {port}" --
