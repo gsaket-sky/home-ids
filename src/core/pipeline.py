@@ -1211,8 +1211,19 @@ class EnginePipeline:
                                 if self.config.get("geofencing_enabled", False):
                                     if country_code in self.config.get("geofencing_countries", []):
                                         LOGGER.warning(f"🚫 GEOFENCE VIOLATION: {dev_id} connected to {d_ip} ({country_code})")
-                                        # Inject hard-stop evidence into the current active evidence set
-                                        active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}"))
+                                        # BUGFIX (2026-08-27, categorization consistency audit): this
+                                        # evidence carried no .domain at all -- the same attribution gap
+                                        # already fixed for honeypot_access/arp_spoofing/zeek_lateral_scan/
+                                        # CONNECTION_ABUSE/DGA_BOTNET_C2, just never extended here. Confirmed
+                                        # live: a "Geofencing Policy Violation" CRITICAL alert's "Contacted"
+                                        # line showed 192.168.1.1 (the router's own private LAN IP -- not
+                                        # even something GeoIP can resolve a country for) instead of the real
+                                        # foreign IP that actually triggered the block, because with no
+                                        # .domain to consume, the display fell back to whatever this device
+                                        # connected to most recently. domain=d_ip here, consumed by the
+                                        # "Geofencing Policy Violation" branch below, same pattern as every
+                                        # other hard-stop evidence type.
+                                        active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip))
                                         # Force re-evaluate decision
                                         decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
                                         risk = decision["threat_confidence"] * 10.0
@@ -1509,6 +1520,12 @@ class EnginePipeline:
                         elif primary_sig_base == "Internal Honeypot Accessed":
                             for ev in active_evidence:
                                 if ev.type == "honeypot_access" and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
+                        elif primary_sig_base == "Geofencing Policy Violation":
+                            for ev in active_evidence:
+                                if ev.type == "geofencing_violation" and ev.domain:
                                     alert_dest_ip = ev.domain
                                     alert_target_domain = "unknown"
                                     break

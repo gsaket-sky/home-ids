@@ -301,8 +301,21 @@ class DecisionEngine:
                     DecisionState.CRITICAL, "Corroborated Reputation Signal", "tier5_corroborated"
                 )
             else:
+                # BUGFIX (2026-08-27, user catch): this used to land at HIGH, which
+                # contradicted its own label -- "Uncorroborated" describing a HIGH-severity
+                # verdict makes no sense next to the tier==4 branch below, which already
+                # treats "one unconfirmed reputation signal" (a WEAKER raw score, 1.5-4.0)
+                # as SUSPICIOUS/monitor, not HIGH/alert. An aggregate score that crossed the
+                # confirmed_ioc bar (>=4.0) but found no genuine corroborating evidence for
+                # an attack conclusion is the SAME underlying situation as tier 4 -- a bigger
+                # raw number doesn't earn it a stronger verdict when the thing that's
+                # supposed to justify HIGH (real corroboration) is exactly what's missing.
+                # Confirmed live: family_pc_fritz_box vs. 35.186.224.24 (Google LLC),
+                # abuse_score=4.0 alone, benign hypothesis (LOCAL_DEVICE_DISCOVERY, 2.5)
+                # outscoring the attack one (NETWORK_INTRUSION, 2.0) -- there is no
+                # behavioral corroboration here at all, just a single crowd-sourced number.
                 shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.HIGH, "Strong Reputation Signal (Uncorroborated)", "tier5_uncorroborated"
+                    DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)", "tier5_uncorroborated"
                 )
         elif shadow_attack_score > benign_score and shadow_attack_score >= 2.0:
             if num_independent_sources >= 2 and shadow_attack_score >= 3.0:

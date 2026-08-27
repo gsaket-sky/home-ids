@@ -185,8 +185,13 @@ def run_backtest(alerts_path: Path, state_dir: Path) -> None:
                 label_only_change += 1
                 new_state, new_explanation = "CRITICAL", "Corroborated Reputation Signal"
             else:
+                # BUGFIX (2026-08-27, user catch): matches decision_engine.py's own fix --
+                # HIGH contradicted the "Uncorroborated" label; this is the same situation
+                # tier==4 already treats as SUSPICIOUS ("Elevated Reputation Signal
+                # (Unconfirmed)"), just a bigger raw score. No real corroboration found ==
+                # no HIGH, regardless of which side of the 4.0 line the score landed on.
                 real_downgrade += 1
-                new_state, new_explanation = "HIGH", "Strong Reputation Signal (Uncorroborated)"
+                new_state, new_explanation = "SUSPICIOUS", "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)"
 
                 later_corrected = _was_later_corrected(dev_id, alert_ts, muted_by_device)
                 other_confirmed = confirmed_counts.get(dev_id, 0) > 0
@@ -219,7 +224,7 @@ def run_backtest(alerts_path: Path, state_dir: Path) -> None:
     print()
     print(f"  Unchanged (ti_score > 2.0, genuine curated-feed IOC match): {unchanged_verified}")
     print(f"  Label-only change (still CRITICAL, corroborated by >=1 independent source): {label_only_change}")
-    print(f"  REAL DOWNGRADE (CRITICAL -> HIGH, uncorroborated aggregate reputation only): {real_downgrade}")
+    print(f"  REAL DOWNGRADE (CRITICAL -> SUSPICIOUS, uncorroborated aggregate reputation only): {real_downgrade}")
     print()
     if real_downgrade:
         print("  Of the real downgrades:")
