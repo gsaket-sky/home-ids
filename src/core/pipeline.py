@@ -1744,7 +1744,8 @@ class EnginePipeline:
                                 containment_status = self.ips_mitigator.get_containment_status(
                                     client_ip=client_ip,
                                     mac_addr=getattr(state, "mac_address", "unknown"),
-                                    domain=alert_target_domain
+                                    domain=alert_target_domain,
+                                    dev_id=dev_id
                                 )
 
                             # PHASE 10 FIX: this used to rewrite ANY "UNBLOCKED" containment
@@ -2195,21 +2196,28 @@ class EnginePipeline:
 
                                 reply_markup = None
                                 inline_keyboard = []
-                                # PHASE 10 FIX: same bug as the containment_status override
-                                # above — this used to attach live "Approve Hardware
-                                # Isolation" / "Release Device" buttons to EVERY alert
-                                # whenever interactive_blocking_enabled was on, regardless of
-                                # whether mitigate() ever had anything pending (only
-                                # possible at risk>=8.5 or a lateral-movement/honeypot hit —
-                                # see ips.py's own thresholds). A SUSPICIOUS/monitor alert
-                                # offering an "Approve Isolation" button for an isolation
-                                # that was never queued is misleading regardless of what the
-                                # containment_status text says.
-                                if bool(self.config.get("interactive_blocking_enabled", False)) and (risk >= 8.5 or lateral_threat):
-                                    inline_keyboard.append([
-                                        {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
-                                        {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
-                                    ])
+                                # PHASE 10 FIX (extended — live-alert audit): the old condition
+                                # here (risk>=8.5 or lateral_threat) was computed completely
+                                # independently of containment_status/action_summary, so it could
+                                # (and did, confirmed live) attach an "Approve Hardware Isolation"
+                                # button to a device that was ALREADY tarpitted/router-isolated
+                                # from an earlier incident — misleading regardless of what the
+                                # "Already done" text said. Buttons now key off action_summary,
+                                # the SAME authoritative value the status-text lines above already
+                                # use: already contained -> Release only (nothing left to
+                                # approve); genuinely pending -> Approve + Release; nothing queued
+                                # ("monitoring only") -> no hardware buttons at all, matching that
+                                # text exactly.
+                                if bool(self.config.get("interactive_blocking_enabled", False)):
+                                    if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
+                                        inline_keyboard.append([
+                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                                        ])
+                                    elif action_summary == "awaiting approval":
+                                        inline_keyboard.append([
+                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
+                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                                        ])
 
                                 # PHASE 6 (operator-driven self-healing, closed loop): record a
                                 # "published_alert" action-ledger entry for EVERY published alert,

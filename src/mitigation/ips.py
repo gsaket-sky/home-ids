@@ -372,13 +372,27 @@ class IPSMitigator:
                     target["dev_id"] = dev_id or target.get("dev_id", dev_id)
             self._save_queues()
 
-    def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "") -> str:
-        """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, DOMAIN BLOCKED, or UNBLOCKED)."""
+    def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "", dev_id: str = "") -> str:
+        """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, DOMAIN BLOCKED, or UNBLOCKED).
+
+        Dashboard/alert-buttons fix: added a dev_id fallback. The primary lookups are
+        keyed by raw client_ip (tarpit) / mac_addr (router isolation), which can miss a
+        genuinely-contained device on an identifier mismatch -- e.g. this alert's own
+        client_ip/mac_addr differ slightly from whatever the device was isolated under
+        in an earlier incident (a DHCP lease change, or the MAC not yet re-resolved this
+        cycle). Both _tarpit_active_targets/_router_isolated_devices entries already
+        store a "dev_id" field (see mitigate()), so when the direct key misses, scan by
+        dev_id instead before concluding the device is genuinely unblocked."""
         with self._lock:
             if client_ip in self._tarpit_active_targets:
                 return "🔒 TARPITTED (Layer-2 ARP/NDP)"
             if mac_addr and mac_addr != "unknown" and mac_addr in self._router_isolated_devices:
                 return "🔒 ROUTER ISOLATED (Fritz!Box WAN)"
+            if dev_id and dev_id != "unknown":
+                if any(target.get("dev_id") == dev_id for target in self._tarpit_active_targets.values()):
+                    return "🔒 TARPITTED (Layer-2 ARP/NDP)"
+                if any(target.get("dev_id") == dev_id for target in self._router_isolated_devices.values()):
+                    return "🔒 ROUTER ISOLATED (Fritz!Box WAN)"
         # C5 FIX: _blocked_domains was never an attribute on IPSMitigator;
         # blocked domains live in state_manager IPS state.
         if domain and domain not in ("unknown", ""):
