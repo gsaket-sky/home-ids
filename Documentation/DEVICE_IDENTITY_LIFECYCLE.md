@@ -11,6 +11,12 @@ included — not carried forward from a design intent that may have drifted. Thi
 of the subsystems in the table below, extend the relevant section here rather than
 starting a new, separate document for an adjacent change.
 
+The retroactive-merge mechanism this document centers on is one of several autonomous
+self-healing loops the system runs continuously — for how it fits alongside sigma-shift,
+trust-cache immunization, per-device learned thresholds, and the rest, plus a real
+Telegram alert example for a live merge, see
+[`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §6.
+
 ---
 
 ## 1. Overview: the device_id lifecycle

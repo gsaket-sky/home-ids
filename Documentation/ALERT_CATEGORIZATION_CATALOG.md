@@ -63,7 +63,11 @@ never shown — circular-reasoning guard).
 - `benign + suppress + valid + not multi-device-spread + not already-actioned` → autonomous
   `mark_false_positive(source="llm_validated")`
 - `malicious + valid + not already-actioned` → (since 2026-08-27) `record_confirmed_threat()`
-  + sigma TUNE_UP + a batched Telegram digest, instead of sitting inert in a report
+  + sigma TUNE_UP
+- (since 2026-08-28) every pattern's outcome above — including withheld/skipped/already-
+  actioned, not just malicious — is captured structurally and sent as one comprehensive
+  per-run Telegram digest instead of the old malicious-only send; see
+  [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §8 for a real example and the full loop
 
 ## Audit findings from this pass (2026-08-27)
 

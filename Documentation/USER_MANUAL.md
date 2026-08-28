@@ -218,7 +218,7 @@ Net effect: expect the model file and threshold values to be re-evaluated **dail
 
 Once a calibration pass *does* write a new value to `state/config_overrides.json` or `state/device_fp_profiles.json`, the **5-second config watcher** above is what actually makes it live — that's the full latency from "system decided to adjust itself" to "the new threshold is being used on the next alert."
 
-### Scheduled reports (observational — don't block or unblock anything themselves)
+### Scheduled reports and closed-loop jobs
 
 ```mermaid
 gantt
@@ -226,23 +226,27 @@ gantt
     axisFormat  %H:%M
     title 24-hour schedule (scripts/scheduler.py polls cron expressions every 60s)
     section Daily jobs
-    retro_hunter.py (retro threat-intel re-scan)      :02:00, 5m
+    retro_hunter.py (retro threat-intel + local-intel re-scan) :02:00, 5m
     train_fp_classifier.py (retrain + calibrate)      :03:00, 10m
     top_domains_report.py (digest)                    :06:00, 5m
-    section Every 4 hours
-    ollama_soc.py run                                 :00:00, 5m
-    ollama_soc.py run                                 :04:00, 5m
-    ollama_soc.py run                                 :08:00, 5m
-    ollama_soc.py run                                 :12:00, 5m
-    ollama_soc.py run                                 :16:00, 5m
-    ollama_soc.py run                                 :20:00, 5m
+    section Every 4 hours (30 past the hour)
+    ollama_soc.py run                                 :00:30, 5m
+    ollama_soc.py run                                 :04:30, 5m
+    ollama_soc.py run                                 :08:30, 5m
+    ollama_soc.py run                                 :12:30, 5m
+    ollama_soc.py run                                 :16:30, 5m
+    ollama_soc.py run                                 :20:30, 5m
+    section Every 5 minutes
+    shadow_watcher.py poll                            :00:00, 5m
 ```
 
-- **`retro_hunter.py`** — 2:00 AM daily. Re-scans recent history against threat intel, writes findings to `state/retro_hunt_findings.jsonl` and a Telegram summary. Purely informational — never blocks or unblocks anything itself.
-- **`train_fp_classifier.py`** — 3:00 AM daily (plus the independent ~weekly in-process pass above). The only scheduled job that changes live detection behavior, and only via the override layer + 5s watcher, never immediately.
-- **`top_domains_report.py`** — 6:00 AM daily. Markdown + Telegram "top domains per device" digest. Observational only.
-- **`ollama_soc.py`** — every 4 hours, on the hour boundary (00/04/08/12/16/20). The only scheduled job that can *directly* unblock a Pi-hole domain (via the LLM-validated correction path in the table above).
+- **`retro_hunter.py`** — 2:00 AM daily. Two passes: rescans recent history against freshly refreshed external threat-intel feeds (writes findings to `state/retro_hunt_findings.jsonl` + a Telegram summary), and cross-references history against the *local* confirmed-intel store. As of 2026-08-27 the local-intel pass is closed-loop, not purely observational — a match also calls `record_confirmed_threat()` (updates the shared network-effect store) and tightens that device's sigma-shift. See [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §7 for the full loop and a real alert example.
+- **`train_fp_classifier.py`** — 3:00 AM daily (plus the independent ~weekly in-process pass above). The only scheduled job that changes live detection behavior via the override layer, and only via the 5s watcher, never immediately.
+- **`top_domains_report.py`** — 6:00 AM daily. Markdown + Telegram "top domains per device" digest. Genuinely observational only — never blocks, unblocks, or tunes anything.
+- **`ollama_soc.py`** — every 4 hours, at :30 past the hour (00:30/04:30/08:30/12:30/16:30/20:30 — corrected 2026-08-27 after its cron had silently drifted to once-daily). Can both unblock a Pi-hole domain (LLM-validated benign) and tighten sensitivity/update the local-intel store network-wide (LLM-validated malicious) — see [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §8.
+- **`shadow_watcher.py`** — every 5 minutes. **Temporary**: notifies the moment the shadow-mode evidence-taxonomy evaluation logs a new divergence (see [`DECISION_LOGIC_DEPENDENCY_MAP.md`](DECISION_LOGIC_DEPENDENCY_MAP.md)). Purely observational, removed once that fix is flipped live or abandoned.
 - All of the above are launched by `scripts/scheduler.py`, which itself only checks cron expressions once a minute — so any job can start up to 60 seconds after its exact cron minute.
+- For every feedback loop mentioned above (sigma-shift, trust cache, per-device thresholds, local confirmed-intel, transfer learning, retroactive identity merge) explained end-to-end with real Telegram alert examples, see [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md).
 
 ---
 
@@ -418,9 +422,10 @@ Polled every 60s by `scripts/scheduler.py`. Cron fields: minute/hour/day/month/d
 |---|---|---|---|
 | `autotune_enabled` | `true` | `[LIVE]` | Enables the daily retrain-and-recalibrate job (`train_fp_classifier.py`). Separate dedicated enable/cron pair — not part of the `scheduler` sub-block. |
 | `autotune_schedule_cron` | `"0 3 * * *"` | `[LIVE]` | 3:00 AM daily. |
-| `scheduler.ollama_soc.enabled/cron` | `true` / `"0 */4 * * *"` | `[LIVE]` | Brain 3, every 4h from midnight. |
-| `scheduler.retro_hunter.enabled/cron/script` | `true` / `"0 2 * * *"` / `retro_hunter.py` | `[LIVE]` | Retroactive threat-intel re-scan, 2 AM. The `script` override is required — this job's config key has never matched its filename by the scheduler's default convention. Don't remove it. |
+| `scheduler.ollama_soc.enabled/cron` | `true` / `"30 */4 * * *"` | `[LIVE]` | Brain 3, every 4h at :30 past the hour. Corrected 2026-08-27 after silently drifting to a once-daily `"30 4 * * *"` — worth double-checking after any manual config.yaml edit near this key. |
+| `scheduler.retro_hunter.enabled/cron/script` | `true` / `"0 2 * * *"` / `retro_hunter.py` | `[LIVE]` | Retroactive threat-intel + local-intel re-scan, 2 AM. The `script` override is required — this job's config key has never matched its filename by the scheduler's default convention. Don't remove it. |
 | `scheduler.top_domains_report.enabled/cron` | `true` / `"0 6 * * *"` | `[LIVE]` | Daily top-domains report, 6 AM. |
+| `scheduler.shadow_watcher.enabled/cron` | `true` / `"*/5 * * * *"` | `[LIVE]` | **Temporary.** Notifies on new shadow-mode divergence entries. Every 5 minutes. Remove this job (and disable it here) once the shadow-mode evaluation is flipped live or abandoned. |
 
 No two jobs above fire in the same hour as each other or as `autotune_schedule_cron`'s 3am default — this is asserted by `tests/test_phase7_scheduling.py`, so a future config edit that breaks it fails a test rather than silently double-booking two jobs.
 
@@ -705,7 +710,7 @@ The whole point of this family: turn "the system is healing/tuning itself" from 
 | `home_ids_persistence_escalation_total` | Counter, `[device, hostname, signature]` | Alerts escalated purely because the same uncorroborated signal persisted, not new evidence — deliberately excluded from authorizing containment on its own (new this release). |
 | `home_ids_ollama_last_run_timestamp`, `_calls_last_run`, `_cache_hits_last_run`, `_deferred_last_run` | Gauge | Brain 3's most recent run: freshness, and how much of it was fresh LLM calls vs. the 7-day cache. |
 | `home_ids_ollama_validated_total` | Gauge, `[verdict]` | Cumulative validated LLM verdicts by outcome. |
-| `home_ids_job_last_success_timestamp`, `_last_duration_seconds` | Gauge, `[job]` | Staleness/duration of every scheduled cron job (`ollama_soc`, `retro_hunter`, `train_fp_classifier`, `top_domains_report`) — turns a silent scheduling bug into a Grafana panel instead of a log line nobody's watching. |
+| `home_ids_job_last_success_timestamp`, `_last_duration_seconds` | Gauge, `[job]` | Staleness/duration of every scheduled cron job (`ollama_soc`, `retro_hunter`, `train_fp_classifier`, `top_domains_report`, `shadow_watcher`) — turns a silent scheduling bug into a Grafana panel instead of a log line nobody's watching. |
 | `home_ids_retro_hunt_findings_total` | Gauge | Cumulative retroactive threat-intel matches. |
 | `home_ids_reactive_capture_bursts_total` | Counter, `[trigger_reason, outcome]` | Reactive Fritzbox-capture trigger attempts — dispatched vs. deferred by the shared hourly budget. |
 | `home_ids_reactive_capture_bytes_total`, `_errors_total`, `_last_burst_timestamp` | Counter/Gauge | Capture volume per radio; failures by pipeline stage; freshness. |

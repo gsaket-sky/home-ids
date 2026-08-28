@@ -11,6 +11,11 @@ Each function entry lists every parameter: where it's **generated**, every
 place it's **transformed** in transit, and every place it's **consumed**
 downstream — not just "what calls what."
 
+This document covers the decision-*making* path (how one alert's verdict is reached). For
+what happens *after* a verdict — how corrections feed back into sigma-shift, trust-cache
+immunization, per-device thresholds, and the other autonomous-learning loops — see
+[`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md).
+
 ## Status
 
 | Item | State | Notes |

@@ -69,6 +69,8 @@ A real alert isn't a wall of numbers — it's built to be understood in five sec
 
 That's it. What happened, why, how sure it is, and a one-tap way to correct it if it's wrong — no decoding required.
 
+The self-tuning described in the next section sends its own plain-English notifications too — "I just decided this domain is safe, tap here if I'm wrong," "this device's history now protects every other device from the same threat." Real examples of every one of those, alongside exactly what happens in the background when you see them, are in [`Documentation/AUTONOMOUS_LEARNING.md`](Documentation/AUTONOMOUS_LEARNING.md).
+
 ---
 
 ## You can watch it think, not just trust it
@@ -99,6 +101,7 @@ Three systems working together — a real-time watchdog that decides, a self-cor
 |---|---|
 | [INSTALL.md](Documentation/INSTALL.md) | Setting it up for the first time — step by step, including everything it depends on. |
 | [USER_MANUAL.md](Documentation/USER_MANUAL.md) | Running it day to day — every setting, every dashboard, what everything means. |
+| [AUTONOMOUS_LEARNING.md](Documentation/AUTONOMOUS_LEARNING.md) | Every self-tuning feedback loop, every scheduled background job, and real Telegram alert examples for each. |
 | [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The technical deep-dive — architecture, mathematics, and the full honest limitations breakdown. |
 | [CHANGELOG.md](Documentation/CHANGELOG.md) | What's changed, release by release. |
 

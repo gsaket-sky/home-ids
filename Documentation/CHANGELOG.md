@@ -2,6 +2,60 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.4.0] - 2026-08-28
+
+Two live-alert-driven fixes, prompted by real production Telegram messages that were confusing rather than clarifying: a device already fully contained (router-isolated + tarpitted) got an alert saying "nothing yet, tap Approve" with no way to tell it was already blocked, and an autonomous "immunized as false positive" notification gave zero indication of what evidence led there.
+
+### 🔘 Alert Buttons and Status Text Now Reflect Real Containment State
+
+- The Approve/Release inline-keyboard pair was gated on an independently recomputed `risk >= 8.5 or lateral_threat` condition that never checked whether the device was already contained — an already-isolated device could still show "Approve Hardware Isolation" alongside "Release," with nothing to actually approve. Buttons now key off `action_summary` (the same value the "Already done" status text already uses): already contained → Release only; genuinely pending → both; nothing queued → no hardware buttons at all.
+- `IPSMitigator.get_containment_status()` gained a `dev_id` fallback — its primary lookup is keyed by raw client_ip/mac_addr, which can miss a genuinely-contained device on an identifier mismatch against an earlier incident (a DHCP lease change, or the MAC not yet re-resolved this cycle). Both `tarpit_targets`/`router_isolated_devices` entries already store a `dev_id` field; the fallback was a direct addition, not new state.
+
+### 🔎 Autonomous-Action Alerts Now Explain Why
+
+- The "🔔 Auto-action: immunized" revoke prompt now shows the LightGBM/FastEmbed/combined-threshold breakdown and calibrated confidence — `fp_engine.evaluate()` already computed and returned all of this (a comment on `fp_verdict["reasons"]` literally said "so pipeline.py can show it," it just never was read), plus the originating signature/risk/destination with ASN/country, and a hostname+IP identity that no longer dead-ends on a bare "unknown."
+- `retro_hunter.py`'s "Retroactive Local-Intel Cross-Reference" alert now shows how long/how many times an IOC has been confirmed, what originally flagged it in plain language, and explicitly states the mitigation actually applied (sensitivity tightened; no block/isolation) — previously invisible even though the action was already being taken every time. Every device reference (including the `confirmed_by` list, previously raw device_id hashes) now resolves to hostname, or IP as fallback — never a bare device_id.
+- `ollama_soc.py`'s Telegram digest used to fire only for validated-malicious findings. It now sends one comprehensive digest per run covering every pattern's outcome (immunized / confirmed-malicious / withheld / skipped / already-actioned / deferred), so a quiet run is visibly confirmed healthy rather than silently absent. The multi-device-guard "withheld" case now persists a cross-run spread history in `state/ollama_analysis_cache.json` — the next run's alert shows the actual trend ("spread 3→3→4→5 devices... newly joined: X"), not just an identical "withheld again" line with no memory of which devices were involved.
+
+## [v12.3.0] - 2026-08-26 to 2026-08-27
+
+A parallel workstream (run alongside the identity/dashboard work below) built a shadow-mode evaluation harness for a proposed evidence-taxonomy fix to the reputation/hypothesis decision logic, then used its own live divergence data to find and fix two real bugs the shadow-mode comparison itself surfaced.
+
+### 🌓 Shadow-Mode Evidence-Taxonomy Evaluation
+
+- New shadow-decision log (`state/shadow_decisions.jsonl`) recording, for every live alert, what the CURRENT decision logic produced side-by-side with what a proposed evidence-taxonomy fix would have produced — lets the fix be evaluated against real traffic before it's ever flipped live, with zero risk to production verdicts.
+- `src/scripts/shadow_watcher.py` (new, temporary — cron `*/5 * * * *`): fires a Telegram notification the moment a new divergence is logged, so observing the fix's live behavior doesn't require an open session. Tracks its own read-position bookmark so repeated 5-minute polls never re-send the same entries.
+- `src/scripts/shadow_backtest.py` (new, manual/offline): backtest CLI for replaying historical alerts through both the current and proposed logic.
+- Two real bugs found via the shadow comparison's own divergence data and fixed: a hard-stop evidence staleness gap (evidence from a prior, already-resolved incident could still count toward a fresh hard-stop) and a Gap 1 shadow-severity/geofencing-attribution bug, both documented with root cause and fix in `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`.
+- `ollama_soc.py`'s cron had silently drifted from its intended 4-hourly cadence to once-daily (`"30 4 * * *"`) — corrected back to `"30 */4 * * *"`.
+- `Documentation/ALERT_CATEGORIZATION_CATALOG.md` (new): a verdict-by-verdict audit of every state/action/explanation each decision layer (Layer 1 rules, Layer 2 CL-AFPE, Layer 3 Ollama) can produce, cross-referenced against real production alert counts.
+- Telegram's "Contacted" line enriched with IP geo/ASN info for the primary THREAT alert (the same `lookup_asn()`/`lookup()` pattern later reused for the autonomous-action alerts in v12.4.0 above).
+
+## [v12.2.0] - 2026-08-25
+
+Prompted by a live Prometheus/Grafana review ("fritzbox isolation and tarpit still shows trapped but it isn't") that led to auditing device identity end-to-end. Root cause: MAC-first identity anchoring only prevents new device_id minting going forward, never retroactively merges a device_id already minted via IP-anchor before its MAC became known — the dominant pattern for dual/triple-stack devices. Confirmed live: 24 fragmented groups across 60 of 88 tracked devices in one production deployment.
+
+### 🆔 Device Identity Fragmentation — Retroactive Merge
+
+- `StateManager.merge_into_canonical()` (new): folds a fragmented orphan device_id into its richer canonical identity — the opposite direction from the existing `migrate_device_id()`, whose overwrite-the-destination semantics would be wrong here. Discards the orphan's own state per product decision, reattributes `blocked_domains`, reuses the existing isolation-release side channel.
+- A configured `gateway_ip` always resolves to one fixed canonical device_id — the router has multiple real physical MACs (one per interface) that can never converge via MAC alone.
+- Closed two pre-existing gaps in the same pass: `fp_engine.py` had no discard/migrate primitive for its per-device profile store at all (now wired into both the merge path and ordinary stale-device eviction), and `prune_stale_devices()` only cleared a device's most-recent `client_ip` from the reverse IP index, not its other `known_ips`.
+- `apply_device_type()` bugfix: the old guard only re-inferred `device_type` on a device's literal first classification, permanently locking in a cold-start guess (e.g. "laptop") even after a real hostname later resolved.
+- `src/merge_fragmented_devices.py` (new): one-time offline cleanup script (dry-run by default) for existing fragmentation. Verified and applied against real production state: 24 groups, 36 orphans merged.
+- `Documentation/DEVICE_IDENTITY_LIFECYCLE.md` (new): living reference for the full identity-resolution priority order and every "move" (migrate/merge/prune) a device_id can go through.
+
+### 📟 Alert Readability Redesign & Live Bug Fixes
+
+- Telegram alert body redesigned around three plain questions: what happened, what did the system already do about it, what happens if you do nothing — replacing two raw, differently-scaled percentages the reader had to reconcile themselves.
+- Honeypot-access alerts previously carried no destination at all (fell back to whatever the device connected to most recently); kill-chain trajectory display collapsed a per-cycle history array with arrows even when the device sat in the same phase the whole time, implying movement that never happened.
+- `ips.py`: the "device marked safe" tarpit auto-release path left the Prometheus gauge stuck after clearing internal state; router-isolation state now reconciles immediately at boot instead of only via the periodic worker thread.
+
+### 📊 Grafana Dashboard Redesign + 15 New Self-Learning Metrics
+
+- Boolean status tiles (Pi-hole IPS, Zeek Monitor, Router Kill-Switch, Tarpit, etc.) now show mapped text (ONLINE/OFFLINE/ARMED) instead of a raw 0/1.
+- Merged the two most duplicated dashboards (Autonomous Behavior + Transparency, ~60% overlapping content) into one, added a `$device` filter variable, and gave Device Deep Dive its own per-device self-learning section.
+- 15 new metrics covering mechanisms that previously only produced a log line or nothing at all: transfer-learning seeds, retroactive identity merges, re-identify migrations/ambiguous candidates, sigma-shift direction (widen vs. tighten — previously one conflated counter), baseline-poisoning/probation lifecycle *transitions* (not just point-in-time flags), device-type reclassifications, and the per-device ML model's own warmup/retrain/anti-poisoning/invalidation lifecycle.
+
 ## [v12.1.0] - 2026-08-24
 
 Two threads: a follow-up live-alert audit found two more instances of the attribution/wording bug classes v12.0 was built to close, and a full Prometheus/Grafana transparency pass closed the remaining gaps between what the system actually does autonomously and what's visible on a dashboard without reading logs.
