@@ -15,6 +15,7 @@ import json
 import time
 import logging
 import argparse
+import ipaddress
 import urllib.request
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -26,6 +27,8 @@ from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.fp_engine import AutonomousFPEngine
+from intelligence.geoip import GeoIPEngine
+from core.state_guard import StateManager
 from utils import write_job_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [RETRO-HUNTER] %(message)s")
@@ -56,6 +59,59 @@ def _send_telegram(msg: str) -> None:
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
         LOGGER.error("Failed to send Telegram retro-hunt alert: %s", e)
+
+
+_REASON_PHRASES = {
+    "STAGE_1_HARD_STOP": "a hard-stop match against known-bad intel",
+    "RETRO_HUNT_LOCAL_INTEL_MATCH": "a retroactive cross-device match like this one",
+    "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP": "a hard-stop that overrode an existing trust-cache entry",
+    "HIGH_CRITICAL_DECISION": "a HIGH/CRITICAL confirmed-threat decision",
+    "LLM_VALIDATED_MALICIOUS": "an Ollama LLM-validated malicious verdict",
+}
+
+
+def _geo_note(geoip_engine, ip: str) -> str:
+    """Returns ' (Org, Country)' for a raw IP via local mmdb lookups, or '' if
+    unavailable/not an IP. Same lookup_asn()/lookup() pattern pipeline.py's own alert
+    text uses -- kept as a small local copy rather than importing pipeline.py's private
+    helper, matching this script's existing self-contained style (e.g. _send_telegram
+    above already mirrors top_domains_report.py's version rather than importing it)."""
+    if not ip or ip == "unknown" or not geoip_engine:
+        return ""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    try:
+        asn_res = geoip_engine.lookup_asn(ip)
+        city_res = geoip_engine.lookup(ip)
+        geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+        geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+        geo_parts = [p for p in (geo_org, geo_country) if p]
+        return f" ({', '.join(geo_parts)})" if geo_parts else ""
+    except Exception:
+        return ""
+
+
+def _load_device_display_map(state_dir: Path) -> dict:
+    """Read-only device_id -> display name (hostname, or IP if hostname unknown --
+    never a bare device_id, which is meaningless to a human at a glance) map, built
+    from the live state file. Same read-only StateManager construction pattern
+    merge_fragmented_devices.py already uses. A device_id no longer present in current
+    state (pruned/merged away) is left unresolved -- callers fall back to the raw id."""
+    display_map = {}
+    try:
+        sm = StateManager(state_path=str(state_dir / "ids_state.json"))
+        sm.load_from_disk()
+        for dev_id in sm.get_all_device_ids():
+            with sm.lock_device(dev_id) as state:
+                hostname = getattr(state, "hostname", "unknown")
+                client_ip = getattr(state, "client_ip", "unknown")
+                display_map[dev_id] = hostname if hostname and hostname != "unknown" else client_ip
+    except Exception as e:
+        LOGGER.debug("Failed to build device display-name map: %s", e)
+    return display_map
+
 
 def _count_findings_by_device(state_dir: Path) -> dict:
     """Per-device breakdown of retro-hunt findings, for the dashboard-redesign per-device
@@ -170,6 +226,7 @@ def check_local_intel_history(log_path: Path, local_intel: LocalConfirmedIntel, 
                     continue
                 device_id = record.get("device", {}).get("id", "unknown")
                 hostname = record.get("device", {}).get("hostname", "unknown")
+                device_ip = record.get("device", {}).get("ip", "unknown")
                 network_context = record.get("network_context", {}) or {}
                 domain = str(network_context.get("queried_domain") or "").lower().strip(".")
                 dest_ip = str(network_context.get("destination_ip") or "")
@@ -183,9 +240,17 @@ def check_local_intel_history(log_path: Path, local_intel: LocalConfirmedIntel, 
                     if device_id in entry.get("sources", []):
                         continue  # this device already confirmed it itself -- not a new finding
                     matches.append({
-                        "device_id": device_id, "hostname": hostname,
+                        "device_id": device_id, "hostname": hostname, "device_ip": device_ip,
                         "matched_kind": kind, "matched_value": value, "ts": ts,
                         "confirmed_by": entry.get("sources", []),
+                        # BUGFIX (live alert audit): local_intel.check() already returns the
+                        # full stored entry -- first_confirmed/count/reason were sitting
+                        # right here and simply never passed through to the caller, which
+                        # meant the Telegram alert could only ever say "confirmed by X" with
+                        # no sense of how long-standing or how many times.
+                        "first_confirmed": entry.get("first_confirmed"),
+                        "count": entry.get("count"),
+                        "reason": entry.get("reason", "unknown"),
                     })
     except Exception as e:
         LOGGER.error("Failed to parse historical stream for local-intel cross-reference: %s", e)
@@ -291,6 +356,15 @@ def run_retro_hunt(days: int = 14) -> None:
         LOGGER.critical("🌐 RETROACTIVE LOCAL-INTEL MATCHES: %d historical connection(s) from a "
                          "device match an IOC confirmed by a DIFFERENT device since then.", len(local_matches))
 
+        # BUGFIX (live alert audit): built lazily (only when there's something to
+        # report) -- GeoIPEngine is a pure local mmdb read (cheap either way), but the
+        # StateManager load is a real disk read, no need to pay for it on a quiet run.
+        geoip_engine = GeoIPEngine(
+            db_path=CONFIG.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")),
+            asn_db_path=CONFIG.get("geoip_asn_db", ""),
+        )
+        device_display_map = _load_device_display_map(state_dir)
+
         # BUGFIX (2026-08-27, third-party review): this pass used to be notify-only --
         # check_local_intel_history() found the match, but nothing ever fed it back into
         # fp_engine's own confirmed-threat bookkeeping (local_intel record/count, sigma
@@ -331,9 +405,30 @@ def run_retro_hunt(days: int = 14) -> None:
         top_local = local_matches[:10]
         lines = [f"🌐 <b>Retroactive Local-Intel Cross-Reference: {len(local_matches)} match(es)</b>",
                  f"Devices that touched a since-confirmed-malicious IP/domain in the past {days}d:", ""]
+        # BUGFIX (live alert audit): this used to just dump raw device_ids and a bare
+        # "confirmed by [...]" list with no sense of how long-standing the IOC is, what
+        # originally flagged it, whether the matched IP is recognizable, or what (if
+        # anything) actually happened as a result -- the mitigation performed above
+        # (record_confirmed_threat + sigma TUNE_UP) had zero visible trace in the alert.
         for m in top_local:
-            lines.append(f"• <code>{m['hostname']}</code> ({m['device_id']}) → {m['matched_kind']} "
-                          f"<code>{m['matched_value']}</code>, confirmed by {m['confirmed_by']}")
+            device_label = m["hostname"] if m.get("hostname") and m["hostname"] != "unknown" else m.get("device_ip", "unknown")
+            confirmed_by_labels = [device_display_map.get(d, d) for d in m.get("confirmed_by", [])]
+            ip_note = _geo_note(geoip_engine, m["matched_value"]) if m["matched_kind"] == "ip" else ""
+            reason_phrase = _REASON_PHRASES.get(m.get("reason", ""), m.get("reason") or "unknown")
+            touched_human = (
+                datetime.fromtimestamp(m["ts"]).strftime("%Y-%m-%d %H:%M") if m.get("ts") else "unknown time"
+            )
+            first_confirmed_human = (
+                datetime.fromtimestamp(m["first_confirmed"]).strftime("%Y-%m-%d")
+                if m.get("first_confirmed") else "unknown"
+            )
+            count_str = f"{m['count']}x" if m.get("count") else "an unknown number of times"
+            lines.append(
+                f"• <code>{device_label}</code> → {m['matched_kind']} <code>{m['matched_value']}</code>{ip_note}\n"
+                f"  Touched {touched_human} | confirmed {count_str} since {first_confirmed_human} "
+                f"({reason_phrase}); also confirmed by: {', '.join(confirmed_by_labels) if confirmed_by_labels else 'no one else yet'}\n"
+                f"  → Sensitivity tightened for this device (no block/isolation — informational + tuning only)"
+            )
         if len(local_matches) > len(top_local):
             lines.append(f"...and {len(local_matches) - len(top_local)} more (see retro_hunt_findings.jsonl)")
         _send_telegram("\n".join(lines)[:4000])

@@ -4,6 +4,7 @@ import json
 import time
 import logging
 import requests
+import ipaddress
 import urllib.request
 import yaml
 from pathlib import Path
@@ -35,6 +36,27 @@ def _send_telegram(config: dict, msg: str) -> None:
         LOGGER.error(f"Failed to send Telegram ollama_soc alert: {e}")
 
 
+def _geo_note(geoip_engine, ip: str) -> str:
+    """Returns ' (Org, Country)' for a raw IP via local mmdb lookups, or '' if
+    unavailable/not an IP. Same small helper as retro_hunter.py's own copy -- kept
+    local rather than shared, matching this script's existing self-contained style."""
+    if not ip or ip == "unknown" or not geoip_engine:
+        return ""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    try:
+        asn_res = geoip_engine.lookup_asn(ip)
+        city_res = geoip_engine.lookup(ip)
+        geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+        geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+        geo_parts = [p for p in (geo_org, geo_country) if p]
+        return f" ({', '.join(geo_parts)})" if geo_parts else ""
+    except Exception:
+        return ""
+
+
 def _flatten_config_categories(raw: dict) -> dict:
     """Mirror config.py's LiveConfig._load() flattening rule: merge every top-level
     mapping whose name doesn't start with "_"/"#" into one flat key->value namespace.
@@ -64,6 +86,7 @@ def load_config():
 from intelligence.ai_soc import DeterministicValidator
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.fp_engine import AutonomousFPEngine
+from intelligence.geoip import GeoIPEngine
 from mitigation.ips import IPSMitigator
 from core.state_guard import StateManager
 from utils import write_job_health
@@ -313,6 +336,23 @@ def main():
             signature_device_counts[sig].add(dev)
     multi_device_suppress_guard = int(config.get("ollama_multi_device_suppress_guard", DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD))
 
+    # BUGFIX (live alert audit): device_id -> display name (hostname, or IP if hostname
+    # unknown -- never a bare device_id, meaningless to a human at a glance). Built once
+    # per run from this run's own alert payloads (already in hand, no extra I/O) rather
+    # than a fresh state load -- used both for per-pattern display and for the withheld-
+    # pattern spread-history trend (which devices joined a spreading pattern since last
+    # run, not just how many).
+    dev_display_map = {}
+    for p in alerts_to_analyze:
+        d = p.get("device", {}) or {}
+        if d.get("id"):
+            dev_display_map[d["id"]] = d["hostname"] if d.get("hostname") not in (None, "unknown") else d.get("ip", d["id"])
+
+    geoip_engine = GeoIPEngine(
+        db_path=config.get("geoip_db", str(root_dir / "models" / "GeoLite2-City.mmdb")),
+        asn_db_path=config.get("geoip_asn_db", ""),
+    )
+
     LOGGER.info(
         f"{len(alerts_to_analyze)} alert(s) collapsed into {len(groups)} distinct threat "
         f"pattern(s) (device+target+signature). Cache TTL={cache_ttl_seconds/3600:.1f}h, "
@@ -347,17 +387,11 @@ def main():
     ]
 
     new_transparency_logs = []
+    pattern_outcomes = []
     queries_made = 0
     cache_hits = 0
     deferred = 0
     run_validated = defaultdict(int)  # classification -> count this run, for the cumulative relay metric
-    # BUGFIX (2026-08-27, third-party review): a validated "malicious" verdict previously
-    # had NO consequence at all -- only benign+suppress ever took autonomous action. This
-    # collects each one so a single batched Telegram digest can be sent after the run
-    # (matching retro_hunter.py's own batched-summary pattern), instead of the finding
-    # sitting silently in reports/soc_daily_report_*.md, which nothing prompts a human to
-    # open on a routine day.
-    validated_malicious_findings = []
 
     # VERSION 10 (#15/#16): explicitly instructs independent reasoning from raw evidence
     # only, matching what the payload itself now actually contains (see
@@ -381,6 +415,12 @@ def main():
         members = groups[key]
         representative = members[0]  # most recent structure is representative enough for a pattern-level verdict
         device_ip = representative.get("device", {}).get("ip", "unknown")
+        # BUGFIX (live alert audit): device_id/alert_hostname used to only be extracted
+        # deep inside the malicious/benign-suppress branches individually -- hoisted here
+        # so every branch (including the new structured pattern_outcomes capture below)
+        # has them without re-deriving.
+        device_id = representative.get("device", {}).get("id", "unknown")
+        alert_hostname = representative.get("device", {}).get("hostname", "unknown")
         risk = representative.get("risk", 0.0)
         target = _target_for_key(representative)
 
@@ -402,6 +442,16 @@ def main():
             report_lines.append(f"### Target: `{target}` (Device: `{device_ip}`, {len(members)} alert(s))")
             report_lines.append("- **Status:** `DEFERRED` -- per-run Ollama query cap reached, will retry on the next scheduled run.")
             report_lines.append("")
+            # BUGFIX (live alert audit): this pattern never got analyzed at all this run
+            # (no LLM call, no cache hit) -- captured as its own outcome so the digest
+            # doesn't silently drop it the way it used to.
+            pattern_outcomes.append({
+                "cache_key": key, "device_id": device_id, "hostname": alert_hostname,
+                "device_ip": device_ip, "target": target, "target_asn_note": "",
+                "signature": representative.get("signature", "unknown"), "classification": None,
+                "llm_confidence": None, "llm_reason": "", "alerts_covered": len(members),
+                "outcome": "deferred_query_cap", "outcome_detail": "per-run Ollama query cap reached, will retry next run",
+            })
             continue
         else:
             # VERSION 10 (#15/#16): prompt built from the sanitized evidence-only view,
@@ -457,7 +507,11 @@ def main():
         new_transparency_logs.append({
             "type": "ollama_transparency",
             "component": "batch_analyzer",
-            "device": {"ip": device_ip},
+            # BUGFIX (live alert audit): "hostname" and "target" were never on this entry
+            # at all -- readable only by decoding cache_key or cross-referencing device_id
+            # against alerts.json/state separately. Both are already local variables here.
+            "device": {"id": device_id, "ip": device_ip, "hostname": alert_hostname},
+            "target": target,
             "timestamp": time.time(),
             "original_alert_ts": representative.get("timestamp"),
             "risk": risk,
@@ -486,6 +540,15 @@ def main():
         already_actioned = bool(cache.get(key, {}).get("action_taken"))
         signature = representative.get("signature", "unknown")
         spread = len(signature_device_counts.get(signature, ()))
+        # BUGFIX (live alert audit): outcome/outcome_detail feed the new structured
+        # pattern_outcomes list below -- captures what actually happened (and why) for
+        # EVERY pattern, not just malicious verdicts, so the run's Telegram digest can
+        # show all of it. Defaults to "no_action_needed" for the case none of the
+        # branches below fire (invalid verdict, or a classification/action combo that
+        # isn't one of benign+suppress / malicious) -- previously silent even in the
+        # .md report.
+        outcome = "no_action_needed"
+        outcome_detail = "" if is_valid else "validator rejected this LLM response (see report for detail)"
         if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned and spread >= multi_device_suppress_guard:
             LOGGER.warning(
                 f"[MULTI-DEVICE GUARD] '{signature}' is independently firing on {spread} distinct "
@@ -500,10 +563,40 @@ def main():
                 f"(guard threshold {multi_device_suppress_guard}) -- deferred to human review "
                 f"instead of auto-immunizing."
             )
+            outcome = "withheld_multi_device"
+            # BUGFIX (live alert audit): the "traceable spread" requirement -- this used to
+            # persist nothing at all (comment above already explained why action_taken
+            # stays False), so a pattern withheld every run for weeks produced an
+            # identical "withheld again" line every time, no memory of prior occurrences
+            # or which devices were involved. cache[key] is guaranteed to already exist
+            # here (written above on a fresh call, or already present on a cache hit).
+            devices_now = signature_device_counts.get(signature, set())
+            withheld_history = cache[key].setdefault("withheld_history", [])
+            new_devices = devices_now - set(withheld_history[-1]["device_ids"]) if withheld_history else devices_now
+            new_device_labels = sorted(dev_display_map.get(d, d) for d in new_devices)
+            if not withheld_history:
+                outcome_detail = f"first withheld, spreading to {len(devices_now)} device(s): {', '.join(sorted(dev_display_map.get(d, d) for d in devices_now)) or 'unknown'}"
+            elif new_devices:
+                spread_seq = "→".join(str(len(h["device_ids"])) for h in withheld_history) + f"→{len(devices_now)}"
+                first_ts_human = datetime.fromtimestamp(withheld_history[0]["ts"]).strftime("%Y-%m-%d %H:%M")
+                outcome_detail = (
+                    f"withheld {len(withheld_history) + 1} time(s) — spread {spread_seq} devices "
+                    f"since {first_ts_human} (newly joined: {', '.join(new_device_labels)})"
+                )
+            else:
+                last_ts_human = datetime.fromtimestamp(withheld_history[-1]["ts"]).strftime("%Y-%m-%d %H:%M")
+                outcome_detail = (
+                    f"withheld {len(withheld_history) + 1} time(s) — still {len(devices_now)} device(s), "
+                    f"no new spread since {last_ts_human}"
+                )
+            withheld_history.append({
+                "ts": time.time(), "device_ids": sorted(devices_now),
+                "display_names": sorted(dev_display_map.get(d, d) for d in devices_now),
+            })
+            cache[key]["withheld_history"] = withheld_history[-20:]  # own cap -- nothing else prunes this sub-field
         elif is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
             target_domain = representative.get("network_context", {}).get("queried_domain", "") or ""
             if target_domain and target_domain != "unknown":
-                alert_hostname = representative.get("device", {}).get("hostname", "unknown")
                 # PHASE 13: tagged distinctly from a real Telegram operator tap, so
                 # train_fp_classifier.py's threshold self-calibration can tell "the LLM
                 # validated this, autonomously, every 4h" apart from "a human confirmed
@@ -532,11 +625,15 @@ def main():
                         f"cache and logged an operator-equivalent training correction "
                         f"(takes effect on soc.service's next restart).{unblocked_note}"
                     )
+                    outcome = "immunized"
+                    outcome_detail = f"domain immunized 14 days, sensitivity loosened for this device{unblocked_note}"
                 else:
                     report_lines.append(
                         f"- **Autonomous Action Skipped:** could not safely extract a base domain "
                         f"from `{target_domain}` — no immunization applied."
                     )
+                    outcome = "skipped"
+                    outcome_detail = f"could not safely extract a base domain from '{target_domain}'"
         elif is_valid and response_json.get('classification') == 'malicious' and not already_actioned:
             # BUGFIX (2026-08-27, third-party review): mirrors exactly what fp_engine's
             # own two hard-evidence confirmation paths already do together (Stage-1 hard-
@@ -550,8 +647,6 @@ def main():
             # poisoning bug once; dest_ip alone is the reliably-attributable part of this
             # verdict.
             dest_ip = representative.get("network_context", {}).get("destination_ip", "") or ""
-            device_id = representative.get("device", {}).get("id", "unknown")
-            alert_hostname = representative.get("device", {}).get("hostname", "unknown")
             fp_engine.record_confirmed_threat(
                 device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
             )
@@ -563,12 +658,24 @@ def main():
                 f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "
                 f"other device that touches it."
             )
-            validated_malicious_findings.append({
-                "hostname": alert_hostname, "device_ip": device_ip, "target": target,
-                "reason": response_json.get("reason", ""), "confidence": response_json.get("confidence", 0.0),
-            })
+            outcome = "confirmed_threat"
+            outcome_detail = "local confirmed-intel updated (any other device touching this now hard-stops), sensitivity tightened for this device"
         elif already_actioned:
             report_lines.append("- **Autonomous Action:** already applied for this pattern on a previous run — not repeated.")
+            outcome = "already_actioned"
+            outcome_detail = "already actioned on a previous run, not repeated"
+
+        # BUGFIX (live alert audit): structured capture of every pattern's outcome (not
+        # just malicious findings) feeds the new comprehensive run digest below --
+        # replaces the old malicious-only validated_malicious_findings-based send.
+        target_asn_note = _geo_note(geoip_engine, target) if target != "unknown" else ""
+        pattern_outcomes.append({
+            "cache_key": key, "device_id": device_id, "hostname": alert_hostname,
+            "device_ip": device_ip, "target": target, "target_asn_note": target_asn_note,
+            "signature": signature, "classification": response_json.get("classification"),
+            "llm_confidence": response_json.get("confidence"), "llm_reason": response_json.get("reason", ""),
+            "alerts_covered": len(members), "outcome": outcome, "outcome_detail": outcome_detail,
+        })
 
         report_lines.append("")
         LOGGER.info(f"Analyzed {device_ip} -> {target} (Risk {risk}, {len(members)} alert(s)): {response_json.get('reason')}")
@@ -602,21 +709,68 @@ def main():
         f"({queries_made} fresh Ollama calls, {cache_hits} cache hits, {deferred} deferred)"
     )
 
-    if validated_malicious_findings:
-        top = validated_malicious_findings[:10]
-        digest_lines = [
-            f"🤖 <b>Ollama SOC: {len(validated_malicious_findings)} validated malicious finding(s)</b>",
-            "Independently confirmed from raw evidence (not the system's own prior verdict) -- "
-            "local-intel updated, sensitivity tuned up:", "",
-        ]
-        for f_entry in top:
-            digest_lines.append(
-                f"• <code>{f_entry['hostname']}</code> ({f_entry['device_ip']}) → {f_entry['target']} "
-                f"(confidence {f_entry['confidence']:.2f}): {f_entry['reason']}"
-            )
-        if len(validated_malicious_findings) > len(top):
-            digest_lines.append(f"...and {len(validated_malicious_findings) - len(top)} more (see {report_path.name})")
-        _send_telegram(config, "\n".join(digest_lines)[:4000])
+    # BUGFIX (live alert audit): this used to only ever send Telegram for validated
+    # malicious findings -- benign-suppress actions, multi-device-guard withholds, and
+    # quiet "nothing new happened" runs were all invisible outside the .md report nobody
+    # is prompted to open. Now fires once per run (whenever there was something to
+    # analyze at all), covering every pattern's outcome, so a quiet run is visibly
+    # confirmed healthy rather than silently absent -- matches the digest CL-AFPE's own
+    # autonomous actions already get.
+    if ordered_keys:
+        _OUTCOME_LABELS = {
+            "immunized": "🛡️ immunized as false positive (sensitivity loosened)",
+            "confirmed_threat": "🚨 confirmed malicious (sensitivity tightened)",
+            "withheld_multi_device": "⏸️ withheld (spreading across multiple devices, re-checking next run)",
+            "skipped": "⚠️ skipped (could not safely apply the action)",
+            "already_actioned": "✅ already actioned / no new action needed",
+            "no_action_needed": "✅ already actioned / no new action needed",
+            "deferred_query_cap": "⏳ deferred (per-run query cap reached, retrying next run)",
+        }
+        by_outcome = defaultdict(list)
+        for po in pattern_outcomes:
+            by_outcome[po["outcome"]].append(po)
+
+        digest_lines = [f"🤖 <b>Ollama SOC run: {len(pattern_outcomes)} pattern(s) analyzed</b>", ""]
+
+        # Summary counts, in a fixed order (interesting outcomes first).
+        summary_order = ["immunized", "confirmed_threat", "withheld_multi_device", "skipped",
+                          "deferred_query_cap"]
+        quiet_count = len(by_outcome.get("already_actioned", [])) + len(by_outcome.get("no_action_needed", []))
+        for oc in summary_order:
+            if by_outcome.get(oc):
+                digest_lines.append(f"{_OUTCOME_LABELS[oc]}: {len(by_outcome[oc])}")
+        if quiet_count:
+            digest_lines.append(f"✅ {quiet_count} already actioned / no new action needed (see report for the full list)")
+        digest_lines.append("")
+
+        # Per-pattern detail for the outcomes worth a human's attention, capped overall
+        # (same [:10]-style truncation pattern retro_hunter.py's own digest already
+        # uses) so one noisy run doesn't blow past Telegram's message-length limits.
+        detail_budget = 10
+        tech_lines = ["", "🔧 <b>Technical detail (optional)</b>"]
+        for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped"):
+            for po in by_outcome.get(oc, [])[:detail_budget]:
+                if detail_budget <= 0:
+                    break
+                detail_budget -= 1
+                device_label = po["hostname"] if po["hostname"] and po["hostname"] != "unknown" else po["device_ip"]
+                digest_lines.append(f"• <code>{device_label}</code> → {po['target']}{po['target_asn_note']} ({po['signature']})")
+                if po["llm_reason"]:
+                    conf_str = f"{po['llm_confidence']:.2f}" if isinstance(po.get("llm_confidence"), (int, float)) else "n/a"
+                    digest_lines.append(f"  LLM (confidence {conf_str}): \"{po['llm_reason']}\"")
+                if po["outcome_detail"]:
+                    digest_lines.append(f"  → {po['outcome_detail']}")
+                digest_lines.append("")
+                tech_lines.append(
+                    f"• {device_label} [{po['cache_key']}]: classification={po.get('classification')}, "
+                    f"confidence={po.get('llm_confidence')}, alerts_covered={po['alerts_covered']}"
+                )
+        remaining = sum(len(by_outcome.get(oc, [])) for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")) - (10 - detail_budget)
+        if remaining > 0:
+            digest_lines.append(f"...and {remaining} more (see {report_path.name})")
+
+        full_msg = "\n".join(digest_lines + tech_lines) if len(tech_lines) > 2 else "\n".join(digest_lines)
+        _send_telegram(config, full_msg[:4000])
 
     state_dir = root_dir / "state"
     _write_ollama_relay_stats(state_dir, calls_made=queries_made, cache_hits=cache_hits, deferred=deferred, run_validated=run_validated)

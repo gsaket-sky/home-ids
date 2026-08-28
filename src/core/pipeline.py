@@ -291,6 +291,27 @@ def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_
     return label, f"{label} -- {detail}{calib_suffix}", fp_risk_pct >= 50
 
 
+def _build_geo_note(geoip_engine: Any, ip: str) -> str:
+    """Returns a formatted ' _(Org, Country)_' geo/ASN annotation for a raw IP, or ''
+    if unavailable. Extracted from the WHAT HAPPENED section's existing inline geo-note
+    logic (same lookup_asn()/lookup() calls, same format) so the autonomous-action
+    revoke prompt can show the same "who/where is this" context without duplicating it
+    -- both are pure local mmdb reads (lookup_asn is @lru_cache'd), cheap enough to call
+    on every alert."""
+    if not ip or ip == "unknown" or not geoip_engine:
+        return ""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    asn_res = geoip_engine.lookup_asn(ip)
+    city_res = geoip_engine.lookup(ip)
+    geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+    geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+    geo_parts = [p for p in (geo_org, geo_country) if p]
+    return f" _({', '.join(geo_parts)})_" if geo_parts else ""
+
+
 class EnginePipeline:
     def __init__(
         self, config, state_manager: StateManager = None, ti_engine: ThreatIntel = None, 
@@ -1684,11 +1705,51 @@ class EnginePipeline:
                                     ttl_seconds=ttl_seconds,
                                 )
                                 revoke_hours = max(1, int(ttl_seconds / 3600))
+
+                                # BUGFIX (live alert audit): this message used to show only
+                                # hostname (dead-ended on "unknown" for devices with no
+                                # resolved hostname, with no IP fallback even though client_ip
+                                # was sitting right there) and a bare confidence number with
+                                # zero explanation of what alert/evidence led here or why the
+                                # FP engine landed on that number. Everything below was already
+                                # computed by fp_engine.evaluate() a few lines earlier -- see
+                                # fp_verdict["reasons"]'s own comment ("Exposed as a real key
+                                # here so pipeline.py can show it") -- it just was never read.
+                                identity = f"*{hostname}*"
+                                if client_ip and client_ip != "unknown":
+                                    identity += f" ({client_ip})"
+
+                                net_ctx = alert_payload.get("network_context", {})
+                                orig_dest_ip = net_ctx.get("destination_ip", "unknown")
+                                origin_line = ""
+                                if orig_dest_ip and orig_dest_ip != "unknown":
+                                    dest_geo_note = _build_geo_note(self.geoip_engine, orig_dest_ip)
+                                    origin_line = (
+                                        f"\nIt was originally flagged by: {alert_payload.get('signature', 'unknown')} "
+                                        f"(risk {alert_payload.get('risk', 0.0):.1f}) — contacted `{orig_dest_ip}`"
+                                        f"{dest_geo_note}:{net_ctx.get('destination_port', '')} "
+                                        f"({net_ctx.get('service_name', 'unknown')})"
+                                    )
+
                                 revoke_msg = (
-                                    f"🔔 *Auto-action:* immunized `{action_info['target']}` for *{hostname}* "
-                                    f"(FP confidence={fp_verdict.get('confidence', 0.0):.2f}).\n"
+                                    f"🔔 *Auto-action:* immunized `{action_info['target']}` for {identity}\n"
+                                    f"This stopped future alerts for this domain because our false-positive "
+                                    f"check was {fp_verdict.get('confidence', 0.0) * 100:.0f}% confident it's "
+                                    f"benign.{origin_line}\n"
                                     f"If this was actually a real threat, tap Revoke within {revoke_hours}h."
                                 )
+                                reasons_list = fp_verdict.get("reasons") or []
+                                if reasons_list:
+                                    calib = fp_verdict.get("calibrated_confidence")
+                                    calib_line = (
+                                        f"- Calibrated confidence: {calib:.2f}" if calib is not None
+                                        else "- Calibrated confidence: not available"
+                                    )
+                                    revoke_msg += (
+                                        "\n\n🔧 *Technical detail (optional)*\n"
+                                        + "\n".join(f"- {r}" for r in reasons_list)
+                                        + f"\n{calib_line}"
+                                    )
                                 self.alert_manager.send(
                                     revoke_msg,
                                     reply_markup={"inline_keyboard": [[
