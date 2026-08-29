@@ -99,8 +99,7 @@ def _buttons_for(action_summary: str, interactive_blocking_enabled: bool, client
             keyboard.append([{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}])
         elif action_summary == "awaiting approval":
             keyboard.append([
-                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
-                {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
             ])
     return keyboard
 
@@ -112,9 +111,13 @@ check("same fix for router-isolated devices",
       _buttons_for("router isolated", True) == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
 check("same fix for an auto-blocked (domain-blocked) device",
       _buttons_for("auto-blocked", True) == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
-check("REGRESSION GUARD: a genuinely pending device (nothing done yet) still gets BOTH "
-      "Approve and Release, exactly as before",
-      len(_buttons_for("awaiting approval", True)) == 1 and len(_buttons_for("awaiting approval", True)[0]) == 2)
+check("BUGFIX (2026-08-29, user catch): a genuinely pending device (nothing done yet) "
+      "now gets ONLY Approve, not a Release button too -- action_summary==\"awaiting "
+      "approval\" is itself derived from containment_status finding nothing currently "
+      "contained (see the branch order above it), so Release was guaranteed to no-op "
+      "there every time, violating the same 'only show a button that would actually do "
+      "something' principle the three checks above this one already enforce",
+      _buttons_for("awaiting approval", True) == [[{"text": "🔒 Approve Hardware Isolation", "callback_data": "block:1.2.3.4"}]])
 check("REGRESSION GUARD: 'monitoring only' (nothing queued, nothing done) gets NO "
       "hardware buttons at all, matching the 'monitoring only' status text",
       _buttons_for("monitoring only", True) == [])
@@ -129,8 +132,14 @@ check("REGRESSION GUARD: pipeline.py's real source still contains the already-co
       "from the real logic on a future edit)",
       'action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked")' in _pipeline_src)
 check("REGRESSION GUARD: pipeline.py's real source still contains the awaiting-approval "
-      "-> both-buttons branch",
+      "-> Approve-only branch",
       'elif action_summary == "awaiting approval":' in _pipeline_src)
+check("REGRESSION GUARD: pipeline.py's awaiting-approval branch no longer also appends "
+      "a Release Device button (catches a future edit silently reintroducing the "
+      "guaranteed-no-op button)",
+      _pipeline_src.count('{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}') == 1,
+      "expected exactly ONE Release-Device button construction in the whole file "
+      "(the already-contained branch) -- found a different count")
 
 print()
 if FAILURES:

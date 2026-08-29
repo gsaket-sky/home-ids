@@ -2266,9 +2266,24 @@ class EnginePipeline:
                                 # "Already done" text said. Buttons now key off action_summary,
                                 # the SAME authoritative value the status-text lines above already
                                 # use: already contained -> Release only (nothing left to
-                                # approve); genuinely pending -> Approve + Release; nothing queued
+                                # approve); genuinely pending -> Approve only; nothing queued
                                 # ("monitoring only") -> no hardware buttons at all, matching that
                                 # text exactly.
+                                # BUGFIX (2026-08-29, user catch): "awaiting approval" used to also
+                                # get a "Release Device" button alongside Approve -- but
+                                # action_summary=="awaiting approval" is ITSELF derived from
+                                # containment_status containing "WAITING FOR APPROVAL" specifically
+                                # in the branch where none of TARPITTED/ROUTER ISOLATED/DOMAIN
+                                # BLOCKED matched (see action_summary's own assignment above) --
+                                # i.e. this state, by construction, always means "not currently
+                                # contained." Release's callback (unblock:{client_ip}) always calls
+                                # the same hardware-release IPC either way, so it was guaranteed to
+                                # no-op here every single time ("nothing to release" was itself
+                                # confirmed correct, just confusingly worded -- see the alerts.py
+                                # message-text fix). This is the same "only show a button when it
+                                # would actually do something" principle the fix above this comment
+                                # already established for the other two states -- the third state
+                                # just never got the same treatment.
                                 if bool(self.config.get("interactive_blocking_enabled", False)):
                                     if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
                                         inline_keyboard.append([
@@ -2276,8 +2291,7 @@ class EnginePipeline:
                                         ])
                                     elif action_summary == "awaiting approval":
                                         inline_keyboard.append([
-                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"},
-                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
                                         ])
 
                                 # PHASE 6 (operator-driven self-healing, closed loop): record a
