@@ -314,7 +314,19 @@ class AlertManager:
                     if released:
                         msg_text = f"✅ Target '{target}' released from containment."
                     else:
-                        msg_text = f"ℹ️ '{target}' was not currently tracked as isolated — nothing to release."
+                        # BUGFIX (2026-08-29, user report: "releasing does not work, it shows
+                        # nothing is marked"): this is the expected, GOOD outcome for an
+                        # "awaiting approval" alert -- Interactive HITL mode never applies the
+                        # hardware block until Approve is tapped, so there was never anything
+                        # to undo. The old wording ("was not currently tracked as isolated —
+                        # nothing to release") read as an error/failed action; reworded to
+                        # confirm the actual, reassuring state instead.
+                        msg_text = (
+                            f"✅ '{target}' is not blocked — no hardware containment was ever "
+                            f"applied (it was still just awaiting your approval, or was already "
+                            f"released earlier). Nothing further to do; the device stays on the "
+                            f"network."
+                        )
             elif action == "block":
                 ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/block"
                 resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
@@ -410,10 +422,32 @@ class AlertManager:
             ipc_timeout = 60.0 if ipc_target == "all" else 10.0
             try:
                 resp = self.session.post(ipc_url, json={"target": ipc_target}, headers=headers, timeout=ipc_timeout)
-                if resp.status_code == 200:
-                    self.send(f"✅ *[TELEGRAM RELEASE]* Successfully released '{ipc_target}' from containment (Pi-hole, Tarpit, Router). 1-Hour Cooldown active.")
-                else:
+                if resp.status_code != 200:
                     self.send(f"⚠️ Failed to release '{ipc_target}': HTTP {resp.status_code}")
+                else:
+                    # BUGFIX (2026-08-29, same gap already fixed in the inline-button
+                    # callback above): this used to claim success on any HTTP 200 without
+                    # checking the response body's released/released_count -- a target that
+                    # was never actually contained (e.g. still "awaiting approval") got a
+                    # false "Successfully released" message instead of the accurate
+                    # "nothing was ever blocked" one.
+                    body = resp.json()
+                    if ipc_target == "all":
+                        released = body.get("released_count", 0)
+                        if released:
+                            self.send(f"✅ *[TELEGRAM RELEASE]* Successfully released {released} device(s) from containment (Pi-hole, Tarpit, Router). 1-Hour Cooldown active.")
+                        else:
+                            self.send("✅ No devices were currently under containment — nothing to release.")
+                    else:
+                        released = body.get("released", 0)
+                        if released:
+                            self.send(f"✅ *[TELEGRAM RELEASE]* Successfully released '{ipc_target}' from containment (Pi-hole, Tarpit, Router). 1-Hour Cooldown active.")
+                        else:
+                            self.send(
+                                f"✅ '{ipc_target}' is not blocked — no hardware containment was "
+                                f"ever applied (it was still just awaiting approval, or was "
+                                f"already released earlier). Nothing further to do."
+                            )
             except Exception as e:
                 self.send(f"❌ Error communicating with local IPC server: {e}")
 
