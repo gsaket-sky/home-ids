@@ -191,6 +191,15 @@ sequenceDiagram
 | **Fritz!Box device isolation** | `risk_score ≥ 8.5` OR active lateral movement/honeypot hit, and `ips_router_enabled` | **Yes**, unless `lateral_threat=True` (active internal scanning bypasses the gate) — controlled by `interactive_blocking_enabled` (default `true`) | Same tick if lateral_threat overrides the gate; otherwise indefinite — waits for a human tap on the Telegram "Approve Hardware Isolation" button, no timeout, no auto-approval fallback |
 | **Layer-2 ARP/NDP Tarpit** | `risk_score ≥ 9.0` OR lateral_threat, `ips_tarpit_enabled` | Same gating as router isolation | Same as router isolation |
 | **Device release / un-isolation** | Device explicitly marked safe (`is_safe=True`), or an explicit "Release Device" Telegram tap | Isolation is **deliberately latched** — never auto-released just because traffic decayed to zero (this would create an isolate→silence→auto-release→re-beacon flapping loop) | Same tick once `is_safe` is true, or immediate on the human tap |
+
+> **Alert buttons (2026-08-29):** an alert only offers a button that would actually do
+> something for the device's *current* containment state — already-isolated shows
+> Release only, still-pending shows Approve only (Release used to also appear here,
+> but since "pending" by definition means nothing is contained yet, tapping it always
+> reported "nothing to release" — confusing, not broken; fixed by not offering it),
+> and a monitoring-only device shows no hardware buttons at all. If you do nothing on
+> a pending alert, the device stays unblocked — there's no timeout that auto-approves
+> a stale request.
 | **Re-isolation after a manual release** | Any new isolation-worthy event for that device | Suppressed for 1 hour after a manual release (`operator_release_cooldown_seconds = 3600`), unless a new lateral-threat event overrides the cooldown | N/A (cooldown window) |
 
 ### Background threads and pollers (same process, but off the main 2-second cycle)

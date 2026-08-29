@@ -20,7 +20,9 @@ grouping every alert's own `reasoning_trail` "Verdict:" line (16,000+ alerts).
 | 2 | CRITICAL / block / "Layer-2 ARP Spoofing Detected" | `any(e.type=="arp_spoofing")`. Evidence created on a **second** MAC-flip within 600s on the same IP (a lone flip is weak/corroboration-required evidence instead — see `arp_spoof_pending`), gated on `not is_safe` | 1.0 | 191 (all `hostname="unknown"`, all Aug 19-22, **zero since** — see audit note below) |
 | 3 | CRITICAL / block / "Geofencing Policy Violation" | `any(e.type=="geofencing_violation")`. `geofencing_enabled=true` and the destination's GeoIP country ISO code is in `geofencing_countries` | 1.0 | 20 (all `paperless`/`unknown` — see audit note, attribution bug found + fixed 2026-08-27) |
 | 4 | CRITICAL / block / "Confirmed Exploit/Malware Signature (Suricata)" | `any(e.type=="suricata_signature_match" and e.confidence>=0.9)`. Real Suricata rule match, severity=1/"high", from batch-mode scan of a reactive-capture burst pcap | 0.98 | 18 (as `SIGNATURE_MATCHED_THREAT` hypothesis name — see note) |
-| 5 | CRITICAL / block / "Confirmed Malicious IOC" | `rep.tier == 5`, i.e. `classifier.py`: `vt_score>2.0 OR ti_score>2.0 OR abuse_score>=4.0` | 0.99 | 83 total signature occurrences (67 pre-date `reasoning_trail` existing in the schema — not a bug, just older records); of the 16 with a trail, **0 had `ti_score>2.0`** — see Gap 1 |
+| 5a | CRITICAL / block / "Confirmed Malicious IOC" | `rep.tier==5 AND rep.verified_ioc` (i.e. the tier-5 hit came specifically from `ti_score>2.0` — a genuine curated threat-intel feed match) | 0.99 | 83 total pre-fix signature occurrences (67 pre-date `reasoning_trail`; of the 16 with a trail, **0 had `ti_score>2.0`** — every historical occurrence was actually 5c below, mislabeled 5a before this fix) |
+| 5b | CRITICAL / block / "Corroborated Reputation Signal" | `rep.tier==5 AND NOT rep.verified_ioc AND num_independent_sources>=1 AND attack_score>benign_score` — a bare VT/AbuseIPDB aggregate score, but with real behavioral evidence favoring an attack conclusion | 0.85 | New category, live 2026-08-29 — 0 historical occurrences possible (didn't exist as a distinct outcome before) |
+| 5c | SUSPICIOUS / monitor / "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)" | `rep.tier==5 AND NOT rep.verified_ioc`, no corroboration | 0.45 | This is what all 83 pre-fix "Confirmed Malicious IOC" occurrences actually were — see Gap 1 below and `DECISION_LOGIC_DEPENDENCY_MAP.md` |
 | 6 | HIGH / alert / `<attack hypothesis name>` | `attack_score > benign_score AND attack_score>=2.0 AND num_independent_sources>=2 AND attack_score>=3.0` | 0.85 | NETWORK_INTRUSION 140, DNS_EVASION 989, CONNECTION_ABUSE 326, DNS_POLICY_BYPASS 103, DNS_ATTRIBUTION_GAP 60, DGA_BOTNET_C2 17, DATA_EXFILTRATION 3, DNS_COVERT_TUNNELING 4 |
 | 7 | SUSPICIOUS / monitor / `<attack hypothesis name>` | `attack_score > benign_score AND attack_score>=2.0`, not clearing the HIGH bar above (single-source, or score in [2.0,3.0)) | 0.40 | NETWORK_INTRUSION 9810 (by far the largest category in the whole system), DNS_EVASION 3638, DNS_COVERT_TUNNELING 1467, CONNECTION_ABUSE 1256, DATA_EXFILTRATION 124, DNS_ATTRIBUTION_GAP 41, SIGNATURE_MATCHED_THREAT 18, DGA_BOTNET_C2 9, DNS_POLICY_BYPASS 1 |
 | 8 | SUSPICIOUS / monitor / "Elevated Reputation Signal (Unconfirmed)" | `rep.tier==4 AND max(vt,ti,abuse)>=1.5`. tier 4 itself = `weak_signal` (any of vt/ti/abuse > 0) without clearing the tier-5 `confirmed_ioc` bar | 0.45 | 590 |
@@ -103,9 +105,27 @@ fix, not a change to when the hard-stop fires.
 
 **Known, already-tracked issues (see `DECISION_LOGIC_DEPENDENCY_MAP.md` for full detail,
 not repeated here):**
-- Gap 1: tier-5 doesn't distinguish `ti_score` (real feed) from `vt`/`abuse` (aggregate) — shadow-live, 2 real divergences logged and confirmed correct as of this writing
-- Gap 2: `NetworkIntrusionHypothesis` conflates `zeek_notice` with real JA3/JA4 — shadow-live, no divergence observed yet
-- Gap 3: hard-stop evidence staleness (honeypot re-firing on stale `EvidenceStore` presence) — shadow-live
+- Gap 1: tier-5 doesn't distinguish `ti_score` (real feed) from `vt`/`abuse` (aggregate) — **flipped LIVE 2026-08-29** (rows 5a/5b/5c above), after a real recurrence (`family_pc_fritz_box` vs. `35.186.224.24`, 3x in one night on `AbuseIPDB=4.0` alone) matched the exact shadow-flagged shape the backtest had already found in 75/80 historical "Confirmed Malicious IOC" alerts
+- Gap 2: `NetworkIntrusionHypothesis` conflates `zeek_notice` with real JA3/JA4 — still shadow-live, no divergence observed yet
+- Gap 3: hard-stop evidence staleness (honeypot re-firing on stale `EvidenceStore` presence) — still shadow-live
+
+**Cloud/CDN-org confirmed-intel write guard gap — REAL BUG FOUND AND FIXED (2026-08-29).**
+The moment a row-5 CRITICAL verdict fires, `pipeline.py` calls
+`fp_engine.record_confirmed_threat()` automatically — before any human approves the
+block — poisoning the local confirmed-intel store (`state/local_confirmed_intel.json`)
+with the destination IP. A write guard (`_is_ip_protected_from_confirmed_intel()`) is
+meant to exempt major cloud/CDN providers from this, but its keyword list
+(`utils._CLOUD_CDN_ORG_KEYWORDS`) was missing `"apple"`/`"facebook"` despite the
+guard's own docstring already claiming Apple was covered. Found via `retro_hunter.py`'s
+cross-reference digest showing Apple Push (`17.57.146.55`/`.59`) and Facebook CDN
+(`157.240.223.61`) IPs recorded "confirmed malicious," cascading sensitivity-tightening
+to every device sharing that infrastructure. Fixed, and a one-time cleanup
+(`clean_confirmed_intel.py --apply`, extended the same day to also check cloud/CDN
+ownership via a live ASN lookup, not just `safe_ips`/private ranges) removed **284**
+already-poisoned entries spanning essentially every major provider (AWS, Google,
+Microsoft, Cloudflare, Akamai, Alibaba, Apple, Facebook, Netflix, and others) —
+almost all traceable back to the same Gap 1 root cause above. See
+`AUTONOMOUS_LEARNING.md` §7 for how the confirmed-intel network effect works.
 
 **Not yet audited this pass** (flagged for a future pass, not because anything's known wrong):
 `ml_anomaly`/ANOMALOUS volume, the exact per-hypothesis `required_satisfied` conditions in

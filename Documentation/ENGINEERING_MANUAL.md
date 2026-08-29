@@ -122,8 +122,12 @@ flowchart TD
     C -->|yes| Z1
     C -->|no| CX["High-severity Suricata<br/>signature match?<br/>(confidence≥0.9 — new in 11.0)"]
     CX -->|yes| Z1
-    CX -->|no| D["Reputation tier 5?<br/>(corroborated: TI/VT hit,<br/>or AbuseIPDB alone at a genuinely high bar)"]
-    D -->|yes| Z2["CRITICAL / block, conf=0.99"]
+    CX -->|no| D["Reputation tier 5?<br/>(VT/TI hit, or AbuseIPDB ≥4.0 alone)"]
+    D -->|yes| D2["verified_ioc?<br/>(ti_score &gt; 2.0 — a genuine curated<br/>threat-intel feed match, not just<br/>an aggregate VT/AbuseIPDB score)"]
+    D2 -->|yes| Z2["CRITICAL / block, conf=0.99<br/>'Confirmed Malicious IOC'"]
+    D2 -->|no| D3["≥1 independent source AND<br/>attack_score &gt; benign_score?"]
+    D3 -->|yes| Z2b["CRITICAL / block, conf=0.85<br/>'Corroborated Reputation Signal'"]
+    D3 -->|no| Z2c["SUSPICIOUS / monitor, conf=0.45<br/>'Elevated Reputation Signal<br/>(Unconfirmed, Tier 5 Score)'"]
     D -->|no| E["attack_score > benign_score<br/>AND attack_score ≥ 2.0?"]
     E -->|yes, ≥2 independent sources<br/>AND score ≥3.0| Z3["HIGH / alert, conf=0.85"]
     E -->|yes, otherwise| Z4["SUSPICIOUS / monitor, conf=0.40"]
@@ -133,6 +137,23 @@ flowchart TD
     G -->|yes| Z6["ANOMALOUS / log, conf=0.10"]
     G -->|no| Z7["BENIGN / suppress"]
 ```
+
+**Why tier 5 splits three ways (fixed 2026-08-29, previously a single branch)**: before
+this fix, ANY tier-5 hit — whether from a genuine curated threat-intel feed match
+(`ti_score > 2.0`) or a bare AbuseIPDB/VirusTotal aggregate score alone — fired an
+identical `CRITICAL`/`0.99` "Confirmed Malicious IOC" verdict. A backtest against 80
+historical alerts carrying this label found `verified_ioc` was `True` for **zero** of
+them. This recurred live — `family_pc_fritz_box` vs. `35.186.224.24` (Google LLC) hit
+`AbuseIPDB=4.0` alone, three times in one night, with the benign hypothesis actually
+outscoring the attack hypothesis and no other corroborating evidence — which is what
+triggered flipping the fix from shadow mode (see `DECISION_LOGIC_DEPENDENCY_MAP.md`)
+into the live path. `verified_ioc=True` stays a genuine hard confirmation; a bare
+aggregate score with real behavioral corroboration (`attack_score > benign_score`,
+≥1 independent source) is now labeled "Corroborated Reputation Signal" at `0.85` — a
+real signal, just not a curated IOC match; and an uncorroborated aggregate score drops
+to `SUSPICIOUS`/`0.45` — the same conceptual severity as the tier-4 branch below it,
+just with a higher raw number, which alone was never meant to justify a stronger
+verdict. See `ALERT_CATEGORIZATION_CATALOG.md` rows 5a/5b/5c for live outcome counts.
 
 **Why tier 4 exists as its own branch (fixed in 8.0)**: before this branch existed, a reputation signal that never rose to "confirmed" (tier 5) had exactly one path through this function — silence. The gap between "99% Confirmed Malicious IOC" and "nothing at all" was a single classification threshold in `reputation/classifier.py`. This was found by tracing a real production alert: a connection to Telegram's own infrastructure reached `CRITICAL`/auto-block purely from a single AbuseIPDB score, with VirusTotal and ThreatIntel both clean. `reputation/classifier.py`'s confirmed-IOC threshold for AbuseIPDB alone is now `≥4.0` (aligned with the exact bar `fp_engine.py`'s own hard-stop check already used for the same metric — previously the two disagreed, `>2.0` vs `≥4.0`, for the identical input). VirusTotal and ThreatIntel — curated, multi-vendor, or blacklist-backed signals — keep the lower `>2.0` bar; they're more authoritative single-source signals than a crowd-sourced abuse-report aggregate.
 

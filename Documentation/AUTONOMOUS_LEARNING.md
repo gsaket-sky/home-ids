@@ -232,6 +232,18 @@ even faster hard-stop) and tightens sigma for the newly-implicated device — th
 genuine autonomous action, not just a notification, even though nothing gets blocked as
 a direct result of the historical match itself.
 
+> **Correction (2026-08-29):** the real example above (`157.240.223.61`, Facebook's own
+> CDN) turned out to illustrate a bug, not a genuine threat — a write guard meant to
+> stop major cloud/CDN IPs from ever entering this store (`_is_ip_protected_from_
+> confirmed_intel()`) had a keyword-list gap that let Apple and Facebook IPs through.
+> Fixed, and a one-time cleanup removed 284 already-poisoned entries across essentially
+> every major provider (AWS, Google, Microsoft, Cloudflare, Akamai, Alibaba, Apple,
+> Facebook, Netflix, and others) — this exact example among them. See
+> `DECISION_LOGIC_DEPENDENCY_MAP.md`'s "ASN/cloud-provider blind spot" row and
+> `ALERT_CATEGORIZATION_CATALOG.md`'s audit-findings section for the full writeup. The
+> network-effect mechanism described above is otherwise unchanged and still applies to
+> genuine confirmed threats.
+
 ---
 
 ## 8. Ollama (Brain 3): LLM-validated closed loop
@@ -301,9 +313,12 @@ total — nothing else runs on a schedule.
 | `ollama_soc` | `30 */4 * * *` (every 4h) | `ollama_soc.py` | Brain 3 batch LLM triage (§8 above) — sends this run's digest whether or not anything new happened. |
 | `retro_hunter` | `0 2 * * *` (2am daily) | `retro_hunter.py` | Two independent passes: rescans historical DNS traffic against freshly refreshed external threat-intel feeds (URLHaus/FeodoTracker/ThreatFox/OTX), and cross-references history against the local confirmed-intel store (§7 above). |
 | `top_domains_report` | `0 6 * * *` (6am daily) | `top_domains_report.py` | Purely observational — a per-device "top domains contacted" digest. Never blocks or unblocks anything, no feedback loop. |
-| `shadow_watcher` | `*/5 * * * *` (every 5 min) | `shadow_watcher.py` | **Temporary** — notifies the moment the shadow-mode evidence-taxonomy evaluation (see [`DECISION_LOGIC_DEPENDENCY_MAP.md`](DECISION_LOGIC_DEPENDENCY_MAP.md)) logs a new divergence. Removed once that fix is flipped live or abandoned. |
+| `shadow_watcher` | `*/5 * * * *` (every 5 min) | `shadow_watcher.py` | **Temporary** — notifies the moment the shadow-mode evidence-taxonomy evaluation (see [`DECISION_LOGIC_DEPENDENCY_MAP.md`](DECISION_LOGIC_DEPENDENCY_MAP.md)) logs a new divergence. Gap 1 (below) flipped live 2026-08-29, so its divergence type no longer fires; still running for Gaps 2/3, which remain shadow-only. Removed once all three are flipped live or abandoned. |
 
-**Real example** (shadow_watcher, an actual production alert):
+**Real example** (shadow_watcher, an actual production alert — **historical**: this
+specific divergence type is the one that got Gap 1 flipped live on 2026-08-29; live and
+shadow now agree on this exact case, kept here as the concrete example of what the fix
+addressed):
 
 > 🔬 **Shadow-Mode: 1 new divergence(s)**
 > Live verdict vs. the proposed evidence-taxonomy fix
@@ -311,6 +326,10 @@ total — nothing else runs on a schedule.
 >
 > • family_pc_fritz_box (192.168.1.12) — live: CRITICAL / Confirmed Malicious IOC →
 >   shadow: SUSPICIOUS / Elevated Reputation Signal (Unconfirmed, Tier 5 Score)
+
+This exact alert — recurring 3x in one night — is what triggered flipping Gap 1 from
+shadow into the live decision path. See `ALERT_CATEGORIZATION_CATALOG.md` rows 5a/5b/5c
+for the three-way outcome this produces now.
 
 **Illustrative example** (top_domains_report — purely observational, no autonomous
 action, shown for completeness rather than as a captured real message):

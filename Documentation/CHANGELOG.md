@@ -2,6 +2,60 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.5.0] - 2026-08-29
+
+A live recurrence of a known shadow-flagged issue (`family_pc_fritz_box` CRITICAL 3x in
+one night on a bare AbuseIPDB score) triggered flipping a decision-logic fix from
+shadow into production, which in turn surfaced a related confirmed-intel poisoning bug
+affecting Apple/Facebook/AWS/Google/Microsoft and most other major cloud providers.
+Two more live-alert-driven UX fixes and a device-classification investigation rounded
+out the night.
+
+### 🎯 Reputation Tier-5 Split Flipped Live + Confirmed-Intel Poisoning Fixed
+
+- `decision_engine.py`'s `rep.tier==5` branch fired an identical `CRITICAL`/"Confirmed
+  Malicious IOC"/0.99-confidence verdict whether the hit came from a genuine curated
+  threat-intel feed match or a bare AbuseIPDB/VirusTotal aggregate score alone — a
+  backtest against 80 historical alerts with this label found `verified_ioc=True` for
+  zero of them. Now a real three-way split (`verified_ioc` confirmed / corroborated-
+  but-unverified / uncorroborated → `SUSPICIOUS`), evaluating live alongside the
+  already-running shadow computation that had flagged this gap since 2026-08-27.
+- Root-caused the same night: `_is_ip_protected_from_confirmed_intel()`'s cloud/CDN-org
+  keyword list was missing `"apple"`/`"facebook"` despite its own docstring already
+  claiming Apple was covered — confirmed live via Apple Push and Facebook CDN IPs
+  recorded "confirmed malicious" in `state/local_confirmed_intel.json`, cascading
+  sensitivity-tightening to every device sharing that infrastructure. Fixed, broadened
+  with a few more providers (IBM Cloud, Vultr, Leaseweb, Scaleway, Contabo — each
+  verified against a real IP first), and backed by a new canary regression test
+  resolving ~20 real IPs through the actual `GeoLite2-ASN.mmdb`. `clean_confirmed_
+  intel.py` extended to detect/purge already-poisoned cloud-owned entries (previously
+  only checked `safe_ips`/private ranges) — removed 284 entries in a one-time cleanup.
+
+### 🔘 Telegram Button/Message Fixes
+
+- "Release Device" on a still-pending ("awaiting approval") alert always reported
+  "nothing to release" — technically correct (Interactive HITL mode never applies the
+  block until Approve is tapped) but worded like a failure. Reworded to confirm the
+  device is already safely unblocked instead.
+- That same insight exposed the real fix: a pending alert only ever needed an Approve
+  button — Release was structurally guaranteed to no-op there, since "awaiting
+  approval" by construction means nothing is contained yet. Removed the dangling
+  Release button from that state, matching the "only show a button that would
+  actually do something" principle already applied to the other containment states.
+
+### 🏷️ Device-Type Classification No Longer Silently Defaults to "laptop"
+
+- `infer_device_type()` has always had hostname/User-Agent/MAC-vendor layers plus a
+  hardcoded final fallback, but its only real caller never passed `mac_vendor`, and
+  the fallback was unconditionally `"laptop"`. Confirmed on production: 13 of 36
+  devices were typed `"laptop"`, and 12 of those (92%) actually had
+  `hostname="unknown"` — `"laptop"` was a silent placeholder, not a real detection,
+  and `fp_engine.py`'s own `dev_type_weights` dict already had an unreachable
+  `"unknown": 0.3` entry waiting for exactly this. New `utils.get_mac_vendor()`
+  (offline OUI lookup via the `manuf` package) closes the dead parameter; the fallback
+  now returns `"unknown"` instead of guessing. Live effect confirmed post-deploy:
+  `"laptop"` count dropped 13 → 7 in the first re-classification pass.
+
 ## [v12.4.0] - 2026-08-28
 
 Two live-alert-driven fixes, prompted by real production Telegram messages that were confusing rather than clarifying: a device already fully contained (router-isolated + tarpitted) got an alert saying "nothing yet, tap Approve" with no way to tell it was already blocked, and an autonomous "immunized as false positive" notification gave zero indication of what evidence led there.

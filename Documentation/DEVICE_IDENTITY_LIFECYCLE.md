@@ -152,13 +152,13 @@ groups across 60 of 88 tracked device_ids** before this fix.
 alongside this document, not part of the original fragmentation-fix scope but
 discovered via the cleanup script's real output (a merged router's canonical identity
 still showed `device_type="laptop"`).
-- **The bug**: `infer_device_type()` (`utils.py:499`) **never returns `"unknown"`** —
-  its own final fallback is `"laptop"`. The old code only re-ran inference when
-  `state.device_type == "unknown"`, which after the very first call could never be true
-  again — a device whose real hostname resolves on a *later* cycle than its first
-  sighting (the common case for anything that cold-starts via an address with no
-  hostname yet, e.g. a router's IPv6 side) was permanently stuck with whatever
-  `infer_device_type("unknown")` produced at cold-start.
+- **The bug**: at the time, `infer_device_type()` (`utils.py:499`) never returned
+  `"unknown"` — its own final fallback was `"laptop"`. The old code only re-ran
+  inference when `state.device_type == "unknown"`, which after the very first call
+  could never be true again — a device whose real hostname resolves on a *later* cycle
+  than its first sighting (the common case for anything that cold-starts via an
+  address with no hostname yet, e.g. a router's IPv6 side) was permanently stuck with
+  whatever `infer_device_type("unknown")` produced at cold-start.
 - **The fix**: re-infer whenever the current value is *not* an explicit operator
   override (`device_type_is_override` — a field that already existed for exactly this
   distinction, see `pipeline.py`'s infra-sensitivity filter). Idempotent/self-
@@ -166,6 +166,21 @@ still showed `device_type="laptop"`).
   doesn't flap once a device's real hostname is known.
 - **Called by**: both `process_dns_identities()`/`process_zeek_identities()`, once per
   row, after `_refresh_identity_signals()`.
+- **Follow-up fix (2026-08-29)**: the re-infer-every-cycle fix above only helps once a
+  real hostname eventually resolves — 12 of 13 devices typed `"laptop"` on production
+  turned out to have `hostname="unknown"` permanently (no DHCP/mDNS/Pi-hole name ever
+  seen for them), so re-running `infer_device_type("unknown")` every cycle just kept
+  landing on the same wrong `"laptop"` guess. Two changes: (1)
+  `infer_device_type()`'s final fallback is now `"unknown"`, not `"laptop"` — this
+  activates `fp_engine.py`'s own pre-existing `dev_type_weights["unknown"] = 0.3`
+  entry, which was defined but unreachable before this fix. (2) `apply_device_type()`
+  now resolves `mac_vendor` via the new `utils.get_mac_vendor()` (offline MAC-OUI
+  lookup, the `manuf` package) and passes it into `infer_device_type()`, wiring up a
+  parameter that had existed but was never fed by any caller — a device with no
+  resolvable hostname but a real, non-randomized vendor MAC (e.g. an Espressif-made
+  IoT sensor) now classifies correctly even with `hostname="unknown"`. Devices with a
+  randomized/locally-administered MAC (the common iOS/Android privacy-MAC behavior)
+  get no vendor signal either way and correctly land on the honest `"unknown"`.
 - **If you change the override-precedence branches above it**: `device_type_is_override`
   must stay the single source of truth `pipeline.py`'s infra-sensitivity evidence
   filter trusts — a device must never be able to self-report its way into "verified
