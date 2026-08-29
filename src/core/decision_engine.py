@@ -182,11 +182,44 @@ class DecisionEngine:
             decision_path = "hard_stop"
 
         elif rep.tier == 5:
-            state = DecisionState.CRITICAL
-            action = "block"
-            explanation = "Confirmed Malicious IOC"
-            threat_confidence = 0.99
-            decision_path = "tier5_confirmed"
+            # BUGFIX (2026-08-29, Gap 1 flipped live from shadow mode after real-world
+            # confirmation): this used to fire "Confirmed Malicious IOC" / CRITICAL / block
+            # / 0.99 confidence for ANY tier-5 hit, whether it came from a genuine curated
+            # threat-intel feed match (rep.verified_ioc, ti_score>2.0) or a bare AbuseIPDB/VT
+            # aggregate score alone. Backtest (scripts/shadow_backtest.py, 80 historical
+            # "Confirmed Malicious IOC" alerts): verified_ioc was True for ZERO of them.
+            # Confirmed live: family_pc_fritz_box vs. 35.186.224.24 (Google LLC) fired this
+            # branch 3x in one night on AbuseIPDB=4.0 alone (VT=0.0, TI=0.0) with the benign
+            # hypothesis (LOCAL_DEVICE_DISCOVERY, 2.5) outscoring the attack one
+            # (NETWORK_INTRUSION, 2.0) -- shadow mode, Ollama's own independent analysis, and
+            # this split all agreed it wasn't a real threat. Uses the live attack_score/
+            # benign_score (not the shadow-adjusted JA3/JA4 split, Gap 2 -- that's still
+            # shadow-only) so this flip is scoped to verified_ioc alone. getattr(...,
+            # False): duck-typed test rep objects (e.g. regression_tester.py's MockRep)
+            # only set .tier, same reasoning as rep_owner/rep_vt/etc. above.
+            if getattr(rep, "verified_ioc", False):
+                state = DecisionState.CRITICAL
+                action = "block"
+                explanation = "Confirmed Malicious IOC"
+                threat_confidence = 0.99
+                decision_path = "tier5_confirmed"
+            elif num_independent_sources >= 1 and attack_score > benign_score:
+                state = DecisionState.CRITICAL
+                action = "block"
+                explanation = "Corroborated Reputation Signal"
+                threat_confidence = 0.85
+                decision_path = "tier5_corroborated"
+            else:
+                # Same reasoning as the tier==4 branch below: a bigger raw reputation
+                # number doesn't earn a stronger verdict when real corroboration (the
+                # thing that's supposed to justify CRITICAL/block) is exactly what's
+                # missing -- this is the same underlying situation as tier 4, just with a
+                # higher raw score.
+                state = DecisionState.SUSPICIOUS
+                action = "monitor"
+                explanation = "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)"
+                threat_confidence = 0.45
+                decision_path = "tier5_uncorroborated"
 
         elif attack_score > benign_score and attack_score >= 2.0:
             explanation = hyp_results["attack"]["name"]
@@ -292,7 +325,11 @@ class DecisionEngine:
                 DecisionState.CRITICAL, "Confirmed Exploit/Malware Signature (Suricata)", "hard_stop"
             )
         elif rep.tier == 5:
-            if rep.verified_ioc:
+            # BUGFIX (2026-08-29, found alongside the live Gap-1 flip above): this used
+            # `rep.verified_ioc` bare -- duck-typed test rep objects (e.g.
+            # regression_tester.py's MockRep, which only sets .tier) crash here with
+            # AttributeError. Same getattr(..., False) fix as the live branch.
+            if getattr(rep, "verified_ioc", False):
                 shadow_state, shadow_explanation, shadow_decision_path = (
                     DecisionState.CRITICAL, "Confirmed Malicious IOC", "tier5_confirmed"
                 )

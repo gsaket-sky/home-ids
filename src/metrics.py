@@ -253,11 +253,15 @@ fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total 
 # Which branch of decision_engine.py's decision order actually resolved each
 # evaluation -- the direct "is the system getting smarter over time" signal: watching
 # hard_stop/tier5 share shrink and benign share grow across weeks is exactly what
-# autonomous healing is supposed to produce. Fixed 7-value enum, safe cardinality.
+# autonomous healing is supposed to produce. Fixed 9-value enum, safe cardinality.
+# tier5_confirmed/tier5_corroborated/tier5_uncorroborated split out 2026-08-29 (Gap 1
+# flipped live) -- previously a single tier5_confirmed path covered all tier-5 hits
+# regardless of rep.verified_ioc.
 decision_path_total = Counter(
     "home_ids_decision_path_total",
     "Which decision-engine branch resolved each evaluation "
-    "(hard_stop/tier5_confirmed/hypothesis_high/hypothesis_suspicious/tier4_unconfirmed/ml_anomaly/benign)",
+    "(hard_stop/tier5_confirmed/tier5_corroborated/tier5_uncorroborated/hypothesis_high/"
+    "hypothesis_suspicious/tier4_unconfirmed/ml_anomaly/benign)",
     ["device", "hostname", "path"]
 )
 

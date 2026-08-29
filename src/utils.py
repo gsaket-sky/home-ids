@@ -349,6 +349,15 @@ _CLOUD_CDN_ORG_KEYWORDS = frozenset({
     "aws", "google llc", "google cloud", "microsoft corporation", "microsoft azure",
     "netflix", "digitalocean", "ovh", "hetzner", "oracle corporation", "alibaba",
     "tencent", "fly.io", "linode", "akamai technologies",
+    # BUGFIX (2026-08-29, live retro-hunter audit): this method's own docstring/callers
+    # already claimed Apple-owned IPs were covered (fp_engine.py's
+    # _is_ip_protected_from_confirmed_intel comment), but "apple" was never actually in
+    # this list -- confirmed live: 17.57.146.55/17.57.146.59 (Apple Push Notification
+    # infrastructure, touched by every iPhone/Apple Watch on the network) had been
+    # recorded "confirmed malicious" and cascaded sensitivity-tightening to every other
+    # device sharing them. Facebook/Meta CDN IPs (e.g. 157.240.223.61) found poisoned
+    # the same audit, same fix.
+    "apple inc", "facebook", "meta platforms",
 })
 
 def is_cloud_cdn_provider_org(org_name: str) -> bool:
