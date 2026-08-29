@@ -2,8 +2,7 @@
 Standalone runtime test for Phase 22 (ARP host-discovery sweep detection). Not part of
 the pytest suite -- run directly: `python3 test_phase22_arp_sweep.py`.
 
-Background: part of the reactive-Fritzbox-capture plan
-((a local planning note), Phase B) -- but genuinely
+Background: part of the reactive-Fritzbox-capture plan (Phase B) -- but genuinely
 self-contained and useful on its own, since ARP is broadcast and already reaches every
 device (WiFi included) via the exact same mechanism that makes MAC correlation work.
 No Fritzbox integration needed for this piece.

@@ -795,8 +795,8 @@ class EnginePipeline:
             # top_domain (a SEPARATE, "_select_target_domain()-picked most notable domain
             # in the window" value) for a risk score that may have come from a completely
             # different domain this same device also happened to query -- confirmed
-            # plausible here: family_pc has a real history of contacting genuinely malicious
-            # DGA domains in the same rolling window. reputation_target now tracks the
+            # plausible here: a real device on this network had a history of contacting
+            # genuinely malicious DGA domains in the same rolling window. reputation_target now tracks the
             # SPECIFIC domain/IP that earned the highest risk score, so the classifier
             # (and the alert built from its verdict) blame the actual source of the risk,
             # not an unrelated bystander domain. When no risk was ever found at all,

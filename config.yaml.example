@@ -104,11 +104,10 @@ network_and_devices:
   # fallback whenever home_subnets (below) is empty. [LIVE]
   home_subnet: 192.168.1.0/24
 
-  # Preferred multi-subnet form: a list of CIDR ranges, e.g.
-  # ["192.168.1.0/24", "192.168.50.0/24"]. Populate this once you have more
-  # than one home subnet to track; while empty, home_subnet (above) is used
-  # instead — currently a no-op. [LIVE]
-  home_subnets: [192.168.1.0/24]
+  # Preferred multi-subnet form: a list of CIDR ranges. Populate this once you
+  # have more than one home subnet to track (e.g. a separate IoT VLAN); while
+  # empty, home_subnet (above) is used instead. [LIVE]
+  home_subnets: [192.168.1.0/24, 192.168.50.0/24]
 
   # Safety cap on how many distinct devices get their own tracked baseline
   # state at once (memory/disk bound). [RESTART]
@@ -116,24 +115,29 @@ network_and_devices:
 
   # IPs that are NEVER treated as suspicious destinations even if flagged
   # elsewhere (your own infra: Pi-hole DNS server, router, this host, etc.).
+  # Example below covers the common set — loopback, your router, the box
+  # running this IDS, and a NAS; add as many entries as your own network needs.
   # [LIVE]
   safe_ips:
     - 127.0.0.1
-    - 192.168.1.94
-    - 192.168.1.1
-    - 192.168.1.15
-    - 192.168.1.31
-    - 192.0.0.2
-    - 192.168.1.2
-    - 192.168.1.3
+    - 192.168.1.1    # router / gateway
+    - 192.168.1.2    # this IDS host
+    - 192.168.1.3    # NAS
 
   # Decoy IP(s) on your LAN. Any device that contacts one gets an instant
   # 10.0 (max) risk score — deploy an unused IP running a fake SSH/SMB
-  # listener at this address for it to mean anything. [LIVE]
+  # listener at each address for it to mean anything. One or many — a second
+  # honeypot on a different VLAN/subnet is a common reason to add more. [LIVE]
   honeypot_ips:
     - 192.168.1.200
+    - 192.168.50.200
 
   # Domains never treated as suspicious (like safe_ips, but for DNS queries).
+  # Empty by default — populate with any domain you've confirmed benign and
+  # never want re-flagged, e.g.:
+  #   safe_domains:
+  #     - mycompany-vpn.example.com
+  #     - printer.local
   # [LIVE]
   safe_domains: []
 
@@ -152,6 +156,7 @@ network_and_devices:
   # code change/deploy needed. [LIVE]
   safe_cdn_base_domains:
     - samsungcloudsolution.net
+    - myprinterbrand-cloud.com
 
   # Hostname substrings that mark a device as "safe infrastructure" (Pi-hole,
   # your repeater, etc.) — dampens noisy behavioral evidence for these
@@ -177,10 +182,10 @@ network_and_devices:
   # pattern to avoid an unintended collision with an unrelated device sharing
   # part of the same name. [LIVE]
   device_type_overrides:
-    MY-LAPTOP-A1B2: laptop
+    LAPTOP-A1B2C3: laptop
     lghometheater: smart_tv
     DIR355BT: iot
-    Family-PC: laptop
+    family-pc: laptop
     dreame: iot
     Chromecast: iot
     Watch: phone
@@ -194,7 +199,7 @@ network_and_devices:
     Samsung: smart_tv
     linux-server: server
     Kindle: tablet
-    "192.168.1.28": nas
+    "192.168.1.3": nas
     android_4: smart_tv
     # Your Pi-hole/unbound resolver host -- device_type_overrides is the ONLY way to
     # reach "verified infra" status (device_type_is_override=True), which is what
@@ -410,7 +415,7 @@ threat_intel_and_ai:
   # Base URL of your local Ollama server, used by scripts/ollama_soc.py (batch triage,
   # every 4h) and intelligence/ai_soc.py's DeterministicValidator for LLM-based alert
   # triage and summaries. [LIVE]
-  ollama_url: http://192.168.1.94:11434
+  ollama_url: http://192.168.1.2:11434
 
   # Ollama model name to use for those requests. [LIVE]
   ollama_model: llama3.1
@@ -566,8 +571,8 @@ reactive_capture:
   # The wired device IP(s) reactive_capture_wired_probe_trigger_enabled watches for a
   # new source -- your NAS and the Ubuntu server itself. [LIVE]
   reactive_capture_wired_probe_ips:
-    - 192.168.1.28   # NAS
-    - 192.168.1.94   # Ubuntu server
+    - 192.168.1.3   # NAS
+    - 192.168.1.2   # this IDS host
 
   # Periodic baseline spot-check, in-process (not a separate scheduled script -- see
   # pipeline.py's PHASE 21D comment on why: a burst's findings only reach live
@@ -638,7 +643,10 @@ telegram:
   # Allowlist of chat IDs permitted to send bot COMMANDS (approve/release/
   # revoke buttons). Empty = allow commands from any chat that has the bot
   # (backward-compatible default) — populate this if you ever add the bot to
-  # a shared/group chat and want to restrict who can act on alerts. [LIVE]
+  # a shared/group chat and want to restrict who can act on alerts, e.g.:
+  #   telegram_allowed_chat_ids: [123456789, -100987654321]
+  # (a positive ID is a private/DM chat, a negative one a group — both forms
+  # are valid entries in this list). [LIVE]
   telegram_allowed_chat_ids: []
 
 

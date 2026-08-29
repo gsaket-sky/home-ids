@@ -7,7 +7,7 @@ Usage:
 Example:
   python src/release_device.py 192.168.1.50
   python src/release_device.py aa:bb:cc:dd:ee:ff
-  python src/release_device.py my-laptop-a1b2
+  python src/release_device.py my-laptop-hostname
 """
 import sys
 from pathlib import Path
