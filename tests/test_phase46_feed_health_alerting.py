@@ -103,6 +103,22 @@ check("auth_expired category is recorded correctly",
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section B2: rate_limited -- BUGFIX (user catch), NEVER alerts, at any streak length.
+# Hitting a free-tier daily/hourly cap is expected/routine, not an outage -- unlike
+# external_infra, no threshold makes it "bad enough" to page the operator, because
+# there's nothing to act on either way; it resolves at the provider's own reset.
+# ═══════════════════════════════════════════════════════════════════════════════════
+for _ in range(10):
+    feed_health.record_failure("test_vt_quota", "HTTP 429 Too Many Requests", "rate_limited")
+s = feed_health._load_state()
+check("rate_limited NEVER alerts, even after 10 consecutive occurrences",
+      s["test_vt_quota"]["alerted_at"] is None, f"got {s['test_vt_quota']}")
+check("rate_limited failures are still recorded in state (for observability)",
+      s["test_vt_quota"]["consecutive_failures"] == 10
+      and s["test_vt_quota"]["category"] == "rate_limited")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: recovery -- record_success() resets the streak and clears alerted_at
 # ═══════════════════════════════════════════════════════════════════════════════════
 feed_health.record_success("test_feodo")

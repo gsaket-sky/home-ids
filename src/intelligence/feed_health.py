@@ -20,9 +20,13 @@ different situations:
   - "auth_expired": OUR OWN API key (AbuseIPDB/VirusTotal/OTX) is being rejected
     (401/403) -- retrying doesn't help, so this alerts on the FIRST occurrence, with
     a direct link to where to regenerate the credential.
-  - "rate_limited": treated the same threshold-gated way as external_infra (a quota
-    reset is also just "wait," not something to fix), kept as its own category so the
-    alert text can say "rate-limited" instead of implying an outage.
+  - "rate_limited" (HTTP 429): NEVER alerts. Hitting a free-tier daily/hourly cap is
+    expected, routine behavior (AbuseIPDB/VirusTotal's own clients already size their
+    request volume against a _DAILY_CAP specifically because crossing the provider's
+    real limit is normal, not a fault) -- it resolves itself at the next reset with no
+    operator action possible or needed, so it's tracked in state for observability but
+    never sent to Telegram. Kept as its own category (not folded into external_infra)
+    so this distinction is explicit rather than accidental.
 """
 import json
 import logging
@@ -134,7 +138,14 @@ def record_failure(feed_name: str, error: str, category: str) -> None:
             "last_error": str(error), "category": category,
             "alerted_at": entry.get("alerted_at"), "last_success_ts": entry.get("last_success_ts"),
         }
-        should_alert = not already_alerted and (
+        # BUGFIX (2026-08-29, user catch): rate_limited (HTTP 429) must NEVER alert --
+        # hitting a free-tier daily/hourly cap is expected, routine behavior (this
+        # codebase's own AbuseIPDB/VirusTotal clients already size their own request
+        # volume against a _DAILY_CAP specifically because crossing the provider's
+        # real limit is a normal, self-resolving-at-the-next-reset condition, not an
+        # outage). Still recorded in state (useful for observability) -- just never
+        # sent to Telegram.
+        should_alert = not already_alerted and category != "rate_limited" and (
             category == "auth_expired" or consecutive >= _EXTERNAL_INFRA_ALERT_THRESHOLD
         )
         if should_alert:
