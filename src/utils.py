@@ -30,11 +30,37 @@ try:
 except ImportError:
     tldextract = None
 
+try:
+    from manuf import manuf as _manuf_module
+    # update=False (also the library's own default): pure offline lookup against the
+    # bundled Wireshark manuf database, no network call at startup -- matches this
+    # project's offline-first pattern (GeoIP mmdb reads, tldextract's suffix list).
+    _MAC_PARSER = _manuf_module.MacParser(update=False)
+except Exception:
+    _MAC_PARSER = None
+
 LOGGER = logging.getLogger("home_ids.utils")
 
 def normalize_domain(domain):
     """Lowercases and cleans up trailing dots from raw DNS queries."""
     return str(domain).lower().strip(".")
+
+def get_mac_vendor(mac_addr: str) -> str:
+    """Offline MAC-OUI vendor lookup (Wireshark's manuf database via the `manuf`
+    package, no network dependency) -- feeds infer_device_type()'s mac_vendor
+    parameter, which existed but was never actually wired up by any caller until this
+    fix (see identity.py's apply_device_type()). Returns "" (not None, never raises)
+    for empty/"unknown" input, a locally-administered/randomized MAC (the increasingly
+    common iOS/Android privacy-MAC behavior -- these have no registered OUI to find),
+    or an OUI the bundled database doesn't recognize -- infer_device_type() already
+    treats an empty mac_vendor as "no signal" and falls through to its next layer."""
+    if not mac_addr or mac_addr == "unknown" or _MAC_PARSER is None:
+        return ""
+    try:
+        vendor = _MAC_PARSER.get_manuf_long(mac_addr) or _MAC_PARSER.get_manuf(mac_addr)
+        return vendor or ""
+    except Exception:
+        return ""
 
 def sanitize_hostname(host):
     """Prevents invalid characters in Prometheus labels and dashboard variables."""
@@ -358,6 +384,16 @@ _CLOUD_CDN_ORG_KEYWORDS = frozenset({
     # device sharing them. Facebook/Meta CDN IPs (e.g. 157.240.223.61) found poisoned
     # the same audit, same fix.
     "apple inc", "facebook", "meta platforms",
+    # Broadened 2026-08-29 alongside the canary regression test (test_phase45) that
+    # checks this list against real IPs for the top providers by prevalence -- a few
+    # more commonly-seen operators not yet covered, same reasoning as every entry above.
+    # "constant company" is Vultr's CURRENT legal ASN-org name (verified live against
+    # the real GeoLite2-ASN.mmdb: AS20473 "The Constant Company, LLC" across multiple
+    # Vultr ranges) -- "vultr"/"choopa" kept too as a safety net for any RIR record
+    # still carrying the pre-rebrand name, but neither actually matched real traffic
+    # when checked.
+    "ibm cloud", "softlayer", "vultr", "choopa", "constant company", "leaseweb",
+    "scaleway", "contabo",
 })
 
 def is_cloud_cdn_provider_org(org_name: str) -> bool:
@@ -501,8 +537,19 @@ def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "")
         if "epson" in mv or "canon" in mv or "brother" in mv:
             return "printer"
 
-    # 4. Defaults: If IP ends up unclassified, default to laptop/phone based on basic string heuristics
+    # 4. Weak string heuristic: only trust this when the hostname actually said something
     if "pc" in h or "mac" in h or "win" in h or "box" in h:
         return "laptop"
 
-    return "laptop"  # Default fallback to laptop profile instead of raw 'unknown'
+    # BUGFIX (2026-08-29, live-audit): this used to default to "laptop" unconditionally
+    # -- confirmed on production state: 13 of 36 devices were typed "laptop", and 12 of
+    # those 13 (92%) actually had hostname="unknown", i.e. NO real signal was ever
+    # found by any layer above. "laptop" was silently functioning as "unclassified,"
+    # not a real detection, and this has real behavioral effect (not just cosmetic) --
+    # fp_engine.py's dev_type_weights dict already defines an "unknown": 0.3 entry that
+    # was never reachable before this fix, because this function never returned
+    # "unknown"; misclassified devices instead got laptop's 0.5 weight. Returning
+    # "unknown" here activates that already-intended bucket instead of inventing a new
+    # category -- device_matching.py/identity.py's _GENERIC_HOSTNAMES sets already
+    # treat "unknown" as a recognized value too.
+    return "unknown"

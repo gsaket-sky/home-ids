@@ -28,6 +28,12 @@ urllib3>=1.26.0      # mitigation/alerts.py imports urllib3.util.retry.Retry dir
 # Added 2026-08-17 for the config.json -> config.yaml migration:
 pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py /
                       # scripts/retro_hunter.py read config.yaml
+
+# Added 2026-08-29: infer_device_type()'s mac_vendor parameter existed but no caller
+# ever populated it -- utils.get_mac_vendor() wires it up via manuf (bundles
+# Wireshark's maintained OUI database, pure offline lookup, update=False default so no
+# network call at startup, same offline-first pattern as geoip2/tldextract above).
+manuf>=1.1.5          # utils.get_mac_vendor() -- identity.py's apply_device_type()
 # PHASE 13 cleanup: ruamel.yaml removed -- it existed only for ollama_soc.py's old
 # save_config_key() (comment-preserving round-trip writes to safe_host_patterns), which
 # was itself removed in Phase 9 (that write target was always wrong -- safe_host_patterns

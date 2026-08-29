@@ -19,7 +19,7 @@ import requests
 from collections import OrderedDict
 from typing import Optional, List, Dict, Set, Any, Tuple
 
-from utils import sanitize_hostname, infer_device_type
+from utils import sanitize_hostname, infer_device_type, get_mac_vendor
 from core.state_guard import StateManager
 from core.device_matching import AUTO_MERGE_CONFIDENCE
 from metrics import device_type_reclassifications_total
@@ -458,21 +458,37 @@ class DeviceIdentityManager:
                     return
         # BUGFIX (found via the device-identity-merge cleanup script's real output): this
         # used to only re-infer when device_type was still the literal string "unknown" --
-        # but infer_device_type() (utils.py) NEVER returns "unknown"; its own final
-        # fallback is "laptop". So this branch could only ever fire ONCE, on a device's
-        # very first apply_device_type() call (before device_type has been set at all).
-        # A device whose real hostname resolves on a LATER cycle than its first sighting
-        # (the common case -- e.g. a router first seen via an address with no hostname
-        # yet) was PERMANENTLY stuck with whatever infer_device_type("unknown") produced
-        # at cold-start ("laptop"), even after its real hostname became known. Confirmed
-        # live: a router's canonical identity (post device-identity-fragmentation-merge)
-        # still showed device_type="laptop" despite hostname="home-router" having been
-        # known for hours. Re-infer whenever the CURRENT value isn't an explicit operator
-        # override (device_type_is_override reused exactly for this distinction) instead
-        # of only when it's literally unset -- a stable hostname always re-infers to the
-        # same classification, so this is idempotent/self-correcting, not flapping.
+        # but at the time, infer_device_type() (utils.py) never actually returned
+        # "unknown" itself; its final fallback was "laptop". So this branch could only
+        # ever fire ONCE, on a device's very first apply_device_type() call (before
+        # device_type has been set at all). A device whose real hostname resolves on a
+        # LATER cycle than its first sighting (the common case -- e.g. a router first
+        # seen via an address with no hostname yet) was PERMANENTLY stuck with whatever
+        # infer_device_type("unknown") produced at cold-start ("laptop"), even after its
+        # real hostname became known. Confirmed live: a router's canonical identity
+        # (post device-identity-fragmentation-merge) still showed device_type="laptop"
+        # despite hostname="home-router" having been known for hours. Re-infer whenever
+        # the CURRENT value isn't an explicit operator override (device_type_is_override
+        # reused exactly for this distinction) instead of only when it's literally
+        # unset -- a stable hostname always re-infers to the same classification, so
+        # this is idempotent/self-correcting, not flapping. (infer_device_type()'s
+        # fallback is "unknown" again as of 2026-08-29 -- this re-infer-every-cycle
+        # behavior stays correct either way, since it's driven by device_type_is_override,
+        # not by comparing against any specific string.)
         if not getattr(state, "device_type_is_override", False):
-            new_type = infer_device_type(hostname)
+            # BUGFIX (2026-08-29, live audit): infer_device_type() has always accepted a
+            # mac_vendor parameter for exactly this purpose, but no caller ever passed
+            # one -- confirmed on production state, 12 of 13 "laptop"-classified devices
+            # actually had hostname="unknown" (no real signal at all). MAC OUI lookup
+            # (utils.get_mac_vendor(), offline via the manuf package) resolves some of
+            # these even with no hostname -- e.g. an Espressif-vendor MAC correctly
+            # types as "iot" instead of falling all the way through to the fallback.
+            # Devices with a randomized/locally-administered MAC (increasingly common
+            # iOS/Android privacy behavior) get "" back and fall through exactly as
+            # before -- this is additive, not a behavior change for hostname-resolved
+            # devices.
+            mac_vendor = get_mac_vendor(getattr(state, "mac_address", ""))
+            new_type = infer_device_type(hostname, mac_vendor=mac_vendor)
             old_type = getattr(state, "device_type", None)
             # Dashboard-redesign metric: only counts an ACTUAL change of the stored
             # value (e.g. the DeviceState constructor's cold-start guess or an earlier
