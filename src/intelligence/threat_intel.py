@@ -31,6 +31,7 @@ from urllib.error import URLError
 from metrics import pihole_gravity_queries_total, pihole_gravity_last_success_timestamp
 
 from utils import etld1
+from intelligence import feed_health
 
 LOGGER = logging.getLogger("home_ids.ti")
 
@@ -427,7 +428,7 @@ class ThreatIntel:
             try:
                 LOGGER.debug("Fetching feed: %s", feed_name)
                 cache_file = self.cache_dir / f"{feed_name}.cache"
-                data = self._fetch_with_cache(feed["url"], cache_file, feed["ttl"])
+                data = self._fetch_with_cache(feed["url"], cache_file, feed["ttl"], feed_name=feed_name)
                 if not data: 
                     LOGGER.debug("No data returned for feed %s", feed_name)
                     continue
@@ -466,8 +467,10 @@ class ThreatIntel:
                 self._fetch_otx(otx_ips, otx_domains)
                 self._feed_ips["otx"] = otx_ips
                 self._feed_domains["otx"] = otx_domains
+                feed_health.record_success("otx")
             except Exception as exc: 
                 LOGGER.warning("OTX Feed refresh failed: %s", exc)
+                feed_health.record_failure("otx", str(exc), feed_health.classify_url_error(exc))
 
         combined_ips, combined_domains, combined_urls, combined_cidrs = {}, {}, {}, []
         for f_name in self._feed_ips:
@@ -623,7 +626,7 @@ class ThreatIntel:
         except Exception as exc: 
             LOGGER.error("Failed to load ThreatIntel cache: %s", exc)
 
-    def _fetch_with_cache(self, url: str, cache_file: Path, ttl: int) -> Optional[str]:
+    def _fetch_with_cache(self, url: str, cache_file: Path, ttl: int, feed_name: str = "") -> Optional[str]:
         if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < ttl: 
             LOGGER.debug("Using cached feed response for %s", url)
             return cache_file.read_text(encoding="utf-8", errors="ignore")
@@ -636,12 +639,16 @@ class ThreatIntel:
                 tmp_file = cache_file.with_suffix(cache_file.suffix + ".tmp")
                 tmp_file.write_text(data, encoding="utf-8")
                 tmp_file.replace(cache_file)
+            if feed_name:
+                feed_health.record_success(feed_name)
             return data
         except URLError as exc:
             if hasattr(exc, "close"):
                 try: exc.close()
                 except Exception: pass
             LOGGER.warning("HTTP fetch failed for %s. Error: %s", url, exc)
+            if feed_name:
+                feed_health.record_failure(feed_name, str(exc), feed_health.classify_url_error(exc))
             return cache_file.read_text(encoding="utf-8", errors="ignore") if cache_file.exists() else None
 
 class AbuseIPDB:
@@ -825,11 +832,13 @@ class AbuseIPDB:
                 LOGGER.info("Successfully fetched and updated AbuseIPDB blacklist (%d IPs).", len(parsed_ips))
             else:
                 LOGGER.warning("AbuseIPDB response yielded no valid IPs; preserving prior cache.")
+            feed_health.record_success("abuseipdb")
         except URLError as exc: 
             if hasattr(exc, "close"):
                 try: exc.close()
                 except Exception: pass
             LOGGER.warning("AbuseIPDB network fetch failed: %s", exc)
+            feed_health.record_failure("abuseipdb", str(exc), feed_health.classify_url_error(exc))
             self._load_cache()
             
     def _parse_data(self, data: str) -> set:
@@ -993,12 +1002,14 @@ class VirusTotalClient:
         req = Request(u, headers={"x-apikey": self.api_key, "User-Agent": "home-ids/1.0"})
         
         max_retries = 3
+        last_exc = None
         for attempt in range(max_retries):
             try:
                 with urlopen(req, timeout=15) as r: 
                     data = json.loads(r.read())
                 attrs = data.get("data", {}).get("attributes", {})
                 LOGGER.debug("VT API response success for %s", value)
+                feed_health.record_success("virustotal")
                 return {
                     "last_analysis_stats": attrs.get("last_analysis_stats", {}), 
                     "reputation": attrs.get("reputation", 0)
@@ -1006,6 +1017,7 @@ class VirusTotalClient:
             except URLError as e:
                 if hasattr(e, 'close'):
                     e.close()
+                last_exc = e
                 if hasattr(e, 'code') and e.code == 429:
                     LOGGER.warning("VT Rate limit hit (429). Daily quota likely exhausted.")
                     self._quota_exhausted_until = time.time() + 3600
@@ -1017,7 +1029,9 @@ class VirusTotalClient:
                     continue
                 LOGGER.error("VT Query failed conclusively for %s: %s", value, e)
                 break
-                
+
+        if last_exc is not None:
+            feed_health.record_failure("virustotal", str(last_exc), feed_health.classify_url_error(last_exc))
         return {}
 
     def _is_cached(self, key: str) -> bool:
