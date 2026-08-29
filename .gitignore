@@ -18,6 +18,15 @@ models/devices/
 models/*.mmdb
 reports/
 !config.json
+# BUGFIX (2026-08-29, live incident): config.yaml holds real deployment values
+# (home subnet, gateway IP, safe_ips, etc.) that must stay real for the service to
+# run, but was tracked in git -- meaning every commit either leaked the real network
+# layout publicly, or (after a history-scrub) risked a `git reset --hard` silently
+# overwriting the live file with anonymized placeholder values, which happened and
+# briefly broke live subnet detection until caught. config.yaml.example is the
+# tracked, safe-to-publish template instead; the real config.yaml is now
+# deployment-local only, same as state/ and reports/ above.
+config.yaml
 context/
 # Environment Secrets
 .env
