@@ -2,6 +2,58 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.6.0] - 2026-08-31
+
+`soc.service` was OOM-killed and auto-restarted (kernel memcg OOM, not a host reboot) after
+running for ~34 hours with memory climbing from a typical ~100MB toward its 1G `MemoryMax`
+ceiling. Root-caused to the reactive-capture subsystem: a benign-looking recurring geofencing
+hit had kept it running nearly nonstop for hours, and burst size spiked ~10x under genuinely
+heavy traffic right before the crash. Full best-case/worst-case load analysis, root-cause table,
+and prioritized fix list in the new `Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md`.
+
+### 🧠 Reactive-Capture Memory Hardening
+
+- `avm_pcap_to_standard()` read the entire raw capture into memory and built a second full
+  in-memory copy before writing it out — normally a few MB, but real bursts reached 46-90MB/radio
+  (vs. a 4-7MB baseline), and two landing back-to-back tipped the cgroup over its limit. Now
+  streams record-by-record: peak memory is O(one record), not O(file size).
+- `ReactiveCaptureDispatcher` previously bounded only burst COUNT
+  (`reactive_capture_max_bursts_per_hour`), never how much any one burst captured — the same
+  incident showed burst size spiking well past what the count budget could account for. Added a
+  second, independent gate, `reactive_capture_max_bytes_per_hour` (default 500MB), tracking real
+  captured bytes in the same rolling hourly window.
+- New `geofencing_exempt_ips` config key: a narrow, IP-scoped allowlist for the geofencing
+  hard-stop specifically — unlike `safe_ips` (which exempts a destination from every detector),
+  an exempted IP here still triggers reputation/honeypot/TI normally. Left empty by default; the
+  operator decides case by case.
+- Considered and deliberately **not** implemented: per-source trigger backoff. Would have
+  reversed a documented prior operator decision (`pipeline.py`, "a shared hourly budget, not
+  per-source cooldowns... more trigger rather than conservative") — presented directly, decision
+  was to keep that design intact.
+
+### ⚠️ Subprocess Memory Ceiling — Shipped, Broke Zeek, Corrected Same Day
+
+- Added `utils.py`'s `memory_limited_preexec_fn()` (Linux `RLIMIT_AS` via `preexec_fn`) wired into
+  the Zeek and Suricata batch-scan subprocess calls, gated by
+  `reactive_capture_zeek_memory_limit_mb` / `reactive_capture_suricata_memory_limit_mb`. Deployed
+  with both defaulted to 512MB, live-verified beforehand against a trivial Python allocation.
+- **The very first real production burst broke Zeek**: `zeek -r exited -6,
+  std::system_error: Resource temporarily unavailable`. `RLIMIT_AS` bounds a process's *reserved*
+  virtual address space, not its actual resident memory use — Zeek (multi-threaded C++: thread
+  stacks, shared-library mappings, internal arenas) reserves address space well beyond what it
+  actually touches, so a limit that comfortably covers real RSS can still abort it outright. A
+  known-bad fit for `RLIMIT_AS` against multi-threaded C/C++ binaries generally, not specific to
+  this deployment's Zeek build.
+- Impact: ~4 minutes of live bursts silently produced zero Zeek/DNS-evasion/Suricata findings
+  (non-fatal to `soc.service` — both call sites already treat a killed child as a logged,
+  non-fatal "no findings" outcome, exactly as designed — but a real functional regression).
+  Corrected live via config hot-reload within ~1 minute of discovery, then the shipped default
+  changed from 512 to 0 (disabled) in both `config.yaml.example` and `capture_and_ingest()`'s own
+  fallback, so a config missing the key also defaults safe. The mechanism stays in the code, off
+  by default — full incident note and the case for a cgroup-based approach instead (`systemd-run
+  --scope -p MemoryMax=...`, bounds actual RSS rather than reserved address space) in the load
+  analysis doc's fix #3/#4 sections.
+
 ## [v12.5.0] - 2026-08-29
 
 A live recurrence of a known shadow-flagged issue (`family_pc_fritz_box` CRITICAL 3x in
