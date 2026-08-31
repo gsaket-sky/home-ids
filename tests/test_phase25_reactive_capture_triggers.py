@@ -58,6 +58,79 @@ d3._count = 999
 check("budget resets once the hourly window has elapsed, even if the prior window was exhausted",
       d3._check_and_consume_budget(enabled_config) is True)
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section A2 (LOAD-ANALYSIS FIX #1, Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §5):
+# aggregate bytes-per-hour budget -- a SECOND gate alongside burst count, since count
+# alone never bounded how large any one burst was (a real incident saw burst size
+# spike ~10x while staying entirely within the count budget).
+# ═══════════════════════════════════════════════════════════════════════════════════
+bytes_config = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+                "reactive_capture_max_bytes_per_hour": 1000}
+
+d6 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+check("bytes budget allows a dispatch when nothing has been captured yet this window",
+      d6._check_and_consume_budget(bytes_config) is True)
+d6._bytes_captured = 1000  # simulate a prior burst having already filled the byte budget
+check("bytes budget denies a dispatch once cumulative bytes captured this window meet/exceed "
+      "reactive_capture_max_bytes_per_hour, even though the burst-COUNT budget (6) is nowhere "
+      "near exhausted",
+      d6._check_and_consume_budget(bytes_config) is False)
+
+d7 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+d7._bytes_captured = 999_999_999
+zero_bytes_budget_config = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+                             "reactive_capture_max_bytes_per_hour": 0}
+check("reactive_capture_max_bytes_per_hour=0 disables the bytes gate entirely (count-only, "
+      "pre-fix behavior) regardless of how many bytes were already captured",
+      d7._check_and_consume_budget(zero_bytes_budget_config) is True)
+
+d8 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+d8._window_start = time.time() - 3601
+d8._bytes_captured = 999_999_999
+check("the bytes counter resets alongside the count on hourly window rollover",
+      d8._check_and_consume_budget(bytes_config) is True and d8._bytes_captured == 0,
+      f"got bytes_captured={d8._bytes_captured}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section B3 (LOAD-ANALYSIS FIX #1): try_dispatch() actually records real captured
+# bytes from capture_fn's return value once a burst completes, and defers a subsequent
+# trigger once that pushes the window over budget.
+# ═══════════════════════════════════════════════════════════════════════════════════
+def fake_capture_with_bytes(config, zeek_fx, out_dir, zeek_bin="/opt/zeek/bin/zeek",
+                             trigger_reason="unspecified", **kwargs):
+    return {"radios_captured": {"ath0": {"bytes": 600, "records": 10},
+                                 "ath1": {"bytes": 500, "records": 8}}}
+
+d9 = ReactiveCaptureDispatcher(capture_fn=fake_capture_with_bytes)
+cfg9 = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+        "reactive_capture_max_bytes_per_hour": 1000,
+        "reactive_capture_scratch_dir": "state/reactive_capture_test"}
+first9 = d9.try_dispatch(cfg9, zeek_fx=object(), trigger_reason="unit_test")
+for _ in range(50):
+    if d9._bytes_captured:
+        break
+    time.sleep(0.02)
+check("a completed burst's real captured bytes (summed across radios) are added to the "
+      "dispatcher's bytes-budget counter",
+      d9._bytes_captured == 1100, f"got {d9._bytes_captured}")
+
+second9 = d9.try_dispatch(cfg9, zeek_fx=object(), trigger_reason="unit_test_2")
+check("a subsequent trigger is deferred once the bytes already captured this window "
+      "(1100) meets/exceeds reactive_capture_max_bytes_per_hour (1000), even though the "
+      "burst-COUNT budget (6) still has room",
+      second9 is False)
+
+d10 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+cfg10 = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+         "reactive_capture_max_bytes_per_hour": 1000,
+         "reactive_capture_scratch_dir": "state/reactive_capture_test"}
+d10.try_dispatch(cfg10, zeek_fx=object(), trigger_reason="unit_test")
+time.sleep(0.1)
+check("a test stub's capture_fn returning None (not a dict) is handled gracefully -- "
+      "bytes counter stays at 0, no crash",
+      d10._bytes_captured == 0, f"got {d10._bytes_captured}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: ReactiveCaptureDispatcher.try_dispatch -- actually fires the capture fn

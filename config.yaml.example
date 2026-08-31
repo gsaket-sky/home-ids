@@ -403,6 +403,17 @@ geofencing:
     - KP
     - IR
 
+  # Specific destination IPs exempted from the geofencing hard-stop above, even
+  # though their GeoIP country is in geofencing_countries. Deliberately narrower
+  # than safe_ips (network_and_devices, above) -- an IP listed here can still
+  # trigger reputation/honeypot/TI/every other detector normally; it is only
+  # excused from the "wrong country = instant CRITICAL/block" rule. Use this for
+  # one specific server you've individually looked into and decided to trust
+  # despite its GeoIP location (note *why*, and the date, next to each entry) --
+  # never add a whole ASN/CIDR here, and never add an entry just to silence a
+  # recurring alert you haven't actually investigated. [LIVE]
+  geofencing_exempt_ips: []
+
 
 # -----------------------------------------------------------------------------
 # threat_intel_and_ai — external threat-intel refresh + local Ollama LLM
@@ -547,6 +558,20 @@ reactive_capture:
   # count does. Default ~1 every 10 minutes at full utilization. [LIVE]
   reactive_capture_max_bursts_per_hour: 6
 
+  # A SECOND shared budget, alongside the count above, not a replacement for it --
+  # see Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §5 (fix #1). The count budget
+  # bounds how OFTEN a burst starts; it does nothing to bound how large each one is.
+  # A real incident (2026-08-31) saw burst size spike ~10x under genuinely heavy
+  # traffic (4-7MB -> 46-90MB/radio) while staying entirely within the count budget,
+  # contributing to soc.service being OOM-killed. This caps cumulative bytes captured
+  # in the same rolling hourly window; once hit, further triggers defer exactly like a
+  # count-budget exhaustion (logged/metriced separately as deferred_bytes_budget) until
+  # the window resets. 0 disables this gate (count-only, pre-fix behavior). Default is
+  # a starting point sized off the incident's own numbers (headroom above typical
+  # 80-150MB service usage, well under soc.service's 1G MemoryMax) -- raise it if your
+  # network's normal traffic legitimately needs bigger/more-frequent captures. [LIVE]
+  reactive_capture_max_bytes_per_hour: 500000000
+
   # Per-trigger enable flags -- each source can be individually disabled without
   # touching the shared budget above. All default on, per explicit operator direction
   # ("more trigger rather than conservative"). [LIVE]
@@ -627,6 +652,35 @@ reactive_capture:
   # is bounded (reactive_capture_burst_seconds above), so this should rarely if
   # ever be reached. [LIVE]
   reactive_capture_suricata_timeout_seconds: 240.0
+
+  # Per-subprocess virtual-memory ceilings (RLIMIT_AS, applied via preexec_fn -- see
+  # utils.py's memory_limited_preexec_fn() and Documentation/REACTIVE_CAPTURE_LOAD_
+  # ANALYSIS.md §7, fix #3) for the Zeek and Suricata child processes a burst spawns.
+  # DEFAULT IS 0 (DISABLED) FOR A REASON, DO NOT JUST ENABLE THIS: live-tested on the
+  # real deployment host at 512MB and it broke Zeek on the very first real burst --
+  # `zeek -r exited -6, terminate called after throwing std::system_error: Resource
+  # temporarily unavailable`. RLIMIT_AS caps the process's total RESERVED virtual
+  # address space, not its actual resident memory use -- Zeek (and likely Suricata,
+  # untested since Zeek already failed first in the same burst) reserves address
+  # space for thread stacks/shared-library mappings/internal arenas well beyond what
+  # it actually touches, so a "reasonable-sounding" limit that would comfortably cover
+  # real RSS usage can still abort the process outright. This is a known-bad fit for
+  # multi-threaded C/C++ binaries in general, not specific to this deployment. Prefer
+  # Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §8's cgroup-based approach (fix #4,
+  # Option B -- limits actual RSS via `systemd-run --scope -p MemoryMax=...`, not
+  # reserved address space) once that's verified working from soc.service's own
+  # runtime context. If you do re-enable this, DO NOT reuse 512MB -- that value is
+  # confirmed-bad; empirically find Zeek/Suricata's real minimum viable RLIMIT_AS
+  # against YOUR real captures first (start high, e.g. 2-4GB, and watch
+  # reactive_capture_errors_total{stage="zeek_reprocess"|"suricata_scan"} closely
+  # before lowering). A child that hits its ceiling fails its own allocation
+  # (non-zero exit), which both call sites already treat as a non-fatal "no findings
+  # this burst" outcome -- see reprocess_with_zeek()'s and run_suricata_on_pcap()'s
+  # docstrings; the danger isn't a crash, it's silently getting ZERO findings from
+  # every burst, which is exactly what happened here. POSIX-only -- silently a no-op
+  # on any platform without the `resource` module (e.g. local Windows dev). [LIVE]
+  reactive_capture_zeek_memory_limit_mb: 0
+  reactive_capture_suricata_memory_limit_mb: 0
 
   # reactive_capture_zeek_bin moved to the "external_system_paths" section at the
   # very bottom of this file, alongside pihole_db/zeek_log_dir -- same reasoning

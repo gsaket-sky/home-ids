@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from intelligence.hypotheses.evidence import Evidence
+from utils import memory_limited_preexec_fn
 
 LOGGER = logging.getLogger("home_ids.suricata_scan")
 
@@ -54,13 +55,20 @@ _DEFAULT_CONFIDENCE = 0.5
 
 
 def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
-                          rules_path: Optional[str], timeout: float = 60.0) -> List[dict]:
+                          rules_path: Optional[str], timeout: float = 60.0,
+                          memory_limit_mb: float = 0) -> List[dict]:
     """Runs `suricata -r <pcap> -l <scratch_dir> -S <rules_path>` (batch/offline mode
     -- reads a file, exits, does not touch a live interface) and returns the parsed
     `event_type: alert` records from the resulting eve.json. Never raises -- a
     missing binary, a missing/empty rules file, or a timeout all just mean "no
     Suricata findings this burst," logged, not fatal to the rest of the capture
-    pipeline (matching reprocess_with_zeek's own non-fatal-failure style)."""
+    pipeline (matching reprocess_with_zeek's own non-fatal-failure style).
+
+    memory_limit_mb (Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §7, fix #3):
+    caps Suricata's own virtual address space via RLIMIT_AS -- 0 (default) applies no
+    limit, matching pre-fix behavior. A child that hits the ceiling exits non-zero,
+    which the branch above already treats as "no findings, logged" -- no new failure
+    handling needed here."""
     if not suricata_bin:
         return []
     if not rules_path or not Path(rules_path).exists():
@@ -75,6 +83,7 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False,
+            preexec_fn=memory_limited_preexec_fn(int(memory_limit_mb * 1024 * 1024)),
         )
         if result.returncode != 0:
             LOGGER.warning(
@@ -224,11 +233,12 @@ def suricata_alerts_to_evidence(alerts: List[dict], ip_to_device: Dict[str, str]
 
 def run_and_attribute(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
                        rules_path: Optional[str], state_manager, capture_ts: float,
-                       timeout: float = 60.0) -> Dict[str, List[Evidence]]:
+                       timeout: float = 60.0, memory_limit_mb: float = 0) -> Dict[str, List[Evidence]]:
     """Convenience wrapper: run_suricata_on_pcap() + build_ip_to_device_map() +
     suricata_alerts_to_evidence() in one call -- what fritzbox_capture.py's
     capture_and_ingest() actually calls per burst."""
-    alerts = run_suricata_on_pcap(pcap_path, scratch_dir, suricata_bin, rules_path, timeout=timeout)
+    alerts = run_suricata_on_pcap(pcap_path, scratch_dir, suricata_bin, rules_path, timeout=timeout,
+                                   memory_limit_mb=memory_limit_mb)
     if not alerts:
         return {}
     ip_map = build_ip_to_device_map(state_manager)

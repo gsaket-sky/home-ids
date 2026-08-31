@@ -216,6 +216,75 @@ finally:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section C3 (LOAD-ANALYSIS FIX #3, Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §7):
+# reprocess_with_zeek(memory_limit_mb=...) actually enforces a memory ceiling on the
+# child process, not just wires a parameter through unused. A fake "zeek" that
+# deliberately allocates well past a small limit stands in for real Zeek (same reason
+# as Section C2 -- no real Zeek binary in this dev environment).
+# ═══════════════════════════════════════════════════════════════════════════════════
+from utils import memory_limited_preexec_fn
+
+check("memory_limited_preexec_fn(0) returns None -- the disabled/pre-fix default applies "
+      "no RLIMIT at all",
+      memory_limited_preexec_fn(0) is None)
+check("memory_limited_preexec_fn(-5) (a nonsensical negative limit) also returns None, "
+      "not an error",
+      memory_limited_preexec_fn(-5) is None)
+
+if os.name == "nt":
+    print("[SKIP] real RLIMIT_AS enforcement check -- POSIX-only (resource.RLIMIT_AS), "
+          "this dev environment is Windows; memory_limited_preexec_fn() already confirmed "
+          "to return None here (see above), matching its documented no-op-on-Windows "
+          "contract. Real enforcement needs live verification on the Linux deployment target.")
+else:
+    hog_script = TMP / "memory_hog.py"
+    hog_script.write_text(
+        "import sys\n"
+        "buf = bytearray(200 * 1024 * 1024)  # 200MB -- comfortably past the 20MB test limit below\n"
+        "buf[0] = 1\n"
+        "sys.exit(0)\n",
+        encoding="utf-8",
+    )
+    hog_bin = TMP / "fake_zeek_hog.sh"
+    # Mimics reprocess_with_zeek()'s exact invocation shape ([bin, "-r", pcap, "local"])
+    # closely enough that the fake script only needs to ignore its argv and allocate.
+    hog_bin.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{hog_script}"\n', encoding="utf-8")
+    hog_bin.chmod(hog_bin.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    hog_pcap = TMP / "memlimit_test.std.pcap"
+    hog_pcap.write_bytes(b"fake pcap bytes for memory-limit regression test")
+    hog_scratch = TMP / "zeek_scratch_memlimit_test"
+
+    try:
+        reprocess_with_zeek(hog_pcap, hog_scratch, zeek_bin=str(hog_bin), timeout=15.0, memory_limit_mb=20)
+        check("THE CORE FIX: a child process that allocates well past its RLIMIT_AS ceiling "
+              "(200MB attempted vs. a 20MB limit) fails and reprocess_with_zeek() surfaces "
+              "that as a FritzboxCaptureError (non-zero exit), not a silent success",
+              False, "reprocess_with_zeek() returned normally -- the memory limit was not enforced")
+    except FritzboxCaptureError:
+        check("THE CORE FIX: a child process that allocates well past its RLIMIT_AS ceiling "
+              "(200MB attempted vs. a 20MB limit) fails and reprocess_with_zeek() surfaces "
+              "that as a FritzboxCaptureError (non-zero exit), not a silent success",
+              True)
+
+    # Control: the SAME script under a generous limit (well above what it actually
+    # allocates) must succeed -- proves Section C3's failure above is really the RLIMIT
+    # firing, not some unrelated breakage in the memory_limit_mb plumbing itself.
+    hog_scratch_control = TMP / "zeek_scratch_memlimit_control"
+    try:
+        reprocess_with_zeek(hog_pcap, hog_scratch_control, zeek_bin=str(hog_bin), timeout=15.0, memory_limit_mb=1024)
+        check("control: the SAME script under a GENEROUS limit (1024MB, well above the "
+              "~200MB it actually allocates) succeeds -- proves the failure above is the "
+              "RLIMIT firing, not unrelated breakage",
+              True)
+    except FritzboxCaptureError as e:
+        check("control: the SAME script under a GENEROUS limit (1024MB, well above the "
+              "~200MB it actually allocates) succeeds -- proves the failure above is the "
+              "RLIMIT firing, not unrelated breakage",
+              False, str(e))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section D: ingest_zeek_logs -- dispatch convention matches ZeekLogTailer's live path
 # ═══════════════════════════════════════════════════════════════════════════════════
 log_dir = TMP / "zeek_logs"

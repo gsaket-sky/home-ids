@@ -311,8 +311,10 @@ autotune_arp_sweep_evidence_count = Gauge("home_ids_autotune_arp_sweep_evidence_
 reactive_capture_bursts_total = Counter(
     "home_ids_reactive_capture_bursts_total",
     "Reactive-capture trigger attempts (outcome=dispatched: budget allowed it and a "
-    "burst actually ran in the background; outcome=deferred: shared hourly budget was "
-    "exhausted)",
+    "burst actually ran in the background; outcome=deferred: shared hourly burst-COUNT "
+    "budget was exhausted; outcome=deferred_bytes_budget: shared hourly aggregate-BYTES "
+    "budget was exhausted, see Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md; "
+    "outcome=deferred_concurrent: a burst was already in flight)",
     ["trigger_reason", "outcome"]
 )
 reactive_capture_bytes_total = Counter("home_ids_reactive_capture_bytes_total", "Cumulative raw AVM pcap bytes captured per radio", ["radio"])

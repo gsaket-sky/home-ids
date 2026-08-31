@@ -52,6 +52,7 @@ import requests
 
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
 from intelligence.detectors.suricata_scan import run_and_attribute as run_suricata_and_attribute
+from utils import memory_limited_preexec_fn
 from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
     reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
@@ -229,60 +230,78 @@ def avm_pcap_to_standard(avm_path: Path, standard_path: Path) -> int:
     magic number and strips the 8 extra AVM-specific bytes from each per-record
     header. Returns the number of records converted. Raises FritzboxCaptureError if
     the input doesn't look like the expected AVM format (wrong magic, truncated
-    header) -- fail loudly here rather than silently handing Zeek a corrupt file."""
-    with open(avm_path, "rb") as f:
-        data = f.read()
+    header) -- fail loudly here rather than silently handing Zeek a corrupt file.
 
-    if len(data) < _GLOBAL_HDR_LEN:
-        raise FritzboxCaptureError(f"{avm_path} is too short to contain a pcap global header.")
+    Streams record-by-record instead of reading the whole capture into memory and
+    building a second full in-memory copy -- a burst is normally a few MB, but real
+    traffic spikes have pushed single-radio captures past 60MB, and the old
+    read-whole-file-then-bytearray-copy approach briefly held ~2x that (raw + converted)
+    on the heap per radio, on top of everything else running in this cgroup's memory
+    budget. Peak memory here is now O(one record), not O(file size)."""
+    standard_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(avm_path, "rb") as fin, open(standard_path, "wb") as fout:
+        global_hdr = fin.read(_GLOBAL_HDR_LEN)
+        if len(global_hdr) < _GLOBAL_HDR_LEN:
+            raise FritzboxCaptureError(f"{avm_path} is too short to contain a pcap global header.")
 
-    magic, ver_maj, ver_min, thiszone, sigfigs, snaplen, network = struct.unpack(
-        "<IHHiIII", data[:_GLOBAL_HDR_LEN]
-    )
-    if magic != _AVM_MAGIC:
-        raise FritzboxCaptureError(
-            f"{avm_path}: expected AVM magic 0x{_AVM_MAGIC:08x}, got 0x{magic:08x}. "
-            "Either this isn't an AVM capture, or the router's format has changed."
+        magic, ver_maj, ver_min, thiszone, sigfigs, snaplen, network = struct.unpack(
+            "<IHHiIII", global_hdr
         )
+        if magic != _AVM_MAGIC:
+            raise FritzboxCaptureError(
+                f"{avm_path}: expected AVM magic 0x{_AVM_MAGIC:08x}, got 0x{magic:08x}. "
+                "Either this isn't an AVM capture, or the router's format has changed."
+            )
 
-    out = bytearray()
-    out += struct.pack("<IHHiIII", _STANDARD_MAGIC, ver_maj, ver_min, thiszone, sigfigs, snaplen, network)
+        fout.write(struct.pack("<IHHiIII", _STANDARD_MAGIC, ver_maj, ver_min, thiszone, sigfigs, snaplen, network))
 
-    offset = _GLOBAL_HDR_LEN
-    n = 0
-    while offset + _AVM_RECORD_HDR_LEN <= len(data):
-        ts_sec, ts_usec, incl_len, orig_len = struct.unpack("<IIII", data[offset:offset + 16])
-        pkt_start = offset + _AVM_RECORD_HDR_LEN
-        pkt_end = pkt_start + incl_len
-        if pkt_end > len(data):
-            LOGGER.warning("%s: record %d claims %d bytes but only %d remain -- truncated capture, stopping here.",
-                            avm_path, n, incl_len, len(data) - pkt_start)
-            break
-        out += struct.pack("<IIII", ts_sec, ts_usec, incl_len, orig_len)
-        out += data[pkt_start:pkt_end]
-        offset = pkt_end
-        n += 1
+        n = 0
+        while True:
+            rec_hdr = fin.read(_AVM_RECORD_HDR_LEN)
+            if not rec_hdr:
+                break  # clean EOF between records
+            if len(rec_hdr) < _AVM_RECORD_HDR_LEN:
+                LOGGER.warning("%s: record %d header truncated (%d/%d bytes) -- stopping here.",
+                                avm_path, n, len(rec_hdr), _AVM_RECORD_HDR_LEN)
+                break
+            ts_sec, ts_usec, incl_len, orig_len = struct.unpack("<IIII", rec_hdr[:16])
+            payload = fin.read(incl_len)
+            if len(payload) < incl_len:
+                LOGGER.warning("%s: record %d claims %d bytes but only %d remain -- truncated capture, stopping here.",
+                                avm_path, n, incl_len, len(payload))
+                break
+            fout.write(struct.pack("<IIII", ts_sec, ts_usec, incl_len, orig_len))
+            fout.write(payload)
+            n += 1
 
     if n == 0:
+        try:
+            standard_path.unlink()
+        except OSError:
+            pass
         raise FritzboxCaptureError(f"{avm_path}: converted zero records -- capture may be empty or malformed.")
 
-    standard_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(standard_path, "wb") as f:
-        f.write(out)
     return n
 
 
 # --- Zeek reprocessing --------------------------------------------------------------
 
 def reprocess_with_zeek(pcap_path: Path, scratch_dir: Path, zeek_bin: str = "/opt/zeek/bin/zeek",
-                         timeout: float = 120.0) -> Path:
+                         timeout: float = 120.0, memory_limit_mb: float = 0) -> Path:
     """Runs `zeek -r <pcap> local` in scratch_dir so the SAME local.zeek policy the
     live deployment loads (JSON logging, mac-logging, dhcp fingerprinting, ja3/ja4)
     applies to this burst too -- this is deliberate: it means the burst gets real
     lateral-movement/JA3/JA4 signal for free, with zero new detection logic, instead
     of a second hand-parsed detection path (see this module's docstring / the
     reactive-capture plan's "Key design decision"). Returns scratch_dir on success;
-    raises FritzboxCaptureError if zeek exits non-zero or isn't found."""
+    raises FritzboxCaptureError if zeek exits non-zero or isn't found.
+
+    memory_limit_mb (Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §7, fix #3):
+    caps Zeek's own virtual address space via RLIMIT_AS -- 0 (default) applies no
+    limit, matching pre-fix behavior. A child that hits the ceiling exits non-zero,
+    which the existing `proc.returncode != 0` check below already turns into a
+    FritzboxCaptureError -- already handled non-fatally by every caller, no new
+    failure-handling needed here."""
     scratch_dir.mkdir(parents=True, exist_ok=True)
     for old_log in scratch_dir.glob("*.log"):
         old_log.unlink()
@@ -309,6 +328,7 @@ def reprocess_with_zeek(pcap_path: Path, scratch_dir: Path, zeek_bin: str = "/op
             capture_output=True,
             text=True,
             timeout=timeout,
+            preexec_fn=memory_limited_preexec_fn(int(memory_limit_mb * 1024 * 1024)),
         )
     except subprocess.TimeoutExpired as e:
         raise FritzboxCaptureError(f"zeek -r timed out after {timeout}s on {pcap_path}") from e
@@ -527,6 +547,19 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     burst_seconds = float(config.get("reactive_capture_burst_seconds", 120.0))
     snaplen = int(config.get("reactive_capture_snaplen", 1600))
     delete_after_ingest = bool(config.get("reactive_capture_delete_after_ingest", True))
+    # LOAD-ANALYSIS FIX #3 (Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §7): caps
+    # each subprocess's own virtual address space, independent of the AVM-conversion
+    # memory fix and the dispatcher's bytes-per-hour budget -- neither bounds what
+    # Zeek/Suricata themselves do with a large pcap once they're handed one. 0 (or
+    # unset) applies no limit, matching pre-fix behavior. FALLBACK MUST STAY 0: live-
+    # tested at 512 on the real deployment host and it broke Zeek on the first real
+    # burst (RLIMIT_AS caps reserved virtual address space, not actual RSS -- Zeek's
+    # own thread-stack/shared-library/arena reservations blew past 512MB long before
+    # its real memory use did, aborting with std::system_error). See
+    # config.yaml.example's own key comment for the full incident note before ever
+    # changing this default back up.
+    zeek_memory_limit_mb = float(config.get("reactive_capture_zeek_memory_limit_mb", 0))
+    suricata_memory_limit_mb = float(config.get("reactive_capture_suricata_memory_limit_mb", 0))
 
     if not fritz_pass:
         raise FritzboxCaptureError("fritz_password is empty in configuration; cannot authenticate.")
@@ -581,7 +614,7 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
 
             scratch = out_dir / f"zeek_scratch_{iface}_{int(time.time())}"
             try:
-                reprocess_with_zeek(std_path, scratch, zeek_bin=zeek_bin)
+                reprocess_with_zeek(std_path, scratch, zeek_bin=zeek_bin, memory_limit_mb=zeek_memory_limit_mb)
             except FritzboxCaptureError as e:
                 LOGGER.error("Zeek reprocessing failed for %s: %s", iface, e)
                 summary["errors"].append(f"{iface}: zeek reprocessing failed -- {e}")
@@ -603,6 +636,7 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
                     iface_findings = run_suricata_and_attribute(
                         std_path, suricata_scratch, suricata_bin, suricata_rules_path,
                         state_manager, capture_ts, timeout=suricata_timeout,
+                        memory_limit_mb=suricata_memory_limit_mb,
                     )
                     for dev_id, ev_list in iface_findings.items():
                         suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
@@ -660,6 +694,13 @@ class ReactiveCaptureDispatcher:
         self._lock = threading.Lock()
         self._window_start = time.time()
         self._count = 0
+        # LOAD-ANALYSIS FIX (Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §5, fix #1):
+        # the count budget above bounds how OFTEN a burst can start, not how much it
+        # actually captures. A real incident (2026-08-31) showed burst size spiking
+        # ~10x under genuinely heavy traffic (4-7MB -> 46-90MB/radio) while still
+        # staying under the count budget -- aggregate bytes/hour was unbounded. This
+        # tracks actual captured bytes in the same rolling window as _count.
+        self._bytes_captured = 0
         self._capture_fn = capture_fn or capture_and_ingest
         # BUGFIX: the hourly budget above only ever limited total burst COUNT, never
         # CONCURRENT execution. Every dispatched trigger spawned its own daemon thread
@@ -677,16 +718,25 @@ class ReactiveCaptureDispatcher:
     def _check_and_consume_budget(self, config: dict) -> bool:
         """Pure budget bookkeeping, no threading -- kept separate from try_dispatch()
         so the hourly-window/count logic can be unit tested directly without spinning
-        real threads."""
+        real threads.
+
+        Two independent gates share the same rolling window: burst COUNT (as before)
+        and, since the load analysis above, aggregate BYTES already captured this
+        window. reactive_capture_max_bytes_per_hour=0 (or unset) disables the bytes
+        gate entirely, matching the pre-fix behavior."""
         if not config.get("reactive_capture_enabled", False):
             return False
         max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
+        max_bytes_per_hour = int(config.get("reactive_capture_max_bytes_per_hour", 0) or 0)
         with self._lock:
             now = time.time()
             if now - self._window_start >= 3600:
                 self._window_start = now
                 self._count = 0
+                self._bytes_captured = 0
             if self._count >= max_per_hour:
+                return False
+            if max_bytes_per_hour > 0 and self._bytes_captured >= max_bytes_per_hour:
                 return False
             self._count += 1
             return True
@@ -709,10 +759,21 @@ class ReactiveCaptureDispatcher:
         if not self._check_and_consume_budget(config):
             if config.get("reactive_capture_enabled", False):
                 max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
-                LOGGER.info("[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
-                            "deferring trigger '%s' -- will be reconsidered once the hourly "
-                            "window resets.", max_per_hour, trigger_reason)
-                reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred").inc()
+                max_bytes_per_hour = int(config.get("reactive_capture_max_bytes_per_hour", 0) or 0)
+                with self._lock:
+                    count_exhausted = self._count >= max_per_hour
+                    bytes_exhausted = max_bytes_per_hour > 0 and self._bytes_captured >= max_bytes_per_hour
+                if bytes_exhausted and not count_exhausted:
+                    LOGGER.info("[DEFERRED] reactive_capture_max_bytes_per_hour (%d bytes) reached "
+                                "(%d bytes captured so far this window), deferring trigger '%s' -- "
+                                "will be reconsidered once the hourly window resets.",
+                                max_bytes_per_hour, self._bytes_captured, trigger_reason)
+                    reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred_bytes_budget").inc()
+                else:
+                    LOGGER.info("[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
+                                "deferring trigger '%s' -- will be reconsidered once the hourly "
+                                "window resets.", max_per_hour, trigger_reason)
+                    reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred").inc()
             return False
 
         if not self._burst_lock.acquire(blocking=False):
@@ -735,9 +796,20 @@ class ReactiveCaptureDispatcher:
 
         def _run():
             try:
-                capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason,
-                           state_manager=state_manager, evidence_store=evidence_store,
-                           geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
+                result = capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason,
+                                     state_manager=state_manager, evidence_store=evidence_store,
+                                     geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
+                # Feed the bytes budget from what was ACTUALLY captured (real numbers,
+                # not an estimate) -- test stubs return None, which is fine, they just
+                # don't move the bytes counter. See _check_and_consume_budget()'s docstring.
+                if isinstance(result, dict):
+                    radios_captured = result.get("radios_captured") or {}
+                    total_bytes = sum(
+                        int(r.get("bytes", 0)) for r in radios_captured.values() if isinstance(r, dict)
+                    )
+                    if total_bytes:
+                        with self._lock:
+                            self._bytes_captured += total_bytes
             except Exception as exc:
                 LOGGER.error("Reactive capture burst (trigger=%s) failed: %s", trigger_reason, exc)
             finally:

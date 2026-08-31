@@ -1230,7 +1230,9 @@ class EnginePipeline:
                             if country_code:
                                 # Feature 3: Geofencing Policy Enforcement
                                 if self.config.get("geofencing_enabled", False):
-                                    if country_code in self.config.get("geofencing_countries", []):
+                                    if country_code in self.config.get("geofencing_countries", []) and d_ip in self.config.get("geofencing_exempt_ips", []):
+                                        LOGGER.info(f"Geofence match on {d_ip} ({country_code}) for {dev_id} -- exempted via geofencing_exempt_ips, not escalating.")
+                                    elif country_code in self.config.get("geofencing_countries", []):
                                         LOGGER.warning(f"🚫 GEOFENCE VIOLATION: {dev_id} connected to {d_ip} ({country_code})")
                                         # BUGFIX (2026-08-27, categorization consistency audit): this
                                         # evidence carried no .domain at all -- the same attribution gap

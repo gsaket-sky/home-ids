@@ -41,6 +41,39 @@ except Exception:
 
 LOGGER = logging.getLogger("home_ids.utils")
 
+def memory_limited_preexec_fn(limit_bytes: int):
+    """Returns a preexec_fn for subprocess.run(...) that caps the CHILD process's
+    virtual address space (RLIMIT_AS) before exec -- a cheap, no-IPC-required backstop
+    against one oversized subprocess invocation (reactive-capture's batch Zeek/Suricata
+    scans -- see fritzbox_capture.py's reprocess_with_zeek() and suricata_scan.py's
+    run_suricata_on_pcap()) consuming unbounded memory inside the parent's own cgroup.
+    See Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §7 for why this exists: the
+    2026-08-31 soc.service OOM incident showed capture-burst size (and therefore
+    Zeek/Suricata's own memory use processing it) has no ceiling today.
+
+    POSIX-only: returns None (i.e. "no preexec_fn, no limit applied") on any platform
+    where the resource module or RLIMIT_AS isn't available (Windows dev machines,
+    notably), or when limit_bytes<=0 (feature explicitly disabled) -- callers pass the
+    result straight to subprocess.run(preexec_fn=...) with no platform check of their
+    own needed. A child that exceeds the limit fails its own allocation (typically a
+    non-zero exit or a signal death) -- both existing call sites already treat a
+    non-zero-exit/timeout as a non-fatal, logged, "no findings this burst" outcome, so
+    no new exception handling is needed at either call site."""
+    if limit_bytes <= 0:
+        return None
+    try:
+        import resource
+        if not hasattr(resource, "RLIMIT_AS"):
+            return None
+    except ImportError:
+        return None
+
+    def _set_limit():
+        resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
+
+    return _set_limit
+
+
 def normalize_domain(domain):
     """Lowercases and cleans up trailing dots from raw DNS queries."""
     return str(domain).lower().strip(".")
