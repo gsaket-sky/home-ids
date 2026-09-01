@@ -2,6 +2,39 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.7.0] - 2026-09-01
+
+Triggered by a live alert review: the operator asked what each Telegram inline button
+actually does and whether the alert's own description matched. It didn't, in two places,
+one of them more serious than wording.
+
+### 🔘 Telegram Alert Buttons/Descriptions Audited Against Actual Behavior
+
+- **Dead-button bug**: the Release/Approve inline-keyboard block was wrapped in an
+  `interactive_blocking_enabled` check that never belonged there. That flag controls
+  whether a *new* containment action needs approval before happening (ips.py's
+  "Interactive HITL Mode" vs. "Autonomous Auto-Block") — it says nothing about whether an
+  *already-contained* device can be released. With the flag `False` (the config's own
+  default when unset), the mitigator still autonomously tarpits/isolates/blocks devices —
+  but the Release button for exactly those alerts was silently suppressed by this same
+  gate, even though the status text explicitly says "tap Release". Not currently reachable
+  on this deployment (`interactive_blocking_enabled: true` live), but a real bug for
+  anyone running the (default) autonomous mode. Release now shows purely off containment
+  state, decoupled from that flag entirely.
+- **Stale copy**: the "awaiting approval" status line said "approve or release using the
+  buttons below" — but a 2026-08-29 fix (below) had already removed the Release button
+  from that exact state, since nothing is contained yet so there's nothing to release. The
+  button-removal fix never touched this text; it predates that fix and was simply missed.
+  Reworded to name the one button that's actually there.
+- **Vague copy**: the "monitoring only" status line said "review below and decide
+  manually" without saying what there was to review — the only button ever attached in
+  that state is "Mark False Positive" (unconditional whenever the target is known). Named
+  it explicitly instead of leaving it open-ended.
+- `tests/test_phase40_alert_button_containment_sync.py` extended: the button-gate mirror
+  no longer takes an `interactive_blocking_enabled` parameter (matching the real fix), a
+  new check proves Release survives with that flag `False`, and a source-level regression
+  guard catches a future edit silently reintroducing the old gate.
+
 ## [v12.6.0] - 2026-08-31
 
 `soc.service` was OOM-killed and auto-restarted (kernel memcg OOM, not a host reboot) after

@@ -85,45 +85,60 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 
 # ── Section B: button-gate logic keyed off action_summary ──────────────────────────
-def _buttons_for(action_summary: str, interactive_blocking_enabled: bool, client_ip: str = "1.2.3.4"):
+def _buttons_for(action_summary: str, client_ip: str = "1.2.3.4"):
     """Mirror of pipeline.py's inline-keyboard button-gate logic. Kept as a literal
     copy (not imported) since pipeline.py's _step() is one giant method with no
     extractable unit under test — matches test_phase20_alert_quality.py's own
     established pattern for testing action_summary itself. The regression check right
     after this function asserts pipeline.py's actual source still contains the two
     conditions this mirror encodes, so the mirror can't silently drift from reality.
+
+    BUGFIX (2026-09-01, button/description audit): no longer takes an
+    interactive_blocking_enabled parameter -- pipeline.py's real gate never should
+    have had one either. That flag controls whether a NEW containment action needs
+    approval before happening, not whether an ALREADY-contained device can be
+    released; wrapping Release in it meant a device autonomously tarpitted/isolated/
+    blocked (interactive_blocking_enabled=False -- the config's own default when
+    unset) got NO Release button at all, even though _build_status_lines' text for
+    those states explicitly says "tap Release". See
+    Documentation/CHANGELOG.md's entry for this fix.
     """
     keyboard = []
-    if interactive_blocking_enabled:
-        if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
-            keyboard.append([{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}])
-        elif action_summary == "awaiting approval":
-            keyboard.append([
-                {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
-            ])
+    if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
+        keyboard.append([{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}])
+    elif action_summary == "awaiting approval":
+        keyboard.append([
+            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
+        ])
     return keyboard
 
 
 check("THE BUG's core scenario, now fixed: an already-tarpitted device gets ONLY a "
       "Release button, no 'Approve' (there's nothing left to approve)",
-      _buttons_for("tarpitted (Layer-2)", True) == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
 check("same fix for router-isolated devices",
-      _buttons_for("router isolated", True) == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("router isolated") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
 check("same fix for an auto-blocked (domain-blocked) device",
-      _buttons_for("auto-blocked", True) == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
+      _buttons_for("auto-blocked") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
 check("BUGFIX (2026-08-29, user catch): a genuinely pending device (nothing done yet) "
       "now gets ONLY Approve, not a Release button too -- action_summary==\"awaiting "
       "approval\" is itself derived from containment_status finding nothing currently "
       "contained (see the branch order above it), so Release was guaranteed to no-op "
       "there every time, violating the same 'only show a button that would actually do "
       "something' principle the three checks above this one already enforce",
-      _buttons_for("awaiting approval", True) == [[{"text": "🔒 Approve Hardware Isolation", "callback_data": "block:1.2.3.4"}]])
+      _buttons_for("awaiting approval") == [[{"text": "🔒 Approve Hardware Isolation", "callback_data": "block:1.2.3.4"}]])
 check("REGRESSION GUARD: 'monitoring only' (nothing queued, nothing done) gets NO "
       "hardware buttons at all, matching the 'monitoring only' status text",
-      _buttons_for("monitoring only", True) == [])
-check("REGRESSION GUARD: interactive_blocking_enabled=False suppresses all hardware "
-      "buttons regardless of action_summary",
-      _buttons_for("awaiting approval", False) == [] and _buttons_for("tarpitted (Layer-2)", False) == [])
+      _buttons_for("monitoring only") == [])
+check("BUGFIX (2026-09-01): a device that's ACTUALLY contained (e.g. autonomously "
+      "tarpitted while interactive_blocking_enabled=False -- the mitigator's "
+      "'Autonomous Auto-Block' mode, see ips.py's own boot-log line) still gets a "
+      "Release button -- this exact scenario used to produce NO button at all while "
+      "the status text still said 'tap Release', a real dead-button bug. Release no "
+      "longer takes interactive_blocking_enabled into account at all, matching that "
+      "flag's actual meaning (gates NEW actions needing approval, not releasing an "
+      "EXISTING one).",
+      _buttons_for("tarpitted (Layer-2)") == [[{"text": "🔓 Release Device", "callback_data": "unblock:1.2.3.4"}]])
 
 # Guard the mirror above against silently drifting from the real pipeline.py source.
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
@@ -140,6 +155,11 @@ check("REGRESSION GUARD: pipeline.py's awaiting-approval branch no longer also a
       _pipeline_src.count('{"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}') == 1,
       "expected exactly ONE Release-Device button construction in the whole file "
       "(the already-contained branch) -- found a different count")
+check("REGRESSION GUARD (2026-09-01 fix): pipeline.py's button assembly no longer "
+      "wraps Release in an interactive_blocking_enabled check -- catches a future "
+      "edit silently reintroducing the dead-button bug",
+      'if bool(self.config.get("interactive_blocking_enabled", False)):\n                                    if action_summary in ("tarpitted (Layer-2)"'
+      not in _pipeline_src)
 
 print()
 if FAILURES:

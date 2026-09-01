@@ -248,15 +248,28 @@ def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
         return "✅", already_done_text, your_move, if_nothing_text
 
     if action_summary == "awaiting approval":
+        # BUGFIX (2026-09-01, button/description audit): only an "Approve Hardware
+        # Isolation" button is ever attached in this state (see the inline_keyboard
+        # assembly below -- Release was deliberately removed from here on 2026-08-29,
+        # since nothing is contained yet so there's nothing to release). This text
+        # said "approve or release using the buttons below" regardless -- stale,
+        # predates and was missed by that same fix. Corrected to match the one
+        # button that's actually there.
         return (
             "⏳", "nothing yet -- action is queued, waiting for your approval via the buttons below.",
-            "approve or release using the buttons below.",
+            "tap Approve below if you want this isolated -- otherwise do nothing, it stays unblocked.",
             "the device stays on the network, unblocked, until you approve isolation.",
         )
 
+    # BUGFIX (2026-09-01, button/description audit): "review below and decide
+    # manually" implied unspecified options without saying what they are. The only
+    # button ever attached in this state ("monitoring only") is Mark False Positive
+    # (added unconditionally whenever the target is known -- see the inline_keyboard
+    # assembly below); there is no isolation button to "decide" between. Named the
+    # one real action instead of leaving it vague.
     return (
         "⚠️", "nothing -- traffic is being monitored only, not blocked.",
-        "review below and decide manually.",
+        "no isolation action available at this severity -- tap \"Mark False Positive\" below if this looks wrong, otherwise no action needed.",
         "the device stays on the network; this alert repeats if the behavior continues.",
     )
 
@@ -2286,15 +2299,31 @@ class EnginePipeline:
                                 # would actually do something" principle the fix above this comment
                                 # already established for the other two states -- the third state
                                 # just never got the same treatment.
-                                if bool(self.config.get("interactive_blocking_enabled", False)):
-                                    if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
-                                        inline_keyboard.append([
-                                            {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
-                                        ])
-                                    elif action_summary == "awaiting approval":
-                                        inline_keyboard.append([
-                                            {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
-                                        ])
+                                #
+                                # BUGFIX (2026-09-01, button/description audit): Release was wrongly
+                                # wrapped in the SAME `interactive_blocking_enabled` gate as Approve.
+                                # That flag controls whether a NEW containment action needs approval
+                                # before it happens (ips.py: "Interactive HITL Mode" vs "Autonomous
+                                # Auto-Block") -- it says nothing about whether an ALREADY-contained
+                                # device can be released. With the flag False (the config's own
+                                # default when unset), the mitigator still autonomously
+                                # tarpits/isolates/blocks devices -- but the Release button for
+                                # exactly those alerts was being suppressed by this same gate, even
+                                # though _build_status_lines' text for those three states explicitly
+                                # says "tap Release". Release now shows purely off containment state,
+                                # matching the text unconditionally. Approve keeps no separate gate
+                                # either -- it doesn't need one: action_summary=="awaiting approval"
+                                # can only ever be set when interactive_blocking_enabled is True in
+                                # the first place (see the containment_status rewrite above,
+                                # ~line 1841), so gating it a second time here was always redundant.
+                                if action_summary in ("tarpitted (Layer-2)", "router isolated", "auto-blocked"):
+                                    inline_keyboard.append([
+                                        {"text": "🔓 Release Device", "callback_data": f"unblock:{client_ip}"}
+                                    ])
+                                elif action_summary == "awaiting approval":
+                                    inline_keyboard.append([
+                                        {"text": "🔒 Approve Hardware Isolation", "callback_data": f"block:{client_ip}"}
+                                    ])
 
                                 # PHASE 6 (operator-driven self-healing, closed loop): record a
                                 # "published_alert" action-ledger entry for EVERY published alert,
