@@ -67,6 +67,30 @@ check("THE CORE FIX: a known-safe ASN (Telegram) does NOT escalate to Tier 5 eve
       "production despite the PHASE 8 threshold-only fix)",
       vec_telegram_high.tier == 2, f"got tier={vec_telegram_high.tier}")
 
+# BUGFIX (2026-09-01, HEE-vs-Ollama disagreement audit): _SAFE_ASN_OWNER_KEYWORDS above
+# is just ("telegram",) -- but utils.is_cloud_cdn_provider_org() already maintains a
+# broader, deliberately conservative safe list (Google LLC, AWS, Apple, Facebook/Meta,
+# IBM Cloud, Vultr, Leaseweb, Scaleway, Contabo -- the SAME list fp_engine.py's
+# confirmed-intel write guard already trusts) that classify() never consulted. Confirmed
+# live: updates.bravesoftware.com / two Spotify hosts / Datadog's log intake all
+# resolved to 35.186.224.0/24 (Google LLC, AS396982) -- a shared GCP customer range
+# whose AbuseIPDB score >= 4.0 came from some OTHER tenant's traffic on the same cloud
+# IP block, not from any of these legitimate services -- pushing tier straight to 5 for
+# domains already treated as safe infrastructure everywhere else in this codebase.
+vec_gcp_low = rc.classify("unknown", abuse_score=2.88, asn_owner="Google LLC")
+check("a recognized cloud/CDN-org ASN (Google LLC) with a below-bar abuse score stays Tier 2",
+      vec_gcp_low.tier == 2, f"got tier={vec_gcp_low.tier}")
+vec_gcp_high = rc.classify("unknown", abuse_score=4.0, asn_owner="Google LLC")
+check("THE CORE FIX: a recognized cloud/CDN-org ASN (Google LLC) does NOT escalate to "
+      "Tier 5 even when the abuse score clears the confirmed-IOC bar -- the exact live "
+      "shape (updates.bravesoftware.com / Spotify / Datadog sharing a GCP IP range) "
+      "that produced 7 of 9 total validator-override disagreements in a 225-case audit",
+      vec_gcp_high.tier == 2, f"got tier={vec_gcp_high.tier}")
+vec_aws_high = rc.classify("unknown", abuse_score=9.9, asn_owner="Amazon.com, Inc.")
+check("the same protection extends to every org is_cloud_cdn_provider_org() already "
+      "recognizes, not just Google -- spot-checked here with AWS",
+      vec_aws_high.tier == 2, f"got tier={vec_aws_high.tier}")
+
 # REGRESSION GUARDS: an otherwise-identical unrelated IP still escalates normally --
 # this fix must not weaken reputation-based detection for anything else.
 vec_evil_high = rc.classify("unknown", abuse_score=4.0, asn_owner="Definitely Evil Hosting LLC")

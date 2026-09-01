@@ -2,6 +2,61 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.11.0] - 2026-09-01
+
+Triggered by an operator question ("how far off is HEE from what Ollama concludes,
+across cases so far, including category and severity") that turned into a real,
+data-backed audit -- all 225 cases Ollama has ever reviewed were cross-referenced
+against their original HEE alert records in `state/alerts.json` (28,823 alert records,
+1,980 distinct incidents), joined via the same `incident_key()` this project already
+uses for incident aggregation.
+
+### 📊 HEE vs. Ollama Agreement Audit
+
+- Overall: Ollama called 92.9% of reviewed cases benign; the deterministic
+  `DeterministicValidator` (a hard backstop that never lets an LLM override real
+  evidence) rejected Ollama's own recommendation in 4.0% of cases (9/225).
+- By category: `DNS_COVERT_TUNNELING` is the one category where Ollama is genuinely
+  split (only 46% benign) rather than defaulting to benign -- the rest cluster at
+  93-100% benign. `Elevated Reputation Signal (Unconfirmed, Tier 5 Score)` had a 100%
+  validator-override rate (7/7) -- not a disagreement on the underlying classification
+  (Ollama and the validator both effectively treat these as non-threats), but the
+  validator refuses to let an LLM suppress a Tier-5 reputation hit on principle,
+  regardless of what it thinks.
+- Following the override cases to their root: 8 of the 9 total overrides trace to one
+  device (`family_pc_fritz_box`) repeatedly hitting `updates.bravesoftware.com` and two
+  Spotify hosts and Datadog's log intake -- all of which resolve to `35.186.224.0/24`,
+  a shared **Google LLC (AS396982)** GCP customer IP range. AbuseIPDB's crowd-sourced
+  score for that shared block sits >= 4.0, almost certainly from some unrelated
+  tenant's traffic on the same cloud IP, not from any of these legitimate services.
+
+### 🌐 ReputationClassifier Now Recognizes the Same Cloud/CDN Orgs Everywhere Else Does
+
+- Root cause: this codebase already has two separate "don't punish known-legitimate
+  shared infrastructure for a noisy crowd-sourced score" mechanisms that were never
+  unified. `ReputationClassifier._SAFE_ASN_OWNER_KEYWORDS` (`classifier.py`) is a tiny,
+  one-entry list (`("telegram",)`) and is the ONLY ASN-based check `classify()` --
+  the function that actually assigns Tier 3/4/5 and drives every SUSPICIOUS/CRITICAL
+  verdict -- ever consulted. `utils.is_cloud_cdn_provider_org()` already maintains a
+  broader, deliberately conservative list (Google LLC, AWS, Apple, Facebook/Meta, IBM
+  Cloud, Vultr, Leaseweb, Scaleway, Contabo -- the same list the v12.5.0 confirmed-intel
+  write guard already trusts), but was never wired into the reputation tier classifier
+  itself.
+- Fixed: `classify()`'s existing ASN-safe-list check now also consults
+  `is_cloud_cdn_provider_org()`, promoting to Tier 2 the same way the Telegram check
+  already does. Same trust boundary this project already accepted elsewhere (a "deliberately
+  short, stable, name-brand list... as close to universally-recognized internet
+  infrastructure as exists"), just applied consistently to a second consumer -- not new
+  trust, closing a gap in existing trust.
+- `tests/test_phase0_fixes.py` extended with the exact live shape (Google LLC,
+  abuse_score at and below the confirmed-IOC bar) plus a spot-check on AWS, and
+  regression guards confirming an unrelated org still escalates normally.
+  `tests/test_phase42_tier5_verified_ioc_split.py`'s own production pin for this exact
+  IP (`35.186.224.24`) updated: it now correctly resolves all the way to BENIGN instead
+  of the tier-5-split fix's prior SUSPICIOUS/monitor -- a further improvement on the
+  same incident that pin has tracked since it was written, not a regression (Section C's
+  generic-unrelated-org shape separately confirms the tier-5 split itself is untouched).
+
 ## [v12.10.0] - 2026-09-01
 
 Triggered by the first real Telegram digest the v12.9.0 fix produced -- it arrived,

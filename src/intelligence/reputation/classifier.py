@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
+from utils import is_cloud_cdn_provider_org
+
 @dataclass
 class ReputationVector:
     """`tier` is a reputation/context classification — "how much prior trust or suspicion
@@ -94,8 +96,28 @@ class ReputationClassifier:
         # infrastructure is tier 2 (known infrastructure) regardless of what a noisy
         # crowd-sourced abuse score says today -- checked BEFORE the confirmed_ioc/
         # weak_signal evaluation below so it can never be overridden back up to tier 4/5.
+        # BUGFIX (2026-09-01, HEE-vs-Ollama disagreement audit): _SAFE_ASN_OWNER_KEYWORDS
+        # above is a tiny, one-entry list (just "telegram") -- but utils.py's
+        # is_cloud_cdn_provider_org() already maintains a broader, deliberately
+        # conservative "universally-recognized cloud/CDN infrastructure" list (Google
+        # LLC, AWS, Apple, Facebook/Meta, IBM Cloud, Vultr, Leaseweb, Scaleway, Contabo --
+        # the SAME list fp_engine.py's confirmed-intel write guard already trusts), and
+        # this function never consulted it. Confirmed live: a device's alerts to
+        # updates.bravesoftware.com / two Spotify hosts / Datadog's log intake all
+        # resolved to 35.186.224.0/24 (Google LLC, AS396982) -- a shared GCP customer
+        # range with an AbuseIPDB score >= 4.0 from SOME OTHER tenant's traffic on the
+        # same cloud IP block, not from any of these legitimate services. That pushed
+        # tier straight to 5 (confirmed_ioc, abuse_score>=4.0 below) for domains that
+        # are already treated as safe infrastructure everywhere ELSE in this codebase --
+        # 7 of 9 total cases across a 225-case Ollama-review audit where the
+        # deterministic validator overrode Ollama's (correct) benign call traced back to
+        # exactly this one gap. Same trust boundary this project has already accepted
+        # elsewhere, just not previously applied here.
         owner_lower = (asn_owner or "").lower()
-        if tier == 3 and any(kw in owner_lower for kw in self._SAFE_ASN_OWNER_KEYWORDS):
+        if tier == 3 and (
+            any(kw in owner_lower for kw in self._SAFE_ASN_OWNER_KEYWORDS)
+            or is_cloud_cdn_provider_org(asn_owner)
+        ):
             tier = 2
 
         # PHASE 8 FIX: a live alert for 149.154.166.110 (Telegram's own API infrastructure,

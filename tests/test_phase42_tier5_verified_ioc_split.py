@@ -184,14 +184,34 @@ if not mock_crashed:
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section E: real-world pin -- the exact family_pc_fritz_box/35.186.224.24 shape
+#
+# UPDATED (2026-09-01, HEE-vs-Ollama disagreement audit): this pin originally expected
+# SUSPICIOUS/monitor (the tier-5-split fix's own improvement over the pre-existing
+# CRITICAL/block). A follow-up investigation found 35.186.224.24 is itself Google LLC
+# (AS396982) -- shared GCP infrastructure also fronting updates.bravesoftware.com and
+# two Spotify hosts, whose AbuseIPDB score >= 4.0 traces to some OTHER tenant on the
+# same cloud IP block, not to any of these legitimate services. ReputationClassifier
+# now consults utils.is_cloud_cdn_provider_org() (see classifier.py's own BUGFIX
+# comment) the same way it already trusted Telegram's ASN -- so this exact shape now
+# classifies as tier 2 (known infrastructure), not tier 5, and with zero corroborating
+# evidence resolves all the way to BENIGN. This is a further improvement on the SAME
+# incident this pin has always tracked, not a regression of the tier-5 split itself
+# (Section C above, using a GENERIC unrelated-org reputation shape, still separately
+# proves the tier-5 split's own SUSPICIOUS/monitor behavior is intact).
 # ═══════════════════════════════════════════════════════════════════════════════════
 rep_family_pc_shape = rc.classify("unknown", vt_score=0.0, ti_score=0.0, abuse_score=4.0,
                                 asn_owner="Google LLC")
 decision_family_pc = de.evaluate([], rep_family_pc_shape)
 check("PRODUCTION PIN: the exact family_pc_fritz_box/35.186.224.24 alert shape "
-      "(AbuseIPDB=4.0, VT=0.0, TI=0.0, Google LLC, no corroborating Zeek/ARP/honeypot "
-      "evidence) now lands at SUSPICIOUS/monitor instead of CRITICAL/block",
-      decision_family_pc["state"] == "SUSPICIOUS", f"got {decision_family_pc}")
+      "(AbuseIPDB=4.0, VT=0.0, TI=0.0, Google LLC -- a recognized shared cloud/CDN ASN, "
+      "no corroborating Zeek/ARP/honeypot evidence) now lands at BENIGN, not even "
+      "SUSPICIOUS -- 35.186.224.24 is legitimate shared GCP infrastructure, confirmed "
+      "via a live cross-reference against real alerts.json/ollama_analysis_cache.json "
+      "data (Documentation/CHANGELOG.md's v12.11.0 entry)",
+      decision_family_pc["state"] == "BENIGN", f"got {decision_family_pc}")
+check("REGRESSION GUARD: the classifier-level fix is what changed this outcome, not the "
+      "tier itself silently becoming something unexpected -- confirm it's genuinely tier 2",
+      rep_family_pc_shape.tier == 2, f"got tier={rep_family_pc_shape.tier}")
 
 
 print()
