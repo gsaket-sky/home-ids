@@ -15,6 +15,105 @@ from datetime import datetime, timedelta
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 
+_TELEGRAM_MSG_BUDGET = 3800  # headroom under Telegram's 4096-char hard limit
+
+
+def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) -> "str | None":
+    """Builds the Telegram digest text for one ollama_soc.py run, or None if there's
+    nothing to report (empty pattern_outcomes). Extracted into its own function (was
+    inline in main()) specifically so this can be unit tested directly -- see
+    tests/test_phase48_ollama_digest_truncation.py.
+
+    BUGFIX (live report, 2026-09-01): previously capped detail entries by COUNT alone
+    (10 entries), then hard-sliced the finished message to [:4000] chars -- but 10
+    entries' worth of full LLM reasoning text routinely exceeds 4000 characters on its
+    own (live report: a 54-withheld-entry run was cut off mid-sentence, mid-entry,
+    inside entry #7 of the 10-entry budget), so the count cap never actually prevented
+    the character-level slice from firing, and that slice cut wherever it landed with
+    zero regard for entry/sentence boundaries. Now builds each entry as a complete,
+    whole block and stops adding NEW entries once the running total approaches
+    Telegram's real 4096-char limit -- every entry that makes it into the message is
+    complete, never truncated mid-sentence; entries that don't fit are folded into the
+    "...and N more" counter instead of being cut off."""
+    if not pattern_outcomes:
+        return None
+
+    _OUTCOME_LABELS = {
+        "immunized": "🛡️ immunized as false positive (sensitivity loosened)",
+        "confirmed_threat": "🚨 confirmed malicious (sensitivity tightened)",
+        "withheld_multi_device": "⏸️ withheld (spreading across multiple devices, re-checking next run)",
+        "skipped": "⚠️ skipped (could not safely apply the action)",
+        "already_actioned": "✅ already actioned / no new action needed",
+        "no_action_needed": "✅ already actioned / no new action needed",
+        "deferred_query_cap": "⏳ deferred (per-run query cap reached, retrying next run)",
+    }
+    by_outcome = defaultdict(list)
+    for po in pattern_outcomes:
+        by_outcome[po["outcome"]].append(po)
+
+    digest_lines = [f"🤖 <b>Ollama SOC run: {len(pattern_outcomes)} pattern(s) analyzed</b>", ""]
+
+    # Summary counts, in a fixed order (interesting outcomes first).
+    summary_order = ["immunized", "confirmed_threat", "withheld_multi_device", "skipped",
+                      "deferred_query_cap"]
+    quiet_count = len(by_outcome.get("already_actioned", [])) + len(by_outcome.get("no_action_needed", []))
+    for oc in summary_order:
+        if by_outcome.get(oc):
+            digest_lines.append(f"{_OUTCOME_LABELS[oc]}: {len(by_outcome[oc])}")
+    if quiet_count:
+        digest_lines.append(f"✅ {quiet_count} already actioned / no new action needed (see report for the full list)")
+    digest_lines.append("")
+
+    # Per-pattern detail for the outcomes worth a human's attention -- see this
+    # function's own docstring for why this is character-budgeted, not just count-capped.
+    detail_budget = 10
+    detail_worthy = [
+        po
+        for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")
+        for po in by_outcome.get(oc, [])
+    ][:detail_budget]
+
+    included = 0
+    tech_lines = ["", "🔧 <b>Technical detail (optional)</b>"]
+    running_len = len("\n".join(digest_lines))
+    for po in detail_worthy:
+        device_label = po["hostname"] if po["hostname"] and po["hostname"] != "unknown" else po["device_ip"]
+        entry_lines = [f"• <code>{device_label}</code> → {po['target']}{po['target_asn_note']} ({po['signature']})"]
+        if po["llm_reason"]:
+            conf_str = f"{po['llm_confidence']:.2f}" if isinstance(po.get("llm_confidence"), (int, float)) else "n/a"
+            entry_lines.append(f"  LLM (confidence {conf_str}): \"{po['llm_reason']}\"")
+        if po["outcome_detail"]:
+            entry_lines.append(f"  → {po['outcome_detail']}")
+        entry_lines.append("")
+        entry_text = "\n".join(entry_lines)
+        if running_len + len(entry_text) > _TELEGRAM_MSG_BUDGET:
+            break
+        digest_lines.extend(entry_lines)
+        running_len += len(entry_text) + 1
+        included += 1
+        tech_lines.append(
+            f"• {device_label} [{po['cache_key']}]: classification={po.get('classification')}, "
+            f"confidence={po.get('llm_confidence')}, alerts_covered={po['alerts_covered']}"
+        )
+
+    total_detail_worthy = sum(
+        len(by_outcome.get(oc, [])) for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")
+    )
+    remaining = total_detail_worthy - included
+    if remaining > 0:
+        digest_lines.append(f"...and {remaining} more (see {report_filename})")
+
+    full_msg = "\n".join(digest_lines)
+    # Technical detail is explicitly labeled optional -- only appended if it fits
+    # without pushing past budget; dropped entirely (never truncated) otherwise.
+    if len(tech_lines) > 2:
+        tech_text = "\n".join(tech_lines)
+        if len(full_msg) + len(tech_text) <= _TELEGRAM_MSG_BUDGET + 200:
+            full_msg += tech_text
+
+    return full_msg[:4096]
+
+
 def _send_telegram(config: dict, msg: str) -> None:
     """Mirrors retro_hunter.py's own _send_telegram() -- same reasoning: a validated
     finding deserves the same real-time channel every other finding in this codebase
@@ -742,60 +841,9 @@ def main():
     # confirmed healthy rather than silently absent -- matches the digest CL-AFPE's own
     # autonomous actions already get.
     if ordered_keys:
-        _OUTCOME_LABELS = {
-            "immunized": "🛡️ immunized as false positive (sensitivity loosened)",
-            "confirmed_threat": "🚨 confirmed malicious (sensitivity tightened)",
-            "withheld_multi_device": "⏸️ withheld (spreading across multiple devices, re-checking next run)",
-            "skipped": "⚠️ skipped (could not safely apply the action)",
-            "already_actioned": "✅ already actioned / no new action needed",
-            "no_action_needed": "✅ already actioned / no new action needed",
-            "deferred_query_cap": "⏳ deferred (per-run query cap reached, retrying next run)",
-        }
-        by_outcome = defaultdict(list)
-        for po in pattern_outcomes:
-            by_outcome[po["outcome"]].append(po)
-
-        digest_lines = [f"🤖 <b>Ollama SOC run: {len(pattern_outcomes)} pattern(s) analyzed</b>", ""]
-
-        # Summary counts, in a fixed order (interesting outcomes first).
-        summary_order = ["immunized", "confirmed_threat", "withheld_multi_device", "skipped",
-                          "deferred_query_cap"]
-        quiet_count = len(by_outcome.get("already_actioned", [])) + len(by_outcome.get("no_action_needed", []))
-        for oc in summary_order:
-            if by_outcome.get(oc):
-                digest_lines.append(f"{_OUTCOME_LABELS[oc]}: {len(by_outcome[oc])}")
-        if quiet_count:
-            digest_lines.append(f"✅ {quiet_count} already actioned / no new action needed (see report for the full list)")
-        digest_lines.append("")
-
-        # Per-pattern detail for the outcomes worth a human's attention, capped overall
-        # (same [:10]-style truncation pattern retro_hunter.py's own digest already
-        # uses) so one noisy run doesn't blow past Telegram's message-length limits.
-        detail_budget = 10
-        tech_lines = ["", "🔧 <b>Technical detail (optional)</b>"]
-        for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped"):
-            for po in by_outcome.get(oc, [])[:detail_budget]:
-                if detail_budget <= 0:
-                    break
-                detail_budget -= 1
-                device_label = po["hostname"] if po["hostname"] and po["hostname"] != "unknown" else po["device_ip"]
-                digest_lines.append(f"• <code>{device_label}</code> → {po['target']}{po['target_asn_note']} ({po['signature']})")
-                if po["llm_reason"]:
-                    conf_str = f"{po['llm_confidence']:.2f}" if isinstance(po.get("llm_confidence"), (int, float)) else "n/a"
-                    digest_lines.append(f"  LLM (confidence {conf_str}): \"{po['llm_reason']}\"")
-                if po["outcome_detail"]:
-                    digest_lines.append(f"  → {po['outcome_detail']}")
-                digest_lines.append("")
-                tech_lines.append(
-                    f"• {device_label} [{po['cache_key']}]: classification={po.get('classification')}, "
-                    f"confidence={po.get('llm_confidence')}, alerts_covered={po['alerts_covered']}"
-                )
-        remaining = sum(len(by_outcome.get(oc, [])) for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")) - (10 - detail_budget)
-        if remaining > 0:
-            digest_lines.append(f"...and {remaining} more (see {report_path.name})")
-
-        full_msg = "\n".join(digest_lines + tech_lines) if len(tech_lines) > 2 else "\n".join(digest_lines)
-        _send_telegram(config, full_msg[:4000])
+        full_msg = build_ollama_digest_message(pattern_outcomes, report_path.name)
+        if full_msg:
+            _send_telegram(config, full_msg)
 
     state_dir = root_dir / "state"
     _write_ollama_relay_stats(state_dir, calls_made=queries_made, cache_hits=cache_hits, deferred=deferred, run_validated=run_validated)

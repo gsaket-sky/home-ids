@@ -2,6 +2,50 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.10.0] - 2026-09-01
+
+Triggered by the first real Telegram digest the v12.9.0 fix produced -- it arrived,
+but cut off mid-sentence inside entry #7 of a 54-entry run.
+
+### 🤖 ollama_soc.py's Telegram Digest No Longer Truncates Mid-Sentence
+
+- Root cause: the digest was capped by entry COUNT alone (10 entries), then the whole
+  finished message was hard-sliced to `[:4000]` characters as an afterthought. Ten
+  entries' worth of real LLM reasoning text (each ~200-400 chars once the
+  device/target line, the LLM quote, and the outcome line are included) routinely
+  exceeds 4000 characters well before the 10th entry, so the count cap never actually
+  prevented the character-level slice from firing -- and that slice cut wherever it
+  landed, with zero regard for entry or sentence boundaries.
+- Fixed: extracted the whole digest-building block into a new, independently testable
+  `build_ollama_digest_message()`. Each entry is now built as a complete, whole block;
+  entries are added to the message while tracking a running character total, and
+  adding stops (not truncates) once the total approaches Telegram's real 4096-char
+  limit. Every entry that makes it into the message is complete; entries that don't
+  fit are folded into the existing "...and N more (see report)" counter instead of
+  being cut off. The optional "Technical detail" section is appended atomically --
+  fully present or fully absent, never partial.
+- New `tests/test_phase48_ollama_digest_truncation.py` (14 checks): reproduces the
+  exact 54-entry shape from the live report, proves no entry is ever left mid-sentence
+  (an even double-quote count across the whole message -- a truncated LLM-reason quote
+  would leave one unclosed), proves the message never exceeds 4096 chars across a
+  range of run sizes (1/5/10/20/54/100 entries), and proves the technical-detail
+  section is all-or-nothing.
+
+### 🧠 Aside: Does Ollama Duplicate the HEE's Job?
+
+A related operator question, answered by reading the code rather than assuming: no --
+this was already recognized as a risk and explicitly guarded against. Ollama never
+sees the Hypothesis & Evidence Engine's own verdict (`_VERDICT_SHAPED_FIELDS` in
+`ollama_soc.py` strips `risk`/`signature`/`factors`/`fp_verdict`/etc. before the prompt
+is built -- "VERSION 10 (#15/#16, Ollama circular-reasoning guard)"), so it can't just
+parrot the existing decision back as "confirmation." Its recommendation is then
+checked by `ai_soc.py`'s `DeterministicValidator` before being allowed to act at all --
+confirmed live in the same run that produced this bug report: `[VALIDATOR] Rejected
+Ollama recommendation: Malicious IOC present` overrode a benign LLM verdict for
+`www.google.com` because a real reputation IOC existed for that device. Ollama's role
+is a separate, guarded, offline second opinion feeding the FP-training/immunization
+loop -- it never touches live containment decisions, which stay the HEE's alone.
+
 ## [v12.9.0] - 2026-09-01
 
 Triggered by a direct operator report: "ollama should also send telegram message, i
