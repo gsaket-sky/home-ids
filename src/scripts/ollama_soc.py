@@ -74,12 +74,37 @@ def _flatten_config_categories(raw: dict) -> dict:
 
 
 def load_config():
-    """Returns the FLAT config namespace (already merged across every category)."""
+    """Returns the FLAT config namespace (already merged across every category).
+
+    BUGFIX (2026-09-01, live report: "ollama should also send telegram message, i am
+    not getting it"): config.yaml's own telegram: section comment says "token/chat ID
+    come from .env" -- true for the main pipeline process, which goes through
+    config.py's LiveConfig.__init__() (load_env_file() + apply_env_overrides()) and
+    therefore has telegram_token/telegram_chat_id available. This script deliberately
+    reads config.yaml directly instead of importing the full config.py CONFIG
+    singleton (see _send_telegram()'s own docstring: "so this standalone daemon
+    doesn't need to boot the full engine") -- but that also meant it never loaded
+    .env at all. _send_telegram() has always silently no-op'd (`if not token or not
+    chat_id: return`, no log line) on every single run as a result -- the digest was
+    dead code from day one, not an intermittent failure. Reuses config.py's own
+    load_env_file()/apply_env_overrides() (same env-var mapping table, not a
+    duplicated copy that could drift) rather than re-deriving the .env path/parsing
+    logic here.
+    """
     config_path = Path(__file__).resolve().parent.parent.parent / "config.yaml"
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
-        return _flatten_config_categories(raw)
+        flat = _flatten_config_categories(raw)
+        try:
+            from config import load_env_file, apply_env_overrides
+            env_path = config_path.parent / flat.get("env_file", ".env")
+            load_env_file(env_path)
+            apply_env_overrides(flat)
+        except Exception as e:
+            LOGGER.error(f"Failed to load .env overrides (Telegram/API keys will be "
+                         f"unavailable this run): {e}")
+        return flat
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}

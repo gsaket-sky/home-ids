@@ -2,6 +2,35 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.9.0] - 2026-09-01
+
+Triggered by a direct operator report: "ollama should also send telegram message, i
+am not getting it."
+
+### 🤖 ollama_soc.py's Telegram Digest Was Dead Code From Day One
+
+- `_send_telegram()` reads `telegram_token`/`telegram_chat_id` from the config dict
+  it's handed, and silently no-ops (`if not token or not chat_id: return`, no log
+  line at all) if either is empty. `config.yaml`'s own `telegram:` section comment
+  says *"token/chat ID come from .env"* — true for the main pipeline process, which
+  goes through `config.py`'s `LiveConfig.__init__()` (`load_env_file()` +
+  `apply_env_overrides()`), but `ollama_soc.py` deliberately reads `config.yaml`
+  directly via its own standalone `load_config()` instead of importing the full
+  `config.py` `CONFIG` singleton ("so this standalone daemon doesn't need to boot the
+  full engine") — and never loaded `.env` at all. Every run silently no-op'd; not an
+  intermittent failure, the digest had never once fired since this script's Telegram
+  feature was added.
+- Checked every other scheduled script for the same pattern:
+  `retro_hunter.py`/`shadow_watcher.py`/`top_domains_report.py` all correctly
+  `from config import CONFIG` (the full singleton, `.env` included) — `ollama_soc.py`
+  was the only one with its own bespoke config loader, so this was an isolated gap,
+  not a wider pattern.
+- Fixed: `load_config()` now also calls `config.py`'s own `load_env_file()` +
+  `apply_env_overrides()` (reused, not re-implemented, so the env-var mapping table
+  can't drift between the two) after flattening the YAML. Verified directly: before
+  the fix, `telegram_token`/`telegram_chat_id` resolved empty; after, both resolve
+  correctly against the real `.env`.
+
 ## [v12.8.0] - 2026-09-01
 
 Triggered by two live Shadow-Mode Telegram digests showing 51 divergences total, every
