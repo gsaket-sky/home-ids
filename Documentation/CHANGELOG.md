@@ -2,6 +2,48 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.8.0] - 2026-09-01
+
+Triggered by two live Shadow-Mode Telegram digests showing 51 divergences total, every
+single one the same shape: `home-router` (the router, at whichever of its several
+IPv6/IPv4 identifiers happened to be active that cycle) diverging live BENIGN -> shadow
+CRITICAL / "Internal Honeypot Accessed".
+
+### 🔬 Shadow-Mode Honeypot Check Now Respects safe_ips
+
+- Root cause: `pipeline.py`'s LIVE evidence-creation gate for `honeypot_access`
+  (~line 1033) is `if features.get("zeek_honeypot_hits", 0) > 0 and not is_safe:` --
+  deliberately exempting `safe_ips` devices (the router is explicitly listed), since
+  it legitimately touches the honeypot sometimes and `mitigate()` already no-ops for
+  `is_safe` devices regardless, so the only effect of not exempting it was a
+  misleading CRITICAL alert with no real containment behind it.
+- `decision_engine.py`'s shadow computation (Gap 3, evaluating a proposed
+  evidence-taxonomy fix from `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`)
+  deliberately reads the same raw `zeek_honeypot_hits` feature directly instead of
+  checking `EvidenceStore` presence, to dodge a *different* bug (stale evidence
+  re-firing the same verdict for up to 600s). In copying the raw-feature read, it
+  copied half of pipeline.py's condition but not the other half — `is_safe` was never
+  even passed into `evaluate()` at all, so every `safe_ips` device touching the
+  honeypot for a benign reason diverged shadow-CRITICAL forever. Not a one-off: a
+  structural gap that would fire this way for as long as shadow mode has existed.
+- Fixed: `evaluate()` gained an optional `is_safe: bool = False` parameter (same
+  optional/defaulted/single-consumer pattern as `features` before it — every existing
+  caller that hasn't been updated is unaffected); the shadow `fresh_honeypot` check now
+  ANDs it in, exactly mirroring the live gate. `pipeline.py`'s one caller that already
+  had `is_safe` in scope (~line 684, well before the `evaluate()` call) now threads it
+  through.
+- This bug never produced a real, live false alert or containment action — `mitigate()`
+  already no-ops for `is_safe` devices independently, and the router's live verdict was
+  correct throughout. It only ever polluted the shadow-mode diagnostic digest, which
+  exists specifically to build confidence in a fix *before* flipping it live (see
+  v12.5.0's tier-5 split, which followed exactly that path) — a shadow signal this
+  noisy would have made a real divergence (if the proposed fix ever has one) hard to
+  spot in the flood.
+- New `tests/test_phase47_shadow_honeypot_safe_ips.py`: proves the fix, a regression
+  guard that a genuinely non-exempt device still trips the shadow hard-stop, a
+  regression guard that omitting `is_safe` (every un-updated caller) is byte-identical
+  to before, and a regression guard that the live verdict was never wrong.
+
 ## [v12.7.0] - 2026-09-01
 
 Triggered by a live alert review: the operator asked what each Telegram inline button

@@ -1181,9 +1181,16 @@ class EnginePipeline:
                 # DeviceProfileBenignHypothesis so routine vendor-telemetry traffic from a
                 # smart TV/IoT/NAS/router-category device gets a named benign explanation
                 # instead of falling through to the generic UNKNOWN_BENIGN catch-all.
+                # BUGFIX (2026-09-01, shadow-divergence flood): is_safe now threaded
+                # through so the shadow honeypot check (decision_engine.py's
+                # fresh_honeypot) can mirror the SAME "and not is_safe" exemption this
+                # evidence's own creation gate uses a few hundred lines below (~line
+                # 1033) -- without it, a safe_ips device (the router) touching the
+                # honeypot for a benign reason diverged CRITICAL in shadow on every
+                # single cycle it happened, live BENIGN, with nothing wrong.
                 decision = self.decision_engine.evaluate(
                     active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                    features=features,
+                    features=features, is_safe=is_safe,
                 )
 
                 # SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): log-only,

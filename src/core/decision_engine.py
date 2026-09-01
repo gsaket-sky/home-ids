@@ -36,7 +36,8 @@ class DecisionEngine:
         self.hypothesis_engine = HypothesisEngine()
 
     def evaluate(self, ev_store: List[Evidence], rep: ReputationVector, device_type: str = "",
-                 baseline_familiarity: float = 0.0, features: Optional[dict] = None) -> Dict[str, Any]:
+                 baseline_familiarity: float = 0.0, features: Optional[dict] = None,
+                 is_safe: bool = False) -> Dict[str, Any]:
         # VERSION 10 (#9/#10 per-device benign profiles): device_type is optional and
         # defaults to "" for any existing caller that hasn't been updated -- only
         # DeviceProfileBenignHypothesis (hypotheses/engine.py) actually reads it.
@@ -47,6 +48,17 @@ class DecisionEngine:
         # pattern -- only the shadow honeypot freshness check below reads it; every
         # existing caller that hasn't been updated to pass it (tests, regression_tester.py)
         # is unaffected, since the shadow computation never influences the live verdict.
+        # BUGFIX (2026-09-01, live shadow-divergence flood: 51 "home-router ... Internal
+        # Honeypot Accessed" divergences in one session, all the router at one of its
+        # several IPv6/IPv4 identifiers): is_safe is the SAME optional/defaulted/
+        # single-consumer pattern, added because the shadow honeypot check below
+        # (fresh_honeypot) copied pipeline.py's raw-feature read
+        # (features.get("zeek_honeypot_hits", 0) > 0) to dodge EvidenceStore staleness,
+        # but silently dropped the "and not is_safe" half of that SAME condition at its
+        # source (pipeline.py's evidence-creation gate, ~line 1033) -- safe_ips devices
+        # like the router touching the honeypot for benign reasons is explicitly
+        # expected and exempted live, but the shadow computation had no way to know
+        # that, since is_safe was never passed in at all.
         hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type, baseline_familiarity)
         
         attack_score = hyp_results["attack"]["score"]
@@ -295,7 +307,10 @@ class DecisionEngine:
         shadow_attack_score = shadow_attack["score"]
 
         now_ts = time.time()
-        fresh_honeypot = bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
+        fresh_honeypot = (
+            bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
+            and not is_safe
+        )
         fresh_arp_spoof = any(
             e.type == "arp_spoofing" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
         )
