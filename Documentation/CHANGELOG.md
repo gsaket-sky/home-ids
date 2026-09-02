@@ -2,6 +2,56 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.12.0] - 2026-09-01
+
+Triggered by an operator question: "is Ollama ever completing all the alerts or is it
+just piling up." It was piling up -- a live audit of
+`state/ollama_analysis_cache.json` found 165 distinct patterns sitting in
+`withheld_history`, some withheld 15-18 times over 4.6 days straight, 100%
+`NETWORK_INTRUSION` (this network's single most common signature) and 100% still
+classified benign at high confidence every single time, with no mechanism that ever
+let a pattern resolve on its own.
+
+### ⏳ ollama_soc.py's Multi-Device Withhold Guard Now Has an Exit Condition
+
+- Root cause: the guard (`spread >= 3` distinct devices independently firing the same
+  signature -- built to catch a real DGA-style cross-device campaign, see its own
+  Phase-21D comment) re-checks every run against then-current device spread, forever.
+  For a broad, common category like `NETWORK_INTRUSION` on a busy home network, spread
+  stays above 3 essentially permanently, so the guard never actually releases.
+- Considered and rejected: auto-resolving once device spread stops growing. Spot-
+  checked live -- most stuck patterns (98 of 147 with 2+ checks) still show device-
+  count churn between checks, which turned out to be normal background noise (different
+  devices intermittently tripping the same common alert), not a shrinking/stabilizing
+  incident. Not the right signal.
+- Fixed instead: track how many times a pattern's OWN streak (this exact
+  device+target+signature key, not the cross-device spread count) has independently
+  reconfirmed the identical benign/validator-passed verdict. After
+  `ollama_multi_device_withhold_auto_resolve_after` consecutive withholds (default 10,
+  matching the existing `ollama_multi_device_suppress_guard` config precedent), the
+  pattern falls through to the normal immunize path instead of withholding again,
+  logged distinctly as auto-resolved-after-streak. A verdict flip (malicious, or the
+  validator rejecting it) resets the streak, so this only ever fires for a genuinely
+  stable, repeatedly-reconfirmed pattern -- the original cross-device contradiction
+  catch (a malicious verdict on any device never reaches the withhold branch at all)
+  is untouched.
+- **Second, more fundamental bug found while building this fix**: the normal (non-
+  guarded) benign+suppress immunize branch was a silent no-op whenever the alert's
+  target had no resolved domain (an IP-only `NETWORK_INTRUSION` target -- the majority
+  shape of what was actually piling up). `action_taken` never got set, so an IP-only
+  pattern could never resolve even on a first-time, low-spread pass that never touched
+  the multi-device guard at all. Fixed: falls back to the same device-level sensitivity-
+  loosening primitive (`_apply_sigma_shift(..., direction="TUNE_DOWN")`) the
+  malicious/TUNE_UP branch already uses, mirroring the no-domain routing
+  `fp_engine.mark_false_positive()` already has for `DNS_EVASION`/`CONNECTION_ABUSE`
+  (PHASE 21D2) but never had for anything else.
+- The withhold decision itself extracted into a new, independently testable
+  `should_still_withhold()`. New `tests/test_phase49_ollama_withhold_streak.py` (11
+  checks): the streak-exhaustion behavior, a regression guard that the original
+  spread-at-threshold DGA-campaign catch is untouched, and source-level checks that the
+  IP-only no-op is genuinely gone and the real wiring calls the tested function (not a
+  drifted copy).
+
 ## [v12.11.0] - 2026-09-01
 
 Triggered by an operator question ("how far off is HEE from what Ollama concludes,

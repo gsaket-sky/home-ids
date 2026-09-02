@@ -256,6 +256,48 @@ DEFAULT_MAX_QUERIES_PER_RUN = 5             # 5 x up to ~15min worst-case (900s 
 # unactioned, where it'll be reconsidered against then-current device spread.
 DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD = 3
 
+# BUGFIX (2026-09-01, live report: "is Ollama ever completing all the alerts or is it
+# just piling up"): the guard above has no exit condition at all -- a pattern that
+# withholds once withholds forever, re-checked every run against then-current spread,
+# with nothing that ever lets it resolve on its own. On this deployment that's not
+# hypothetical: a live audit of state/ollama_analysis_cache.json found 165 distinct
+# patterns sitting in withheld_history, some withheld 15-18 times over 4.6 days
+# straight, 100% NETWORK_INTRUSION (this network's single most common signature, so
+# spread>=3 is essentially always true for it) and 100% still classified benign at
+# high confidence (0.8-1.0) every single time. Device-count STABILITY turned out not to
+# be the right signal to auto-resolve on (spot-checked live: most stuck patterns still
+# show device-count churn between checks -- normal background noise as different
+# devices intermittently trip the same common alert, not a genuinely growing incident)
+# -- what actually IS the right signal is the model independently re-reaching the exact
+# SAME verdict (benign, validator-passed) this many times in a row, since a genuinely
+# active/evolving campaign (the DGA case above) would be expected to show new evidence
+# or a verdict flip well within this many cron cycles, not a perfectly static repeat.
+# Once a pattern's OWN streak (this device+target+signature key specifically, not the
+# cross-device spread count) reaches this length, it falls through to the normal
+# immunize path instead of withholding again -- logged distinctly as an
+# auto-resolved-after-streak action, not silently folded into the immediate-immunize
+# case. A verdict flip (malicious, or the validator rejecting it) never increments this
+# streak, so this only ever fires for a genuinely stable, repeatedly-reconfirmed benign
+# pattern -- it does not weaken the guard's original cross-device contradiction check
+# (a malicious verdict on any one device still never reaches the withhold branch at
+# all, immediately going to confirmed_threat instead).
+DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER = 10
+
+
+def should_still_withhold(spread: int, multi_device_suppress_guard: int,
+                           existing_withheld_count: int, multi_device_withhold_auto_resolve_after: int) -> bool:
+    """Pure decision function, extracted specifically so it's unit-testable without
+    mocking Ollama/fp_engine/state -- see tests/test_phase49_ollama_withhold_streak.py.
+    True iff the multi-device spread guard is currently satisfied (spread >= threshold)
+    AND this exact pattern hasn't yet independently reconfirmed the identical
+    benign/validator-passed verdict multi_device_withhold_auto_resolve_after times in a
+    row. Once the streak is exhausted, a pattern falls through to the normal immunize
+    branch in main() instead of withholding again -- see
+    DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER's own comment for the full incident
+    this closes (165 patterns stuck in withheld_history, some 15-18 times over 4.6 days,
+    with no exit condition at all before this)."""
+    return spread >= multi_device_suppress_guard and existing_withheld_count < multi_device_withhold_auto_resolve_after
+
 
 # VERSION 10 (incident aggregation): this grouping-key logic used to live only here,
 # duplicated nowhere else -- pipeline.py's own real-time Telegram-volume gate
@@ -459,6 +501,9 @@ def main():
         if dev and dev != "unknown":
             signature_device_counts[sig].add(dev)
     multi_device_suppress_guard = int(config.get("ollama_multi_device_suppress_guard", DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD))
+    multi_device_withhold_auto_resolve_after = int(config.get(
+        "ollama_multi_device_withhold_auto_resolve_after", DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER
+    ))
 
     # BUGFIX (live alert audit): device_id -> display name (hostname, or IP if hostname
     # unknown -- never a bare device_id, meaningless to a human at a glance). Built once
@@ -673,7 +718,20 @@ def main():
         # .md report.
         outcome = "no_action_needed"
         outcome_detail = "" if is_valid else "validator rejected this LLM response (see report for detail)"
-        if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned and spread >= multi_device_suppress_guard:
+        # See should_still_withhold()'s own docstring / DEFAULT_MULTI_DEVICE_WITHHOLD_
+        # AUTO_RESOLVE_AFTER's comment: once this exact pattern (this device+target+
+        # signature key) has independently reconfirmed the identical benign/validator-
+        # passed verdict this many times in a row, it stops re-withholding and falls
+        # through to the normal immunize branch below -- streak_exhausted=True there
+        # gets the report/outcome_detail worded distinctly from a same-day immediate
+        # immunize.
+        existing_withheld_count = len(cache.get(key, {}).get("withheld_history", []))
+        streak_exhausted = not should_still_withhold(
+            spread, multi_device_suppress_guard, existing_withheld_count, multi_device_withhold_auto_resolve_after
+        ) and spread >= multi_device_suppress_guard
+        if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned and should_still_withhold(
+            spread, multi_device_suppress_guard, existing_withheld_count, multi_device_withhold_auto_resolve_after
+        ):
             LOGGER.warning(
                 f"[MULTI-DEVICE GUARD] '{signature}' is independently firing on {spread} distinct "
                 f"devices right now (>= {multi_device_suppress_guard}) -- withholding the autonomous "
@@ -719,6 +777,15 @@ def main():
             })
             cache[key]["withheld_history"] = withheld_history[-20:]  # own cap -- nothing else prunes this sub-field
         elif is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
+            # Reached either because spread < guard (the normal, first-time/low-spread
+            # case) or because streak_exhausted (this pattern independently reconfirmed
+            # the identical verdict multi_device_withhold_auto_resolve_after times in a
+            # row -- see that constant's own comment) -- both take the same corrective
+            # action below; only the report/outcome_detail wording differs.
+            streak_note = (
+                f"auto-resolved after {existing_withheld_count} consistent withholds -- "
+                if streak_exhausted else ""
+            )
             target_domain = representative.get("network_context", {}).get("queried_domain", "") or ""
             if target_domain and target_domain != "unknown":
                 # PHASE 13: tagged distinctly from a real Telegram operator tap, so
@@ -745,12 +812,12 @@ def main():
                         unblocked_note = f" Released {len(released)} existing Pi-hole block(s)."
                         LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released {len(released)} existing Pi-hole block(s): {released}")
                     report_lines.append(
-                        f"- **Autonomous Action Taken:** 🤖 Immunized `{base_domain}` in the FP trust "
-                        f"cache and logged an operator-equivalent training correction "
+                        f"- **Autonomous Action Taken:** 🤖 {streak_note}Immunized `{base_domain}` in the "
+                        f"FP trust cache and logged an operator-equivalent training correction "
                         f"(takes effect on soc.service's next restart).{unblocked_note}"
                     )
                     outcome = "immunized"
-                    outcome_detail = f"domain immunized 14 days, sensitivity loosened for this device{unblocked_note}"
+                    outcome_detail = f"{streak_note}domain immunized 14 days, sensitivity loosened for this device{unblocked_note}"
                 else:
                     report_lines.append(
                         f"- **Autonomous Action Skipped:** could not safely extract a base domain "
@@ -758,6 +825,34 @@ def main():
                     )
                     outcome = "skipped"
                     outcome_detail = f"could not safely extract a base domain from '{target_domain}'"
+            else:
+                # BUGFIX (2026-09-01, live report: "is Ollama ever completing all the
+                # alerts or is it just piling up"): this branch used to be a SILENT NO-OP
+                # for any target with no resolved domain (an IP-only NETWORK_INTRUSION
+                # target, the majority shape of what was piling up) -- the outer `if
+                # target_domain:` gate meant neither immunize NOR skip ever ran, so
+                # action_taken never got set and the pattern could never resolve, EVEN
+                # on a first-time low-spread pass that never touched the multi-device
+                # guard at all. mark_false_positive() already has a no-domain fallback
+                # for two other signature shapes (DNS_EVASION -> immunize the raw IP,
+                # CONNECTION_ABUSE -> raise this device's own arp_sweep threshold, see
+                # fp_engine.py's PHASE 21D2 routing) -- NETWORK_INTRUSION isn't among
+                # those, so this reuses the same device-level sensitivity-loosening
+                # primitive the malicious/TUNE_UP branch below already calls, just in
+                # the opposite direction, so an IP-only pattern still has SOMETHING
+                # corrective happen and SOMETHING that marks it resolved.
+                fp_engine._apply_sigma_shift(
+                    device_id, alert_hostname, direction="TUNE_DOWN",
+                    source="llm_validated_streak" if streak_exhausted else "llm_validated_no_domain",
+                )
+                if key in cache:
+                    cache[key]["action_taken"] = True
+                report_lines.append(
+                    f"- **Autonomous Action Taken:** 🤖 {streak_note}No domain to immunize (IP-only "
+                    f"target `{target}`) -- loosened this device's own detection sensitivity instead."
+                )
+                outcome = "immunized"
+                outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity loosened instead"
         elif is_valid and response_json.get('classification') == 'malicious' and not already_actioned:
             # BUGFIX (2026-08-27, third-party review): mirrors exactly what fp_engine's
             # own two hard-evidence confirmation paths already do together (Stage-1 hard-
