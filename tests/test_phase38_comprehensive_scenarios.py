@@ -301,10 +301,38 @@ arp_ev = fresh_store([Evidence(type="arp_spoofing", source="zeek", timestamp=tim
 check("verified ARP spoofing (real MAC-flip evidence) is a CRITICAL hard-stop",
       de.evaluate(arp_ev, ReputationVector(domain="", tier=3))["state"] == "CRITICAL")
 
-geofence_ev = fresh_store([Evidence(type="geofencing_violation", source="geoip", timestamp=time.time(),
-                                     device="dev_geo", value=1.0, confidence=1.0, independence_group="reputation")], "dev_geo")
-check("a geofencing policy violation is a CRITICAL hard-stop",
-      de.evaluate(geofence_ev, ReputationVector(domain="", tier=3))["state"] == "CRITICAL")
+# VERSION 12 (G6, HEE coverage audit): "geography alone should not be CRITICAL" --
+# geofencing_violation evidence's REAL independence_group in production is the
+# dataclass default "general" (pipeline.py never sets one explicitly for this type),
+# which ATTACK_EVIDENCE_FAMILIES does not include, so a geofence hit alone can no
+# longer trivially corroborate itself into the num_independent_sources count.
+geofence_alone_ev = fresh_store([Evidence(type="geofencing_violation", source="geoip", timestamp=time.time(),
+                                           device="dev_geo", value=1.0, confidence=1.0)], "dev_geo")
+check("THE FIX (G6): a geofencing policy violation ALONE (no behavioral corroboration) "
+      "is HIGH, not CRITICAL -- geography alone is a policy fact about the destination, "
+      "not first-hand evidence of malicious behavior the way honeypot access/ARP "
+      "spoofing/a confirmed exploit signature are",
+      de.evaluate(geofence_alone_ev, ReputationVector(domain="", tier=3))["state"] == "HIGH")
+check("REGRESSION GUARD: the uncorroborated geofence verdict still authorizes a real "
+      "operator-facing action (alert), not a silent downgrade to monitoring",
+      de.evaluate(geofence_alone_ev, ReputationVector(domain="", tier=3))["action"] == "alert")
+
+geofence_corroborated_ev = fresh_store([
+    Evidence(type="geofencing_violation", source="geoip", timestamp=time.time(),
+             device="dev_geo2", value=1.0, confidence=1.0),
+    # A real, independent, attack-hypothesis-winning evidence family (arp_sweep ->
+    # ConnectionAbuseHypothesis's own INTERNAL_RECONNAISSANCE naming, G7) -- genuine
+    # behavioral corroboration, not the geofence hit corroborating itself.
+    Evidence(type="arp_sweep", source="zeek", timestamp=time.time(), device="dev_geo2",
+             value=12.0, confidence=0.9, independence_group="lan_recon"),
+], "dev_geo2")
+check("a geofencing policy violation WITH real independent behavioral corroboration IS "
+      "still a CRITICAL hard-stop -- this is what G6 is supposed to still catch",
+      de.evaluate(geofence_corroborated_ev, ReputationVector(domain="", tier=3))["state"] == "CRITICAL")
+check("REGRESSION GUARD: the corroborated case's explanation stays the EXACT original "
+      "string (no suffix) -- fp_engine.py's _HARD_STOP_SIGNATURES refuses to \"correct\" "
+      "an alert that exact-matches it; a renamed string would silently lose that guard",
+      de.evaluate(geofence_corroborated_ev, ReputationVector(domain="", tier=3))["explanation"] == "Geofencing Policy Violation")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

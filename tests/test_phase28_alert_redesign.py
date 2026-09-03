@@ -165,7 +165,10 @@ check("exactly one CONFIDENCE line exists, built from the reconciled _build_conf
       "*CONFIDENCE:* {confidence_line}" in pipeline_src)
 check("the WHY header cites the real independent-source count that authorized containment, "
       "not a bare percentage with no context",
-      "independent signal(s), strongest first" in pipeline_src)
+      # VERSION 12 (G7/G8, HEE coverage audit): "signal" -> "evidence family" -- the
+      # count itself was always a family count (one entry per independence_group);
+      # only the word was wrong. See pipeline.py's own comment at this exact line.
+      "independent evidence famil" in pipeline_src and "strongest first)_" in pipeline_src)
 
 # C2: regression guards -- the old confusing structures are genuinely GONE, not just
 # supplemented. These are the exact strings a silent revert would reintroduce.

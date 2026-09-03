@@ -444,7 +444,14 @@ def _collect_connection_abuse_corrections(state_dir: Path) -> dict:
             if doc.get("type") not in _FP_CORRECTION_TYPES:
                 continue
             original = doc.get("original_alert", {}) or {}
-            if original.get("signature") != "CONNECTION_ABUSE":
+            # VERSION 12 (G7): INTERNAL_RECONNAISSANCE is ConnectionAbuseHypothesis's own
+            # dynamic name (hypotheses/engine.py) for the arp_sweep-ONLY case that used to
+            # always be named "CONNECTION_ABUSE" -- this is exactly the case this arp-sweep
+            # calibration pass cares about, so it must count both names. Deliberately does
+            # NOT add "PORT_SCAN" (the OTHER new dynamic name, for a zeek_conn_abuse-only
+            # finding with no arp_sweep evidence at all) -- that correction says nothing
+            # about whether arp_sweep_unique_targets_threshold is too sensitive.
+            if original.get("signature") not in ("CONNECTION_ABUSE", "INTERNAL_RECONNAISSANCE"):
                 continue
             device_id = original.get("device", {}).get("id", "unknown")
             counts[device_id] = counts.get(device_id, 0) + 1
@@ -752,7 +759,14 @@ def run_threshold_calibration(state_dir: Path) -> None:
             global_arp_sweep_default = float(CONFIG.get("arp_sweep_unique_targets_threshold", 8.0))
             for device_id in sorted(arp_device_ids):
                 corrected_count = connection_abuse_corrections.get(device_id, 0)
-                confirmed_count = fp_engine.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
+                # VERSION 12 (G7): get_confirmed_count() only matches one exact signature key
+                # -- sum both names an arp_sweep-relevant confirmed threat can carry now (see
+                # _collect_connection_abuse_corrections()'s own comment for why PORT_SCAN is
+                # deliberately excluded).
+                confirmed_count = (
+                    fp_engine.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
+                    + fp_engine.get_confirmed_count(device_id, signature="INTERNAL_RECONNAISSANCE")
+                )
                 arp_sweep_evidence[device_id] = (corrected_count, confirmed_count)
                 dev_current = fp_engine.get_device_arp_sweep_threshold(device_id, default=global_arp_sweep_default)
                 new_value, reason = calibrate_arp_sweep_threshold(corrected_count, confirmed_count, dev_current)

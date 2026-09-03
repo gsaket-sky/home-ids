@@ -62,8 +62,26 @@ class DNSTunnelingHypothesis(Hypothesis):
 
 
 class NetworkIntrusionHypothesis(Hypothesis):
+    """VERSION 12 (G7, HEE coverage audit): `_NAME_LATERAL_MOVEMENT` gives
+    `zeek_lateral_scan`-driven findings their own name -- mirrors DNSEvasionHypothesis's
+    existing dynamic-name pattern (subtag -> self.name) rather than introducing a
+    competing hypothesis class, which would need every downstream consumer that
+    pattern-matches "NETWORK_INTRUSION" (pipeline.py's attribution branches, this
+    session's own trust-cache hypothesis-scoping in fp_engine.py) to separately learn a
+    new name while ALSO risking a scoring conflict between two classes claiming the
+    same evidence. Naming only depends on has_lateral_scan, which is identical between
+    evaluate() and evaluate_shadow() (both call _evaluate_impl, only
+    has_malicious_tls/has_notable_notice differ by use_gap2_fix) -- both calls landing
+    on the SAME `self` (this class is HypothesisEngine's `self._network_intrusion`
+    shadow-mode target, and self.name is shared instance state written by whichever of
+    evaluate()/evaluate_shadow() runs last within one evaluate_all() cycle) therefore
+    always agree, so the shared-state read after the shadow call never shows a name the
+    live call wouldn't itself have produced for the same evidence."""
+    _NAME_NETWORK_INTRUSION = "NETWORK_INTRUSION"
+    _NAME_LATERAL_MOVEMENT = "LATERAL_MOVEMENT"
+
     def __init__(self):
-        super().__init__("NETWORK_INTRUSION")
+        super().__init__(self._NAME_NETWORK_INTRUSION)
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=False)
@@ -102,6 +120,13 @@ class NetworkIntrusionHypothesis(Hypothesis):
         self.required_satisfied = has_lateral_scan or has_malicious_tls or has_mac_flip or has_notable_notice
         if not self.required_satisfied:
             return 0.0
+
+        # VERSION 12 (G7): lateral movement is the more specific, more actionable story
+        # whenever it's present at all -- matches the "Hard escalate for lateral scans"
+        # treatment a few lines below, which already treats it as the headline signal
+        # even when corroborated by something else (a TLS fingerprint match alongside
+        # a lateral scan doesn't change WHAT is happening, it just adds confidence).
+        self.name = self._NAME_LATERAL_MOVEMENT if has_lateral_scan else self._NAME_NETWORK_INTRUSION
 
         # Strong
         strong_count = sum([has_lateral_scan, has_malicious_tls, has_mac_flip])
@@ -295,8 +320,22 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
 
 
 class ConnectionAbuseHypothesis(Hypothesis):
+    """VERSION 12 (G7, HEE coverage audit): dynamic self.name (same pattern as
+    DNSEvasionHypothesis's subtag naming, and NetworkIntrusionHypothesis's
+    LATERAL_MOVEMENT split above) -- PORT_SCAN and INTERNAL_RECONNAISSANCE give the two
+    genuinely distinguishable single-signal shapes their own name; CONNECTION_ABUSE
+    stays the name for zeek_long_conn-only findings (a long-lived-connection pattern
+    that isn't really a scan or recon shape at all) AND for any multi-category
+    corroborated finding (arp_hits + scan_hits together IS the "multi-stage recon"
+    pattern the class's own PHASE 21B comment already describes -- a broader story than
+    either specific name alone, so it keeps the general name rather than picking one of
+    the two arbitrarily)."""
+    _NAME_CONNECTION_ABUSE = "CONNECTION_ABUSE"
+    _NAME_PORT_SCAN = "PORT_SCAN"
+    _NAME_INTERNAL_RECONNAISSANCE = "INTERNAL_RECONNAISSANCE"
+
     def __init__(self):
-        super().__init__("CONNECTION_ABUSE")
+        super().__init__(self._NAME_CONNECTION_ABUSE)
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
         self._reset_eval_state()
@@ -324,6 +363,19 @@ class ConnectionAbuseHypothesis(Hypothesis):
         distinct_categories = sum(bool(x) for x in (scan_hits, long_hits, arp_hits))
         if distinct_categories >= 2:
             self.strong_score += 1.0
+
+        # VERSION 12 (G7): see class docstring -- specific name only for a clean
+        # single-category finding, general name for anything corroborated across
+        # multiple categories (a broader story than either specific name alone).
+        if distinct_categories == 1:
+            if arp_hits:
+                self.name = self._NAME_INTERNAL_RECONNAISSANCE
+            elif scan_hits:
+                self.name = self._NAME_PORT_SCAN
+            else:
+                self.name = self._NAME_CONNECTION_ABUSE
+        else:
+            self.name = self._NAME_CONNECTION_ABUSE
 
         score = 2.0
         if best >= 0.6 and self.contradicting_score == 0:

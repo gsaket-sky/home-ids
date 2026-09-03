@@ -170,6 +170,30 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "mixed": "Mixed reputation signal on this connection",
 }
 
+# VERSION 12 (G8-for-live-alerts, HEE coverage audit): human-readable labels for
+# evidence.py's EVIDENCE_FAMILIES (independence_group values) -- the WHY block below
+# groups evidence by FAMILY (one entry per independence_group, the strongest in each),
+# exactly the "3 DNS features != 3 independent signals" distinction this whole HEE
+# review is about, but the header text still said "N independent signal(s)" -- correct
+# on the COUNT (it always was a family count, not a raw-item count) but using the wrong
+# WORD, which is exactly the ambiguity a third-party review flagged in ollama_soc.py's
+# reporting (see Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4, Phase 50) and
+# that fix never reached this file's own, separate WHY-block text. An unmapped family
+# still degrades gracefully (de-snaked title-cased group name), never KeyErrors --
+# same fallback shape as _EVIDENCE_PLAIN_LANGUAGE above.
+_EVIDENCE_FAMILY_LABELS = {
+    "dns_behavior": "DNS Behavior",
+    "dns_tunnel_v2": "DNS Tunneling",
+    "zeek_network": "Network (Zeek)",
+    "lan_recon": "Internal Discovery",
+    "blindspot_audit": "DNS Blind-Spot Audit",
+    "honeypot": "Honeypot",
+    "ml_anomaly": "ML Anomaly",
+    "local_context": "Local Context",
+    "reputation": "Reputation",
+    "suricata": "Signature Match",
+}
+
 
 def _describe_evidence(ev) -> str:
     """One human-readable sentence for ONE piece of evidence -- see
@@ -1529,7 +1553,12 @@ class EnginePipeline:
                         # these evidence types now carries a real .domain (zeek_features.py/
                         # threat_signals.py/zeek_network.py changes, this same session) --
                         # this just consumes it, same pattern as every branch above.
-                        elif primary_sig_base == "CONNECTION_ABUSE":
+                        # VERSION 12 (G7): PORT_SCAN/INTERNAL_RECONNAISSANCE are
+                        # ConnectionAbuseHypothesis's own dynamic names for a single-category
+                        # zeek_conn_abuse-only / arp_sweep-only finding (hypotheses/engine.py) --
+                        # same evidence types, same attribution logic applies regardless of
+                        # which of the three names this cycle's finding actually got.
+                        elif primary_sig_base in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"):
                             # BUGFIX (live audit, follow-up): zeek_conn_abuse's domain is a
                             # genuinely singular target (one specific rejected connection);
                             # arp_sweep's is only ONE of potentially hundreds of swept IPs,
@@ -1548,7 +1577,10 @@ class EnginePipeline:
                             if chosen:
                                 alert_dest_ip = chosen
                                 alert_target_domain = "unknown"
-                        elif primary_sig_base == "NETWORK_INTRUSION":
+                        # VERSION 12 (G7): LATERAL_MOVEMENT is NetworkIntrusionHypothesis's own
+                        # dynamic name whenever zeek_lateral_scan drove the finding
+                        # (hypotheses/engine.py) -- same evidence types, same attribution logic.
+                        elif primary_sig_base in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT"):
                             for ev in active_evidence:
                                 if ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice") and ev.domain:
                                     alert_dest_ip = ev.domain
@@ -1566,7 +1598,10 @@ class EnginePipeline:
                                     alert_dest_ip = ev.domain
                                     alert_target_domain = "unknown"
                                     break
-                        elif primary_sig_base == "Geofencing Policy Violation":
+                        # VERSION 12 (G6): "(Uncorroborated)" is decision_engine.py's own
+                        # suffix for the demoted HIGH case (geography alone, no behavioral
+                        # corroboration) -- same evidence type/attribution applies either way.
+                        elif primary_sig_base in ("Geofencing Policy Violation", "Geofencing Policy Violation (Uncorroborated)"):
                             for ev in active_evidence:
                                 if ev.type == "geofencing_violation" and ev.domain:
                                     alert_dest_ip = ev.domain
@@ -2090,6 +2125,17 @@ class EnginePipeline:
                                         bucket[ev.independence_group] = ev
                                 why_lines = [_describe_evidence(ev) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
+                                # VERSION 12: family labels, aligned to why_lines by construction --
+                                # both sort the SAME dict by the SAME key function (stable sort, ties
+                                # preserve dict insertion order identically in both), so
+                                # zip(why_families, why_lines) below pairs each label with its own
+                                # description. Kept as a second pass (not folded into why_lines
+                                # itself) so the existing `why_lines = [_describe_evidence(ev) for ev
+                                # in ...]` line -- what tests/test_phase20_alert_quality.py and
+                                # tests/test_phase28_alert_redesign.py both check for verbatim --
+                                # stays intact.
+                                why_families = [fam for fam, ev in
+                                                 sorted(grouped_evidence.items(), key=lambda kv: kv[1].value, reverse=True)]
                                 context_lines = [_describe_evidence(ev) for ev in
                                                   sorted(context_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
@@ -2270,9 +2316,22 @@ class EnginePipeline:
                                     alert_msg += f"- Kill-chain trajectory: `{' → '.join(killchain_transitions)}`\n"
                                 alert_msg += f"- Action taken: `{containment_status}`\n"
 
-                                alert_msg += f"\n🧠 *WHY* _({len(grouped_evidence)} independent signal(s), strongest first)_\n"
-                                for line in why_lines:
-                                    alert_msg += f"- {line}\n"
+                                # VERSION 12: "family" not "signal" -- len(grouped_evidence) was
+                                # always a family count (one entry per independence_group, see the
+                                # BUGFIX comment above this block), the word was just wrong. Each
+                                # entry now names its family explicitly (✓ *Family* / └─ description),
+                                # matching evidence.py's own EVIDENCE_FAMILIES vocabulary -- the
+                                # concrete "3 DNS features != 3 independent signals" distinction this
+                                # whole HEE review exists to make legible, now reflected here too, not
+                                # just in ollama_soc.py's report (Phase 50).
+                                fam_count = len(grouped_evidence)
+                                alert_msg += (
+                                    f"\n🧠 *WHY* _({fam_count} independent evidence famil"
+                                    f"{'y' if fam_count == 1 else 'ies'}, strongest first)_\n"
+                                )
+                                for fam, line in zip(why_families, why_lines):
+                                    fam_label = _EVIDENCE_FAMILY_LABELS.get(fam, fam.replace("_", " ").title())
+                                    alert_msg += f"✓ *{fam_label}*\n   └─ {line}\n"
 
                                 if context_lines:
                                     alert_msg += "\n📎 *Also observed* _(context -- did not independently trigger this)_\n"

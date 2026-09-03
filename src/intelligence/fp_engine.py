@@ -1722,7 +1722,12 @@ class AutonomousFPEngine:
                     "destination_ip on this alert — skipping IP immunization, but still "
                     "recording the training correction and sigma widening below.", hostname
                 )
-        elif signature == "CONNECTION_ABUSE":
+        # VERSION 12 (G7): PORT_SCAN/INTERNAL_RECONNAISSANCE are ConnectionAbuseHypothesis's
+        # own dynamic names (hypotheses/engine.py) for a single-category zeek_conn_abuse-only
+        # / arp_sweep-only finding -- same feature-driven routing below applies regardless of
+        # which of the three names this cycle's finding got (the branches below already
+        # inspect the raw feature values directly, never the signature string itself).
+        elif signature in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"):
             # BUGFIX (live audit): this used to ALWAYS bump arp_sweep_unique_targets_
             # threshold, no matter which of ConnectionAbuseHypothesis's three evidence
             # types (zeek_conn_abuse/zeek_long_conn/arp_sweep -- hypotheses/engine.py)
@@ -1873,9 +1878,9 @@ class AutonomousFPEngine:
                 f"Destination IP '{ip_immunized}' added to trust cache." if ip_immunized else
                 "No usable destination IP on this alert — trust cache NOT updated.",
             ]
-        elif signature == "CONNECTION_ABUSE":
+        elif signature in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"):
             reasons = [
-                f"Marked as false positive (ARP-sweep / connection-abuse finding) by {origin_text}.",
+                f"Marked as false positive ({signature.replace('_', ' ').title()} finding) by {origin_text}.",
                 "This device's own arp_sweep_unique_targets_threshold was raised — was too "
                 "sensitive for its normal behavior.",
             ]

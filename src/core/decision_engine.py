@@ -180,11 +180,39 @@ class DecisionEngine:
             decision_path = "hard_stop"
             
         elif has_geofence:
-            state = DecisionState.CRITICAL
-            action = "block"
-            explanation = "Geofencing Policy Violation"
-            threat_confidence = 1.0
-            decision_path = "hard_stop"
+            # VERSION 12 (G6, HEE coverage audit): geography alone is a policy fact about
+            # the DESTINATION, not evidence of malicious BEHAVIOR by this device -- unlike
+            # honeypot access, ARP spoofing, and a confirmed exploit signature (all three
+            # are themselves direct, first-hand evidence of compromise/attack), a
+            # geofence hit only says "this destination is in a blocklisted country,"
+            # which says nothing about whether the CONNECTION itself was malicious. Same
+            # corroboration split already applied to tier-5 reputation above (Gap 1) --
+            # num_independent_sources/attack_score/benign_score are already computed at
+            # the top of this function; geofencing_violation evidence itself carries
+            # independence_group="general" (Evidence's own default, never set otherwise
+            # for this type), which ATTACK_EVIDENCE_FAMILIES does not include -- so this
+            # check requires a GENUINELY SEPARATE evidence family, not the geofence hit
+            # trivially corroborating itself.
+            if num_independent_sources >= 1 and attack_score > benign_score:
+                # Explanation deliberately stays the EXACT original string (no suffix) --
+                # fp_engine.py's _HARD_STOP_SIGNATURES refuses to "correct" an alert whose
+                # signature exact-matches "Geofencing Policy Violation", the same
+                # protection every other hard-stop already gets. Only the uncorroborated
+                # (no-longer-a-hard-stop) case below gets a distinguishing suffix.
+                state = DecisionState.CRITICAL
+                action = "block"
+                explanation = "Geofencing Policy Violation"
+                threat_confidence = 0.95
+                decision_path = "hard_stop"
+            else:
+                # "Geography alone should not be CRITICAL" -- still a real, specific,
+                # actionable policy violation (stronger than a bare reputation score),
+                # so HIGH/alert rather than demoting all the way to SUSPICIOUS/monitor.
+                state = DecisionState.HIGH
+                action = "alert"
+                explanation = "Geofencing Policy Violation (Uncorroborated)"
+                threat_confidence = 0.70
+                decision_path = "geofence_uncorroborated"
 
         elif has_confirmed_exploit:
             state = DecisionState.CRITICAL
@@ -332,9 +360,18 @@ class DecisionEngine:
                 DecisionState.CRITICAL, "Layer-2 ARP Spoofing Detected", "hard_stop"
             )
         elif fresh_geofence:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop"
-            )
+            # VERSION 12 (G6): mirrors the live branch's corroboration split exactly --
+            # this shadow computation exists to isolate Gap 3's freshness question alone
+            # (see this block's own module comment), so it must NOT diverge from live for
+            # a completely different, unrelated reason (G6's corroboration requirement).
+            if num_independent_sources >= 1 and attack_score > benign_score:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop"
+                )
+            else:
+                shadow_state, shadow_explanation, shadow_decision_path = (
+                    DecisionState.HIGH, "Geofencing Policy Violation (Uncorroborated)", "geofence_uncorroborated"
+                )
         elif fresh_confirmed_exploit:
             shadow_state, shadow_explanation, shadow_decision_path = (
                 DecisionState.CRITICAL, "Confirmed Exploit/Malware Signature (Suricata)", "hard_stop"

@@ -163,8 +163,15 @@ scan_features = {"zeek_s0_rej_count": 40.0, "zeek_s0_rej_unique_ips": 20.0}
 ev, active, result, rep = run_hypothesis(scan_features)
 check("ThreatSignalDetector emits zeek_conn_abuse evidence for a port-scan pattern",
       any(e.type == "zeek_conn_abuse" for e in ev))
-check("ConnectionAbuseHypothesis becomes the winning attack hypothesis",
-      result["attack"]["name"] == "CONNECTION_ABUSE", f"got={result['attack']}")
+# VERSION 12 (G7, HEE coverage audit): ConnectionAbuseHypothesis is still the winning
+# CLASS -- only its dynamic self.name changed. A zeek_conn_abuse-only finding (no
+# arp_sweep/zeek_long_conn alongside it, exactly this scenario) now gets the more
+# specific "PORT_SCAN" name instead of the old generic "CONNECTION_ABUSE" (which is
+# now reserved for zeek_long_conn-only or multi-category corroborated findings -- see
+# hypotheses/engine.py's ConnectionAbuseHypothesis docstring).
+check("ConnectionAbuseHypothesis becomes the winning attack hypothesis, named PORT_SCAN "
+      "for this single-category (scan-only) evidence shape",
+      result["attack"]["name"] == "PORT_SCAN", f"got={result['attack']}")
 
 
 # ── Test 6: telemetry-domain dampening suppresses the classifier-score DGA branch ──
