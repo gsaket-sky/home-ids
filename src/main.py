@@ -103,7 +103,18 @@ def main():
         if fastapi_port <= 0:
             LOGGER.warning("Configured fastapi_port %s is invalid; falling back to 8010.", fastapi_port)
             fastapi_port = 8010
-        LOGGER.info("🔌 Starting internal FastAPI Router Webhook daemon on port %d...", fastapi_port)
+        fastapi_bind_host = str(CONFIG.get("fastapi_bind_host", "127.0.0.1")) or "127.0.0.1"
+        if fastapi_bind_host != "127.0.0.1":
+            LOGGER.warning(
+                "🔓 fastapi_bind_host=%s -- the IPC control endpoints (isolate/release/block) "
+                "are reachable from other devices on the network, protected only by "
+                "fritz_api_token. Set fastapi_bind_host back to 127.0.0.1 to restrict them "
+                "to this box only.", fastapi_bind_host,
+            )
+        LOGGER.info(
+            "🔌 Starting internal FastAPI Router Webhook daemon on %s:%d...",
+            fastapi_bind_host, fastapi_port,
+        )
         try:
             # ARCHITECTURAL FIX: Pipe Uvicorn stdout/stderr to a dedicated log file 
             # instead of DEVNULL so GET /hosts and access pings can be tracked.
@@ -116,7 +127,7 @@ def main():
                 [
                     sys.executable, "-m", "uvicorn",
                     "middleware.main_api:app",
-                    "--host", "127.0.0.1",
+                    "--host", fastapi_bind_host,
                     "--port", str(fastapi_port),
                     "--app-dir", src_dir,
                 ],

@@ -37,6 +37,16 @@ service_ports:
   # be internet-exposed. [RESTART]
   fastapi_port: 8010
 
+  # Which interface the above IPC/webhook daemon binds to. Defaults to loopback-only
+  # -- the isolate/release/block endpoints are powerful hardware-control actions, so
+  # out of the box nothing else on your LAN can reach them no matter what token it
+  # has, even if the token leaks. Set to "0.0.0.0" ONLY as a deliberate choice to make
+  # those endpoints reachable from other devices on your LAN (e.g. clicking
+  # Isolate/Release from a Grafana dashboard open on a different machine) -- the
+  # bearer token (fritz_api_token / API_SECRET_TOKEN) becomes the only thing
+  # protecting them at that point. [RESTART]
+  fastapi_bind_host: "127.0.0.1"
+
 
 # -----------------------------------------------------------------------------
 # paths — every file/directory this process reads from or writes to.

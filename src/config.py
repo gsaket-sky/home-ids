@@ -54,7 +54,7 @@ _STATIC_KEYS = {
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
-    "fritz_password", "fritz_api_token", "fastapi_port",
+    "fritz_password", "fritz_api_token", "fastapi_port", "fastapi_bind_host",
     "env_file"
 }
 # NOTE: "scheduled_tasks" was removed from this set (2026-08-17 config audit) — it was a
@@ -181,6 +181,16 @@ DEFAULT_CONFIG = {
     "fritz_password": "",
     "fritz_api_token": "",
     "fastapi_port": 8010,          # AUDIT FIX #13: document fastapi_port in defaults
+    # SECURITY: which interface main.py's internal FastAPI/uvicorn IPC daemon binds to.
+    # Defaults to loopback-only -- the isolate/release/block endpoints are powerful
+    # hardware-control actions, so out of the box a compromised/malicious device
+    # elsewhere on the LAN can never reach them no matter what token it has, even if
+    # the token leaks. Set to "0.0.0.0" (a deliberate, explicit operator choice -- see
+    # config.yaml's own comment) only if you want those endpoints reachable from other
+    # devices on your LAN (e.g. clicking Isolate/Release from a Grafana dashboard open
+    # on a different machine) -- the bearer token becomes the only thing protecting
+    # them at that point.
+    "fastapi_bind_host": "127.0.0.1",
     "telegram_allowed_chat_ids": [], # AUDIT FIX #10: allowlist for Telegram command senders (empty = allow all, for backward compat)
     "router_hosts_url": "http://127.0.0.1:8010/hosts",
     "router_hosts_timeout_seconds": 5.0,
