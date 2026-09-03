@@ -285,7 +285,8 @@ DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER = 10
 
 
 def should_still_withhold(spread: int, multi_device_suppress_guard: int,
-                           existing_withheld_count: int, multi_device_withhold_auto_resolve_after: int) -> bool:
+                           existing_withheld_count: int, multi_device_withhold_auto_resolve_after: int,
+                           campaign_corroborated: bool = True) -> bool:
     """Pure decision function, extracted specifically so it's unit-testable without
     mocking Ollama/fp_engine/state -- see tests/test_phase49_ollama_withhold_streak.py.
     True iff the multi-device spread guard is currently satisfied (spread >= threshold)
@@ -295,8 +296,72 @@ def should_still_withhold(spread: int, multi_device_suppress_guard: int,
     branch in main() instead of withholding again -- see
     DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER's own comment for the full incident
     this closes (165 patterns stuck in withheld_history, some 15-18 times over 4.6 days,
-    with no exit condition at all before this)."""
-    return spread >= multi_device_suppress_guard and existing_withheld_count < multi_device_withhold_auto_resolve_after
+    with no exit condition at all before this).
+
+    PHASE 53 (campaign correlation): `campaign_corroborated` (optional, default True --
+    every pre-Phase-53 caller/test is unaffected) is _is_campaign_corroborated()'s own
+    verdict on whether this signature's cross-device spread actually LOOKS like a
+    coordinated campaign (destinations concentrated on shared/unexplained infra) versus
+    devices independently reaching different, individually reputable infrastructure
+    under a merely-common signature name -- the "3 smart-TVs hitting 3 different CDN
+    edges" case. Device COUNT alone (spread) answers "how many devices," not "are they
+    actually part of the same incident" -- this is the second, independent question the
+    original guard conflated into one. Defaults True (the pre-Phase-53, err-toward-
+    caution behavior) so a caller that hasn't computed it yet still withholds exactly as
+    before."""
+    return (spread >= multi_device_suppress_guard and campaign_corroborated
+            and existing_withheld_count < multi_device_withhold_auto_resolve_after)
+
+
+def _is_campaign_corroborated(members: list, geoip_engine) -> bool:
+    """PHASE 53 (campaign correlation): True if this signature's spread across devices
+    looks like it could genuinely be ONE coordinated incident -- destinations
+    concentrated on a small/shared set of IPs, or destinations that aren't recognized
+    reputable cloud/CDN infrastructure (unexplained, so treated with the same caution
+    the guard has always used). False ONLY when there are multiple genuinely DISTINCT
+    destination IPs and EVERY one of them resolves to a recognized cloud/CDN provider --
+    the concrete "3 smart-TVs independently hitting 3 different CDN edges" shape a
+    generic/noisy signature produces, not a real campaign. Deliberately conservative:
+    any lookup failure, missing GeoIP engine, or destination that doesn't resolve to a
+    recognized provider keeps the result True (unchanged, err-toward-caution behavior)
+    -- this function can only ever RELAX the guard, never tighten it beyond what spread
+    alone already required, since should_still_withhold() ANDs it with the existing
+    spread check rather than replacing it."""
+    distinct_ips = {
+        ip for p in members
+        if (ip := (p.get("network_context", {}) or {}).get("destination_ip")) not in (None, "", "unknown")
+    }
+    if len(distinct_ips) <= 1:
+        return True  # concentrated on one destination (or nothing to disambiguate)
+    if not geoip_engine:
+        return True  # can't classify -- conservative default
+
+    try:
+        from utils import is_cloud_cdn_provider_org
+    except Exception:
+        return True
+
+    classified = 0
+    reputable = 0
+    for ip in distinct_ips:
+        try:
+            asn_res = geoip_engine.lookup_asn(ip)
+            owner = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+        except Exception:
+            owner = None
+        if not owner:
+            continue
+        classified += 1
+        if is_cloud_cdn_provider_org(owner):
+            reputable += 1
+
+    if classified == 0:
+        return True  # nothing resolvable -- conservative default
+    # "Scattered across reputable infra" requires EVERY resolvable destination to be
+    # reputable -- a single unexplained/unclassified destination among several keeps
+    # the conservative True (still corroborated, still withheld).
+    all_reputable = reputable == classified == len(distinct_ips)
+    return not all_reputable
 
 
 # VERSION 10 (incident aggregation): this grouping-key logic used to live only here,
@@ -500,11 +565,19 @@ def main():
     # window, independent of the exact target domain string (a rotating-suffix DGA domain
     # never repeats exactly, so this must key on signature alone, not on _cache_key()).
     signature_device_counts: dict = defaultdict(set)
+    # PHASE 53 (campaign correlation): every alert payload sharing a signature, not just
+    # its device -- _is_campaign_corroborated() below needs the actual destination_ips
+    # to tell "many devices independently hitting the SAME/few infra" (a real
+    # coordinated campaign) apart from "many devices hitting MANY DIFFERENT, individually
+    # reputable destinations" (a noisy generic signature, not a campaign) -- device COUNT
+    # alone can't distinguish these two shapes, which is exactly what this phase adds.
+    signature_members: dict = defaultdict(list)
     for payload in alerts_to_analyze:
         sig = payload.get("signature", "unknown")
         dev = payload.get("device", {}).get("id", "unknown")
         if dev and dev != "unknown":
             signature_device_counts[sig].add(dev)
+        signature_members[sig].append(payload)
     multi_device_suppress_guard = int(config.get("ollama_multi_device_suppress_guard", DEFAULT_MULTI_DEVICE_SUPPRESS_GUARD))
     multi_device_withhold_auto_resolve_after = int(config.get(
         "ollama_multi_device_withhold_auto_resolve_after", DEFAULT_MULTI_DEVICE_WITHHOLD_AUTO_RESOLVE_AFTER
@@ -526,6 +599,13 @@ def main():
         db_path=config.get("geoip_db", str(root_dir / "models" / "GeoLite2-City.mmdb")),
         asn_db_path=config.get("geoip_asn_db", ""),
     )
+
+    # PHASE 53 (campaign correlation): computed once per DISTINCT signature (not per
+    # cache_key/target -- several targets can share one signature) and reused across the
+    # run, since _is_campaign_corroborated() does real GeoIP ASN lookups per distinct
+    # destination IP -- no reason to repeat that work for every target sharing the
+    # signature.
+    campaign_shape_cache: dict = {}
 
     LOGGER.info(
         f"{len(alerts_to_analyze)} alert(s) collapsed into {len(groups)} distinct threat "
@@ -800,6 +880,12 @@ def main():
         already_actioned = bool(cache.get(key, {}).get("action_taken"))
         signature = representative.get("signature", "unknown")
         spread = len(signature_device_counts.get(signature, ()))
+        # PHASE 53: computed once per signature, reused across every target sharing it.
+        if signature not in campaign_shape_cache:
+            campaign_shape_cache[signature] = _is_campaign_corroborated(
+                signature_members.get(signature, []), geoip_engine
+            )
+        campaign_corroborated = campaign_shape_cache[signature]
         # BUGFIX (live alert audit): outcome/outcome_detail feed the new structured
         # pattern_outcomes list below -- captures what actually happened (and why) for
         # EVERY pattern, not just malicious verdicts, so the run's Telegram digest can
@@ -817,15 +903,26 @@ def main():
         # gets the report/outcome_detail worded distinctly from a same-day immediate
         # immunize.
         existing_withheld_count = len(cache.get(key, {}).get("withheld_history", []))
-        streak_exhausted = not should_still_withhold(
-            spread, multi_device_suppress_guard, existing_withheld_count, multi_device_withhold_auto_resolve_after
-        ) and spread >= multi_device_suppress_guard
+        # PHASE 53: streak_exhausted must ALSO require campaign_corroborated to have
+        # been true in the first place -- otherwise a pattern that skipped the guard
+        # via the campaign check (spread>=guard but scattered across reputable infra)
+        # would be misreported as an exhausted-streak auto-resolve below, instead of
+        # simply "never needed withholding at all."
+        streak_exhausted = (
+            not should_still_withhold(
+                spread, multi_device_suppress_guard, existing_withheld_count,
+                multi_device_withhold_auto_resolve_after, campaign_corroborated,
+            )
+            and spread >= multi_device_suppress_guard and campaign_corroborated
+        )
         if is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned and should_still_withhold(
-            spread, multi_device_suppress_guard, existing_withheld_count, multi_device_withhold_auto_resolve_after
+            spread, multi_device_suppress_guard, existing_withheld_count,
+            multi_device_withhold_auto_resolve_after, campaign_corroborated,
         ):
             LOGGER.warning(
                 f"[MULTI-DEVICE GUARD] '{signature}' is independently firing on {spread} distinct "
-                f"devices right now (>= {multi_device_suppress_guard}) -- withholding the autonomous "
+                f"devices right now (>= {multi_device_suppress_guard}), destinations concentrated or "
+                f"unexplained (not scattered across reputable infra) -- withholding the autonomous "
                 f"suppress/immunize action for {target!r} despite a benign LLM verdict. A pattern this "
                 f"widespread deserves a human look, not a same-day auto-immunization; not marking "
                 f"action_taken so it's reconsidered next run against then-current device spread."
@@ -833,8 +930,9 @@ def main():
             report_lines.append(
                 f"- **Autonomous Action Withheld:** LLM recommended suppress, but signature "
                 f"`{signature}` is independently firing on {spread} distinct devices right now "
-                f"(guard threshold {multi_device_suppress_guard}) -- deferred to human review "
-                f"instead of auto-immunizing."
+                f"(guard threshold {multi_device_suppress_guard}), and their destinations don't look "
+                f"like independent, reputable infrastructure -- deferred to human review instead of "
+                f"auto-immunizing."
             )
             outcome = "withheld_multi_device"
             # BUGFIX (live alert audit): the "traceable spread" requirement -- this used to
@@ -868,14 +966,27 @@ def main():
             })
             cache[key]["withheld_history"] = withheld_history[-20:]  # own cap -- nothing else prunes this sub-field
         elif is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
-            # Reached either because spread < guard (the normal, first-time/low-spread
-            # case) or because streak_exhausted (this pattern independently reconfirmed
-            # the identical verdict multi_device_withhold_auto_resolve_after times in a
-            # row -- see that constant's own comment) -- both take the same corrective
-            # action below; only the report/outcome_detail wording differs.
+            # Reached because spread < guard (the normal, first-time/low-spread case),
+            # OR streak_exhausted (this pattern independently reconfirmed the identical
+            # verdict multi_device_withhold_auto_resolve_after times in a row -- see
+            # that constant's own comment), OR spread >= guard but campaign_corroborated
+            # is False (PHASE 53: destinations scattered across individually-reputable
+            # infra, not a real campaign) -- all three take the same corrective action
+            # below; only the report/outcome_detail wording differs.
             streak_note = (
                 f"auto-resolved after {existing_withheld_count} consistent withholds -- "
                 if streak_exhausted else ""
+            ) + (
+                # PHASE 53: spread alone would have satisfied the multi-device guard,
+                # but campaign correlation found the destinations scattered across
+                # independently-reputable infra -- not a coordinated incident, so this
+                # never actually withheld. Mutually exclusive with the streak_exhausted
+                # note above (that one only ever fires once campaign_corroborated was
+                # True, i.e. this pattern WAS withheld at least once).
+                f"spread={spread} device(s) but destinations scattered across independently-"
+                f"reputable infrastructure (not a coordinated campaign) -- "
+                if spread >= multi_device_suppress_guard and not campaign_corroborated and not streak_exhausted
+                else ""
             )
             target_domain = representative.get("network_context", {}).get("queried_domain", "") or ""
             if target_domain and target_domain != "unknown":
