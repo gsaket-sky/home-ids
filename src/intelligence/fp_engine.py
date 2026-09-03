@@ -114,6 +114,78 @@ _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD = 0.55
 # How long an immunized domain stays in the trust cache before re-evaluation
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600  # 14 days
 
+# PHASE 52 (scoped suppression): a per-entry TTL (e.g. ollama_soc.py's LLM-supplied
+# ttl_seconds, Phase 51) is clamped to this range rather than trusted verbatim -- a
+# hallucinated/malformed value (0, negative, or absurdly large) must not create an
+# effectively-permanent or instantly-expiring immunization. Never longer than the
+# global default above; the floor keeps a very short LLM-suggested TTL from being
+# functionally useless (re-querying Ollama on literally the next 4h cron cycle).
+MIN_TRUST_ENTRY_TTL_SECONDS = 3600         # 1 hour floor
+MAX_TRUST_ENTRY_TTL_SECONDS = TRUST_CACHE_TTL_SECONDS  # 14 days ceiling
+
+# PHASE 52: hypotheses whose benign correction is a claim about THIS DEVICE's own
+# behavior, not the destination's general safety -- e.g. "this device's traffic to X
+# wasn't preceded by this device's own DNS lookup" (DNSEvasionHypothesis,
+# hypotheses/engine.py) says nothing about whether X is safe for a DIFFERENT device
+# that DID properly resolve it via DNS. A trust-cache entry recording one of these as
+# its justifying hypothesis is therefore gated to the SAME device on reuse (see
+# _is_trust_cached()) -- every other hypothesis name (NETWORK_INTRUSION,
+# DNS_COVERT_TUNNELING, DGA_BOTNET_C2, generic reputation, ...) is a claim about the
+# DESTINATION itself, so trust for those stays shared across devices, same as before
+# this phase. Chosen from what actually reaches mark_false_positive() as
+# alert_payload["signature"] in practice: a PUBLISHED alert's signature is always the
+# WINNING hypothesis (decision_engine.py's `explanation`), so only ATTACK-side (or
+# these evasion) names ever appear here -- a benign-only hypothesis name like
+# DEVICE_PROFILE_TELEMETRY structurally never does, since a benign-winning cycle is
+# suppressed, not published.
+DEVICE_SCOPED_TRUST_HYPOTHESES = frozenset({
+    "DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS",
+})
+
+
+def _trust_entry_ts(entry) -> float:
+    """PHASE 52: `_trust_cache` values are either a bare float (every entry written
+    before this phase, and still the shape for any consumer that reads the raw dict
+    directly) or a dict with a "ts" key (this phase onward, when device/hypothesis/TTL
+    scope was available at write time). Every reader of _trust_cache must go through
+    this (and _trust_entry_ttl below) rather than assuming either shape, so a mixed
+    on-disk cache (old float entries alongside new dict ones, exactly what a live
+    upgrade produces) never crashes a reader. Returns 0.0 (i.e. "already expired") for
+    a malformed entry rather than raising -- one bad entry must not abort loading the
+    rest of the cache."""
+    try:
+        return float(entry["ts"]) if isinstance(entry, dict) else float(entry)
+    except (KeyError, TypeError, ValueError):
+        return 0.0
+
+
+def _trust_entry_ttl(entry) -> float:
+    """Companion to _trust_entry_ts -- the TTL this specific entry should be judged
+    against. A dict entry's own `ttl_seconds` (already clamped at write time by
+    _immunize_domain) if present, else the global TRUST_CACHE_TTL_SECONDS default --
+    same default a legacy bare-float entry has always implicitly used."""
+    if isinstance(entry, dict):
+        ttl = entry.get("ttl_seconds")
+        try:
+            if ttl is not None and float(ttl) > 0:
+                return float(ttl)
+        except (TypeError, ValueError):
+            pass
+    return TRUST_CACHE_TTL_SECONDS
+
+
+def _trust_entry_hypothesis_base(hypothesis: Optional[str]) -> Optional[str]:
+    """Strips decision_engine.py's persistence-escalation suffix (e.g. 'DNS_EVASION
+    (persisted 603s)' -> 'DNS_EVASION') the same way mark_false_positive()'s own
+    _HARD_STOP_SIGNATURES check and incident_key.py's signature_base already do, so an
+    incident that escalates mid-episode still scopes/matches consistently. Returns
+    None for empty/missing input -- callers treat that as "no hypothesis recorded/
+    known," which _is_trust_cached() already handles as an always-match wildcard."""
+    if not hypothesis:
+        return None
+    return hypothesis.split(" (persisted ", 1)[0] or None
+
+
 # How much to widen a device's EWMA sigma per confirmed FP event
 SIGMA_WIDENING_STEP = 0.25
 
@@ -367,13 +439,21 @@ class AutonomousFPEngine:
         # skip ML inference and hard-stops entirely and suppress immediately.
         # This handles recurring alerts for the same FP domain at zero CPU cost,
         # and allows explicit admin immunization to bypass AbuseIPDB/TI false positives.
+        #
+        # PHASE 52 (scoped suppression): device_id/hypothesis are passed through so a
+        # scoped entry (see _is_trust_cached()) only fires for the device/hypothesis
+        # combination that actually justified it -- an immunization from correcting one
+        # attack hypothesis against this domain can no longer silently suppress a
+        # DIFFERENT, unrelated hypothesis against the same domain later. An unscoped
+        # (legacy, or hypothesis-less) entry is unaffected -- still matches regardless.
         # ==================================================================
         base_domain = self._extract_base_domain(domain)
-        
+        alert_hypothesis = alert_payload.get("signature", "")
+
         cached_target = None
-        if self._is_trust_cached(base_domain):
+        if self._is_trust_cached(base_domain, device_id=device_id, hypothesis=alert_hypothesis):
             cached_target = base_domain
-        elif dest_ip and self._is_trust_cached(dest_ip):
+        elif dest_ip and self._is_trust_cached(dest_ip, device_id=device_id, hypothesis=alert_hypothesis):
             cached_target = dest_ip
             
         if cached_target:
@@ -773,10 +853,17 @@ class AutonomousFPEngine:
 
         Example return: {"sentry.io", "brave.com", "grafana.sky"}
         """
+        # PHASE 52: shape-agnostic (a bare float from before this phase, or a scoped
+        # dict since) via _trust_entry_ts/_trust_entry_ttl -- deliberately UNCHANGED
+        # semantics otherwise (still every non-expired domain regardless of
+        # device/hypothesis scope). This feeds pipeline.py/scoring.py's earlier
+        # is_domain_safe dampener, not the final suppression decision -- scoping THAT
+        # consumer by device/hypothesis was explicitly out of scope for Phase 52 (see
+        # Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4 entry).
         now = time.time()
         with self._lock:
-            active = {d for d, ts in self._trust_cache.items()
-                      if (now - ts) < TRUST_CACHE_TTL_SECONDS}
+            active = {d for d, entry in self._trust_cache.items()
+                      if (now - _trust_entry_ts(entry)) < _trust_entry_ttl(entry)}
         return active
 
     def get_sigma_shift(self, device_id: str) -> float:
@@ -1381,9 +1468,12 @@ class AutonomousFPEngine:
     # SELF-HEALING ACTIONS
     # ==========================================================================
 
-    def _immunize_domain(self, base_domain: str, hostname: str, source: str = "autonomous") -> bool:
+    def _immunize_domain(self, base_domain: str, hostname: str, source: str = "autonomous",
+                          device_id: Optional[str] = None, hypothesis: Optional[str] = None,
+                          ttl_seconds: Optional[float] = None) -> bool:
         """
-        Add a base domain to the persistent dynamic trust cache (14-day TTL).
+        Add a base domain to the persistent dynamic trust cache (14-day TTL, or
+        `ttl_seconds` when given -- see PHASE 52 note below).
 
         `source` is one of "autonomous" (CL-AFPE's own Stage 2/3 suppress path),
         "operator" (Telegram "Mark False Positive" tap), or "llm_validated" (Brain 3) --
@@ -1391,13 +1481,32 @@ class AutonomousFPEngine:
         autonomous vs human-approved, the entire point of the self-calibration story.
 
         After immunization:
-        - Any subdomain of base_domain across ALL devices gets is_domain_safe=True
-          without running any ML inference.
+        - Any subdomain of base_domain gets is_domain_safe=True without running any ML
+          inference (get_dynamic_trust_cache(), still unscoped -- see that method's own
+          comment). evaluate()'s own trust-cache-hit fast path (_is_trust_cached) is
+          additionally scoped: see below.
         - The cache entry is written to disk so it survives soc.service restarts.
         - The Prometheus trust cache size gauge is updated.
 
         Example: immunizing 'sentry.io' means future alerts for
                  'xyz.ingest.us.sentry.io' are instantly suppressed.
+
+        PHASE 52 (scoped suppression): `device_id`/`hypothesis` (both optional) record
+        WHAT justified this immunization -- the calling alert's device and winning
+        hypothesis/signature. evaluate()'s own trust-cache-hit check
+        (_is_trust_cached) uses these to require the SAME hypothesis on reuse always,
+        and the SAME device specifically for DEVICE_SCOPED_TRUST_HYPOTHESES (a claim
+        about THIS device's own behavior, not the destination's general safety -- see
+        that constant's own comment). Every OTHER consumer of the trust cache
+        (get_dynamic_trust_cache(), utils.py's separate telemetry allowlist below) is
+        deliberately left unscoped/global, same as before this phase -- narrower scope
+        was an explicit choice, not an oversight (see
+        Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4 entry). `ttl_seconds`
+        (optional) overrides the global 14-day default for just this entry -- e.g.
+        ollama_soc.py threading through the LLM's own suggested ttl_seconds (Phase 51)
+        -- clamped to [MIN_TRUST_ENTRY_TTL_SECONDS, MAX_TRUST_ENTRY_TTL_SECONDS] so a
+        malformed/hallucinated value can't create an effectively-permanent or
+        instantly-expiring entry.
 
         Returns:
             True if this was a NEW immunization (not previously cached), False if it was
@@ -1409,9 +1518,26 @@ class AutonomousFPEngine:
             return False
 
         now = time.time()
+        entry_ttl = None
+        if ttl_seconds is not None:
+            try:
+                ttl_val = float(ttl_seconds)
+                if ttl_val > 0:
+                    entry_ttl = min(max(ttl_val, MIN_TRUST_ENTRY_TTL_SECONDS), MAX_TRUST_ENTRY_TTL_SECONDS)
+            except (TypeError, ValueError):
+                entry_ttl = None
+        hypothesis_base = _trust_entry_hypothesis_base(hypothesis)
+
         with self._lock:
             is_new = base_domain not in self._trust_cache
-            self._trust_cache[base_domain] = now
+            entry = {"ts": now, "source": source}
+            if device_id and device_id != "unknown":
+                entry["device_id"] = device_id
+            if hypothesis_base:
+                entry["hypothesis"] = hypothesis_base
+            if entry_ttl is not None:
+                entry["ttl_seconds"] = entry_ttl
+            self._trust_cache[base_domain] = entry
             cache_size = len(self._trust_cache)
 
         try:
@@ -1420,17 +1546,19 @@ class AutonomousFPEngine:
         except Exception:
             pass
 
+        ttl_note = f"{entry_ttl / 3600:.0f}h" if entry_ttl is not None else "14 days"
+        scope_note = f", hypothesis={hypothesis_base!r}" if hypothesis_base else ""
         if is_new:
             fp_engine_domains_immunized_total.labels(source=source).inc()
             LOGGER.info(
-                "🛡️  [FP ENGINE » IMMUNIZE] NEW: '%s' added to autonomous trust cache "
-                "(TTL: 14 days). Triggered by device: %s",
-                base_domain, hostname
+                "🛡️  [FP ENGINE » IMMUNIZE] NEW: '%s' added to trust cache (TTL: %s%s). "
+                "Triggered by device: %s",
+                base_domain, ttl_note, scope_note, hostname
             )
         else:
             LOGGER.info(
-                "🔄 [FP ENGINE » IMMUNIZE] REFRESH: '%s' trust cache TTL refreshed.",
-                base_domain
+                "🔄 [FP ENGINE » IMMUNIZE] REFRESH: '%s' trust cache TTL refreshed (TTL: %s%s).",
+                base_domain, ttl_note, scope_note
             )
 
         fp_engine_trust_cache_size.set(cache_size)
@@ -1462,8 +1590,17 @@ class AutonomousFPEngine:
             LOGGER.debug("[FP ENGINE » REVOKE] '%s' was not in trust cache (already expired or never cached).", base_domain)
         return existed
 
-    def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "", source: str = "operator") -> dict:
-        """PHASE 6 (operator-driven self-healing): originally the human-in-the-loop half of
+    def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "",
+                             source: str = "operator", ttl_seconds: Optional[float] = None) -> dict:
+        """PHASE 52: `ttl_seconds` (optional, new) is threaded straight through to every
+        _immunize_domain() call below -- e.g. ollama_soc.py's LLM-supplied ttl_seconds
+        (Phase 51). device_id and the winning hypothesis (`signature`, already read
+        below) are ALWAYS threaded through regardless of caller, from alert_payload
+        itself -- see _immunize_domain()'s own docstring for what that scopes and why
+        every call site here (not just the LLM-sourced one) gets it uniformly rather
+        than special-casing by source.
+
+        PHASE 6 (operator-driven self-healing): originally the human-in-the-loop half of
         the FP closed loop — called when an operator taps "🛡️ Mark False Positive" on a
         PUBLISHED alert's Telegram message (i.e. one fp_engine did NOT autonomously
         suppress; see AUTONOMOUS_FP_SUPPRESSED for the fully-autonomous Stage2/3 path via
@@ -1574,7 +1711,10 @@ class AutonomousFPEngine:
         if signature in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
             dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
             if dest_ip and dest_ip != "unknown":
-                is_new_immunization = self._immunize_domain(dest_ip, hostname, source=source)
+                is_new_immunization = self._immunize_domain(
+                    dest_ip, hostname, source=source, device_id=device_id,
+                    hypothesis=signature, ttl_seconds=ttl_seconds,
+                )
                 ip_immunized = dest_ip
             else:
                 LOGGER.warning(
@@ -1665,14 +1805,42 @@ class AutonomousFPEngine:
             domain = target_domain or alert_payload.get("network_context", {}).get("queried_domain", "") or ""
             base_domain = self._extract_base_domain(domain)
             if base_domain:
-                is_new_immunization = self._immunize_domain(base_domain, hostname, source=source)
-            else:
-                LOGGER.warning(
-                    "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
-                    "skipping trust-cache immunization, but still recording the training "
-                    "correction and sigma widening below.",
-                    hostname, domain
+                is_new_immunization = self._immunize_domain(
+                    base_domain, hostname, source=source, device_id=device_id,
+                    hypothesis=signature, ttl_seconds=ttl_seconds,
                 )
+            else:
+                # BUGFIX (2026-09-03, live audit): a raw-IP alert (queried_domain=
+                # "unknown" -- the majority shape of NetworkIntrusionHypothesis's
+                # zeek_lateral_scan/malicious_ja3/malicious_ja4/zeek_notice evidence)
+                # fell all the way through to a no-op here: no domain to extract, and
+                # unlike DNS_EVASION above, no destination_ip fallback either.
+                # Confirmed live: family_pc_fritz_box's NETWORK_INTRUSION incidents against
+                # raw IPs (149.154.175.56, 20.184.175.17, its own NAS, ...) kept getting
+                # "domain immunized ('unknown')" logged despite _immunize_domain()
+                # rejecting it outright, so only the device-wide sigma widening below
+                # ever actually applied -- the SAME incident kept re-escalating to HIGH
+                # every ~10 minutes for hours instead of durably clearing. Reuses the
+                # exact same destination_ip trust-cache path DNS_EVASION already
+                # established: evaluate()'s TRUST CACHE FAST PATH checks
+                # network_context.destination_ip regardless of signature, and still
+                # re-runs Stage-1 hard-stops on every cache hit (PHASE 3 fix above), so
+                # a genuinely malicious destination re-appearing later isn't blindly
+                # trusted just because this one alert against it was corrected.
+                dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
+                if dest_ip and dest_ip != "unknown":
+                    is_new_immunization = self._immunize_domain(
+                        dest_ip, hostname, source=source, device_id=device_id,
+                        hypothesis=signature, ttl_seconds=ttl_seconds,
+                    )
+                    ip_immunized = dest_ip
+                else:
+                    LOGGER.warning(
+                        "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' "
+                        "and no usable destination_ip either — skipping trust-cache immunization, "
+                        "but still recording the training correction and sigma widening below.",
+                        hostname, domain
+                    )
 
         # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
         # the autonomous path applies, scoped to the one device this correction is about.
@@ -1712,10 +1880,15 @@ class AutonomousFPEngine:
                 "sensitive for its normal behavior.",
             ]
         else:
+            if base_domain:
+                trust_cache_note = f"Base domain '{base_domain}' added to trust cache."
+            elif ip_immunized:
+                trust_cache_note = f"No resolved domain — destination IP '{ip_immunized}' added to trust cache instead."
+            else:
+                trust_cache_note = "Base domain could not be extracted and no usable destination IP was available — trust cache NOT updated."
             reasons = [
                 f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
-                f"Base domain '{base_domain}' added to trust cache." if base_domain else
-                "Base domain could not be extracted — trust cache NOT updated for this domain.",
+                trust_cache_note,
             ]
         self._write_muted_log(alert_payload, event_type, reasons, 1.0)
 
@@ -2028,7 +2201,11 @@ class AutonomousFPEngine:
         if now is None:
             now = time.time()
         if self._trust_cache:
-            expired_domains = [domain for domain, added_at in self._trust_cache.items() if (now - float(added_at)) >= TRUST_CACHE_TTL_SECONDS]
+            # PHASE 52: shape-agnostic + per-entry TTL, see _trust_entry_ts/_trust_entry_ttl.
+            expired_domains = [
+                domain for domain, entry in self._trust_cache.items()
+                if (now - _trust_entry_ts(entry)) >= _trust_entry_ttl(entry)
+            ]
             for domain in expired_domains:
                 self._trust_cache.pop(domain, None)
         self._sigma_shifts = {k: v for k, v in self._sigma_shifts.items() if isinstance(v, (int, float))}
@@ -2049,13 +2226,18 @@ class AutonomousFPEngine:
             now = time.time()
             loaded = expired = 0
 
-            for domain, added_at in raw.items():
-                age = now - float(added_at)
-                if age < TRUST_CACHE_TTL_SECONDS:
+            for domain, entry in raw.items():
+                # PHASE 52: `entry` may be a bare float (every entry written before
+                # this phase) or a scoped dict (since) -- preserve whichever shape was
+                # actually on disk rather than collapsing back to a float, so a
+                # PHASE-52 entry's device_id/hypothesis/ttl_seconds survive a restart.
+                age = now - _trust_entry_ts(entry)
+                ttl = _trust_entry_ttl(entry)
+                if age < ttl:
                     if str(domain).lower() in ("unknown", "null", "none"):
                         LOGGER.info("🧹 [FP ENGINE] Pruning legacy invalid domain '%s' from loaded trust cache.", domain)
                         continue
-                    self._trust_cache[domain] = float(added_at)
+                    self._trust_cache[domain] = entry
                     loaded += 1
                     try:
                         from utils import register_dynamic_allowlist_domain
@@ -2066,7 +2248,7 @@ class AutonomousFPEngine:
                         "  Trust cache: '%s' (age=%dd, expires in %dd)",
                         domain,
                         int(age // 86400),
-                        int((TRUST_CACHE_TTL_SECONDS - age) // 86400)
+                        int((ttl - age) // 86400)
                     )
                 else:
                     expired += 1
@@ -2168,14 +2350,42 @@ class AutonomousFPEngine:
             LOGGER.warning("[FP ENGINE] etld1() raised for '%s' (%s) — failing closed, no domain immunization.", domain, exc)
             return ""
 
-    def _is_trust_cached(self, base_domain: str) -> bool:
-        """True if base_domain is in the dynamic trust cache and its TTL has not expired."""
+    def _is_trust_cached(self, base_domain: str, device_id: Optional[str] = None,
+                          hypothesis: Optional[str] = None) -> bool:
+        """True if base_domain is in the dynamic trust cache, its TTL has not expired,
+        AND -- for a PHASE 52 scoped entry -- the CURRENT alert's device_id/hypothesis
+        are compatible with what justified the immunization.
+
+        `device_id`/`hypothesis` are optional and default to None, so any caller that
+        doesn't pass them gets the pre-PHASE-52 behavior: an entry matches regardless
+        of scope. The live call site (evaluate()'s TRUST CACHE FAST PATH) always passes
+        both. An entry with no recorded hypothesis (every legacy bare-float entry, and
+        any dict entry written without one) is likewise an always-match wildcard --
+        this only NARROWS a hit, it never invents a rejection the pre-scoping cache
+        wouldn't already have accepted."""
         if not base_domain:
             return False
         now = time.time()
         with self._lock:
-            added_at = self._trust_cache.get(base_domain)
-        return added_at is not None and (now - added_at) < TRUST_CACHE_TTL_SECONDS
+            entry = self._trust_cache.get(base_domain)
+        if entry is None:
+            return False
+        if (now - _trust_entry_ts(entry)) >= _trust_entry_ttl(entry):
+            return False
+        if not isinstance(entry, dict):
+            return True  # legacy bare-float entry -- unscoped, always matches
+
+        entry_hypothesis = entry.get("hypothesis")
+        current_hypothesis = _trust_entry_hypothesis_base(hypothesis)
+        if entry_hypothesis and current_hypothesis and entry_hypothesis != current_hypothesis:
+            return False
+
+        entry_device = entry.get("device_id")
+        if entry_device and device_id and entry_hypothesis in DEVICE_SCOPED_TRUST_HYPOTHESES:
+            if device_id != entry_device:
+                return False
+
+        return True
 
     # ==========================================================================
     # BACKGROUND MODEL LOADERS

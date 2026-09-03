@@ -884,7 +884,13 @@ def main():
                 # validated this, autonomously, every 4h" apart from "a human confirmed
                 # this" — the former is now the PRIMARY, human-independent calibration
                 # signal; the latter remains valid and optional on top.
-                mark_result = fp_engine.mark_false_positive(representative, alert_hostname, target_domain, source="llm_validated")
+                # PHASE 52: threads the LLM's own suggested ttl_seconds (Phase 51) through
+                # as this specific immunization's TTL override -- fp_engine.mark_false_positive()
+                # clamps it to a sane range and falls back to the 14-day default if absent/invalid.
+                mark_result = fp_engine.mark_false_positive(
+                    representative, alert_hostname, target_domain, source="llm_validated",
+                    ttl_seconds=response_json.get("ttl_seconds"),
+                )
                 base_domain = mark_result.get("base_domain", "")
                 if key in cache:
                     cache[key]["action_taken"] = True
