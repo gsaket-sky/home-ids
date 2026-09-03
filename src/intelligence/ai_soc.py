@@ -76,6 +76,37 @@ class DeterministicValidator:
                 )
                 return False
 
+            # PHASE 51 (structured evidence contract): reject a "benign" verdict that
+            # doesn't actually justify itself. Per the evidence-family principle this
+            # whole gate exists for -- unknown reputation is NEUTRAL, not proof of
+            # innocence -- an LLM asserting "benign" with an empty supporting_evidence
+            # list is an assertion, not a finding, and must not reach an autonomous
+            # action any more than a "telemetry" free-text claim used to be trusted
+            # unchecked. The system_prompt (ollama_soc.py) now explicitly tells the
+            # model the absence of a TI/VT/AbuseIPDB hit is not supporting evidence on
+            # its own; this check enforces the structural half of that (a real list is
+            # present) -- it does not attempt to content-judge each item, which would be
+            # a much more fragile string-matching heuristic for marginal extra benefit.
+            supporting = [s for s in (recommendation.get("supporting_evidence") or []) if str(s).strip()]
+            if not supporting:
+                LOGGER.warning(
+                    "[VALIDATOR] Rejected Ollama recommendation: 'benign' verdict has no "
+                    "supporting_evidence -- an assertion, not a finding."
+                )
+                return False
+
+            # A verdict that lists its OWN contradicting evidence but still recommends
+            # suppressing the alert is internally inconsistent -- the model itself found
+            # a reason not to trust its classification and recommended an action anyway.
+            contradicting = [c for c in (recommendation.get("contradicting_evidence") or []) if str(c).strip()]
+            if contradicting and recommendation.get("recommended_action") == "suppress":
+                LOGGER.warning(
+                    "[VALIDATOR] Rejected Ollama recommendation: verdict lists its own "
+                    "contradicting_evidence (%s) but still recommends suppress -- "
+                    "self-contradictory.", contradicting,
+                )
+                return False
+
         # VERSION 10 (#15/#16, Ollama circular-reasoning guard): the model is no longer
         # shown risk/signature/factors/fp_verdict at all (see ollama_soc.py's
         # _build_evidence_only_payload -- found via a third-party review that the old

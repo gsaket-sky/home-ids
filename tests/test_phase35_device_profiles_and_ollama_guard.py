@@ -238,7 +238,14 @@ check("REGRESSION GUARD: the pre-existing 'benign despite confirmed IOC' rejecti
       not v.validate({"classification": "benign", "reason": "just ads"}, ev_bad_ioc))
 check("REGRESSION GUARD: a genuinely benign verdict with no contradicting evidence "
       "is still accepted",
-      v.validate({"classification": "benign", "reason": "just ads"}, []))
+      # PHASE 51 (structured evidence contract, added after this file): a non-empty
+      # supporting_evidence is now a separate, unconditional requirement for any
+      # "benign" verdict -- see test_phase51_ollama_structured_contract.py for that
+      # check in isolation. Added here purely so this pre-existing check keeps testing
+      # what it always tested (a genuinely benign verdict with no bad-reputation
+      # evidence passes), unaffected by the later, independent requirement.
+      v.validate({"classification": "benign", "reason": "just ads",
+                  "supporting_evidence": ["destination matches known ad-network domain list"]}, []))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

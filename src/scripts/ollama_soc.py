@@ -572,6 +572,22 @@ def main():
     # _build_evidence_only_payload) -- the model is never shown this system's own risk
     # score, signature name, or prior verdict, so it must derive a classification from
     # device/network_context/features itself rather than ratifying an existing one.
+    #
+    # PHASE 51 (structured evidence contract): the schema used to be just {classification,
+    # confidence, reason, recommended_action} -- one free-text paragraph the model could
+    # fill with "no TI hit, so probably benign" and nothing forced it to actually name what
+    # it thinks is happening or list what it's basing that on. This mirrors the required/
+    # supporting/contradicting shape every Hypothesis subclass in hypotheses/engine.py
+    # already uses internally -- the model is now asked to reason the SAME way, in the
+    # SAME vocabulary, so `hypothesis`/`supporting_evidence`/`contradicting_evidence` are
+    # checkable claims (see ai_soc.py's DeterministicValidator, which now rejects a
+    # "benign" verdict carrying no supporting_evidence at all, or one that lists its own
+    # contradicting_evidence and recommends suppress anyway) rather than a paragraph that
+    # can only be parsed for a handful of substrings ("telemetry", an exact risk-score
+    # digit). `classification` itself stays the existing benign|malicious values --
+    # every downstream branch in this file's main() already keys on exactly those two
+    # strings; renaming it to a 3-way enum here would be a much larger, separate change
+    # (see Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 4 entry).
     system_prompt = (
         "You are an autonomous Tier 2 SOC Analyst for a Home Intrusion Detection System. "
         "You are given RAW EVIDENCE ONLY for one network alert -- device info, connection "
@@ -581,8 +597,27 @@ def main():
         "verdict -- you must independently determine whether the activity is benign (e.g. "
         "telemetry, ads, routine device chatter) or malicious purely from the evidence "
         "given, not by assuming any classification already exists. "
+        "Reason like a hypothesis test, not a vibe check: name the SPECIFIC benign or "
+        "attack explanation you believe fits (use this system's own vocabulary when it "
+        "applies -- benign: DEVICE_PROFILE_TELEMETRY, LOCAL_DEVICE_DISCOVERY, "
+        "ADVERTISING_BURST; attack: NETWORK_INTRUSION, DNS_COVERT_TUNNELING, "
+        "DGA_BOTNET_C2, CONNECTION_ABUSE, DATA_EXFILTRATION, C2_BEACONING, "
+        "DNS_POLICY_BYPASS -- or a short specific name if none of these fit), then list "
+        "the concrete evidence that supports it and the concrete evidence that argues "
+        "against it. The ABSENCE of a threat-intel hit (ti_risk/abuse_risk/vt_risk all "
+        "0.0) is NOT supporting evidence for benign -- it is simply unknown, and must not "
+        "be the sole item in supporting_evidence. A 'benign' classification with an empty "
+        "supporting_evidence list, or one whose supporting_evidence is only the absence of "
+        "bad reputation, will be rejected. "
         "You must respond ONLY with a valid JSON object matching this schema: "
-        "{\"classification\": \"benign|malicious\", \"confidence\": 0.0-1.0, \"reason\": \"<short executive summary>\", \"recommended_action\": \"suppress|block|none\"}"
+        "{\"hypothesis\": \"<specific named explanation, not just 'benign' or 'malicious'>\", "
+        "\"classification\": \"benign|malicious\", \"confidence\": 0.0-1.0, "
+        "\"reason\": \"<short executive summary>\", "
+        "\"supporting_evidence\": [\"<concrete observation that supports the hypothesis>\", ...], "
+        "\"contradicting_evidence\": [\"<concrete observation that argues against it, if any>\"], "
+        "\"missing_evidence\": [\"<what would make you more confident, if anything>\"], "
+        "\"recommended_action\": \"suppress|block|none\", "
+        "\"ttl_seconds\": <how long this verdict should be trusted before re-evaluation, e.g. 86400>}"
     )
 
     for key in ordered_keys:
@@ -601,10 +636,18 @@ def main():
         cached = cache.get(key)
         if cached:
             response_json = {
+                "hypothesis": cached.get("hypothesis", ""),
                 "classification": cached.get("classification", "unknown"),
                 "confidence": cached.get("confidence", 0.0),
                 "reason": cached.get("reason", ""),
+                # PHASE 51: absent for any cache entry written before the structured
+                # contract existed -- defaults to [] rather than erroring, same
+                # backward-compat treatment as every other new field here.
+                "supporting_evidence": cached.get("supporting_evidence", []),
+                "contradicting_evidence": cached.get("contradicting_evidence", []),
+                "missing_evidence": cached.get("missing_evidence", []),
                 "recommended_action": cached.get("recommended_action", "none"),
+                "ttl_seconds": cached.get("ttl_seconds"),
             }
             is_valid = bool(cached.get("validator_passed", False))
             cache_hits += 1
@@ -674,10 +717,15 @@ def main():
             # never shown (see ai_soc.py's DeterministicValidator.validate()).
             is_valid = validator.validate(response_json, ev_store, original_risk=risk, ground_truth=ground_truth)
             cache[key] = {
+                "hypothesis": response_json.get("hypothesis", ""),
                 "classification": response_json.get("classification", "unknown"),
                 "confidence": response_json.get("confidence", 0.0),
                 "reason": response_json.get("reason", ""),
+                "supporting_evidence": response_json.get("supporting_evidence") or [],
+                "contradicting_evidence": response_json.get("contradicting_evidence") or [],
+                "missing_evidence": response_json.get("missing_evidence") or [],
                 "recommended_action": response_json.get("recommended_action", "none"),
+                "ttl_seconds": response_json.get("ttl_seconds"),
                 "validator_passed": is_valid,
                 "model": ollama_model,
                 "ts": time.time(),
@@ -708,8 +756,19 @@ def main():
         })
 
         report_lines.append(f"### Target: `{target}` (Device: `{device_ip}`, {len(members)} alert(s) covered by this analysis)")
-        report_lines.append(f"- **Classification:** `{response_json.get('classification', 'unknown').upper()}` (Confidence: {response_json.get('confidence', 0.0)})")
+        # PHASE 51 (structured contract): hypothesis is shown alongside classification --
+        # "BENIGN, hypothesis=DEVICE_PROFILE_TELEMETRY" is a checkable claim; bare
+        # "BENIGN" was not. Empty for any cached entry written before this existed.
+        llm_hypothesis = response_json.get("hypothesis") or ""
+        hyp_note = f" — hypothesis: `{llm_hypothesis}`" if llm_hypothesis else ""
+        report_lines.append(f"- **Classification:** `{response_json.get('classification', 'unknown').upper()}` (Confidence: {response_json.get('confidence', 0.0)}){hyp_note}")
         report_lines.append(f"- **Summary:** {response_json.get('reason', 'N/A')}")
+        for label, field in (("Supporting evidence", "supporting_evidence"),
+                              ("Contradicting evidence", "contradicting_evidence"),
+                              ("Missing evidence", "missing_evidence")):
+            items = response_json.get(field) or []
+            if items:
+                report_lines.append(f"- **{label}:** " + "; ".join(str(i) for i in items))
         report_lines.append(f"- **Recommended Action:** `{response_json.get('recommended_action', 'none')}`")
         report_lines.append(f"- **Validator Passed:** `{'YES' if is_valid else 'NO'}`")
         # PHASE 50: show the deterministic engine's own original finding for this alert,

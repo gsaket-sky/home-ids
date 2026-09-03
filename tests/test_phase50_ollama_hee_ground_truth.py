@@ -58,7 +58,16 @@ from intelligence.ai_soc import DeterministicValidator, _STRONG_ATTACK_DECISION_
 
 validator = DeterministicValidator()
 
-BENIGN_REC = {"classification": "benign", "reason": "routine device chatter", "recommended_action": "suppress"}
+BENIGN_REC = {
+    "classification": "benign", "reason": "routine device chatter",
+    "recommended_action": "suppress",
+    # PHASE 51 (structured evidence contract, added after this file): a non-empty
+    # supporting_evidence is now a separate, unconditional requirement for any "benign"
+    # verdict -- see test_phase51_ollama_structured_contract.py for THAT check in
+    # isolation. Included here so this file keeps testing ONLY the Phase 50 ground_truth
+    # gate in isolation, unaffected by the later Phase 51 requirement.
+    "supporting_evidence": ["destination matches this device's known recurring pattern"],
+}
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: DeterministicValidator ground-truth rejection
