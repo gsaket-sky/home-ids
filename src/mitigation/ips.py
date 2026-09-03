@@ -116,7 +116,11 @@ class IPSMitigator:
                 if cleared:
                     LOGGER.warning("🔄 [BOOT RECONCILE] Cleared %d stale router-isolation record(s) no longer isolated by Fritz!Box.", cleared)
             except Exception as exc:
-                LOGGER.debug("Boot-time router isolation reconcile failed: %s", exc)
+                # BUGFIX (live audit): was LOGGER.debug() -- reconcile_router_isolation_state()
+                # now logs each per-target failure itself, so reaching THIS except means
+                # something broke in the reconcile pass as a whole (not just one device's
+                # query), worth a WARNING same as everything else in this fix.
+                LOGGER.warning("🔄 [BOOT RECONCILE] Router isolation reconcile failed: %s", exc)
 
         LOGGER.info("Starting Router Isolation Reconcile Worker Thread...")
         threading.Thread(target=self._router_reconcile_worker, daemon=True, name="ips_router_reconcile_worker").start()
@@ -311,9 +315,18 @@ class IPSMitigator:
         fastapi_port = int(self.config.get("fastapi_port", 8010))
         api_token = self.config.get("fritz_api_token", "")
         headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
-        timeout_seconds = float(self.config.get("router_webhook_timeout_seconds", 5.0))
+        # BUGFIX (live audit, 2026-09-04): this used to reuse router_webhook_timeout_seconds
+        # (5.0s, tuned for the isolate/unisolate SET webhook) for this read-only status
+        # QUERY too -- confirmed live this Fritzbox's TR-064 GetWANAccessByIP genuinely
+        # takes ~10s round-trip, so every single reconcile attempt silently timed out and
+        # was swallowed by the bare `except Exception` below (logged at DEBUG, invisible
+        # at the service's normal INFO level) -- family_pc's stale "still isolated" record
+        # never actually cleared despite this worker running on schedule and Fritz!Box
+        # correctly reporting it unblocked. Own, more generous timeout for this query
+        # specifically; the SET actions' own timeout is untouched.
+        timeout_seconds = float(self.config.get("router_status_query_timeout_seconds", 20.0))
         if timeout_seconds <= 0:
-            timeout_seconds = 5.0
+            timeout_seconds = 20.0
 
         cleared = 0
         for mac, meta in targets:
@@ -329,6 +342,16 @@ class IPSMitigator:
                     # Query itself failed (Fritz!Box unreachable, etc.) -- leave the
                     # existing state alone rather than guess; a real un-isolation
                     # will still clear it via _unisolate_device_router() as normal.
+                    # BUGFIX (live audit): this used to be a silent `continue` -- the
+                    # exact same silence that let the timeout above go unnoticed for
+                    # as long as it did. A non-200 here is still worth an operator's
+                    # attention (bad token, Fritz!Box auth failure, etc.), just not
+                    # worth treating the record as cleared.
+                    LOGGER.warning(
+                        "🔄 [RECONCILE] Status query for %s (%s) returned HTTP %d -- "
+                        "leaving existing router-isolation record as-is this pass.",
+                        hostname, ip, resp.status_code,
+                    )
                     continue
                 if not bool(resp.json().get("isolated", True)):
                     with self._lock:
@@ -346,7 +369,17 @@ class IPSMitigator:
                         "clearing stale IDS-side router-isolation record.", hostname, ip
                     )
             except Exception as e:
-                LOGGER.debug("Router isolation status query failed for %s (%s): %s", hostname, ip, e)
+                # BUGFIX (live audit): was LOGGER.debug() -- invisible at this service's
+                # normal INFO level, which is exactly how a real, currently-active
+                # failure mode (the timeout this fix addresses) went unnoticed through
+                # every scheduled reconcile pass since this worker was built. A query
+                # failure here means a stale record will keep showing wrong in Grafana
+                # for at least one more interval -- worth a WARNING every time, not a
+                # DEBUG line nobody's log level will ever surface.
+                LOGGER.warning(
+                    "🔄 [RECONCILE] Status query failed for %s (%s): %s: %s",
+                    hostname, ip, type(e).__name__, e,
+                )
         return cleared
 
     def _ensure_tarpit_target(self, client_ip: str, mac_addr: str, hostname: str, dev_id: str) -> None:

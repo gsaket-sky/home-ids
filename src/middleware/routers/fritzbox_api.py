@@ -124,9 +124,16 @@ def router_isolation_status(ip: str, token: str = Depends(verify_token)):
     if not fritz_pass:
         raise HTTPException(status_code=500, detail="FritzBox credentials not configured.")
 
-    timeout_seconds = float(CONFIG.get("router_webhook_timeout_seconds", 5.0))
+    # BUGFIX (live audit, 2026-09-04): was router_webhook_timeout_seconds (5.0s, tuned
+    # for the isolate/unisolate SET action) -- confirmed live this Fritzbox's
+    # GetWANAccessByIP genuinely takes ~10s round-trip, close enough to 5s that the
+    # CALLER's own HTTP client-side timeout to THIS endpoint (ips.py's
+    # reconcile_router_isolation_state(), also fixed the same day) was timing out even
+    # on requests that would have eventually succeeded here. Own, more generous budget
+    # for this read-only query, independent of the SET actions' timeout.
+    timeout_seconds = float(CONFIG.get("router_status_query_timeout_seconds", 20.0))
     if timeout_seconds <= 0:
-        timeout_seconds = 5.0
+        timeout_seconds = 20.0
 
     try:
         fc = FritzConnection(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)

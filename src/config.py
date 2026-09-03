@@ -164,6 +164,18 @@ DEFAULT_CONFIG = {
     "pihole_api_path": "/api/domains",  # AUDIT FIX #9: configurable Pi-hole API path (v6 base; code appends /deny/exact[/{domain}])
     "router_webhook_url": "http://127.0.0.1:8010/isolate",
     "router_webhook_timeout_seconds": 5.0,
+    # BUGFIX (live audit, 2026-09-04): confirmed live that this Fritzbox's TR-064
+    # GetWANAccessByIP query (used by reconcile_router_isolation_state()'s status
+    # check, NOT the isolate/unisolate SET actions above) genuinely takes ~10s
+    # round-trip -- every reconcile attempt was silently timing out against the 5s
+    # router_webhook_timeout_seconds budget (caught by a bare except, nothing logged
+    # above DEBUG), so family_pc's stale "still router-isolated" record never actually
+    # got cleared despite the reconcile worker running on schedule and Fritzbox
+    # genuinely reporting it unblocked. A separate, more generous timeout for the
+    # read-only status QUERY path specifically -- the isolate/unisolate SET actions
+    # keep their own existing 5s budget unchanged, since they aren't reported broken
+    # and a SET's latency profile isn't necessarily the same as this GET's.
+    "router_status_query_timeout_seconds": 20.0,
     "fritz_ip": "192.168.1.1",
     "fritz_user": "admin",
     "fritz_password": "",
