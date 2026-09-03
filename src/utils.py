@@ -126,7 +126,19 @@ def etld1(domain):
     parts = domain.lower().strip(".").split(".")
     if len(parts) >= 2:
         return ".".join(parts[-2:])
-    return domain
+    # BUGFIX (2026-09-03, live audit): a single-label, no-dot input (the sentinel
+    # "unknown" pipeline.py uses for a raw-IP alert with no resolved hostname, or any
+    # other non-domain junk) used to fall through to `return domain` here -- returning
+    # it VERBATIM as if it were a valid eTLD+1. Confirmed live: fp_engine.py's
+    # mark_false_positive() then treated "unknown" as a real (truthy) base_domain,
+    # calling _immunize_domain("unknown", ...) which correctly rejected it internally
+    # but left the caller's own base_domain variable non-empty -- so the caller's
+    # "no domain, fall back to destination_ip" branch was never reached, its own log
+    # line claimed "domain immunized ('unknown')", and callers comparing base domains
+    # (dns_evasion.py's host_base/queried_bases) risked a spurious single-word match.
+    # Contradicts this function's own "fails closed" docstring/PHASE 0 promise above --
+    # fail closed here too, consistent with the IP-shaped-input guard just above.
+    return ""
 
 def entropy(text):
     """Computes Shannon entropy of a string. High entropy suggests encryption or DGA."""

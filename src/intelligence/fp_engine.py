@@ -1667,12 +1667,34 @@ class AutonomousFPEngine:
             if base_domain:
                 is_new_immunization = self._immunize_domain(base_domain, hostname, source=source)
             else:
-                LOGGER.warning(
-                    "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' — "
-                    "skipping trust-cache immunization, but still recording the training "
-                    "correction and sigma widening below.",
-                    hostname, domain
-                )
+                # BUGFIX (2026-09-03, live audit): a raw-IP alert (queried_domain=
+                # "unknown" -- the majority shape of NetworkIntrusionHypothesis's
+                # zeek_lateral_scan/malicious_ja3/malicious_ja4/zeek_notice evidence)
+                # fell all the way through to a no-op here: no domain to extract, and
+                # unlike DNS_EVASION above, no destination_ip fallback either.
+                # Confirmed live: family_pc_fritz_box's NETWORK_INTRUSION incidents against
+                # raw IPs (149.154.175.56, 20.184.175.17, its own NAS, ...) kept getting
+                # "domain immunized ('unknown')" logged despite _immunize_domain()
+                # rejecting it outright, so only the device-wide sigma widening below
+                # ever actually applied -- the SAME incident kept re-escalating to HIGH
+                # every ~10 minutes for hours instead of durably clearing. Reuses the
+                # exact same destination_ip trust-cache path DNS_EVASION already
+                # established: evaluate()'s TRUST CACHE FAST PATH checks
+                # network_context.destination_ip regardless of signature, and still
+                # re-runs Stage-1 hard-stops on every cache hit (PHASE 3 fix above), so
+                # a genuinely malicious destination re-appearing later isn't blindly
+                # trusted just because this one alert against it was corrected.
+                dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
+                if dest_ip and dest_ip != "unknown":
+                    is_new_immunization = self._immunize_domain(dest_ip, hostname, source=source)
+                    ip_immunized = dest_ip
+                else:
+                    LOGGER.warning(
+                        "⚠️ [FP ENGINE » MARK FP] %s: could not extract a safe base domain from '%s' "
+                        "and no usable destination_ip either — skipping trust-cache immunization, "
+                        "but still recording the training correction and sigma widening below.",
+                        hostname, domain
+                    )
 
         # Self-healing Action: widen THIS device's EWMA sigma — same TUNE_DOWN adjustment
         # the autonomous path applies, scoped to the one device this correction is about.
@@ -1712,10 +1734,15 @@ class AutonomousFPEngine:
                 "sensitive for its normal behavior.",
             ]
         else:
+            if base_domain:
+                trust_cache_note = f"Base domain '{base_domain}' added to trust cache."
+            elif ip_immunized:
+                trust_cache_note = f"No resolved domain — destination IP '{ip_immunized}' added to trust cache instead."
+            else:
+                trust_cache_note = "Base domain could not be extracted and no usable destination IP was available — trust cache NOT updated."
             reasons = [
                 f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
-                f"Base domain '{base_domain}' added to trust cache." if base_domain else
-                "Base domain could not be extracted — trust cache NOT updated for this domain.",
+                trust_cache_note,
             ]
         self._write_muted_log(alert_payload, event_type, reasons, 1.0)
 
