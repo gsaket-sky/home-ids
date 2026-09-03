@@ -138,6 +138,11 @@ check("ollama_soc.py checks device spread against a configurable threshold befor
 # session's changes, unrelated to them. Anchors on the actual should_still_withhold(
 # call instead, and on the real next branch (elif is_valid ... 'suppress'), both of
 # which are stable regardless of how many positional args the call itself takes.
+#
+# NOTE: an independent session fixed this same underlying bug in parallel (commit
+# 484f674, box/main) with a different regex anchored on the if-statement's closing
+# "):" instead -- also correct, kept here as a comment for provenance since both
+# approaches were reconciled to this one during the merge.
 _guard_branch_match = re.search(
     r'if is_valid.*?should_still_withhold\(.*?\):\n(.*?)\n        elif is_valid',
     ollama_soc_src, re.DOTALL,

@@ -120,11 +120,28 @@ if config_path.exists():
         hours = [h for h in range(24) if scheduler_mod.check_cron(cron, datetime.datetime(2026, 1, 5, h, 0))]
         fire_hours[job_name] = set(hours)
 
+    # BUGFIX (2026-09-03): this section's own stated purpose (see the comment above)
+    # is checking the DISCRETE daily/weekly batch jobs against each other -- it
+    # predates shadow_watcher (a "*/5 * * * *" job, added later) being added to the
+    # scheduler. A job firing every 5 minutes around the clock has fire_hours = all
+    # 24 hours by construction, so it trivially "collides" with literally any other
+    # hourly-or-coarser job under this check -- not a real "started at the same time"
+    # resource-contention concern (which is what motivated this check), just a
+    # continuously-running poller that was never meant to be compared this way.
+    # Confirmed live: every reported collision involved shadow_watcher specifically;
+    # the actual discrete batch jobs (ollama_soc/retro_hunter/top_domains_report/
+    # autotune) don't collide with each other at all. Excluding any job whose
+    # fire_hours spans EVERY hour keeps the check meaningful for what it was built
+    # to catch, without needing to hardcode "shadow_watcher" by name (so a future
+    # continuously-running job doesn't silently reintroduce this same false
+    # positive).
+    discrete_fire_hours = {name: hours for name, hours in fire_hours.items() if len(hours) < 24}
+
     collisions = []
-    names = list(fire_hours.keys())
+    names = list(discrete_fire_hours.keys())
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
-            overlap = fire_hours[names[i]] & fire_hours[names[j]]
+            overlap = discrete_fire_hours[names[i]] & discrete_fire_hours[names[j]]
             if overlap:
                 collisions.append((names[i], names[j], overlap))
 

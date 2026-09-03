@@ -10,8 +10,8 @@ plus a hardcoded final fallback, but its only real caller (identity.py's
 apply_device_type()) never passed mac_vendor at all, and the fallback was
 unconditionally "laptop" rather than the "unknown" fp_engine.py's own dev_type_weights
 dict already expected. Real production MACs were checked directly against the `manuf`
-package this fix adds (e.g. aa:bb:cc:dd:ee:12 -> "Espressif Inc.", an IoT device
-currently mis-typed "laptop"; aa:bb:cc:dd:ee:10 -> "Synology Incorporated", a NAS).
+package this fix adds (e.g. 24:6f:28:xx:xx:xx -> "Espressif Inc.", an IoT device
+currently mis-typed "laptop"; 00:11:32:xx:xx:xx -> "Synology Incorporated", a NAS).
 
 Not part of the pytest suite -- run directly:
 `python3 tests/test_phase44_mac_vendor_and_device_type.py`.
@@ -43,12 +43,12 @@ from utils import get_mac_vendor, infer_device_type
 # Section A: get_mac_vendor() -- real production MACs, verified against the actual
 # manuf database this fix adds (not fabricated -- checked live before writing this)
 # ═══════════════════════════════════════════════════════════════════════════════════
-espressif_mac = "aa:bb:cc:dd:ee:12"
+espressif_mac = "24:6f:28:00:00:00"
 espressif_vendor = get_mac_vendor(espressif_mac)
 check("get_mac_vendor() resolves a real production Espressif (IoT) MAC",
       "espressif" in espressif_vendor.lower(), f"got {espressif_vendor!r}")
 
-synology_mac = "aa:bb:cc:dd:ee:10"
+synology_mac = "00:11:32:00:00:00"
 synology_vendor = get_mac_vendor(synology_mac)
 check("get_mac_vendor() resolves a real production Synology (NAS) MAC",
       "synology" in synology_vendor.lower(), f"got {synology_vendor!r}")
