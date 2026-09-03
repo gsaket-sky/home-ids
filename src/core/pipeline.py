@@ -1600,6 +1600,28 @@ class EnginePipeline:
                             "hypothesis_weight": decision.get("hypothesis_weight", 0.0),
                             "reasoning_trail": decision.get("reasoning_trail", []),
                             "incident_id": incident_id,
+                            # PHASE 50 (ollama_soc.py HEE ground-truth wiring): persists the
+                            # SAME attack-vs-benign hypothesis competition decision_engine.py just
+                            # computed for this alert -- previously only reachable in-memory via the
+                            # `decision` dict, discarded once this cycle ended. Closes the "Known
+                            # limitation" this doc's own dependency map already flagged (reasoning_trail
+                            # retains the rendered strings but not the raw name/score/family-count
+                            # triple a downstream consumer can actually grade against). ollama_soc.py's
+                            # batch SOC review reads this back the next time this exact alert pattern
+                            # comes up for LLM review, so a same-day "benign, suppress" LLM verdict can
+                            # be rejected outright when the deterministic engine already corroborated an
+                            # attack hypothesis across >=2 independent evidence families for THIS alert
+                            # -- instead of the LLM's free-text paragraph being the only thing deciding
+                            # whether to auto-suppress. See ai_soc.py's DeterministicValidator.validate()
+                            # `ground_truth` param and ollama_soc.py's _VERDICT_SHAPED_FIELDS (these are
+                            # stripped back out before the evidence-only prompt reaches the LLM -- they
+                            # encode this system's own prior verdict, not a raw observation).
+                            "hee_hypotheses": decision.get("hypotheses", {}),
+                            "hee_independent_sources": decision.get("independent_sources", 0),
+                            "hee_decision_path": decision.get("decision_path", ""),
+                            "hee_evidence_families": sorted({
+                                ev.independence_group for ev in active_evidence if ev.independence_group
+                            }),
                             # BUGFIX (live audit): previously only lived on the in-memory
                             # `decision` dict (read once for the mitigation gate at the
                             # severity-gate check below) and was never persisted onto the

@@ -10,9 +10,31 @@ def _safe_float(val: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
 
+# PHASE 50 (ollama_soc.py HEE ground-truth wiring): decision_engine.py's own
+# `decision_path` values that represent a genuinely corroborated attack conclusion --
+# either a hard-stop (honeypot/ARP-spoof/geofence/confirmed-exploit), a tier-5 IOC
+# confirmed or corroborated across independent families, or a named attack hypothesis
+# that cleared the >=2-independent-family / attack_score>=3.0 HIGH bar
+# (hypotheses/engine.py, decision_engine.py:236-247). If THIS SAME ALERT already
+# reached one of these paths when the live pipeline first evaluated it, an LLM
+# free-text "benign, suppress" verdict reviewing it hours later is disagreeing with a
+# multi-family-corroborated deterministic finding, not just a low/ambiguous score --
+# exactly the situation the evidence-family concept exists to make un-overridable by a
+# single paragraph of LLM reasoning.
+_STRONG_ATTACK_DECISION_PATHS = frozenset({
+    "hard_stop", "tier5_confirmed", "tier5_corroborated", "hypothesis_high",
+})
+
 class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], ev_store: List[Evidence],
-                 original_risk: Optional[float] = None) -> bool:
+                 original_risk: Optional[float] = None,
+                 ground_truth: Optional[Dict[str, Any]] = None) -> bool:
+        """`ground_truth` (PHASE 50, optional/defaulted -- every existing caller that
+        hasn't been updated, e.g. tests, is unaffected) is the ORIGINAL alert's own
+        `hee_decision_path`/`hee_hypotheses`/`hee_independent_sources`, as persisted by
+        pipeline.py at publish time (see alert_payload's own comment there). Absent for
+        alerts published before this existed -- degrades to the pre-PHASE-50 behavior
+        below, not an error."""
         # Prevent LLM hallucination poisoning
         classification = recommendation.get("classification", "").lower()
         reason = recommendation.get("reason", "").lower()
@@ -30,6 +52,29 @@ class DeterministicValidator:
                 if has_bad_rep:
                     LOGGER.warning("[VALIDATOR] Rejected Ollama recommendation: Bad reputation for telemetry claim.")
                     return False
+
+            # PHASE 50: reject "benign" outright if the deterministic engine already
+            # corroborated an attack conclusion for THIS alert across >=2 independent
+            # evidence families (or a hard-stop / confirmed-IOC path) when it was first
+            # evaluated -- see _STRONG_ATTACK_DECISION_PATHS' own comment. This is the
+            # actual "AI proposes, deterministic code disposes" gate: previously the only
+            # things that could reject a benign verdict were a bare IOC>=4.0 evidence item
+            # reconstructed from features, or the literal word "telemetry" -- neither of
+            # which requires the LLM's verdict to actually agree with what
+            # HypothesisEngine/DecisionEngine already found.
+            decision_path = (ground_truth or {}).get("decision_path", "")
+            if decision_path in _STRONG_ATTACK_DECISION_PATHS:
+                hyp = (ground_truth or {}).get("hypotheses", {}) or {}
+                attack_name = hyp.get("attack", {}).get("name", "unknown")
+                sources = (ground_truth or {}).get("independent_sources", 0)
+                LOGGER.warning(
+                    "[VALIDATOR] Rejected Ollama recommendation: this alert's original "
+                    "HEE verdict already corroborated attack hypothesis '%s' across %d "
+                    "independent evidence famil%s (decision_path=%s) -- an LLM 'benign' "
+                    "verdict does not override that without new counter-evidence.",
+                    attack_name, sources, "y" if sources == 1 else "ies", decision_path,
+                )
+                return False
 
         # VERSION 10 (#15/#16, Ollama circular-reasoning guard): the model is no longer
         # shown risk/signature/factors/fp_verdict at all (see ollama_soc.py's

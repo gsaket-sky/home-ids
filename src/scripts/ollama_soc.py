@@ -336,6 +336,11 @@ def _cache_key(payload: dict) -> str:
 _VERDICT_SHAPED_FIELDS = frozenset({
     "risk", "signature", "factors", "fp_verdict", "hypothesis_weight",
     "evidence_verification_required", "reasoning_trail",
+    # PHASE 50: this system's own prior attack-vs-benign hypothesis competition for this
+    # exact alert (pipeline.py, decision_engine.py) -- a verdict/taxonomy decision, not a
+    # raw observation, same reasoning as every other field in this set. Used below to
+    # ground-truth-check the LLM's response AFTER it's generated, never shown beforehand.
+    "hee_hypotheses", "hee_independent_sources", "hee_decision_path", "hee_evidence_families",
 })
 
 
@@ -653,10 +658,21 @@ def main():
             if response_json is None:
                 continue
 
+            # PHASE 50: this alert's own original attack-vs-benign hypothesis competition,
+            # as computed live by decision_engine.py when it was first published (see
+            # pipeline.py's alert_payload comment) -- absent (empty dict) for alerts
+            # published before this existed, in which case the validator's ground-truth
+            # check below is a no-op and behavior is unchanged from before this phase.
+            ground_truth = {
+                "hypotheses": representative.get("hee_hypotheses", {}),
+                "independent_sources": representative.get("hee_independent_sources", 0),
+                "decision_path": representative.get("hee_decision_path", ""),
+            }
+
             # VERSION 10 (#15/#16): original_risk lets the validator's defense-in-depth
             # check catch a response that suspiciously cites the exact score it was
             # never shown (see ai_soc.py's DeterministicValidator.validate()).
-            is_valid = validator.validate(response_json, ev_store, original_risk=risk)
+            is_valid = validator.validate(response_json, ev_store, original_risk=risk, ground_truth=ground_truth)
             cache[key] = {
                 "classification": response_json.get("classification", "unknown"),
                 "confidence": response_json.get("confidence", 0.0),
@@ -696,6 +712,22 @@ def main():
         report_lines.append(f"- **Summary:** {response_json.get('reason', 'N/A')}")
         report_lines.append(f"- **Recommended Action:** `{response_json.get('recommended_action', 'none')}`")
         report_lines.append(f"- **Validator Passed:** `{'YES' if is_valid else 'NO'}`")
+        # PHASE 50: show the deterministic engine's own original finding for this alert,
+        # named-family style (not a bare count) -- matches evidence.py's own
+        # EVIDENCE_FAMILIES vocabulary rather than restating "N independent signal(s)".
+        gt_hyp = representative.get("hee_hypotheses", {}) or {}
+        if gt_hyp:
+            gt_sources = representative.get("hee_independent_sources", 0)
+            gt_families = representative.get("hee_evidence_families", [])
+            families_note = f" ({', '.join(gt_families)})" if gt_families else ""
+            report_lines.append(
+                f"- **Original HEE finding:** attack=`{gt_hyp.get('attack', {}).get('name', '?')}` "
+                f"(score={gt_hyp.get('attack', {}).get('score', 0):.1f}) vs. "
+                f"benign=`{gt_hyp.get('benign', {}).get('name', '?')}` "
+                f"(score={gt_hyp.get('benign', {}).get('score', 0):.1f}) — "
+                f"{gt_sources} independent evidence famil{'y' if gt_sources == 1 else 'ies'}{families_note}, "
+                f"decision_path=`{representative.get('hee_decision_path', 'n/a')}`"
+            )
 
         # PHASE 9 FIX (autonomous action): calls fp_engine.mark_false_positive() -- the same
         # mechanism the "🛡️ Mark False Positive" Telegram button uses -- instead of writing
