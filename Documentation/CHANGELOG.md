@@ -2,6 +2,51 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.13.0] - 2026-09-04
+
+Triggered by an operator report: "family_pc was once again recently tarpitted and after
+removing it from block, Grafana still shows as tarpitted and blocked. It keeps
+recurring -- if unblocked from Fritzbox, the script doesn't know, Grafana doesn't know.
+Only `release_device.py` seems to properly update the state in Grafana."
+
+### 🔄 Router-Isolation Reconcile Worker's Status Query Used the Wrong Timeout, Silently Failing Every Pass
+
+- Root cause, confirmed via live SSH investigation: `reconcile_router_isolation_state()`
+  (`mitigation/ips.py`) -- the mechanism specifically built so that a device unblocked
+  directly in the Fritz!Box admin UI (bypassing this IDS entirely) doesn't stay shown as
+  isolated in Grafana forever -- reused `router_webhook_timeout_seconds` (5.0s, tuned for
+  the *fast* isolate/unisolate SET webhook call) as the timeout for the much slower
+  `GetWANAccessByIP` read-only status QUERY. Timed the real round-trip against this
+  Fritzbox directly: ~10.2 seconds. Every single reconcile attempt -- the boot-time pass
+  and every scheduled 300s pass since the mechanism was built -- silently timed out and
+  was swallowed by a bare `except Exception: LOGGER.debug(...)`, invisible at this
+  service's normal INFO log level. Zero existing test coverage for this whole area,
+  plausibly why it went unnoticed through every restart and every scheduled pass since it
+  was built.
+- Fixed: a new, separate `router_status_query_timeout_seconds` config key (20.0s
+  default) for this query specifically, used both by `ips.py`'s own HTTP call to the
+  internal status endpoint and by that endpoint's own `FritzConnection(timeout=...)`
+  call (`middleware/routers/fritzbox_api.py`'s `router_isolation_status()`). The
+  isolate/unisolate SET actions keep their original 5.0s `router_webhook_timeout_seconds`
+  budget, untouched -- they weren't reported broken and a SET's latency profile isn't
+  necessarily the same as this GET's.
+- Both failure paths (non-200 response, exception) upgraded from silent/DEBUG to
+  `LOGGER.warning()`, so a future recurrence of this failure mode -- for any cause, not
+  just this exact timeout -- doesn't go unnoticed through every scheduled pass again the
+  way this one did.
+- **Separate, by-design limitation clarified, not fixed the same way**: the Layer-2
+  ARP/NDP Scapy "tarpit" containment mechanism (`mitigation/ips.py`'s tarpit target
+  registry) has no reconciliation at all, and structurally can't -- unlike router
+  isolation, it's purely local to this box; Fritz!Box has no visibility into it and
+  nothing external to poll for its real state. Clearing a tarpit entry still requires an
+  explicit release: `release_device.py` / the Telegram release button / (for a stale
+  entry after an out-of-band change) `clear_stale_isolation.py`.
+- New `tests/test_phase55_router_reconcile_timeout.py` (15 checks): the new config
+  key's default and independence from the SET-action timeout, that the reconcile HTTP
+  call actually uses it (mocked via `ips.session.get`), that non-200/exception paths now
+  log at WARNING, and regression guards that a genuine success still clears the stale
+  record exactly as before and that the SET-action timeout key is untouched everywhere.
+
 ## [v12.12.0] - 2026-09-01
 
 Triggered by an operator question: "is Ollama ever completing all the alerts or is it
