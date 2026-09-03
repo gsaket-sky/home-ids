@@ -128,8 +128,15 @@ check("ollama_soc.py's guard is keyed on signature, not the exact (never-repeati
       "sig = payload.get(\"signature\"" in ollama_soc_src)
 check("ollama_soc.py checks device spread against a configurable threshold before suppressing",
       "spread >= multi_device_suppress_guard" in ollama_soc_src)
+# BUGFIX (2026-09-03): the withheld branch's own if-condition grew a
+# should_still_withhold(...) call spanning multiple lines (2026-09-02's streak-
+# exhaustion fix, commit 4d6630a) -- the old regex expected the condition to end
+# right at "spread >= multi_device_suppress_guard:" on one line, so it silently
+# stopped matching anything at all. Anchors on the closing "):" of the (now
+# multi-line) if-statement instead, which is stable regardless of how the
+# condition itself is worded.
 _guard_branch_match = re.search(
-    r'if is_valid.*?spread >= multi_device_suppress_guard:\n(.*?)\n        elif',
+    r'if is_valid.*?\n        \):\n(.*?)\n        elif',
     ollama_soc_src, re.DOTALL,
 )
 check("a withheld suppress's branch does NOT set action_taken=True (so it's reconsidered next run)",

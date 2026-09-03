@@ -53,7 +53,12 @@ def check(name, cond, detail=""):
 _tmpdir = tempfile.mkdtemp()
 os.makedirs(os.path.join(_tmpdir, "state"), exist_ok=True)
 import config as _config_module
-_config_module.CONFIG._data = {
+# BUGFIX (2026-09-03): was CONFIG._data -- LiveConfig.get() actually reads
+# self._config (config.py), so this never redirected anything. The test's own
+# temp-dir isolation was a complete no-op: every run silently read/wrote the
+# REAL production state/feed_health.json instead, confirmed live (test_vt_quota
+# etc. found sitting in it with real accumulated counts from repeated test runs).
+_config_module.CONFIG._config = {
     "state_path": os.path.join(_tmpdir, "state", "ids_state.json"),
     "telegram_token": "", "telegram_chat_id": "",
 }
