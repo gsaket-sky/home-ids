@@ -128,8 +128,18 @@ check("ollama_soc.py's guard is keyed on signature, not the exact (never-repeati
       "sig = payload.get(\"signature\"" in ollama_soc_src)
 check("ollama_soc.py checks device spread against a configurable threshold before suppressing",
       "spread >= multi_device_suppress_guard" in ollama_soc_src)
+# BUGFIX (found while verifying G6/G7, pre-existing since before this session): this
+# regex was written against the guard's original inline-comparison shape
+# ("spread >= multi_device_suppress_guard:" immediately followed by an indented block
+# and "elif"), which stopped existing the moment Phase 49 refactored the check into
+# the should_still_withhold() function call -- confirmed the old pattern already
+# didn't match at commit 4d6630a (Phase 49's own commit), so this check has been
+# silently failing (bool(_guard_branch_match) False) since before any of this
+# session's changes, unrelated to them. Anchors on the actual should_still_withhold(
+# call instead, and on the real next branch (elif is_valid ... 'suppress'), both of
+# which are stable regardless of how many positional args the call itself takes.
 _guard_branch_match = re.search(
-    r'if is_valid.*?spread >= multi_device_suppress_guard:\n(.*?)\n        elif',
+    r'if is_valid.*?should_still_withhold\(.*?\):\n(.*?)\n        elif is_valid',
     ollama_soc_src, re.DOTALL,
 )
 check("a withheld suppress's branch does NOT set action_taken=True (so it's reconsidered next run)",
