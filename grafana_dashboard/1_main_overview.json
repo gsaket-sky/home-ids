@@ -1140,7 +1140,7 @@
         "spec": {
           "id": 9023,
           "title": "🚨 Master Threat Ledger (Complete Multi-Vector Device Matrix)",
-          "description": "The single most important panel in this dashboard set. One row per device, one column per detection signal — statistical (Threat Confidence, ML Outlier, Markov Score, Risk Velocity), threat-intel (TI Risk, AbuseIPDB, VirusTotal), network (JA4+ Hits, Honeypot, Lateral Moves, DoH Intercepts, Port Scans, Outbound Bytes, TXT/NULL Abuse), and containment/lifecycle state (Fritz! Router Block, Layer-2 Tarpit Trapped, Kill-Chain Phase, Probation, Baseline Frozen, Safe Listed). Sort by Threat Confidence to triage fastest. Click a hostname to open its full Device Deep Dive page. Thresholds on the Threat Confidence column (🟢 0-3.99 / 🟡 4-5.99 / 🟠 6-7.99 / 🔴 8+) mirror the engine's own detection_engine.alert_threshold = 6.0 — anything 🟠 or worse has already crossed the line that triggers a real alert.",
+          "description": "The single most important panel in this dashboard set. One row per device, one column per detection signal — statistical (Verdict Confidence, ML Outlier, Markov Score, Risk Velocity), threat-intel (TI Risk, AbuseIPDB, VirusTotal -- Clean/Weak-Unconfirmed/Confirmed bands mirror reputation/classifier.py's real tier cutoffs: >0 is tier-4 'weak signal', TI/VT confirm at >2.0, AbuseIPDB confirms at >=4.0 -- a deliberately higher bar since it's crowd-sourced and noisier), network (JA4+ Hits, Honeypot, Lateral Moves, DoH Intercepts, Port Scans, Outbound Bytes, TXT/NULL Abuse), and containment/lifecycle state (Fritz! Router Block, Layer-2 Tarpit Trapped, Kill-Chain Phase, Probation, Baseline Frozen, Safe Listed). Sort by Verdict Confidence to triage fastest. Click a hostname to open its full Device Deep Dive page. Verdict Confidence is a 0.0-1.0 value (○ 0-0.39 Low / ◔ 0.4-0.59 Moderate / ◑ 0.6-0.79 High / ● 0.8-1.0 Very High) — deliberately shown in blue, not green/yellow/orange/red, since it answers \"how certain is the engine in its own call,\" NOT \"how dangerous is this device\" (that's Verdict's job; reusing severity colors/words here made it read as a second, disagreeing severity score). while Verdict answers \"which call did it make.\" They measure different things and will usually move together (harder evidence produces both a more severe Verdict and higher Confidence in the same branch of decision_engine.py) — a severe Verdict paired with LOW Confidence is unusual and worth a second look, not a display error. A \"Verdict\" column (the exact 0-4 HEE decision-engine state -- BENIGN through CRITICAL -- that drives automatic mitigation, not a derived proxy) sits right next to Verdict Confidence, named to make that pairing explicit.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1164,6 +1164,26 @@
                       }
                     },
                     "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_decision_state{hostname=~\"$device\"}",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "Q",
                     "hidden": false
                   }
                 },
@@ -1593,7 +1613,7 @@
                         "mac": true
                       },
                       "renameByName": {
-                        "Value #A": "Threat Confidence",
+                        "Value #A": "Verdict Confidence",
                         "Value #B": "ML Outlier",
                         "Value #C": "Markov Score",
                         "Value #D": "Risk Velocity",
@@ -1613,7 +1633,8 @@
                         "Value #RB": "Fritz! Router Block",
                         "Value #TN": "TXT/NULL Abuse",
                         "Value #TP": "Layer-2 Tarpit Trapped",
-                        "hostname": "Hostname"
+                        "hostname": "Hostname",
+                        "Value #Q": "Verdict"
                       }
                     }
                   }
@@ -1626,7 +1647,7 @@
                       "fields": [
                         {
                           "desc": true,
-                          "displayName": "Threat Confidence"
+                          "displayName": "Verdict Confidence"
                         }
                       ]
                     }
@@ -1647,7 +1668,7 @@
                 "sortBy": [
                   {
                     "desc": false,
-                    "displayName": "Threat Confidence"
+                    "displayName": "Verdict Confidence"
                   }
                 ]
               },
@@ -1681,6 +1702,88 @@
                   {
                     "matcher": {
                       "id": "byName",
+                      "options": "Verdict"
+                    },
+                    "properties": [
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "0": {
+                                "color": "green",
+                                "index": 0,
+                                "text": "🟢 BENIGN"
+                              },
+                              "1": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 ANOMALOUS"
+                              },
+                              "2": {
+                                "color": "orange",
+                                "index": 2,
+                                "text": "🟠 SUSPICIOUS"
+                              },
+                              "3": {
+                                "color": "red",
+                                "index": 3,
+                                "text": "🔴 HIGH"
+                              },
+                              "4": {
+                                "color": "dark-red",
+                                "index": 4,
+                                "text": "⚫ CRITICAL"
+                              }
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds",
+                          "steps": [
+                            {
+                              "color": "green",
+                              "value": 0
+                            },
+                            {
+                              "color": "yellow",
+                              "value": 1
+                            },
+                            {
+                              "color": "orange",
+                              "value": 2
+                            },
+                            {
+                              "color": "red",
+                              "value": 3
+                            },
+                            {
+                              "color": "dark-red",
+                              "value": 4
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "mode": "gradient",
+                          "type": "color-background"
+                        }
+                      },
+                      {
+                        "id": "custom.width",
+                        "value": 160
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
                       "options": "Hostname"
                     },
                     "properties": [
@@ -1707,7 +1810,7 @@
                   {
                     "matcher": {
                       "id": "byName",
-                      "options": "Threat Confidence"
+                      "options": "Verdict Confidence"
                     },
                     "properties": [
                       {
@@ -1716,48 +1819,48 @@
                           {
                             "options": {
                               "from": 0,
+                              "to": 0.399,
                               "result": {
-                                "color": "green",
+                                "color": "light-blue",
                                 "index": 0,
-                                "text": "🟢 Safe"
-                              },
-                              "to": 3.99
+                                "text": "○ Low Confidence"
+                              }
                             },
                             "type": "range"
                           },
                           {
                             "options": {
-                              "from": 4,
+                              "from": 0.4,
+                              "to": 0.599,
                               "result": {
-                                "color": "yellow",
+                                "color": "blue",
                                 "index": 1,
-                                "text": "🟡 Monitoring"
-                              },
-                              "to": 5.99
+                                "text": "◔ Moderate Confidence"
+                              }
                             },
                             "type": "range"
                           },
                           {
                             "options": {
-                              "from": 6,
+                              "from": 0.6,
+                              "to": 0.799,
                               "result": {
-                                "color": "orange",
+                                "color": "semi-dark-blue",
                                 "index": 2,
-                                "text": "🟠 Suspicious"
-                              },
-                              "to": 7.99
+                                "text": "◑ High Confidence"
+                              }
                             },
                             "type": "range"
                           },
                           {
                             "options": {
-                              "from": 8,
+                              "from": 0.8,
+                              "to": 1.0,
                               "result": {
-                                "color": "red",
+                                "color": "dark-blue",
                                 "index": 3,
-                                "text": "🔴 Critical Threat"
-                              },
-                              "to": 100
+                                "text": "● Very High Confidence"
+                              }
                             },
                             "type": "range"
                           }
@@ -1769,20 +1872,20 @@
                           "mode": "thresholds",
                           "steps": [
                             {
-                              "color": "green",
+                              "color": "light-blue",
                               "value": 0
                             },
                             {
-                              "color": "yellow",
-                              "value": 4
+                              "color": "blue",
+                              "value": 0.4
                             },
                             {
-                              "color": "orange",
-                              "value": 6
+                              "color": "semi-dark-blue",
+                              "value": 0.6
                             },
                             {
-                              "color": "red",
-                              "value": 8
+                              "color": "dark-blue",
+                              "value": 0.8
                             }
                           ]
                         }
@@ -2454,13 +2557,25 @@
                           },
                           {
                             "options": {
-                              "from": 0.1,
+                              "from": 0.01,
+                              "to": 1.99,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Weak/Unconfirmed Signal"
+                              }
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 2.0,
+                              "to": 100,
                               "result": {
                                 "color": "red",
-                                "index": 1,
-                                "text": "🔴 Flagged"
-                              },
-                              "to": 100
+                                "index": 2,
+                                "text": "🔴 Confirmed IOC"
+                              }
                             },
                             "type": "range"
                           }
@@ -2477,11 +2592,11 @@
                             },
                             {
                               "color": "yellow",
-                              "value": 1
+                              "value": 0.01
                             },
                             {
                               "color": "red",
-                              "value": 3.2
+                              "value": 2.0
                             }
                           ]
                         }
@@ -2516,13 +2631,25 @@
                           },
                           {
                             "options": {
-                              "from": 0.1,
+                              "from": 0.01,
+                              "to": 3.99,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Weak/Unconfirmed Signal"
+                              }
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 4.0,
+                              "to": 100,
                               "result": {
                                 "color": "red",
-                                "index": 1,
-                                "text": "🔴 Flagged"
-                              },
-                              "to": 100
+                                "index": 2,
+                                "text": "🔴 Confirmed IOC"
+                              }
                             },
                             "type": "range"
                           }
@@ -2538,8 +2665,12 @@
                               "value": 0
                             },
                             {
+                              "color": "yellow",
+                              "value": 0.01
+                            },
+                            {
                               "color": "red",
-                              "value": 3
+                              "value": 4.0
                             }
                           ]
                         }
@@ -2574,13 +2705,25 @@
                           },
                           {
                             "options": {
-                              "from": 0.1,
+                              "from": 0.01,
+                              "to": 1.99,
+                              "result": {
+                                "color": "yellow",
+                                "index": 1,
+                                "text": "🟡 Weak/Unconfirmed Signal"
+                              }
+                            },
+                            "type": "range"
+                          },
+                          {
+                            "options": {
+                              "from": 2.0,
+                              "to": 100,
                               "result": {
                                 "color": "red",
-                                "index": 1,
-                                "text": "🔴 Flagged"
-                              },
-                              "to": 100
+                                "index": 2,
+                                "text": "🔴 Confirmed IOC"
+                              }
                             },
                             "type": "range"
                           }
@@ -2597,11 +2740,11 @@
                             },
                             {
                               "color": "yellow",
-                              "value": 1
+                              "value": 0.01
                             },
                             {
                               "color": "red",
-                              "value": 3
+                              "value": 2.0
                             }
                           ]
                         }
@@ -2749,6 +2892,18 @@
                               }
                             },
                             "type": "value"
+                          },
+                          {
+                            "options": {
+                              "from": 1,
+                              "to": 999999,
+                              "result": {
+                                "color": "red",
+                                "index": 1,
+                                "text": "🚨 Lateral Movement Detected"
+                              }
+                            },
+                            "type": "range"
                           }
                         ]
                       },
@@ -3120,7 +3275,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "### Welcome — start here\n\nThis is one of **4 linked dashboards**. Use the links at the top-right of every dashboard (or the corner **Navigation** menu) to jump between them:\n\n1. **Overview** (this page) — is the system healthy, and what's the current threat picture across your whole network?\n2. **Threat Landscape** — where is the threat coming from (countries, C2, DNS tunneling, scanning)?\n3. **Device Deep Dive** — pick one device and see its full history.\n4. **System Tuning, Healing & Health** — how the AI is tuning itself, what it's silently suppressed, and whether the engine process itself is healthy.\n\n**What the colors mean everywhere in this dashboard set:** 🟢 Safe (0-3.99) → 🟡 Monitoring (4-5.99) → 🟠 Suspicious (6-7.99, this is the engine's real alert_threshold) → 🔴 Critical (8+). These bands are not arbitrary — they come directly from `detection_engine.alert_threshold: 6.0` in `config.yaml`.\n\n**If you see a 🔴 Critical device:** open its row link to go to Device Deep Dive, read the Kill-Chain Phase and which specific signals fired (TI/AbuseIPDB/VirusTotal flags = reputation, Port Scans/Lateral Moves = it's attacking other devices, Outbound Bytes spike = possible data exfiltration). If `interactive_blocking_enabled` is on, you'll get a Telegram prompt to approve isolation; DNS sinkholing (Pi-hole) has already happened automatically regardless. Use the Isolate/Release links on the Hostname column to act immediately without waiting for Telegram.",
+                "content": "### Welcome — start here\n\nThis is one of **4 linked dashboards**. Use the links at the top-right of every dashboard (or the corner **Navigation** menu) to jump between them:\n\n1. **Overview** (this page) — is the system healthy, and what's the current threat picture across your whole network?\n2. **Threat Landscape** — where is the threat coming from (countries, C2, DNS tunneling, scanning)?\n3. **Device Deep Dive** — pick one device and see its full history.\n4. **System Tuning, Healing & Health** — how the AI is tuning itself, what it's silently suppressed, and whether the engine process itself is healthy.\n\n**What the colors mean:** Look at the **Verdict** column first — that's the engine's actual decision: 🟢 BENIGN → 🟡 ANOMALOUS → 🟠 SUSPICIOUS → 🔴 HIGH → ⚫ CRITICAL. HIGH and CRITICAL are the states that can trigger automatic mitigation. **Verdict Confidence** next to it is a separate signal, shown in blue (○ Low → ◔ Moderate → ◑ High → ● Very High) so it's never mistaken for a second danger score — it tells you how certain the engine is in that Verdict, not how dangerous the device is. A HIGH or CRITICAL Verdict paired with only Low Confidence is unusual and worth a second look, not a contradiction: they measure different things.\n\n**If you see a 🔴 HIGH or ⚫ CRITICAL device:** open its row link to go to Device Deep Dive, read the Kill-Chain Phase and which specific signals fired (TI/AbuseIPDB/VirusTotal flags = reputation, Port Scans/Lateral Moves = it's attacking other devices, Outbound Bytes spike = possible data exfiltration). If `interactive_blocking_enabled` is on, you'll get a Telegram prompt to approve isolation; DNS sinkholing (Pi-hole) has already happened automatically regardless. Use the Isolate/Release links on the Hostname column to act immediately without waiting for Telegram.",
                 "mode": "markdown"
               },
               "fieldConfig": {

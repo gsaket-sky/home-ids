@@ -262,7 +262,7 @@
         "spec": {
           "id": 14,
           "title": "Network Geographic Footprint",
-          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_country_marker (same risk value as home_ids_geo_risk, paired with a static per-country centroid so the map has coordinates to plot -- see core/country_centroids.py) (0 = benign, 9+ = matches a blocked country in geofencing.geofencing_countries). Requires paths.geoip_db to have loaded successfully at startup — if this map is empty even though you have real traffic, check your startup logs for a GeoIP load failure before assuming your network is quiet.",
+          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_country_marker (same risk value as home_ids_geo_risk, paired with a static per-country centroid so the map has coordinates to plot -- see core/country_centroids.py). This metric is ONLY EVER SET once a connection's risk crosses alert_threshold=6.0 (metrics_sync.py) -- a country either doesn't appear on this map at all (benign), or already scores at least ~6 the moment it does. 6-8.99 = orange (crossed the alert line), 9+ = red (matches a blocked country in geofencing.geofenced_countries in config.yaml).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1023,7 +1023,7 @@
         "spec": {
           "id": 3001,
           "title": "🗺️ Top Risky Countries (GeoIP)",
-          "description": "The same home_ids_geo_risk data as the map above, as a sortable table — useful when you want exact numbers rather than reading map marker sizes. topk(10, ...) shows your 10 highest-risk countries by connection volume/severity.",
+          "description": "The same home_ids_geo_risk data as the map above, as a sortable table — useful when you want exact numbers rather than reading map marker sizes. topk(10, ...) shows your 10 highest-risk countries by connection volume/severity. Same gating as the map: every row here already crossed alert_threshold=6.0 to have a value at all -- there's no 'low risk' row, only 'not on this list yet'.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1210,6 +1210,210 @@
                     }
                   }
                 },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3100": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3100,
+          "title": "🌍 Full Geographic Traffic Context (All Countries, Not Just Risky Ones)",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "code": {
+                  "language": "plaintext",
+                  "showLineNumbers": false,
+                  "showMiniMap": false
+                },
+                "content": "",
+                "mode": "markdown"
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-3101": {
+        "kind": "Panel",
+        "spec": {
+          "id": 3101,
+          "title": "Geographic Traffic Context (All Countries, Not Just Risky Ones)",
+          "description": "The panels above only surface countries that crossed a risk threshold. This is the full picture -- how much traffic, how many devices, and how much DNS activity your network sends to every country it talks to, risky or not. Useful for spotting 'why does any of my traffic go there at all' even when nothing has been flagged.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (country) (home_ids_geo_traffic_total)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (country) (home_ids_geo_device_count)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (country) (home_ids_geo_queries_per_minute)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (country) (home_ids_geo_unique_domains)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "avg by (country) (home_ids_geo_entropy)",
+                        "format": "table",
+                        "instant": true
+                      }
+                    },
+                    "refId": "E",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "mode": "outer",
+                      "byField": "country"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "continent": true
+                      },
+                      "renameByName": {
+                        "country": "Country",
+                        "Value #A": "Total Traffic Events",
+                        "Value #B": "Devices",
+                        "Value #C": "Queries/Min",
+                        "Value #D": "Unique Domains",
+                        "Value #E": "Entropy"
+                      }
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "showHeader": true
+              },
+              "fieldConfig": {
+                "defaults": {},
                 "overrides": []
               }
             }
@@ -1413,6 +1617,32 @@
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-3003"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 67,
+              "width": 24,
+              "height": 4,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3100"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 71,
+              "width": 24,
+              "height": 12,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-3101"
               }
             }
           }
