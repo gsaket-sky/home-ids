@@ -377,6 +377,7 @@ from incident_key import (
     signature_base as _signature_base,
 )
 from intelligence.hypotheses.engine import HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+from intelligence.hypotheses.evidence_graph import EvidenceGraph
 
 
 def _target_for_key(payload: dict) -> str:
@@ -516,6 +517,38 @@ def _evidence_relevance_breakdown(representative: dict) -> "dict | None":
         "absent_relevant": sorted(relevant - present),
         "present_irrelevant": sorted(present - relevant - {"reputation"}),
     }
+
+
+def _build_alert_evidence_graph(representative: dict) -> "EvidenceGraph | None":
+    """PHASE 61 (Gap 6 item 5, evidence graph): builds a per-alert EvidenceGraph from
+    the same hee_evidence_types (Phase 58) and HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+    registry (Phase 59) _evidence_relevance_breakdown() already uses -- a visual/
+    graph-shaped rendering of the identical relationship data, not a second
+    independent computation. Evidence nodes are built from TYPE NAMES ONLY (this
+    alert's persisted hee_evidence_types is a list of strings, not full Evidence
+    objects with real value/domain/confidence -- those live and die within one
+    pipeline.py cycle, never persisted) -- destination-targeting edges won't
+    populate for that reason; this graph's real value is the device->evidence->
+    hypothesis relevance structure, which the available data DOES support fully.
+    Returns None under the same conditions _evidence_relevance_breakdown() does
+    (uncovered hypothesis, or no hee_evidence_types -- pre-Phase-58 alert)."""
+    sig = _signature_base(representative.get("signature", ""))
+    relevant = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(sig)
+    evidence_types = representative.get("hee_evidence_types", []) or []
+    if not relevant or not evidence_types:
+        return None
+    device_id = representative.get("device", {}).get("id", "unknown")
+    device_label = representative.get("device", {}).get("hostname") or device_id
+    now = time.time()
+    synthetic_ev_store = [
+        Evidence(type=t, source="persisted", timestamp=now, device=device_id, value=1.0,
+                 confidence=1.0, independence_group="", provenance="ollama_soc:hee_evidence_types")
+        for t in evidence_types
+    ]
+    graph = EvidenceGraph(device_id, device_label)
+    graph.add_evidence_list(synthetic_ev_store)
+    graph.add_hypothesis_relevance(sig, relevant)
+    return graph
 
 
 def _build_evidence_only_payload(representative: dict) -> dict:
@@ -1077,6 +1110,17 @@ def main():
                 rel_parts.append(f"present but IRRELEVANT to this hypothesis: {', '.join(relevance['present_irrelevant'])}")
             report_lines.append(
                 f"- **Evidence relevance ({relevance['hypothesis']}):** " + " | ".join(rel_parts)
+            )
+        # PHASE 61: graph-shaped rendering of the same relevance data right above,
+        # inside a collapsible <details> block (GitHub-flavored markdown, same as
+        # this repo's other reports render) -- collapsed by default so the common
+        # case (skim the flat line above) isn't cluttered by it.
+        graph = _build_alert_evidence_graph(representative)
+        if graph:
+            report_lines.append(
+                "  <details><summary>Evidence graph</summary>\n\n  ```\n"
+                + "\n".join(f"  {line}" for line in graph.render_text().splitlines())
+                + "\n  ```\n  </details>"
             )
 
         # PHASE 9 FIX (autonomous action): calls fp_engine.mark_false_positive() -- the same
