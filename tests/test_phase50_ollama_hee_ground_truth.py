@@ -136,7 +136,10 @@ check("the 4 new hee_* fields are stripped from what the LLM prompt actually see
 
 check("main() actually threads ground_truth= into the real validator.validate() call "
       "(not a second, drifting reimplementation)",
-      "validator.validate(response_json, ev_store, original_risk=risk, ground_truth=ground_truth)" in _soc_src)
+      # PHASE 58b: the call gained a baseline_familiarity= kwarg and was reformatted
+      # across multiple lines -- see test_phase58b_validator_destination_baseline.py
+      # for that change's own coverage.
+      "response_json, ev_store, original_risk=risk, ground_truth=ground_truth," in _soc_src)
 
 check("ground_truth is built FROM the representative alert's own hee_* fields (reads "
       "back what pipeline.py persisted), not hardcoded/invented locally",

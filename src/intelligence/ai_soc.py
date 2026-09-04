@@ -1,6 +1,14 @@
 import logging
 from typing import Dict, Any, List, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_SHAPED_EVIDENCE_TYPES
+from intelligence.fp_engine import FAMILIARITY_TRUST_BAR
+
+# PHASE 58b: reputation tiers treated as "trusted/known infrastructure" -- matches
+# DeviceProfileBenignHypothesis's own is_trusted_destination check (hypotheses/
+# engine.py: `rep_vector.tier in (0, 1, 2)`) verbatim, so the validator requires the
+# SAME bar the deterministic engine already requires before it will let a device-type
+# explanation stand in for genuine evidence.
+_TRUSTED_REP_TIERS = frozenset({0, 1, 2})
 
 LOGGER = logging.getLogger(__name__)
 
@@ -41,19 +49,24 @@ _STRONG_ATTACK_DECISION_PATHS = frozenset({
 #
 # Bumped to 3 by Phase 58 (attack-shaped-evidence check, see below) -- the first actual
 # use of this versioning mechanism to invalidate existing cache entries the way it was
-# built for.
-VALIDATOR_SCHEMA_VERSION = 3
+# built for. Bumped to 4 by Phase 58b (destination-ownership/baseline-familiarity check).
+VALIDATOR_SCHEMA_VERSION = 4
 
 class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], ev_store: List[Evidence],
                  original_risk: Optional[float] = None,
-                 ground_truth: Optional[Dict[str, Any]] = None) -> bool:
+                 ground_truth: Optional[Dict[str, Any]] = None,
+                 baseline_familiarity: float = 0.0) -> bool:
         """`ground_truth` (PHASE 50, optional/defaulted -- every existing caller that
         hasn't been updated, e.g. tests, is unaffected) is the ORIGINAL alert's own
         `hee_decision_path`/`hee_hypotheses`/`hee_independent_sources`, as persisted by
         pipeline.py at publish time (see alert_payload's own comment there). Absent for
         alerts published before this existed -- degrades to the pre-PHASE-50 behavior
-        below, not an error."""
+        below, not an error. `baseline_familiarity` (PHASE 58b, optional/defaulted --
+        every existing caller unaffected) is the CALLER's own
+        AutonomousFPEngine.get_baseline_familiarity() result for this device+
+        port/ASN/domain -- 0.0 (the safe default) for any caller that hasn't threaded
+        it through yet."""
         # Prevent LLM hallucination poisoning
         classification = recommendation.get("classification", "").lower()
         reason = recommendation.get("reason", "").lower()
@@ -126,6 +139,30 @@ class DeterministicValidator:
                     "%s is present on this alert's own evaluation -- a 'benign' verdict "
                     "does not override that regardless of device-type reasoning.",
                     sorted(attack_shaped_present),
+                )
+                return False
+
+            # PHASE 58b (Gap 6 item 2, destination-ownership/baseline-familiarity check):
+            # a "benign" verdict needs SOME deterministic corroboration, not just the
+            # LLM's own say-so -- mirrors DeviceProfileBenignHypothesis's own
+            # requirement (hypotheses/engine.py) that a device-profile explanation only
+            # holds when the destination is EITHER already-trusted/known infrastructure
+            # (rep_vector.tier in (0,1,2)) OR this specific device has personally,
+            # repeatedly used this exact port/ASN/domain before without incident
+            # (baseline_familiarity >= FAMILIARITY_TRUST_BAR). If NEITHER holds -- an
+            # unclassified/unreputable destination this device has never really talked
+            # to before -- a "benign" verdict is unsupported regardless of how the LLM
+            # phrases its reasoning. Absent rep_tier (pre-Phase-58b alert) degrades to a
+            # no-op, same backward-compat treatment as every other ground_truth field.
+            rep_tier = (ground_truth or {}).get("rep_tier")
+            if (rep_tier is not None and rep_tier not in _TRUSTED_REP_TIERS
+                    and baseline_familiarity < FAMILIARITY_TRUST_BAR):
+                LOGGER.warning(
+                    "[VALIDATOR] Rejected Ollama recommendation: destination reputation "
+                    "tier %s is not trusted/known infrastructure, and this device has no "
+                    "learned familiarity with it (%.2f < %.2f) -- a 'benign' verdict "
+                    "needs deterministic corroboration, not just the LLM's own reasoning.",
+                    rep_tier, baseline_familiarity, FAMILIARITY_TRUST_BAR,
                 )
                 return False
 

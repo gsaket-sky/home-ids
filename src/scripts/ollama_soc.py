@@ -474,6 +474,9 @@ _VERDICT_SHAPED_FIELDS = frozenset({
     # deterministic evaluation found, threaded into ground_truth below for
     # DeterministicValidator's attack-shaped-evidence check, never shown to the LLM.
     "hee_evidence_types",
+    # PHASE 58b: this cycle's own reputation tier for the destination -- a verdict
+    # this system already computed, same treatment as every other hee_* field here.
+    "hee_rep_tier",
 })
 
 
@@ -865,12 +868,41 @@ def main():
                 # DeterministicValidator's attack-shaped-evidence check degrades to a no-op
                 # for those, same backward-compat treatment as every other hee_* field here.
                 "evidence_types": representative.get("hee_evidence_types", []),
+                # PHASE 58b: absent (0, "unknown" tier) for alerts published before this
+                # existed -- degrades the same way as every other hee_* field here.
+                "rep_tier": representative.get("hee_rep_tier"),
             }
+
+            # PHASE 58b (destination-ownership/baseline-familiarity validator
+            # precondition): reuses fp_engine's EXISTING learned per-device baseline
+            # (record_device_baseline_observation()/get_baseline_familiarity(), already
+            # populated every cycle by the live pipeline -- see fp_engine.py) rather than
+            # inventing a second, parallel familiarity mechanism here. Mirrors exactly
+            # what DeviceProfileBenignHypothesis already requires at the live-scoring
+            # pass (hypotheses/engine.py: is_trusted_destination OR is_familiar_destination)
+            # -- ai_soc.py's validator now requires the SAME bar before trusting a
+            # "benign" verdict, not a looser one.
+            nc = representative.get("network_context", {}) or {}
+            dest_ip = nc.get("destination_ip")
+            asn_owner = None
+            if dest_ip:
+                try:
+                    asn_res = geoip_engine.lookup_asn(dest_ip)
+                    asn_owner = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+                except Exception:
+                    asn_owner = None
+            domain_base = target if target not in ("unknown", dest_ip) else None
+            baseline_familiarity = fp_engine.get_baseline_familiarity(
+                device_id, dest_port=nc.get("destination_port"), asn_owner=asn_owner, domain_base=domain_base,
+            )
 
             # VERSION 10 (#15/#16): original_risk lets the validator's defense-in-depth
             # check catch a response that suspiciously cites the exact score it was
             # never shown (see ai_soc.py's DeterministicValidator.validate()).
-            is_valid = validator.validate(response_json, ev_store, original_risk=risk, ground_truth=ground_truth)
+            is_valid = validator.validate(
+                response_json, ev_store, original_risk=risk, ground_truth=ground_truth,
+                baseline_familiarity=baseline_familiarity,
+            )
             cache[pcache_key] = {
                 "cache_key": key,  # PHASE 57: human-readable grouping identity, for debugging/audit only
                 "hypothesis": response_json.get("hypothesis", ""),

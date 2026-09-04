@@ -82,6 +82,19 @@ from intelligence.local_intel import LocalConfirmedIntel
 # ---------------------------------------------------------------------------
 LOGGER = logging.getLogger("home_ids.fp_engine")
 
+# PHASE 58b: module-level (not buried as a class-private attribute) so both
+# hypotheses/engine.py's DeviceProfileBenignHypothesis and ai_soc.py's
+# DeterministicValidator read the exact same "is this get_baseline_familiarity() score
+# high enough to trust" bar -- a familiarity of 0.6 means AutonomousFPEngine.
+# get_baseline_familiarity() has recorded at least 3 of the 5 observations needed to
+# reach full (1.0) familiarity for this device+port/ASN/domain, without that ever
+# becoming a CONFIRMED_THREAT (baseline observations are only ever recorded from
+# cycles the HEE itself already called BENIGN/ANOMALOUS -- see pipeline.py). Hoisted
+# here specifically so a future change to what "familiar" means can't silently drift
+# between the two consumers, same reasoning as hypotheses/evidence.py's
+# ATTACK_SHAPED_EVIDENCE_TYPES hoist.
+FAMILIARITY_TRUST_BAR = 0.6
+
 
 # ---------------------------------------------------------------------------
 # TUNABLE CONSTANTS

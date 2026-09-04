@@ -1,6 +1,7 @@
 from typing import List, Dict, Any
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore, ATTACK_SHAPED_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
+from intelligence.fp_engine import FAMILIARITY_TRUST_BAR
 
 class Hypothesis:
     def __init__(self, name: str):
@@ -551,7 +552,10 @@ class DeviceProfileBenignHypothesis(Hypothesis):
     # recorded from cycles the HEE itself already called BENIGN/ANOMALOUS -- see
     # pipeline.py). A per-device LEARNED pattern, not a global reputation tier or any
     # hardcoded list -- fully generic, ports to any home network unchanged.
-    _FAMILIARITY_TRUST_BAR = 0.6
+    # PHASE 58b: hoisted to fp_engine.py's module-level FAMILIARITY_TRUST_BAR so
+    # ai_soc.py's DeterministicValidator shares the exact same bar -- see that
+    # constant's own comment.
+    _FAMILIARITY_TRUST_BAR = FAMILIARITY_TRUST_BAR
 
     def __init__(self):
         super().__init__("DEVICE_PROFILE_TELEMETRY")

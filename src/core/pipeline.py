@@ -1667,6 +1667,15 @@ class EnginePipeline:
                             # the SAME active_evidence list already in scope here, same
                             # treatment as hee_evidence_families right above.
                             "hee_evidence_types": sorted({ev.type for ev in active_evidence}),
+                            # PHASE 58b (destination-ownership/baseline-familiarity
+                            # validator precondition): this cycle's own reputation tier
+                            # for the destination -- rep_vector is already computed above
+                            # (feeds decision_engine.evaluate() itself), reused verbatim
+                            # rather than ai_soc.py/ollama_soc.py re-deriving a
+                            # ReputationClassifier.classify() call independently, which
+                            # could disagree with what the live pipeline actually used if
+                            # TI feeds changed between publish time and LLM review time.
+                            "hee_rep_tier": rep_vector.tier,
                             # BUGFIX (live audit): previously only lived on the in-memory
                             # `decision` dict (read once for the mitigation gate at the
                             # severity-gate check below) and was never persisted onto the

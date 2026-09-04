@@ -173,9 +173,11 @@ check("ollama_soc.py threads hee_evidence_types into ground_truth as 'evidence_t
 
 _ai_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "ai_soc.py").read_text(encoding="utf-8")
 check("VALIDATOR_SCHEMA_VERSION was actually bumped for this change (not left at "
-      "Phase 57's value -- a validator logic change with no version bump would defeat "
-      "the entire point of Phase 57's cache-key versioning)",
-      "VALIDATOR_SCHEMA_VERSION = 3" in _ai_soc_src and VALIDATOR_SCHEMA_VERSION == 3)
+      "Phase 57's value 2 -- a validator logic change with no version bump would defeat "
+      "the entire point of Phase 57's cache-key versioning). >=3 rather than ==3 since "
+      "a later phase (58b) legitimately bumps it further -- see "
+      "test_phase58b_validator_destination_baseline.py for that one's own coverage.",
+      VALIDATOR_SCHEMA_VERSION >= 3)
 
 check("ATTACK_SHAPED_EVIDENCE_TYPES is imported from hypotheses/evidence.py, not "
       "redefined locally in ai_soc.py",
