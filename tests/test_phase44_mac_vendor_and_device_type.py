@@ -98,10 +98,14 @@ check("a real, resolved hostname still classifies correctly (hostname layer take
       infer_device_type("home-router", mac_vendor=espressif_vendor) == "router",
       f"got {infer_device_type('home-router', mac_vendor=espressif_vendor)!r}")
 check("REGRESSION GUARD: iphone-shaped hostname still types 'phone'",
-      infer_device_type("iphone_fritz_box") == "phone")
+      # "iphone" kept literally here (unlike the generic device-name examples
+      # elsewhere in this repo) -- infer_device_type()'s own pattern table (utils.py)
+      # keys on that exact substring, so this is testing recognized keyword-matching
+      # logic, not narrating a real device on any specific network.
+      infer_device_type("example_iphone_fritz_box") == "phone")
 check("REGRESSION GUARD: a genuinely laptop-shaped hostname still types 'laptop' "
       "(the fix only changed the FALLBACK, not real laptop detection)",
-      infer_device_type("family_pc_fritz_box") == "laptop")
+      infer_device_type("example_pc_fritz_box") == "laptop")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

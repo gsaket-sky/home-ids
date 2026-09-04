@@ -88,13 +88,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
     state_path = str(state_dir / "ids_state.json")
 
     sm = StateManager(state_path=state_path)
-    sm.get_or_create("dev_with_hostname", "192.168.1.50", "family_pc_fritz_box")
+    sm.get_or_create("dev_with_hostname", "192.168.1.50", "example_pc_fritz_box")
     sm.get_or_create("dev_no_hostname", "192.168.1.51", "unknown")
     sm.flush_to_disk()
 
     display_map = _load_device_display_map(state_dir)
     check("device-display map resolves a device WITH a known hostname to that hostname",
-          display_map.get("dev_with_hostname") == "family_pc_fritz_box")
+          display_map.get("dev_with_hostname") == "example_pc_fritz_box")
     check("device-display map falls back to IP (never the bare device_id) when hostname "
           "is unknown -- this is the exact rule requested: hostname first, IP fallback, "
           "never a raw device_id hash",
@@ -118,7 +118,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         }) + "\n")
         # the device that already confirmed it itself -- must be EXCLUDED (pre-existing behavior)
         f.write(json.dumps({
-            "timestamp": now, "device": {"id": "confirming_device_1", "hostname": "family_pc", "ip": "192.168.1.12"},
+            "timestamp": now, "device": {"id": "confirming_device_1", "hostname": "example_pc", "ip": "192.168.1.12"},
             "network_context": {"destination_ip": "203.0.113.99", "queried_domain": "unknown"},
         }) + "\n")
 
@@ -176,12 +176,12 @@ def _simulate_withheld_occurrence(cache_entry: dict, devices_now: set, dev_displ
     return outcome_detail
 
 
-dmap = {"dev_a": "family_pc_fritz_box", "dev_b": "asus_laptop_fritz_box", "dev_c": "applewatch_fritz_box"}
+dmap = {"dev_a": "example_pc_fritz_box", "dev_b": "example_laptop_fritz_box", "dev_c": "example_smartwatch_fritz_box"}
 
 cache_entry = {}
 detail1 = _simulate_withheld_occurrence(cache_entry, {"dev_a", "dev_b"}, dmap, time.time())
 check("first occurrence: no prior history to compare against, lists all current devices as the finding",
-      "first withheld" in detail1 and "family_pc_fritz_box" in detail1 and "asus_laptop_fritz_box" in detail1,
+      "first withheld" in detail1 and "example_pc_fritz_box" in detail1 and "example_laptop_fritz_box" in detail1,
       detail1)
 check("first occurrence seeds withheld_history with exactly one entry",
       len(cache_entry["withheld_history"]) == 1)
@@ -194,11 +194,11 @@ check("THE FIX (no new spread case): repeat occurrence with the SAME device set 
 detail3 = _simulate_withheld_occurrence(cache_entry, {"dev_a", "dev_b", "dev_c"}, dmap, time.time())
 check("THE FIX (the actual user requirement): a genuinely new device joining is identified "
       "BY NAME, not just as a count increment",
-      "newly joined" in detail3 and "applewatch_fritz_box" in detail3, detail3)
+      "newly joined" in detail3 and "example_smartwatch_fritz_box" in detail3, detail3)
 check("REGRESSION GUARD: the newly-joined phrase does NOT also re-list dev_a/dev_b as "
       "'newly joined' -- only the genuinely new device(s), diffed against the LAST "
       "entry only",
-      detail3.count("newly joined:") == 1 and "newly joined: applewatch_fritz_box" in detail3, detail3)
+      detail3.count("newly joined:") == 1 and "newly joined: example_smartwatch_fritz_box" in detail3, detail3)
 check("spread-count sequence in the trend phrase reflects the real history (2→2→3)",
       "2→2→3" in detail3, detail3)
 
@@ -211,7 +211,7 @@ _simulate_withheld_occurrence(cache_entry2, {"dev_a"}, dmap, time.time())  # dev
 detail_reappear = _simulate_withheld_occurrence(cache_entry2, {"dev_a", "dev_b"}, dmap, time.time())
 check("a device that dropped out and reappeared IS correctly flagged as newly joined "
       "again (diff against the immediately-preceding entry, which no longer had it)",
-      "newly joined" in detail_reappear and "asus_laptop_fritz_box" in detail_reappear, detail_reappear)
+      "newly joined" in detail_reappear and "example_laptop_fritz_box" in detail_reappear, detail_reappear)
 
 # Cap check: 21 occurrences should leave exactly 20 entries.
 cache_entry3 = {}

@@ -419,7 +419,7 @@ check("THE FIX: a genuinely-confirmed no-PTR-record IP (9.9.9.2) still counts as
 # public resolver (e.g. a Chromecast querying 8.8.8.8 directly instead of through
 # Pi-hole) was guaranteed to be flagged as "unexplained" -- the connection itself IS
 # how domain resolution happens, so by definition no domain lookup can ever explain it.
-# Confirmed live: chromecast_fritz_box flagged for "no matching DNS lookup history" on
+# Confirmed live: example_castdevice_fritz_box flagged for "no matching DNS lookup history" on
 # a connection to 8.8.8.8.
 # ═══════════════════════════════════════════════════════════════════════════════════
 from intelligence.detectors.dns_evasion import _is_known_dns_resolver, audit_device, DeviceBurstAudit

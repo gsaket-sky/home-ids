@@ -2188,7 +2188,7 @@ class EnginePipeline:
                                 # decision engine's own HIGH-vs-CRITICAL state) had its headline read
                                 # "monitoring only" directly above an "Action taken: TARPITTED" line a
                                 # few lines further down in the SAME message -- confirmed live on a
-                                # real family_pc_fritz_box alert. Same bug class as the 8.0
+                                # real example_pc_fritz_box alert. Same bug class as the 8.0
                                 # "WAITING FOR APPROVAL contradiction" fix; this is the other half of
                                 # the SAME containment_status value that fix never got extended to.
                                 # SECOND BUGFIX, caught by this fix's own regression test: a bare

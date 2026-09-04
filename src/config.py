@@ -169,7 +169,7 @@ DEFAULT_CONFIG = {
     # check, NOT the isolate/unisolate SET actions above) genuinely takes ~10s
     # round-trip -- every reconcile attempt was silently timing out against the 5s
     # router_webhook_timeout_seconds budget (caught by a bare except, nothing logged
-    # above DEBUG), so family_pc's stale "still router-isolated" record never actually
+    # above DEBUG), so example_pc's stale "still router-isolated" record never actually
     # got cleared despite the reconcile worker running on schedule and Fritzbox
     # genuinely reporting it unblocked. A separate, more generous timeout for the
     # read-only status QUERY path specifically -- the isolate/unisolate SET actions

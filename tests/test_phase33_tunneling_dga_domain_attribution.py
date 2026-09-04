@@ -96,7 +96,7 @@ _BASE_DGA_FEATS = {
 # longer trips dns_tunnel_v2 just because an unrelated top_domain isn't CDN-recognized.
 quickconnect_feats = dict(_BASE_TUNNEL_FEATS,
     max_label_length=57.0,
-    max_label_domain="syn6-abcdefghijklmnopqrstuvwxyiaaaaaaaaaaaaaaaaaaaaaaaaaa.example.direct.quickconnect.to")
+    max_label_domain="syn6-abcdefghijklmnopqrstuvwxyiaaaaaaaaaaaaaaaaaaaaaaaaaa.exampleuser.direct.quickconnect.to")
 check("THE CORE FIX: a safe-listed QuickConnect DDNS long label no longer false-positives "
       "dns_tunnel_v2 via an unrelated top_domain",
       _tunnel_evidence(quickconnect_feats, "some-unrelated-domain.example") == [])

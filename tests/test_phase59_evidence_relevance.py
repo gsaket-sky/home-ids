@@ -11,7 +11,7 @@ report reader) an explicit, deterministic breakdown of which of THIS alert's own
 evidence types are actually relevant to the hypothesis in question, so reasoning like
 "query rate is low, therefore NETWORK_INTRUSION is unlikely" has a structural nudge
 away from it -- query rate was never relevant to NETWORK_INTRUSION in the first place
-(confirmed live: both amazon_echoshow_fritz_box immunizations in the 2026-09-03 SOC
+(confirmed live: both example_smarttv_fritz_box immunizations in the 2026-09-03 SOC
 report cited exactly this irrelevant evidence).
 
 Deliberately NOT a validator-side rejection rule -- matching a free-text

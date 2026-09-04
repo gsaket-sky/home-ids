@@ -193,7 +193,7 @@ check("the WHY section shows plain-language sentences with no raw per-signal mag
 # contains "BLOCKED". A genuinely tarpitted device (Layer 2 fires on risk>=9.0 OR lateral
 # movement, independent of the decision engine's own HIGH-vs-CRITICAL state) had its
 # headline read "monitoring only" directly above an "Action taken: TARPITTED" line a few
-# lines further down in the SAME message -- confirmed on a real family_pc_fritz_box alert.
+# lines further down in the SAME message -- confirmed on a real example_pc_fritz_box alert.
 check("THE FIX: action_summary now recognizes TARPITTED as its own case, checked before "
       "the generic BLOCKED substring match",
       '"tarpitted (Layer-2)" if "TARPITTED" in containment_status' in pipeline_src)

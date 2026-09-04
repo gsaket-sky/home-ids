@@ -40,7 +40,7 @@ Most alerting tools cry wolf constantly, and people learn to ignore them — whi
 - **It learns each device individually.** Not "this is a smart speaker, speakers are chatty" — it learns *your* smart speaker's actual behavior, over time, and only from behavior it already independently judged safe, so a genuinely compromised device can't talk its way into a trusted history just by repeating itself.
 - **One confirmed threat protects everything else instantly.** The moment it confirms something is genuinely malicious, every other device on your network is immediately protected from that exact threat too — no re-learning, no waiting.
 - **It tunes itself, safely, without touching your settings.** When enough real evidence says a threshold is a little too twitchy for your network, it loosens it — never the other way around without your say-so — and every adjustment it makes is fully explained and instantly reversible.
-- **It has an optional private AI analyst.** A local AI model — nothing sent to any outside service, ever — does a deeper review of what made it through, a few times a day, and can independently confirm false positives on its own. It's never taken at its word, either: a separate check rejects any AI judgment that contradicts the hard evidence already on file.
+- **It has an optional private AI analyst.** A local AI model — nothing sent to any outside service, ever — does a deeper review of what made it through, a few times a day, and can independently confirm false positives on its own. It's never taken at its word, either: a deterministic check sits between the AI's judgment and any action, and rejects it outright if it contradicts the hard evidence already on file, cites evidence irrelevant to what it's actually reviewing, or can't point to a destination this device already has a track record with.
 
 The net effect: it gets quieter and more accurate the longer it runs, instead of noisier.
 
@@ -58,7 +58,7 @@ The net effect: it gets quieter and more accurate the longer it runs, instead of
 
 A real alert isn't a wall of numbers — it's built to be understood in five seconds:
 
-> **⚠️ HIGH — laptop-gs, auto-blocked**
+> **⚠️ HIGH — kitchen-laptop, auto-blocked**
 > **What happened:** Contacted a suspicious domain over DNS. The domain name itself was structured like an encoding scheme — a common way malware smuggles data out past normal filters.
 > **Why:** Two independent things agree: the domain matches a known malware-tracking blocklist, *and* the traffic pattern matches DNS tunneling.
 > **How confident:**

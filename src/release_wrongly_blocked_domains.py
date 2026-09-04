@@ -7,7 +7,7 @@ Telegram-reputation tier-escalation bug).
 Found via a direct audit of state/ids_state.json's ips_state.blocked_domains: 119
 domains were actively blocked, ~73 of which are legitimate services (email, NAS
 remote access, streaming apps, work/dev tools) with no plausible connection to a real
-threat, alongside a genuine cluster of ~46 domains on ONE device (family_pc_fritz_box)
+threat, alongside a genuine cluster of ~46 domains on ONE device (example_pc_fritz_box)
 showing a real DGA/malware-downloader-rotation pattern that should stay blocked.
 
 Classifies every currently-blocked domain into exactly one bucket:

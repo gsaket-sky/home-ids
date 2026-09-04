@@ -877,7 +877,7 @@ class ZeekFeatureExtractor:
         app_weight = 0.2 if port in (80, 443) else (0.6 if port in (22, 445, 3389) else 0.4)
 
         # BUGFIX: found via a live alert audit (a third-party review of a real
-        # family_pc_fritz_box tarpit alert, verified against this exact code) --
+        # example_pc_fritz_box tarpit alert, verified against this exact code) --
         # zeek_lateral_moves is a raw COUNT of connections to LATERAL_PORTS, with no
         # distinction between "one legitimate SMB/SSH/RDP connection" and "a genuine
         # multi-target scan." fp_engine.py's Stage-1 hard-stop and pipeline.py's

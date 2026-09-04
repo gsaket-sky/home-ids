@@ -167,7 +167,7 @@ def run_backtest(alerts_path: Path, state_dir: Path) -> None:
                     attack_name, attack_score = hm.group(1), float(hm.group(2))
                     benign_name, benign_score = hm.group(3), float(hm.group(4))
 
-            # REFINEMENT found while verifying against a live family_pc_fritz_box alert
+            # REFINEMENT found while verifying against a live example_pc_fritz_box alert
             # (2026-08-26): decision_engine.py already computes attack_score/benign_score
             # BEFORE the tier==5 branch (evaluate()'s top few lines) but never consults
             # them there. A real example showed attack='NETWORK_INTRUSION' (score=2.0) LOSING

@@ -5,7 +5,7 @@ in the Fritz!Box admin UI stays shown as isolated in Grafana forever") has been
 completely non-functional in production since it was built, for a reason invisible in
 its own logs: it reused router_webhook_timeout_seconds (5.0s, tuned for the isolate/
 unisolate SET action) as the timeout for its own read-only status QUERY -- confirmed
-live (2026-09-04, family_pc_fritz_box) that this Fritzbox's TR-064 GetWANAccessByIP
+live (2026-09-04, example_pc_fritz_box) that this Fritzbox's TR-064 GetWANAccessByIP
 genuinely takes ~10s round-trip, so every single reconcile attempt (boot-time AND every
 scheduled 300s pass since) silently timed out, caught by a bare `except Exception:
 LOGGER.debug(...)` that's invisible at this service's normal INFO log level. Live

@@ -81,7 +81,7 @@ ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 # alert, hours later, in a different process) -- previously only the FIRST of those two
 # consumers had this guard; the second could still be talked into "benign, suppress" by
 # a device-type explanation that never engaged with the actual attack-shaped evidence at
-# all (confirmed live: both amazon_echoshow_fritz_box immunizations in the 2026-09-03 SOC
+# all (confirmed live: both example_smarttv_fritz_box immunizations in the 2026-09-03 SOC
 # report justified suppressing NETWORK_INTRUSION using DNS-hygiene language -- query rate,
 # unique domains, entropy -- none of which NetworkIntrusionHypothesis.evaluate() actually
 # reads; see hypotheses/engine.py:104-120). Deliberately excludes dns_rate/dns_entropy/

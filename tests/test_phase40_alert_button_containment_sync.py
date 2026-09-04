@@ -1,6 +1,6 @@
 """
 Standalone runtime test for the "Telegram alert buttons don't reflect device's actual
-containment state" bug, found via a live alert: a device (family_pc) that was ALREADY
+containment state" bug, found via a live alert: a device (example_pc) that was ALREADY
 tarpitted + router-isolated from an earlier incident got a NEW alert saying "Already
 done: nothing yet" with "Approve Hardware Isolation" / "Release Device" buttons, as if
 nothing had happened -- misleading, since there was nothing left to approve.

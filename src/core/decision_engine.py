@@ -228,7 +228,7 @@ class DecisionEngine:
             # threat-intel feed match (rep.verified_ioc, ti_score>2.0) or a bare AbuseIPDB/VT
             # aggregate score alone. Backtest (scripts/shadow_backtest.py, 80 historical
             # "Confirmed Malicious IOC" alerts): verified_ioc was True for ZERO of them.
-            # Confirmed live: family_pc_fritz_box vs. 35.186.224.24 (Google LLC) fired this
+            # Confirmed live: example_pc_fritz_box vs. 35.186.224.24 (Google LLC) fired this
             # branch 3x in one night on AbuseIPDB=4.0 alone (VT=0.0, TI=0.0) with the benign
             # hypothesis (LOCAL_DEVICE_DISCOVERY, 2.5) outscoring the attack one
             # (NETWORK_INTRUSION, 2.0) -- shadow mode, Ollama's own independent analysis, and
@@ -399,7 +399,7 @@ class DecisionEngine:
                 # an attack conclusion is the SAME underlying situation as tier 4 -- a bigger
                 # raw number doesn't earn it a stronger verdict when the thing that's
                 # supposed to justify HIGH (real corroboration) is exactly what's missing.
-                # Confirmed live: family_pc_fritz_box vs. 35.186.224.24 (Google LLC),
+                # Confirmed live: example_pc_fritz_box vs. 35.186.224.24 (Google LLC),
                 # abuse_score=4.0 alone, benign hypothesis (LOCAL_DEVICE_DISCOVERY, 2.5)
                 # outscoring the attack one (NETWORK_INTRUSION, 2.0) -- there is no
                 # behavioral corroboration here at all, just a single crowd-sourced number.

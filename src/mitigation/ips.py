@@ -320,7 +320,7 @@ class IPSMitigator:
         # QUERY too -- confirmed live this Fritzbox's TR-064 GetWANAccessByIP genuinely
         # takes ~10s round-trip, so every single reconcile attempt silently timed out and
         # was swallowed by the bare `except Exception` below (logged at DEBUG, invisible
-        # at the service's normal INFO level) -- family_pc's stale "still isolated" record
+        # at the service's normal INFO level) -- example_pc's stale "still isolated" record
         # never actually cleared despite this worker running on schedule and Fritz!Box
         # correctly reporting it unblocked. Own, more generous timeout for this query
         # specifically; the SET actions' own timeout is untouched.

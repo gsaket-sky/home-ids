@@ -9,7 +9,7 @@ engine already refuses to let a device-type label rescue a "benign" hypothesis a
 attack-shaped evidence -- hypotheses/engine.py's DeviceProfileBenignHypothesis checks
 `has_competing_attack_evidence` against _ATTACK_SHAPED_EVIDENCE_TYPES before it will
 even fire. But that guard only ever applied at the LIVE alert-scoring pass. Confirmed
-live, not hypothetical: both amazon_echoshow_fritz_box immunizations in the
+live, not hypothetical: both example_smarttv_fritz_box immunizations in the
 2026-09-03 SOC report justified suppressing NETWORK_INTRUSION using DNS-hygiene
 language (query rate, unique domains, entropy) -- evidence types
 NetworkIntrusionHypothesis.evaluate() never actually reads. The LLM's free-text

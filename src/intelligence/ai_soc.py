@@ -122,7 +122,7 @@ class DeterministicValidator:
             # corroborated by a second source) could still be talked into "benign,
             # suppress" by a device-type explanation that never engaged with the actual
             # trigger at all -- confirmed live, not hypothetical: both
-            # amazon_echoshow_fritz_box immunizations in the 2026-09-03 SOC report
+            # example_smarttv_fritz_box immunizations in the 2026-09-03 SOC report
             # justified suppressing NETWORK_INTRUSION using DNS-hygiene language (query
             # rate, unique domains, entropy) -- evidence types
             # NetworkIntrusionHypothesis.evaluate() never reads at all (hypotheses/

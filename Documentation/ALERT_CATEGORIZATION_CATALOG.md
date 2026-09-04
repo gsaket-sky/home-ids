@@ -59,11 +59,24 @@ docstring.
 ## Layer 3 — `ollama_soc.py` batch classification (offline, 4-hourly)
 
 `classification: benign|malicious`, `recommended_action: suppress|block|none`, gated by
-`DeterministicValidator` (rejects "benign" against a confirmed-IOC evidence reconstruction;
-rejects "malicious" if the model's own reasoning cites the exact prior risk score it was
-never shown — circular-reasoning guard).
+`DeterministicValidator` (`intelligence/ai_soc.py`). A "benign" verdict is rejected
+outright, independent of the model's own reasoning, when: a confirmed IOC (`≥4.0`) is
+present in the reconstructed reputation evidence; the alert's original deterministic
+verdict already corroborated an attack hypothesis across independent evidence families;
+the alert's own persisted evidence types include an attack-shaped one (`arp_sweep`,
+`zeek_lateral_scan`, a malicious TLS fingerprint, etc. — since 2026-09-04, mirrors
+`DeviceProfileBenignHypothesis`'s own guard, §Layer 1); the destination isn't
+trusted/known infrastructure and this device has no learned familiarity with it (since
+2026-09-04); or the model's own `supporting_evidence` is empty or self-contradictory. A
+"malicious" verdict is rejected if the model's own reasoning cites the exact prior risk
+score it was never shown (circular-reasoning guard). The persistent verdict cache is
+keyed on evidence content + the validator's own schema version (since 2026-09-04), so a
+validator upgrade invalidates every already-cached verdict immediately rather than
+trusting it for up to the 7-day TTL.
 - `benign + suppress + valid + not multi-device-spread + not already-actioned` → autonomous
-  `mark_false_positive(source="llm_validated")`
+  `mark_false_positive(source="llm_validated")`, plus (since 2026-09-04) releases this
+  device from any active Layer-2 tarpit/router isolation it had already crossed the
+  real-time bar for
 - `malicious + valid + not already-actioned` → (since 2026-08-27) `record_confirmed_threat()`
   + sigma TUNE_UP
 - (since 2026-08-28) every pattern's outcome above — including withheld/skipped/already-
@@ -105,7 +118,7 @@ fix, not a change to when the hard-stop fires.
 
 **Known, already-tracked issues (see `DECISION_LOGIC_DEPENDENCY_MAP.md` for full detail,
 not repeated here):**
-- Gap 1: tier-5 doesn't distinguish `ti_score` (real feed) from `vt`/`abuse` (aggregate) — **flipped LIVE 2026-08-29** (rows 5a/5b/5c above), after a real recurrence (`family_pc_fritz_box` vs. `35.186.224.24`, 3x in one night on `AbuseIPDB=4.0` alone) matched the exact shadow-flagged shape the backtest had already found in 75/80 historical "Confirmed Malicious IOC" alerts
+- Gap 1: tier-5 doesn't distinguish `ti_score` (real feed) from `vt`/`abuse` (aggregate) — **flipped LIVE 2026-08-29** (rows 5a/5b/5c above), after a real recurrence (`example_pc_fritz_box` vs. `35.186.224.24`, 3x in one night on `AbuseIPDB=4.0` alone) matched the exact shadow-flagged shape the backtest had already found in 75/80 historical "Confirmed Malicious IOC" alerts
 - Gap 2: `NetworkIntrusionHypothesis` conflates `zeek_notice` with real JA3/JA4 — still shadow-live, no divergence observed yet
 - Gap 3: hard-stop evidence staleness (honeypot re-firing on stale `EvidenceStore` presence) — still shadow-live
 

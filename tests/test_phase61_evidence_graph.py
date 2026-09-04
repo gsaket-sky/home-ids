@@ -129,7 +129,7 @@ print("\n--- Section B: _build_alert_evidence_graph() ---")
 _live_incident_payload = {
     "signature": "NETWORK_INTRUSION (persisted 1543s)",
     "hee_evidence_types": ["arp_spoof_pending", "dns_rate"],
-    "device": {"id": "5d0bdf3a3b16", "hostname": "amazon_echoshow_fritz_box"},
+    "device": {"id": "5d0bdf3a3b16", "hostname": "example_smarttv_fritz_box"},
 }
 graph = _build_alert_evidence_graph(_live_incident_payload)
 check("returns a real EvidenceGraph for a covered hypothesis with evidence types present",

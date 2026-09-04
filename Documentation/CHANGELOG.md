@@ -2,9 +2,89 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+## [v12.14.0] - 2026-09-04
+
+Triggered by a third-party architecture review of a live SOC digest, which found the
+Ollama LLM re-review layer could still be talked into a "benign, suppress" verdict by
+citing evidence irrelevant to the actual hypothesis (both `example_smarttv_fritz_box`
+immunizations in the reviewed report justified suppressing `NETWORK_INTRUSION` using
+DNS-hygiene language -- query rate, unique domains, entropy -- none of which
+`NetworkIntrusionHypothesis.evaluate()` actually reads), and, while auditing that
+report's real immunizations against the review's own suggested checklist, a confirmed
+live bug: the persistent Ollama-verdict cache never re-validated a cache HIT against
+the current `DeterministicValidator` logic, so a validator upgrade had no effect on
+any already-cached pattern. See `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`'s
+Gap 6 entry for the full trace, live-evidence citations, and per-item file:line detail
+-- summarized here.
+
+### 🔑 Evidence Fingerprint + Validator-Schema Versioning
+
+- `ollama_soc.py`'s persistent cache now keys on evidence CONTENT (a hash of
+  attack-shaped-evidence presence plus a few bucketed risk/entropy signals) and the
+  current `ai_soc.VALIDATOR_SCHEMA_VERSION`, not just the coarse device/target/
+  signature grouping key used for in-run collapsing. A genuine evidence change or a
+  validator logic upgrade each produce a different key, so a stale cached verdict is
+  simply never looked up again -- no separate invalidation pass needed.
+
+### 🛡️ Validator Now Requires Real Corroboration for "Benign"
+
+- Rejects a "benign" verdict outright when the alert's own recorded evidence
+  includes an attack-shaped type (`arp_sweep`, `zeek_lateral_scan`, a malicious TLS
+  fingerprint, etc.), independent of whether the original alert had already escalated
+  -- closes the exact failure mode the reviewed report exhibited.
+- Additionally requires the destination to be trusted/known infrastructure OR this
+  specific device to have real learned familiarity with it (`fp_engine`'s existing
+  `get_baseline_familiarity()`) -- mirrors `DeviceProfileBenignHypothesis`'s own
+  requirement, now enforced identically on the LLM's later free-text re-review, not
+  just the live scoring pass.
+
+### 🧭 Evidence Relevance Breakdown + Graph
+
+- The Ollama prompt and the `.md` report now both show, per alert, which of its
+  evidence types are actually relevant to the hypothesis being reviewed vs. merely
+  present-but-irrelevant -- deterministic scaffolding, not a new validator rejection
+  rule (matching free text against a type name would need the same fragile
+  string-matching heuristic already rejected for a different check).
+- New `intelligence/hypotheses/evidence_graph.py`: an additive, on-demand
+  device/evidence/destination/hypothesis graph view over the same data, rendered as a
+  collapsed block in the report -- not a second live store alongside `EvidenceStore`.
+
+### 📊 Confidence Calibration (data collection only)
+
+- New `intelligence/confidence_calibration.py`: online per-confidence-bucket
+  Beta-Binomial posterior (separate benign/malicious tracks, asymmetric priors),
+  updated from two harvesting sites that reuse existing infrastructure -- a benign
+  cache entry surviving its whole TTL, and the confirmed-threat branch. Not yet
+  consulted by any decision logic; a future phase once buckets have real sample
+  volume.
+
+### 🕸️ Tarpit Release on Benign Confirmation
+
+- Found while implementing, not assumed: the Layer-2 dual-stack ARP/NDP tarpit
+  subsystem already existed live in `mitigation/ips.py`, fully decision-driven. The
+  actual gap was that `ollama_soc.py`'s benign-confirmation path never called the
+  already-existing `IPSMitigator.release_device()` -- so a device that crossed the
+  real-time tarpit bar before a LATER Ollama review validated the same pattern as
+  benign stayed trapped indefinitely. Both benign-confirmation branches now call it.
+
+### 🧹 Privacy sweep
+
+- Replaced every real device hostname (this network's actual smart-TV, PC, and
+  smart-monitor device names, among others) across source comments, tests, and
+  documentation with generic `example_*` names, and removed a real filesystem path
+  this investigation's own notes had captured. No real first names or credentials
+  were found in the tracked repo.
+
+New `tests/test_phase57_evidence_fingerprint.py`,
+`test_phase58_validator_attack_shaped_evidence.py`,
+`test_phase58b_validator_destination_baseline.py`,
+`test_phase59_evidence_relevance.py`, `test_phase60a_confidence_calibration.py`,
+`test_phase61_evidence_graph.py`, `test_phase62_tarpit_release_on_benign.py` (94
+checks total); full 55-file suite re-run clean.
+
 ## [v12.13.0] - 2026-09-04
 
-Triggered by an operator report: "family_pc was once again recently tarpitted and after
+Triggered by an operator report: "example_pc was once again recently tarpitted and after
 removing it from block, Grafana still shows as tarpitted and blocked. It keeps
 recurring -- if unblocked from Fritzbox, the script doesn't know, Grafana doesn't know.
 Only `release_device.py` seems to properly update the state in Grafana."
@@ -119,7 +199,7 @@ uses for incident aggregation.
   validator refuses to let an LLM suppress a Tier-5 reputation hit on principle,
   regardless of what it thinks.
 - Following the override cases to their root: 8 of the 9 total overrides trace to one
-  device (`family_pc_fritz_box`) repeatedly hitting `updates.bravesoftware.com` and two
+  device (`example_pc_fritz_box`) repeatedly hitting `updates.bravesoftware.com` and two
   Spotify hosts and Datadog's log intake -- all of which resolve to `35.186.224.0/24`,
   a shared **Google LLC (AS396982)** GCP customer IP range. AbuseIPDB's crowd-sourced
   score for that shared block sits >= 4.0, almost certainly from some unrelated
@@ -354,7 +434,7 @@ and prioritized fix list in the new `Documentation/REACTIVE_CAPTURE_LOAD_ANALYSI
 
 ## [v12.5.0] - 2026-08-29
 
-A live recurrence of a known shadow-flagged issue (`family_pc_fritz_box` CRITICAL 3x in
+A live recurrence of a known shadow-flagged issue (`example_pc_fritz_box` CRITICAL 3x in
 one night on a bare AbuseIPDB score) triggered flipping a decision-logic fix from
 shadow into production, which in turn surfaced a related confirmed-intel poisoning bug
 affecting Apple/Facebook/AWS/Google/Microsoft and most other major cloud providers.

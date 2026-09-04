@@ -1833,7 +1833,7 @@ class AutonomousFPEngine:
                 # zeek_lateral_scan/malicious_ja3/malicious_ja4/zeek_notice evidence)
                 # fell all the way through to a no-op here: no domain to extract, and
                 # unlike DNS_EVASION above, no destination_ip fallback either.
-                # Confirmed live: family_pc_fritz_box's NETWORK_INTRUSION incidents against
+                # Confirmed live: example_pc_fritz_box's NETWORK_INTRUSION incidents against
                 # raw IPs (149.154.175.56, 20.184.175.17, its own NAS, ...) kept getting
                 # "domain immunized ('unknown')" logged despite _immunize_domain()
                 # rejecting it outright, so only the device-wide sigma widening below

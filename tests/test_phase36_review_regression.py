@@ -140,7 +140,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     live_bug_alert = {
-        "device": {"id": "dev_echo", "hostname": "amazon_echotower_fritz_box"},
+        "device": {"id": "dev_echo", "hostname": "example_smartspeaker_fritz_box"},
         "network_context": {"queried_domain": "unknown", "destination_ip": "99.83.214.173"},
         "signature": "DNS_EVASION",
     }
@@ -152,7 +152,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
           f"got {live_bug_verdict}")
 
     telemetry_exempt_alert = {
-        "device": {"id": "dev_echo2", "hostname": "amazon_echotower_2"},
+        "device": {"id": "dev_echo2", "hostname": "example_smartspeaker_2"},
         "network_context": {"queried_domain": "device-metrics-us.amazon.com", "destination_ip": "9.9.9.9"},
         "signature": "DATA_EXFILTRATION",
     }

@@ -20,7 +20,7 @@ immunization, per-device thresholds, and the other autonomous-learning loops —
 
 | Item | State | Notes |
 |---|---|---|
-| Gap 1 — reputation tier-5 privilege split (`verified_ioc`) | **Live** (2026-08-29, flipped from shadow) | A live recurrence (`family_pc_fritz_box` vs. `35.186.224.24`, CRITICAL 3x in one night on `AbuseIPDB=4.0` alone, benign hypothesis outscoring attack) matched the exact shape the Phase A backtest below had already found in 75/80 historical alerts. `decision_engine.py`'s live `tier==5` branch now itself splits on `rep.verified_ioc` / corroboration (mirrors the shadow logic that had been running alongside it since 2026-08-26) — see `ALERT_CATEGORIZATION_CATALOG.md` rows 5a/5b/5c for the resulting three-way outcome. The shadow computation for Gap 1 specifically is now redundant (live and shadow agree on tier-5 cases) but stays in place unmodified since it's combined with Gaps 2/3 in one code path — see those rows below, still shadow-only |
+| Gap 1 — reputation tier-5 privilege split (`verified_ioc`) | **Live** (2026-08-29, flipped from shadow) | A live recurrence (`example_pc_fritz_box` vs. `35.186.224.24`, CRITICAL 3x in one night on `AbuseIPDB=4.0` alone, benign hypothesis outscoring attack) matched the exact shape the Phase A backtest below had already found in 75/80 historical alerts. `decision_engine.py`'s live `tier==5` branch now itself splits on `rep.verified_ioc` / corroboration (mirrors the shadow logic that had been running alongside it since 2026-08-26) — see `ALERT_CATEGORIZATION_CATALOG.md` rows 5a/5b/5c for the resulting three-way outcome. The shadow computation for Gap 1 specifically is now redundant (live and shadow agree on tier-5 cases) but stays in place unmodified since it's combined with Gaps 2/3 in one code path — see those rows below, still shadow-only |
 | Gap 2 — `has_malicious_tls`/`zeek_notice` conflation | **Shadow-live** (2026-08-26) | `NetworkIntrusionHypothesis.evaluate_shadow()` (`hypotheses/engine.py`) implements the split; `HypothesisEngine.evaluate_all()` returns an extra `shadow_attack` key (name/score using the fixed logic) alongside the unchanged `attack`/`benign` keys; `decision_engine.py`'s shadow block (below) consumes it. Cannot be backtested from `alerts.json` history — see limitation above; only live-observable via `state/shadow_decisions.jsonl` going forward. |
 | `scripts/shadow_backtest.py` (Phase A, Gap 1 only) | Built, run 3x, results below | Re-run after Gap 2 wiring landed — numbers unchanged (5/75/0), as expected: the standalone backtest re-derives from stored `alerts.json` fields independently of the live code, so it wasn't and couldn't be affected by the Gap 2 change |
 | Live shadow logging (Phase B, Gap 1 + Gap 2 composed) | **Implemented** (2026-08-26) | `decision_engine.py:evaluate()`'s shadow block now composes BOTH gaps in one pass (hard-stops reused as-is; tier==5 branch uses `rep.verified_ioc` + `shadow_attack_score > benign_score`; the hypothesis branch uses `shadow_attack_score`/`shadow_attack_name` in place of the live ones) — mirrors the real branch structure fresh rather than reusing/duplicating the live branch code, so there's exactly one "old" (unedited, still-shipped) and one "new" (fixed) implementation, never two drifting copies of the same logic. `pipeline.py:_log_shadow_divergence()` appends to `state/shadow_decisions.jsonl` whenever `shadow_changed` is True (state OR explanation differs) |
@@ -52,7 +52,7 @@ immunization, per-device thresholds, and the other autonomous-learning loops —
 
 **Refined pass**, after finding a live counter-example (see below): corroboration also requires `attack_score > benign_score` (both already computed at the top of `decision_engine.evaluate()`, just never consulted by the tier==5 branch). Result: **75 real downgrades (CRITICAL→HIGH), 5 label-only (stay CRITICAL, relabeled), 0 unchanged** (zero of the 80 had a genuine `ti_score > 2.0` curated-feed match — every single one relied on VT/AbuseIPDB aggregate scores alone).
 
-**The counter-example that drove the refinement** — a live `family_pc_fritz_box` alert (`35.186.224.24`, Google LLC, AbuseIPDB=4.0, VT=0, TI=0) had this reasoning trail:
+**The counter-example that drove the refinement** — a live `example_pc_fritz_box` alert (`35.186.224.24`, Google LLC, AbuseIPDB=4.0, VT=0, TI=0) had this reasoning trail:
 ```
 Hypotheses: attack='NETWORK_INTRUSION' (score=2.0) vs benign='LOCAL_DEVICE_DISCOVERY' (score=2.5) — 2 independent evidence source(s)
 Verdict: CRITICAL / block — Confirmed Malicious IOC (confidence=0.99)
@@ -61,8 +61,8 @@ The **benign** hypothesis outscored the **attack** hypothesis (2.5 > 2.0), yet t
 
 **Honest caveats on the backtest data (found while checking, not assumed):**
 - 67 of the 75 downgrades are a single device (`paperless`, id `52a469cfd274`) on a single day (2026-08-17), all against Telegram's own server IP `149.154.166.110` — the exact case `classifier.py`'s own PHASE 8 comment already documents. These pre-date/coincide with the `abuse_score >= 4.0` threshold fix already shipped in the current code, so this specific historical failure mode is likely **already moot** under today's live thresholds — it validates that this *class* of bug is real, not that Gap 1 changes much going forward for this device.
-- The other 8 downgrades (7 `family_pc_fritz_box` + 1 `galaxy_note9_fritz_box`) are current and ongoing (2026-08-22 through 2026-08-26) — `family_pc_fritz_box` alone has hit this exact `Confirmed Malicious IOC`/Google-Cloud-IP pattern **at least 7 times over 4 days**, which the original tarpit evidently didn't resolve (still recurring as of the morning of 2026-08-26). This is the more relevant evidence for what Gap 1 changes *today*.
-- The `later_corrected_within_14d` check is a loose per-device proxy (any correction on the same device within 14 days, not proof it was correcting this exact alert) — treat "75/75 correlate with a correction" as suggestive, not proof, especially for `family_pc_fritz_box`, which is a generally high-alert-volume device likely to show *some* correction in any 14-day window regardless.
+- The other 8 downgrades (7 `example_pc_fritz_box` + 1 `example_phone_fritz_box`) are current and ongoing (2026-08-22 through 2026-08-26) — `example_pc_fritz_box` alone has hit this exact `Confirmed Malicious IOC`/Google-Cloud-IP pattern **at least 7 times over 4 days**, which the original tarpit evidently didn't resolve (still recurring as of the morning of 2026-08-26). This is the more relevant evidence for what Gap 1 changes *today*.
+- The `later_corrected_within_14d` check is a loose per-device proxy (any correction on the same device within 14 days, not proof it was correcting this exact alert) — treat "75/75 correlate with a correction" as suggestive, not proof, especially for `example_pc_fritz_box`, which is a generally high-alert-volume device likely to show *some* correction in any 14-day window regardless.
 - Zero downgrades correlated with a device that has other confirmed-threat history (`confirmed_threat_counts.json`) — nothing in this backtest looks like it would have downgraded a genuinely dangerous device.
 
 **Next step for Gap 2:** unlike Gap 1 (a single extra branch after the hypothesis competition already runs), Gap 2 lives *inside* `NetworkIntrusionHypothesis.evaluate()`, which directly feeds `attack_score` — splitting `has_malicious_tls`/`zeek_notice` there changes the hypothesis's own score, not just a downstream branch. To shadow it without touching live behavior, it needs a second, parallel `HypothesisEngine` instance running the patched hypothesis alongside the original, logged the same way. Not yet implemented — next concrete task.
@@ -160,7 +160,7 @@ are?), not something Gap 3's freshness fix addresses — flagged to the user, de
 
 Cowrie itself (`docker inspect soc_honeypot`) only exposes `2222/tcp` (SSH) and `2223/tcp`
 (Telnet) — confirmed empirically from a separate LAN host that `192.168.1.200:53` gives no
-response at all. The `family_pc_fritz_box` "Internal Honeypot Accessed" tarpit that prompted this
+response at all. The `example_pc_fritz_box` "Internal Honeypot Accessed" tarpit that prompted this
 whole investigation was a single 41-byte UDP packet to port 53 — real evidence
 (`zeek_honeypot_hits: 1`, not a stale echo), but to a service that structurally cannot have
 answered it, alongside that same device's alert history being otherwise saturated with
@@ -204,7 +204,7 @@ ownership, baseline match, validator approval, scoped TTL, no global sensitivity
 inferred from reading the architecture alone.
 
 **Confirmed live, not inferred**: pulled the exact cache entries backing all 3 immunizations
-directly from `state/ollama_analysis_cache.json` on the box (`ssh 192.168.1.94`, host `sky`,
+directly from `state/ollama_analysis_cache.json` on the box (`ssh 192.168.1.94`,
 `soc.service` — NOT the Unison-mirrored NAS copy, which had stopped updating `state/`/`reports/`
 since ~Aug 31 due to an unrelated, unscheduled-Unison sync stall found in the same session):
 
@@ -222,8 +222,8 @@ not present as empty string/list, the keys don't exist in the dict at all. That 
 produced by that code, i.e. they predate it.
 
 **Pinned the exact boundary**: `git log -S'"supporting_evidence": response_json.get' --
-src/scripts/ollama_soc.py` on the box's own checkout (`/home/user/myscripts/home-ids/SOC`,
-confirmed `git status` clean, `HEAD` matching `origin/main`) identifies commit `3a3c21c "feat:
+src/scripts/ollama_soc.py` on the box's own checkout (confirmed `git status` clean, `HEAD`
+matching `origin/main`) identifies commit `3a3c21c "feat:
 ollama_soc.py's LLM must now name a hypothesis and justify it with evidence"`, authored
 **2026-09-03 20:22:45** — the SAME commit that added `ai_soc.py`'s supporting-evidence-emptiness
 rejection rule (Phase 51, see Gap 4 above). All three cache entries' reasoning text
@@ -261,7 +261,7 @@ fresh Ollama call next run. This is the same key redesign Gap 6 item 1 (Evidence
 already needs for an unrelated reason (hashing evidence content instead of counting reconfirms)
 — do both in the same change, not two separate touches of `_cache_key()`.
 
-**Remediation task, not yet executed (touches live production state on `sky` — confirm before
+**Remediation task, not yet executed (touches live production state on the box — confirm before
 running):** audit all 15 *withheld* patterns from the `2026-09-03` report the same way the 3
 immunizations were audited above — pull each pattern's cache entry from
 `state/ollama_analysis_cache.json` on the box, check whether `hypothesis`/`supporting_evidence`

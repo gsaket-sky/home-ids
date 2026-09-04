@@ -74,7 +74,7 @@ device querying that same domain stops alerting on it for the duration of the TT
 **Real example** (this alert type prompted the enrichment work in v12.4.0 — see
 [CHANGELOG.md](CHANGELOG.md)):
 
-> 🔔 **Auto-action:** immunized `i-scmp.com` for *family_pc_fritz_box* (192.168.1.12)
+> 🔔 **Auto-action:** immunized `i-scmp.com` for *example_pc_fritz_box* (192.168.1.12)
 > This stopped future alerts for this domain because our false-positive check was 81%
 > confident it's benign.
 > It was originally flagged by: DNS_EVASION (risk 4.5) — contacted `104.20.2.31`
@@ -253,16 +253,43 @@ a direct result of the historical match itself.
 The third and most independent brain: a local LLM re-analyzes recent alerts from **raw
 evidence only** — it's deliberately never shown this system's own risk score, signature
 name, or prior verdict, so it has to reach its own conclusion rather than just ratifying
-what already happened. A `DeterministicValidator` rejects any LLM response that
-contradicts hard evidence (a circular-reasoning guard), and every alert is analyzed once
-per *pattern* (device + target + signature), not once per individual occurrence — a
-single noisy pattern firing 50 times in a day costs one LLM call, not 50.
+what already happened. Every alert is analyzed once per *pattern* (device + target +
+signature), not once per individual occurrence — a single noisy pattern firing 50 times
+in a day costs one LLM call, not 50.
+
+A `DeterministicValidator` (`intelligence/ai_soc.py`) sits between the LLM's raw
+response and any autonomous action — "AI proposes, deterministic code disposes." It
+rejects a "benign" verdict outright, regardless of how the LLM phrases its reasoning,
+when ANY of the following holds:
+
+- the alert's own recorded evidence includes an attack-shaped type (`arp_sweep`, a
+  lateral-movement scan, a malicious TLS fingerprint, etc.) — a device-type
+  explanation can't talk its way past genuine attack evidence, the same guard the live
+  scoring pass already enforces, now applied identically to this later re-review;
+- the destination isn't trusted/known infrastructure AND this specific device has no
+  real learned familiarity with it — a "benign" verdict needs some deterministic
+  corroboration, not just the model's own say-so;
+- the alert's original deterministic verdict already corroborated an attack hypothesis
+  across independent evidence families (a circular-reasoning / hallucination guard);
+- the LLM's own supporting-evidence list is empty, or it lists contradicting evidence
+  but recommends suppressing anyway (self-inconsistent).
+
+The report also shows, per alert, an **evidence relevance breakdown** — which of the
+alert's own evidence types are actually relevant to the hypothesis under review vs.
+merely present-but-irrelevant (e.g. a low DNS query rate has nothing to do with a
+lateral-movement finding) — so a skim of the report makes the same distinction the
+validator enforces mechanically. The persistent verdict cache is keyed on evidence
+content plus the validator's own schema version, not just device+target+signature, so
+a genuine evidence change or a validator upgrade both invalidate a stale cached verdict
+immediately rather than silently trusting it for days.
 
 A validated verdict feeds directly into the loops above:
 
 - **Benign + suppress** → the same `mark_false_positive()` mechanism as a human's
   "Mark False Positive" tap: domain immunized into the trust cache, sigma widened, any
-  existing Pi-hole block released.
+  existing Pi-hole block released — **and** this device released from any active
+  Layer-2 tarpit or hardware router isolation it had already crossed the real-time
+  bar for, before this later review ran.
 - **Malicious** → the same `record_confirmed_threat()` mechanism as any other hard
   confirmation: local confirmed-intel updated (network-effect propagation), sigma
   tightened.
@@ -282,7 +309,7 @@ A validated verdict feeds directly into the loops above:
 > ⏸️ withheld (spreading across multiple devices, re-checking next run): 1
 > ✅ 1 already actioned / no new action needed (see report for the full list)
 >
-> • `samsungsmartmonitor_fritz_box` → `firebaselogging-pa.googleapis.com` (NETWORK_INTRUSION)
+> • `example_smart_monitor_fritz_box` → `firebaselogging-pa.googleapis.com` (NETWORK_INTRUSION)
 >   LLM (confidence 0.93): "Standard Firebase Cloud Logging endpoint used by Android/
 >   Google apps for telemetry; matches known benign vendor pattern, no evidence of data
 >   exfiltration."
@@ -295,9 +322,9 @@ A validated verdict feeds directly into the loops above:
 >   → local confirmed-intel updated (any other device touching this now hard-stops),
 >   sensitivity tightened for this device
 >
-> • `family_pc_fritz_box` → `qwertyuiopasdfghjklzxcvbnm-*.ru` (DGA_BOTNET_C2)
+> • `example_pc_fritz_box` → `qwertyuiopasdfghjklzxcvbnm-*.ru` (DGA_BOTNET_C2)
 >   withheld 4th time — spread 3→3→4→5 devices since 2026-08-24 09:1X (newly joined:
->   applewatch_fritz_box)
+>   example_smartwatch_fritz_box)
 
 ---
 
@@ -324,7 +351,7 @@ addressed):
 > Live verdict vs. the proposed evidence-taxonomy fix
 > ([`DECISION_LOGIC_DEPENDENCY_MAP.md`](DECISION_LOGIC_DEPENDENCY_MAP.md)):
 >
-> • family_pc_fritz_box (192.168.1.12) — live: CRITICAL / Confirmed Malicious IOC →
+> • example_pc_fritz_box (192.168.1.12) — live: CRITICAL / Confirmed Malicious IOC →
 >   shadow: SUSPICIOUS / Elevated Reputation Signal (Unconfirmed, Tier 5 Score)
 
 This exact alert — recurring 3x in one night — is what triggered flipping Gap 1 from
@@ -335,8 +362,8 @@ for the three-way outcome this produces now.
 action, shown for completeness rather than as a captured real message):
 
 > 📊 **Top Domains — Last 24h**
-> • family_pc_fritz_box: github.com (142), api.spotify.com (89), teams.microsoft.com (54)
-> • amazon_echoshow_fritz_box: api.spotify.com (211), music-fa.scdn.co (176)
+> • example_pc_fritz_box: github.com (142), api.spotify.com (89), teams.microsoft.com (54)
+> • example_smarttv_fritz_box: api.spotify.com (211), music-fa.scdn.co (176)
 
 ---
 
