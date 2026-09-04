@@ -144,7 +144,9 @@ check("system_prompt explicitly tells the model absence of a TI/VT/AbuseIPDB hit
 
 check("the fresh-query cache write persists all 5 new fields (not silently dropped "
       "before the next run's cache-hit reads them back)",
-      all(f'"{f}":' in _soc_src.split('cache[key] = {', 1)[1].split('\n\n', 1)[0]
+      # PHASE 57: the write site is now `cache[pcache_key] = {`, not `cache[key] = {`
+      # -- see test_phase57_evidence_fingerprint.py for that change's own coverage.
+      all(f'"{f}":' in _soc_src.split('cache[pcache_key] = {', 1)[1].split('\n\n', 1)[0]
           for f in ("hypothesis", "supporting_evidence", "contradicting_evidence",
                      "missing_evidence", "ttl_seconds")))
 

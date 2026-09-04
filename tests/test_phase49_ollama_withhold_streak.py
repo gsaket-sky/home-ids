@@ -108,7 +108,10 @@ check("THE CORE FIX (IP-only no-op): the benign/suppress branch's no-domain path
       "longer does nothing -- it now calls _apply_sigma_shift with a TUNE_DOWN "
       "direction and marks action_taken, so an IP-only target (the majority shape of "
       "what was piling up) can actually resolve",
-      'direction="TUNE_DOWN"' in _src and 'cache[key]["action_taken"] = True' in _src)
+      # PHASE 57: cache writes now go through pcache_key (evidence fingerprint +
+      # validator-schema version), not the bare grouping key -- see
+      # test_phase57_evidence_fingerprint.py for that change's own coverage.
+      'direction="TUNE_DOWN"' in _src and 'cache[pcache_key]["action_taken"] = True' in _src)
 
 check("REGRESSION GUARD: the no-domain fallback is still gated behind the SAME "
       "benign+suppress+not-already-actioned condition as the domain path (an `else:` "

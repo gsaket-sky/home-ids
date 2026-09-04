@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import hashlib
 import logging
 import requests
 import ipaddress
@@ -207,7 +208,7 @@ def load_config():
     except Exception as e:
         LOGGER.error(f"Failed to load config: {e}")
         return {}
-from intelligence.ai_soc import DeterministicValidator
+from intelligence.ai_soc import DeterministicValidator, VALIDATOR_SCHEMA_VERSION
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.fp_engine import AutonomousFPEngine
 from intelligence.geoip import GeoIPEngine
@@ -382,11 +383,74 @@ def _cache_key(payload: dict) -> str:
     """Canonical 'same threat' identity: same device, same target, same signature
     (persistence-escalation suffix stripped -- see incident_key.signature_base -- so an
     incident that escalates mid-episode, e.g. "DNS_EVASION" -> "DNS_EVASION (persisted
-    603s)", still collapses to the same cache key instead of fragmenting into two)."""
+    603s)", still collapses to the same cache key instead of fragmenting into two).
+    Deliberately stays this coarse -- used for THIS RUN's in-memory grouping
+    (`groups[...]`), where the whole point is that repeat firings of the identical
+    pattern collapse into one Ollama call regardless of minor feature fluctuation. NOT
+    used directly against the persistent on-disk cache anymore -- see
+    _persistent_cache_key() below."""
     device_id = payload.get("device", {}).get("id", "unknown")
     signature = payload.get("signature", "unknown")
     return _incident_key(device_id, payload.get("network_context", {}).get("destination_ip"),
                           payload.get("network_context", {}).get("queried_domain"), signature)
+
+
+# PHASE 57 (evidence fingerprint): raw feature keys that actually feed a Hypothesis's
+# required/strong/contradicting checks somewhere in hypotheses/engine.py (arp_sweep/
+# lateral-scan/TLS-fingerprint/notice/honeypot-shaped signals) or a validator IOC check
+# (ti/abuse/vt risk) -- a change in any of these means the underlying EVIDENCE changed,
+# not just noise, even if the pattern's device/target/signature name (_cache_key) stayed
+# the same. Deliberately excludes fast-fluctuating, non-evidence-bearing fields (exact
+# query rate, unique-domain count, timestamps) so the persistent cache doesn't
+# invalidate on every run's minor variance.
+_FINGERPRINT_PRESENCE_KEYS = (
+    "zeek_lateral_moves", "zeek_honeypot_hits", "zeek_arp_spoof", "zeek_notice_count",
+    "malicious_ja3", "malicious_ja4", "zeek_conn_abuse", "zeek_long_conn",
+    "zeek_exfiltration", "zeek_beaconing", "dns_tunnel_score", "dns_dga_score",
+)
+_FINGERPRINT_BUCKETED_KEYS = (
+    "ti_risk", "abuseipdb_risk", "vt_risk", "entropy_avg", "nxdomain_ratio", "blocked_ratio",
+)
+
+
+def _evidence_fingerprint(payload: dict) -> str:
+    """PHASE 57: content hash of the evidence-bearing features, distinct from
+    _cache_key()'s coarse device|target|signature grouping. Two alerts with the SAME
+    _cache_key() but a genuinely different fingerprint (e.g. arp_sweep newly appearing
+    on an already-cached NETWORK_INTRUSION pattern) get different persistent cache
+    entries -- see _persistent_cache_key(). Presence-only (any nonzero value) for
+    attack-shaped signals, since a fresh hit mattering is a yes/no fact, not a magnitude;
+    rounded to 1 decimal place for continuous signals that matter to hypothesis scoring
+    but shouldn't invalidate the cache on every minor fluctuation."""
+    features = payload.get("features", {}) or {}
+    presence = sorted(k for k in _FINGERPRINT_PRESENCE_KEYS if _safe_feature_float(features.get(k)) > 0)
+    bucketed = {k: round(_safe_feature_float(features.get(k)), 1) for k in _FINGERPRINT_BUCKETED_KEYS}
+    raw = json.dumps({"presence": presence, "bucketed": bucketed}, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _safe_feature_float(val) -> float:
+    try:
+        return float(val) if val is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _persistent_cache_key(payload: dict) -> str:
+    """PHASE 57: the key actually used for the persistent on-disk `cache` dict
+    (read/write) -- _cache_key() alone stays reserved for in-run grouping (see its own
+    docstring). Folds in the evidence fingerprint (so a genuine evidence change
+    invalidates a stale verdict even under an unchanged pattern name) and
+    VALIDATOR_SCHEMA_VERSION (so upgrading DeterministicValidator.validate()'s logic
+    makes every previously-cached verdict unreachable by lookup immediately, rather than
+    silently trusting a `validator_passed` boolean computed under superseded rules for
+    up to DEFAULT_CACHE_TTL_SECONDS, or indefinitely for a pattern kept alive via
+    withheld_history -- see Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 6 root
+    cause, the live bug this exists to close. An orphaned old-version/old-fingerprint
+    entry is simply never looked up again and ages out of the cache file via the
+    existing TTL prune in _load_cache() like any other unused entry -- no separate
+    migration/invalidation pass needed."""
+    return f"{_cache_key(payload)}|{_evidence_fingerprint(payload)}|v{VALIDATOR_SCHEMA_VERSION}"
 
 
 # VERSION 10 (#15/#16, Ollama circular-reasoning guard): every field below encodes a
@@ -703,6 +767,9 @@ def main():
     for key in ordered_keys:
         members = groups[key]
         representative = members[0]  # most recent structure is representative enough for a pattern-level verdict
+        # PHASE 57: the persistent on-disk cache is keyed more finely than the in-run
+        # grouping key (`key`) -- see _persistent_cache_key()'s own docstring.
+        pcache_key = _persistent_cache_key(representative)
         device_ip = representative.get("device", {}).get("ip", "unknown")
         # BUGFIX (live alert audit): device_id/alert_hostname used to only be extracted
         # deep inside the malicious/benign-suppress branches individually -- hoisted here
@@ -713,7 +780,7 @@ def main():
         risk = representative.get("risk", 0.0)
         target = _target_for_key(representative)
 
-        cached = cache.get(key)
+        cached = cache.get(pcache_key)
         if cached:
             response_json = {
                 "hypothesis": cached.get("hypothesis", ""),
@@ -796,7 +863,8 @@ def main():
             # check catch a response that suspiciously cites the exact score it was
             # never shown (see ai_soc.py's DeterministicValidator.validate()).
             is_valid = validator.validate(response_json, ev_store, original_risk=risk, ground_truth=ground_truth)
-            cache[key] = {
+            cache[pcache_key] = {
+                "cache_key": key,  # PHASE 57: human-readable grouping identity, for debugging/audit only
                 "hypothesis": response_json.get("hypothesis", ""),
                 "classification": response_json.get("classification", "unknown"),
                 "confidence": response_json.get("confidence", 0.0),
@@ -939,10 +1007,10 @@ def main():
             # persist nothing at all (comment above already explained why action_taken
             # stays False), so a pattern withheld every run for weeks produced an
             # identical "withheld again" line every time, no memory of prior occurrences
-            # or which devices were involved. cache[key] is guaranteed to already exist
-            # here (written above on a fresh call, or already present on a cache hit).
+            # or which devices were involved. cache[pcache_key] is guaranteed to already
+            # exist here (written above on a fresh call, or already present on a cache hit).
             devices_now = signature_device_counts.get(signature, set())
-            withheld_history = cache[key].setdefault("withheld_history", [])
+            withheld_history = cache[pcache_key].setdefault("withheld_history", [])
             new_devices = devices_now - set(withheld_history[-1]["device_ids"]) if withheld_history else devices_now
             new_device_labels = sorted(dev_display_map.get(d, d) for d in new_devices)
             if not withheld_history:
@@ -964,7 +1032,7 @@ def main():
                 "ts": time.time(), "device_ids": sorted(devices_now),
                 "display_names": sorted(dev_display_map.get(d, d) for d in devices_now),
             })
-            cache[key]["withheld_history"] = withheld_history[-20:]  # own cap -- nothing else prunes this sub-field
+            cache[pcache_key]["withheld_history"] = withheld_history[-20:]  # own cap -- nothing else prunes this sub-field
         elif is_valid and response_json.get('classification') == 'benign' and response_json.get('recommended_action') == 'suppress' and not already_actioned:
             # Reached because spread < guard (the normal, first-time/low-spread case),
             # OR streak_exhausted (this pattern independently reconfirmed the identical
@@ -1003,8 +1071,8 @@ def main():
                     ttl_seconds=response_json.get("ttl_seconds"),
                 )
                 base_domain = mark_result.get("base_domain", "")
-                if key in cache:
-                    cache[key]["action_taken"] = True
+                if pcache_key in cache:
+                    cache[pcache_key]["action_taken"] = True
                 if base_domain:
                     # PHASE 14: an earlier cycle may have already blocked this domain in
                     # Pi-hole before the LLM had a chance to validate it as benign -- an
@@ -1053,8 +1121,8 @@ def main():
                     device_id, alert_hostname, direction="TUNE_DOWN",
                     source="llm_validated_streak" if streak_exhausted else "llm_validated_no_domain",
                 )
-                if key in cache:
-                    cache[key]["action_taken"] = True
+                if pcache_key in cache:
+                    cache[pcache_key]["action_taken"] = True
                 report_lines.append(
                     f"- **Autonomous Action Taken:** 🤖 {streak_note}No domain to immunize (IP-only "
                     f"target `{target}`) -- loosened this device's own detection sensitivity instead."
@@ -1078,8 +1146,8 @@ def main():
                 device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
             )
             fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
-            if key in cache:
-                cache[key]["action_taken"] = True
+            if pcache_key in cache:
+                cache[pcache_key]["action_taken"] = True
             report_lines.append(
                 f"- **Autonomous Action Taken:** 🤖 Recorded as confirmed threat (local-intel + "
                 f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "

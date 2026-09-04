@@ -25,6 +25,21 @@ _STRONG_ATTACK_DECISION_PATHS = frozenset({
     "hard_stop", "tier5_confirmed", "tier5_corroborated", "hypothesis_high",
 })
 
+# PHASE 57 (evidence fingerprint + validator-schema versioning): bump this any time
+# DeterministicValidator.validate()'s logic changes. ollama_soc.py folds this into its
+# persistent cache key (_persistent_cache_key()), so a version bump makes every
+# previously-cached verdict unreachable by lookup immediately -- the next run re-derives
+# it fresh under the new rules instead of trusting a `validator_passed` boolean that was
+# computed under logic that no longer exists. Set to 2 here because Phase 51 (commit
+# 3a3c21c, 2026-09-03) already replaced the original 2-rule validator (bare IOC>=4.0 veto,
+# "telemetry"-substring veto only) with today's structured-evidence-aware logic -- that
+# was version 1, implicitly, before this constant existed; this is the first change to
+# formally version it. See Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md's Gap 6 root
+# cause for the live bug this closes: cache hits previously never re-ran validate() at
+# all, so the pre-Phase-51 validator's verdicts on already-cached patterns were still
+# being trusted indefinitely, unchanged, well after Phase 51 shipped.
+VALIDATOR_SCHEMA_VERSION = 2
+
 class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], ev_store: List[Evidence],
                  original_risk: Optional[float] = None,
