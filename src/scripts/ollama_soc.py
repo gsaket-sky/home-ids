@@ -209,6 +209,7 @@ def load_config():
         LOGGER.error(f"Failed to load config: {e}")
         return {}
 from intelligence.ai_soc import DeterministicValidator, VALIDATOR_SCHEMA_VERSION
+from intelligence.confidence_calibration import ConfidenceCalibrator
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.fp_engine import AutonomousFPEngine
 from intelligence.geoip import GeoIPEngine
@@ -526,7 +527,20 @@ def _build_evidence_only_payload(representative: dict) -> dict:
     return {k: v for k, v in representative.items() if k not in _VERDICT_SHAPED_FIELDS}
 
 
-def _load_cache(cache_path: Path, ttl_seconds: float) -> dict:
+def _load_cache(cache_path: Path, ttl_seconds: float, calibrator=None) -> dict:
+    """`calibrator` (PHASE 60a, optional/defaulted -- every existing caller, e.g.
+    tests, is unaffected) is a ConfidenceCalibrator (confidence_calibration.py).
+    Weak-benign label harvesting: an entry that survives its ENTIRE TTL without ever
+    being re-queried (the only way a cache entry ages out at all) AND was actually
+    acted on (`action_taken`) is the closest thing this codebase has to "this benign
+    verdict was never contradicted" -- if it had been wrong, the pattern would have
+    kept recurring and either gotten re-escalated by the live pipeline or re-queried
+    sooner via a fingerprint change (Phase 57). Deliberately conservative: only
+    action_taken entries count (an entry nobody ever acted on carries no real
+    consequence either way, weaker signal), and this only ever labels the BENIGN
+    track -- a malicious verdict's weak/strong labels are harvested elsewhere (see
+    main()'s confirmed-threat branch, which has an immediate, stronger label
+    available and doesn't need to wait for a TTL to expire)."""
     if not cache_path.exists():
         return {}
     try:
@@ -535,7 +549,18 @@ def _load_cache(cache_path: Path, ttl_seconds: float) -> dict:
         LOGGER.warning(f"Could not read ollama analysis cache ({e}) -- starting fresh.")
         return {}
     now = time.time()
-    fresh = {k: v for k, v in raw.items() if isinstance(v, dict) and (now - float(v.get("ts", 0.0))) < ttl_seconds}
+    fresh = {}
+    for k, v in raw.items():
+        if not isinstance(v, dict):
+            continue
+        if (now - float(v.get("ts", 0.0))) < ttl_seconds:
+            fresh[k] = v
+            continue
+        if calibrator is not None and v.get("action_taken") and v.get("classification") == "benign":
+            try:
+                calibrator.record_outcome("benign", float(v.get("confidence", 0.0)), correct=True)
+            except Exception as e:
+                LOGGER.debug(f"Confidence-calibration harvest skipped for an expiring entry: {e}")
     pruned = len(raw) - len(fresh)
     if pruned:
         LOGGER.info(f"Pruned {pruned} expired entries from ollama analysis cache.")
@@ -722,7 +747,15 @@ def main():
     )
 
     cache_path = Path(config.get("state_path", "state/ids_state.json")).parent / "ollama_analysis_cache.json"
-    cache = _load_cache(cache_path, cache_ttl_seconds)
+    # PHASE 60a: pure data-collection scaffold -- calibrator.get_calibrated() isn't
+    # consulted by any decision below yet (Phase 60b, deferred until buckets have real
+    # volume). Instantiated before _load_cache() so a benign entry that's about to be
+    # pruned (survived its whole TTL, never contradicted) can be harvested as a weak
+    # label on its way out -- see _load_cache()'s own comment.
+    calibrator = ConfidenceCalibrator(
+        str(Path(config.get("state_path", "state/ids_state.json")).parent / "confidence_calibration.json")
+    )
+    cache = _load_cache(cache_path, cache_ttl_seconds, calibrator=calibrator)
 
     validator = DeterministicValidator()
     fp_engine = AutonomousFPEngine(config=config, state_dir=str(root_dir / "state"))
@@ -1258,6 +1291,14 @@ def main():
             fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
             if pcache_key in cache:
                 cache[pcache_key]["action_taken"] = True
+            # PHASE 60a: a stronger, immediate label than the weak-benign TTL-survival
+            # harvest in _load_cache() -- record_confirmed_threat() above is itself the
+            # confirmation (a validator-passed "malicious" verdict that just got acted
+            # on), no need to wait for anything further to happen.
+            try:
+                calibrator.record_outcome("malicious", float(response_json.get("confidence", 0.0)), correct=True)
+            except Exception as e:
+                LOGGER.debug(f"Confidence-calibration harvest skipped for a confirmed threat: {e}")
             report_lines.append(
                 f"- **Autonomous Action Taken:** 🤖 Recorded as confirmed threat (local-intel + "
                 f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "
