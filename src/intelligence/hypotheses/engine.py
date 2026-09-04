@@ -4,6 +4,18 @@ from intelligence.reputation.classifier import ReputationVector
 from intelligence.fp_engine import FAMILIARITY_TRUST_BAR
 
 class Hypothesis:
+    # PHASE 59 (Gap 6 item 3, evidence relevance): the Evidence `type` values this
+    # hypothesis's evaluate() actually reads -- already implicit in each subclass's own
+    # `e.type == "..."` checks below, just not previously exposed anywhere. Empty by
+    # default (a hypothesis that hasn't declared its relevant set yet is simply not
+    # covered by the relevance breakdown -- see HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+    # below -- not an error). Deliberately NOT auto-derived by inspecting evaluate()'s
+    # source (fragile, and a hypothesis's contradicting-evidence checks read types too,
+    # which aren't "relevant" in the same sense) -- each subclass states its own set
+    # explicitly, the same way ATTACK_SHAPED_EVIDENCE_TYPES is an explicit list rather
+    # than something inferred.
+    RELEVANT_EVIDENCE_TYPES: frozenset = frozenset()
+
     def __init__(self, name: str):
         self.name = name
         self.required_satisfied = False
@@ -32,6 +44,12 @@ class Hypothesis:
         raise NotImplementedError
 
 class DNSTunnelingHypothesis(Hypothesis):
+    # PHASE 59: matches evaluate()'s own e.type reads exactly (dns_rate/dns_entropy
+    # required, dns_unique_ratio strong) -- rep_vector.tier isn't an Evidence type so
+    # it isn't listed here (the relevance breakdown is evidence-type-shaped, not a
+    # full re-statement of every signal the hypothesis consults).
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_rate", "dns_entropy", "dns_unique_ratio"})
+
     def __init__(self):
         super().__init__("DNS_TUNNELING")
 
@@ -78,6 +96,16 @@ class NetworkIntrusionHypothesis(Hypothesis):
     evaluate()/evaluate_shadow() runs last within one evaluate_all() cycle) therefore
     always agree, so the shared-state read after the shadow call never shows a name the
     live call wouldn't itself have produced for the same evidence."""
+    # PHASE 59: matches _evaluate_impl()'s own e.type reads exactly, across BOTH the
+    # live and shadow (use_gap2_fix) code paths combined -- deliberately the union of
+    # both variants' required-evidence checks, not just whichever runs live today, so
+    # the relevance breakdown doesn't need to know which variant is active. This is the
+    # exact set the live 2026-09-03 incident's LLM reasoning never engaged with at all
+    # (it cited dns_rate/unique_domains/entropy instead -- none of which appear here).
+    RELEVANT_EVIDENCE_TYPES = frozenset({
+        "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice",
+        "arp_spoof_pending",
+    })
     _NAME_NETWORK_INTRUSION = "NETWORK_INTRUSION"
     _NAME_LATERAL_MOVEMENT = "LATERAL_MOVEMENT"
 
@@ -154,6 +182,24 @@ class NetworkIntrusionHypothesis(Hypothesis):
             score = 4.0
 
         return score
+
+
+# PHASE 59: module-level registry so ollama_soc.py can look up a hypothesis's relevant
+# evidence types by NAME (the alert's own signature/hypothesis string) without needing
+# to instantiate the full HypothesisEngine -- this is a static lookup, not a live
+# evaluation. Includes NetworkIntrusionHypothesis's own dynamic alternate name
+# (LATERAL_MOVEMENT, see its docstring above) pointing at the SAME set, since a
+# lateral-movement-named alert is still fundamentally a NetworkIntrusionHypothesis
+# finding. Hypotheses that haven't declared a RELEVANT_EVIDENCE_TYPES override
+# (inherit the base class's empty frozenset()) are simply absent from this dict --
+# callers must treat a missing name as "no relevance breakdown available yet", not an
+# error, the same way every other hee_* backward-compat field in this codebase degrades.
+HYPOTHESIS_RELEVANT_EVIDENCE_TYPES: Dict[str, frozenset] = {
+    "DNS_TUNNELING": DNSTunnelingHypothesis.RELEVANT_EVIDENCE_TYPES,
+    NetworkIntrusionHypothesis._NAME_NETWORK_INTRUSION: NetworkIntrusionHypothesis.RELEVANT_EVIDENCE_TYPES,
+    NetworkIntrusionHypothesis._NAME_LATERAL_MOVEMENT: NetworkIntrusionHypothesis.RELEVANT_EVIDENCE_TYPES,
+}
+
 
 class AdvertisingBurstHypothesis(Hypothesis):
     def __init__(self):

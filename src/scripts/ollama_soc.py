@@ -371,7 +371,11 @@ def _is_campaign_corroborated(members: list, geoip_engine) -> bool:
 # both now import the single shared definition from incident_key.py instead of drifting
 # independently. Kept as thin wrappers under their original names so nothing else in
 # this file needs to change.
-from incident_key import target_for_key as _target_for_key_raw, incident_key as _incident_key
+from incident_key import (
+    target_for_key as _target_for_key_raw, incident_key as _incident_key,
+    signature_base as _signature_base,
+)
+from intelligence.hypotheses.engine import HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
 
 
 def _target_for_key(payload: dict) -> str:
@@ -478,6 +482,39 @@ _VERDICT_SHAPED_FIELDS = frozenset({
     # this system already computed, same treatment as every other hee_* field here.
     "hee_rep_tier",
 })
+
+
+def _evidence_relevance_breakdown(representative: dict) -> "dict | None":
+    """PHASE 59 (Gap 6 item 3, evidence relevance): classifies this alert's own
+    persisted evidence types (hee_evidence_types, Phase 58) against the RELEVANT set
+    for the hypothesis this alert was originally published under (its own signature,
+    persistence-suffix stripped) -- present_relevant (real evidence this hypothesis
+    actually reads), absent_relevant (evidence this hypothesis would need but doesn't
+    have), present_irrelevant (evidence types present on the alert that this SPECIFIC
+    hypothesis does not read at all -- the exact 'DNS query rate is IRRELEVANT to
+    NETWORK_INTRUSION' failure mode confirmed live in the 2026-09-03 incident, where
+    both Echo Show immunizations cited query-rate/entropy language while never
+    engaging with the actual trigger). Scaffolding/context, not a verdict -- unlike
+    _VERDICT_SHAPED_FIELDS, safe to show the model directly: it states which evidence
+    TYPES are relevant to the hypothesis in question, not whether the alert IS
+    malicious. Returns None (not an empty dict) when the hypothesis isn't yet covered
+    by HYPOTHESIS_RELEVANT_EVIDENCE_TYPES (most hypotheses don't declare a
+    RELEVANT_EVIDENCE_TYPES override yet, see hypotheses/engine.py) -- callers must
+    skip rendering entirely rather than show a misleadingly empty breakdown, or for an
+    alert published before hee_evidence_types existed (Phase 58)."""
+    if not representative.get("hee_evidence_types"):
+        return None
+    sig = _signature_base(representative.get("signature", ""))
+    relevant = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(sig)
+    if not relevant:
+        return None
+    present = set(representative.get("hee_evidence_types", []) or [])
+    return {
+        "hypothesis": sig,
+        "present_relevant": sorted(present & relevant),
+        "absent_relevant": sorted(relevant - present),
+        "present_irrelevant": sorted(present - relevant - {"reputation"}),
+    }
 
 
 def _build_evidence_only_payload(representative: dict) -> dict:
@@ -830,6 +867,21 @@ def main():
             # comment for the incident this fixed.
             evidence_only_payload = _build_evidence_only_payload(representative)
             prompt_text = f"Alert Payload:\n{json.dumps(evidence_only_payload, indent=2)}"
+            # PHASE 59: scaffolding, not a verdict (see _evidence_relevance_breakdown's
+            # own docstring) -- appended as its own clearly-labeled section so the model
+            # can't mistake it for part of the raw Alert Payload above. None whenever
+            # this alert's hypothesis isn't yet covered (most aren't) -- prompt is
+            # byte-identical to before this phase in that case, not silently different.
+            relevance = _evidence_relevance_breakdown(representative)
+            if relevance:
+                prompt_text += (
+                    f"\n\nEvidence relevance for hypothesis '{relevance['hypothesis']}' "
+                    "(which of this alert's own evidence types this SPECIFIC hypothesis "
+                    "actually reads -- reason about relevant evidence only; the "
+                    "'present_irrelevant' list is real evidence on this alert, just not "
+                    "germane to this hypothesis, do not treat it as support either way):\n"
+                    f"{json.dumps(relevance, indent=2)}"
+                )
             feats = representative.get("features", {}) or {}
             rep_value = max(
                 float(feats.get("ti_risk", 0.0) or 0.0),
@@ -974,6 +1026,24 @@ def main():
                 f"(score={gt_hyp.get('benign', {}).get('score', 0):.1f}) — "
                 f"{gt_sources} independent evidence famil{'y' if gt_sources == 1 else 'ies'}{families_note}, "
                 f"decision_path=`{representative.get('hee_decision_path', 'n/a')}`"
+            )
+        # PHASE 59: human-readable relevance breakdown for the ORIGINAL alert's own
+        # hypothesis -- the exact HEE-style table the third-party review asked for,
+        # scoped to whichever hypotheses have declared a RELEVANT_EVIDENCE_TYPES set
+        # (hypotheses/engine.py). Absent line (not an empty one) for the many
+        # hypotheses not yet covered -- matches _evidence_relevance_breakdown()'s own
+        # None-means-skip contract.
+        relevance = _evidence_relevance_breakdown(representative)
+        if relevance:
+            rel_parts = []
+            if relevance["present_relevant"]:
+                rel_parts.append(f"relevant+present: {', '.join(relevance['present_relevant'])}")
+            if relevance["absent_relevant"]:
+                rel_parts.append(f"relevant+absent: {', '.join(relevance['absent_relevant'])}")
+            if relevance["present_irrelevant"]:
+                rel_parts.append(f"present but IRRELEVANT to this hypothesis: {', '.join(relevance['present_irrelevant'])}")
+            report_lines.append(
+                f"- **Evidence relevance ({relevance['hypothesis']}):** " + " | ".join(rel_parts)
             )
 
         # PHASE 9 FIX (autonomous action): calls fp_engine.mark_false_positive() -- the same
