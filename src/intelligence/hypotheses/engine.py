@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from intelligence.hypotheses.evidence import Evidence, EvidenceStore
+from intelligence.hypotheses.evidence import Evidence, EvidenceStore, ATTACK_SHAPED_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
 
 class Hypothesis:
@@ -536,12 +536,12 @@ class DeviceProfileBenignHypothesis(Hypothesis):
     # excludes dns_rate/dns_entropy/dns_unique_ratio: those are the same ambiguous
     # signals this hypothesis itself is explaining as routine telemetry, not
     # attack-specific on their own.
-    _ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
-        "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
-        "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
-        "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
-        "arp_spoof_pending",
-    })
+    # PHASE 58: hoisted to hypotheses/evidence.py's module-level ATTACK_SHAPED_EVIDENCE_TYPES
+    # so ai_soc.py's DeterministicValidator can share the exact same set -- see that
+    # module's own comment for why (a device-type label must not rescue a "benign"
+    # verdict against genuine attack-shaped evidence in EITHER consumer, not just this
+    # one). Kept as a same-named class attribute so every reference below is unchanged.
+    _ATTACK_SHAPED_EVIDENCE_TYPES = ATTACK_SHAPED_EVIDENCE_TYPES
 
     # VERSION 11 (P1 follow-up, review #9/#10): matches
     # AutonomousFPEngine._BASELINE_FAMILIARITY_OBSERVATIONS (fp_engine.py) -- a

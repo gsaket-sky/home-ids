@@ -70,6 +70,32 @@ EVIDENCE_FAMILIES = frozenset({
 # excluded from pipeline.py's attack-side noisy_types dampening.
 ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 
+# PHASE 58 (hoisted from hypotheses/engine.py's DeviceProfileBenignHypothesis, which
+# originally defined this as a private class attribute): Evidence `type` values that are
+# NEVER ambiguous/routine-telemetry-explainable -- a device-type label (Gap 6, Documentation/
+# DECISION_LOGIC_DEPENDENCY_MAP.md) can never rescue a "benign" verdict when any of these
+# are present, regardless of which HYPOTHESIS actually fired. Single source of truth,
+# imported both by DeviceProfileBenignHypothesis (`hypotheses/engine.py`, competing
+# against an attack hypothesis at alert-creation time) and by ai_soc.py's
+# DeterministicValidator (checking an LLM's free-text re-review of an already-published
+# alert, hours later, in a different process) -- previously only the FIRST of those two
+# consumers had this guard; the second could still be talked into "benign, suppress" by
+# a device-type explanation that never engaged with the actual attack-shaped evidence at
+# all (confirmed live: both amazon_echoshow_fritz_box immunizations in the 2026-09-03 SOC
+# report justified suppressing NETWORK_INTRUSION using DNS-hygiene language -- query rate,
+# unique domains, entropy -- none of which NetworkIntrusionHypothesis.evaluate() actually
+# reads; see hypotheses/engine.py:104-120). Deliberately excludes dns_rate/dns_entropy/
+# dns_unique_ratio (and by extension the "dns_behavior" independence_group as a whole) --
+# those genuinely are ambiguous signals a device-profile hypothesis is allowed to explain
+# as routine telemetry, not attack-specific on their own -- see
+# DeviceProfileBenignHypothesis's own docstring.
+ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
+    "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
+    "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
+    "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
+    "arp_spoof_pending",
+})
+
 class EvidenceStore:
     def __init__(self):
         self._evidence_by_device: Dict[str, List[Evidence]] = {}

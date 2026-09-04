@@ -1,6 +1,6 @@
 import logging
 from typing import Dict, Any, List, Optional
-from intelligence.hypotheses.evidence import Evidence
+from intelligence.hypotheses.evidence import Evidence, ATTACK_SHAPED_EVIDENCE_TYPES
 
 LOGGER = logging.getLogger(__name__)
 
@@ -38,7 +38,11 @@ _STRONG_ATTACK_DECISION_PATHS = frozenset({
 # cause for the live bug this closes: cache hits previously never re-ran validate() at
 # all, so the pre-Phase-51 validator's verdicts on already-cached patterns were still
 # being trusted indefinitely, unchanged, well after Phase 51 shipped.
-VALIDATOR_SCHEMA_VERSION = 2
+#
+# Bumped to 3 by Phase 58 (attack-shaped-evidence check, see below) -- the first actual
+# use of this versioning mechanism to invalidate existing cache entries the way it was
+# built for.
+VALIDATOR_SCHEMA_VERSION = 3
 
 class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], ev_store: List[Evidence],
@@ -88,6 +92,40 @@ class DeterministicValidator:
                     "independent evidence famil%s (decision_path=%s) -- an LLM 'benign' "
                     "verdict does not override that without new counter-evidence.",
                     attack_name, sources, "y" if sources == 1 else "ies", decision_path,
+                )
+                return False
+
+            # PHASE 58 (Gap 6 item 2, device-identity/attack-shaped-evidence check): the
+            # deterministic engine already refuses to let a device-type label rescue a
+            # "benign" verdict against genuine attack-shaped evidence -- see
+            # hypotheses/engine.py's DeviceProfileBenignHypothesis.has_competing_attack_evidence
+            # -- but that guard only ever applied at the LIVE alert-scoring pass. This
+            # mirrors it here, on the LLM's free-text re-review of an already-published
+            # alert (hours or days later, in a different process), which previously had
+            # NO independent check against the raw evidence at all -- only against the
+            # original alert's decision_path reaching one of _STRONG_ATTACK_DECISION_PATHS
+            # (the check just above). A pattern that hadn't yet escalated that far (e.g.
+            # still `hypothesis_suspicious`, or a single arp_sweep/MAC-flip not yet
+            # corroborated by a second source) could still be talked into "benign,
+            # suppress" by a device-type explanation that never engaged with the actual
+            # trigger at all -- confirmed live, not hypothetical: both
+            # amazon_echoshow_fritz_box immunizations in the 2026-09-03 SOC report
+            # justified suppressing NETWORK_INTRUSION using DNS-hygiene language (query
+            # rate, unique domains, entropy) -- evidence types
+            # NetworkIntrusionHypothesis.evaluate() never reads at all (hypotheses/
+            # engine.py:104-120 only reads zeek_lateral_scan/malicious_ja3/ja4/
+            # arp_spoof_pending/zeek_notice). Structural check, deliberately not
+            # content-judging WHICH evidence the model's own reasoning cites (same
+            # philosophy as the supporting_evidence-emptiness check below -- a much more
+            # fragile string-matching heuristic for marginal extra benefit).
+            evidence_types = set((ground_truth or {}).get("evidence_types", []) or [])
+            attack_shaped_present = evidence_types & ATTACK_SHAPED_EVIDENCE_TYPES
+            if attack_shaped_present:
+                LOGGER.warning(
+                    "[VALIDATOR] Rejected Ollama recommendation: attack-shaped evidence "
+                    "%s is present on this alert's own evaluation -- a 'benign' verdict "
+                    "does not override that regardless of device-type reasoning.",
+                    sorted(attack_shaped_present),
                 )
                 return False
 

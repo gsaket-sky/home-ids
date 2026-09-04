@@ -470,6 +470,10 @@ _VERDICT_SHAPED_FIELDS = frozenset({
     # raw observation, same reasoning as every other field in this set. Used below to
     # ground-truth-check the LLM's response AFTER it's generated, never shown beforehand.
     "hee_hypotheses", "hee_independent_sources", "hee_decision_path", "hee_evidence_families",
+    # PHASE 58: same treatment -- the real Evidence.type names this alert's own
+    # deterministic evaluation found, threaded into ground_truth below for
+    # DeterministicValidator's attack-shaped-evidence check, never shown to the LLM.
+    "hee_evidence_types",
 })
 
 
@@ -857,6 +861,10 @@ def main():
                 "hypotheses": representative.get("hee_hypotheses", {}),
                 "independent_sources": representative.get("hee_independent_sources", 0),
                 "decision_path": representative.get("hee_decision_path", ""),
+                # PHASE 58: absent (empty list) for alerts published before this existed --
+                # DeterministicValidator's attack-shaped-evidence check degrades to a no-op
+                # for those, same backward-compat treatment as every other hee_* field here.
+                "evidence_types": representative.get("hee_evidence_types", []),
             }
 
             # VERSION 10 (#15/#16): original_risk lets the validator's defense-in-depth

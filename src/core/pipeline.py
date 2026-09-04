@@ -1657,6 +1657,16 @@ class EnginePipeline:
                             "hee_evidence_families": sorted({
                                 ev.independence_group for ev in active_evidence if ev.independence_group
                             }),
+                            # PHASE 58: the actual Evidence.type names present (not just
+                            # their coarser independence_group families) -- needed because
+                            # family granularity is too coarse for ai_soc.py's attack-shaped-
+                            # evidence check: e.g. "dns_dga_burst" and the ambiguous
+                            # "dns_rate"/"dns_entropy" all share the SAME "dns_behavior"
+                            # family, but only the former is attack-shaped (see
+                            # hypotheses/evidence.py's ATTACK_SHAPED_EVIDENCE_TYPES). Reuses
+                            # the SAME active_evidence list already in scope here, same
+                            # treatment as hee_evidence_families right above.
+                            "hee_evidence_types": sorted({ev.type for ev in active_evidence}),
                             # BUGFIX (live audit): previously only lived on the in-memory
                             # `decision` dict (read once for the mitigation gate at the
                             # severity-gate check below) and was never persisted onto the
