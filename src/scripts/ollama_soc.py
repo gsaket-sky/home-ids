@@ -1230,6 +1230,19 @@ def main():
                     if released:
                         unblocked_note = f" Released {len(released)} existing Pi-hole block(s)."
                         LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released {len(released)} existing Pi-hole block(s): {released}")
+                    # PHASE 62 (Gap 6 item 6, tarpit): mirrors the Pi-hole unblock right
+                    # above -- "an autonomous correction should also undo containment
+                    # that's no longer warranted, not just stop future alerts" (PHASE 14's
+                    # own comment) previously only covered Pi-hole; a device that had
+                    # already crossed the real-time risk_score>=9.0 tarpit/router-isolation
+                    # bar (mitigation/ips.py) before this LLM review ran stayed trapped
+                    # even after being validated benign. release_device() already exists
+                    # (the same one the operator's manual Release button uses) and is a
+                    # safe no-op if this device isn't currently contained.
+                    device_released = ips_mitigator.release_device(device_id)
+                    if device_released:
+                        unblocked_note += " Also released this device from any active Layer-2 tarpit/router isolation."
+                        LOGGER.info(f"🔓 [OLLAMA-SOC] '{alert_hostname}' was validated benign -- released from active tarpit/router isolation.")
                     report_lines.append(
                         f"- **Autonomous Action Taken:** 🤖 {streak_note}Immunized `{base_domain}` in the "
                         f"FP trust cache and logged an operator-equivalent training correction "
@@ -1266,9 +1279,17 @@ def main():
                 )
                 if pcache_key in cache:
                     cache[pcache_key]["action_taken"] = True
+                # PHASE 62: same release-containment-too treatment as the domain-immunize
+                # branch above -- an IP-only NETWORK_INTRUSION target is exactly the shape
+                # most likely to have already crossed the real-time tarpit bar (risk_score
+                # >=9.0) before this review ran.
+                device_released = ips_mitigator.release_device(device_id)
+                released_note = " Also released this device from any active Layer-2 tarpit/router isolation." if device_released else ""
+                if device_released:
+                    LOGGER.info(f"🔓 [OLLAMA-SOC] '{alert_hostname}' was validated benign -- released from active tarpit/router isolation.")
                 report_lines.append(
                     f"- **Autonomous Action Taken:** 🤖 {streak_note}No domain to immunize (IP-only "
-                    f"target `{target}`) -- loosened this device's own detection sensitivity instead."
+                    f"target `{target}`) -- loosened this device's own detection sensitivity instead.{released_note}"
                 )
                 outcome = "immunized"
                 outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity loosened instead"
