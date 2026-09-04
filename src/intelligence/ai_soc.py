@@ -50,7 +50,8 @@ _STRONG_ATTACK_DECISION_PATHS = frozenset({
 # Bumped to 3 by Phase 58 (attack-shaped-evidence check, see below) -- the first actual
 # use of this versioning mechanism to invalidate existing cache entries the way it was
 # built for. Bumped to 4 by Phase 58b (destination-ownership/baseline-familiarity check).
-VALIDATOR_SCHEMA_VERSION = 4
+# Bumped to 5 by Phase 63 (hypothesis-independence check, see below).
+VALIDATOR_SCHEMA_VERSION = 5
 
 class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], ev_store: List[Evidence],
@@ -66,7 +67,10 @@ class DeterministicValidator:
         every existing caller unaffected) is the CALLER's own
         AutonomousFPEngine.get_baseline_familiarity() result for this device+
         port/ASN/domain -- 0.0 (the safe default) for any caller that hasn't threaded
-        it through yet."""
+        it through yet. `ground_truth["candidate_hypotheses"]` (PHASE 63, optional --
+        absent/empty is a no-op) is every OTHER named hypothesis whose relevant
+        evidence types overlap this alert's own, computed independently of the LLM's
+        response -- see ollama_soc.py's _candidate_alternate_hypotheses()."""
         # Prevent LLM hallucination poisoning
         classification = recommendation.get("classification", "").lower()
         reason = recommendation.get("reason", "").lower()
@@ -165,6 +169,37 @@ class DeterministicValidator:
                     rep_tier, baseline_familiarity, FAMILIARITY_TRUST_BAR,
                 )
                 return False
+
+            # PHASE 63 (Gap 6 item 4, hypothesis independence at the LLM layer): the
+            # deterministic engine already scores every attack hypothesis independently
+            # and takes the max (HypothesisEngine.evaluate_all()) -- weakening one
+            # hypothesis provably cannot touch another's score there. Nothing forced the
+            # SAME discipline on the LLM's free-text reasoning: it could generalize
+            # "this evidence weakens hypothesis A" into "therefore benign overall"
+            # without ever checking B/C/D. ollama_soc.py's ground_truth now carries
+            # `candidate_hypotheses` -- every OTHER named hypothesis whose
+            # RELEVANT_EVIDENCE_TYPES overlaps this alert's own evidence, computed
+            # independently of the LLM's response (see
+            # _candidate_alternate_hypotheses()). A "benign" verdict must address every
+            # one of them in its own `hypotheses_ruled_out` list -- structural substring
+            # check, deliberately not content-judging the quality of each reason (same
+            # philosophy as the Phase 58 attack-shaped-evidence check above: a much more
+            # fragile string-matching heuristic would buy little extra confidence).
+            candidate_hypotheses = set((ground_truth or {}).get("candidate_hypotheses", []) or [])
+            if candidate_hypotheses:
+                ruled_out_text = " ".join(
+                    str(x).lower() for x in (recommendation.get("hypotheses_ruled_out") or [])
+                )
+                unaddressed = {c for c in candidate_hypotheses if c.lower() not in ruled_out_text}
+                if unaddressed:
+                    LOGGER.warning(
+                        "[VALIDATOR] Rejected Ollama recommendation: 'benign' verdict "
+                        "does not address candidate hypothesis(es) %s in "
+                        "hypotheses_ruled_out -- weakening the named hypothesis does not "
+                        "by itself clear these.",
+                        sorted(unaddressed),
+                    )
+                    return False
 
             # PHASE 51 (structured evidence contract): reject a "benign" verdict that
             # doesn't actually justify itself. Per the evidence-family principle this

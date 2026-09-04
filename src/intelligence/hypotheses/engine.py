@@ -251,6 +251,10 @@ class LocalDeviceDiscoveryHypothesis(Hypothesis):
 
 
 class DGAHypothesis(Hypothesis):
+    # PHASE 63 (Gap 6 item 3 follow-up, relevance coverage 2/9 -> 9/9): matches
+    # evaluate()'s own reads -- dns_dga_burst required, dns_rate strong corroboration.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_dga_burst", "dns_rate"})
+
     def __init__(self):
         super().__init__("DGA_BOTNET_C2")
 
@@ -276,6 +280,10 @@ class DGAHypothesis(Hypothesis):
 
 
 class ExfiltrationHypothesis(Hypothesis):
+    # PHASE 63: matches evaluate()'s own reads -- zeek_exfiltration required,
+    # zeek_beaconing/reputation strong corroboration.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"zeek_exfiltration", "zeek_beaconing", "reputation"})
+
     def __init__(self):
         super().__init__("DATA_EXFILTRATION")
 
@@ -301,6 +309,12 @@ class ExfiltrationHypothesis(Hypothesis):
 
 
 class BeaconingHypothesis(Hypothesis):
+    # PHASE 63: matches evaluate()'s own reads -- zeek_beaconing required,
+    # zeek_exfiltration/reputation/malicious_ja3/malicious_ja4 strong corroboration.
+    RELEVANT_EVIDENCE_TYPES = frozenset({
+        "zeek_beaconing", "zeek_exfiltration", "reputation", "malicious_ja3", "malicious_ja4",
+    })
+
     def __init__(self):
         super().__init__("C2_BEACONING")
 
@@ -330,6 +344,11 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
     detector despite its name). This one uses the actual tunneling signals scoring.py
     computed: long/encoded subdomain labels, TXT/NULL query abuse, and suspicious-TLD
     concentration — broadens coverage rather than replacing the existing hypothesis."""
+
+    # PHASE 63: matches evaluate()'s own read -- dns_tunnel_v2 is the only Evidence
+    # type this hypothesis consumes (the "2+ distinct categories" strong bonus is
+    # computed from provenance subtags WITHIN this same type, not a second type).
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_tunnel_v2"})
 
     def __init__(self):
         super().__init__("DNS_COVERT_TUNNELING")
@@ -380,6 +399,10 @@ class ConnectionAbuseHypothesis(Hypothesis):
     _NAME_CONNECTION_ABUSE = "CONNECTION_ABUSE"
     _NAME_PORT_SCAN = "PORT_SCAN"
     _NAME_INTERNAL_RECONNAISSANCE = "INTERNAL_RECONNAISSANCE"
+    # PHASE 63: matches evaluate()'s own reads -- zeek_conn_abuse/zeek_long_conn/
+    # arp_sweep are the three alternate required triggers; shared across all 3 of this
+    # class's dynamic names (they're the same evidence, just named by which subset fired).
+    RELEVANT_EVIDENCE_TYPES = frozenset({"zeek_conn_abuse", "zeek_long_conn", "arp_sweep"})
 
     def __init__(self):
         super().__init__(self._NAME_CONNECTION_ABUSE)
@@ -452,6 +475,16 @@ class DNSEvasionHypothesis(Hypothesis):
     _NAME_POLICY_BYPASS = "DNS_POLICY_BYPASS"
     _NAME_NO_DNS_HISTORY = "DNS_EVASION"
     _NAME_PARTIAL_GAP = "DNS_ATTRIBUTION_GAP"
+    # PHASE 63: only dns_evasion_anomaly is listed -- the required trigger, matching
+    # every other hypothesis's convention. This class's "strong" bump is deliberately
+    # open-ended ("any OTHER evidence type present at all", see evaluate() below) rather
+    # than a fixed second signal the way every other hypothesis here corroborates, so
+    # listing that corroboration set here would falsely narrow it to a handful of named
+    # types when the actual code accepts literally anything else. Leaving it out is the
+    # honest answer, not an oversight -- present_irrelevant for this hypothesis will
+    # legitimately include real corroborating evidence that evaluate() DOES read, just
+    # not by specific type name.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_evasion_anomaly"})
 
     def __init__(self):
         super().__init__(self._NAME_NO_DNS_HISTORY)
@@ -510,6 +543,11 @@ class SuricataSignatureHypothesis(Hypothesis):
     hard-stop conditions (has_confirmed_exploit) -- everything below that threshold
     is real evidence here like any other hypothesis, not a hard-stop."""
 
+    # PHASE 63: matches evaluate()'s own read -- suricata_signature_match is the only
+    # Evidence type this hypothesis consumes (the "strong" bump is >=2 hits of the
+    # SAME type, not a second type).
+    RELEVANT_EVIDENCE_TYPES = frozenset({"suricata_signature_match"})
+
     def __init__(self):
         super().__init__("SIGNATURE_MATCHED_THREAT")
 
@@ -532,6 +570,29 @@ class SuricataSignatureHypothesis(Hypothesis):
         if best >= 0.85 and self.contradicting_score == 0:
             score = 4.0
         return score
+
+
+# PHASE 63 (Gap 6 item 3 follow-up): the remaining 7 hypothesis classes' registry
+# entries, added here rather than inline in HYPOTHESIS_RELEVANT_EVIDENCE_TYPES's own
+# definition above since these classes are defined further down this file -- Python
+# name resolution requires the class objects to already exist. Every dynamic-name
+# variant of ConnectionAbuseHypothesis/DNSEvasionHypothesis points at the SAME
+# frozenset object as its siblings (same identity, not just equal value --
+# ollama_soc.py's _candidate_alternate_hypotheses() relies on this to dedupe aliases
+# of one underlying class by id()).
+HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.update({
+    "DGA_BOTNET_C2": DGAHypothesis.RELEVANT_EVIDENCE_TYPES,
+    "DATA_EXFILTRATION": ExfiltrationHypothesis.RELEVANT_EVIDENCE_TYPES,
+    "C2_BEACONING": BeaconingHypothesis.RELEVANT_EVIDENCE_TYPES,
+    "DNS_COVERT_TUNNELING": DNSTunnelingV2Hypothesis.RELEVANT_EVIDENCE_TYPES,
+    ConnectionAbuseHypothesis._NAME_CONNECTION_ABUSE: ConnectionAbuseHypothesis.RELEVANT_EVIDENCE_TYPES,
+    ConnectionAbuseHypothesis._NAME_PORT_SCAN: ConnectionAbuseHypothesis.RELEVANT_EVIDENCE_TYPES,
+    ConnectionAbuseHypothesis._NAME_INTERNAL_RECONNAISSANCE: ConnectionAbuseHypothesis.RELEVANT_EVIDENCE_TYPES,
+    DNSEvasionHypothesis._NAME_POLICY_BYPASS: DNSEvasionHypothesis.RELEVANT_EVIDENCE_TYPES,
+    DNSEvasionHypothesis._NAME_NO_DNS_HISTORY: DNSEvasionHypothesis.RELEVANT_EVIDENCE_TYPES,
+    DNSEvasionHypothesis._NAME_PARTIAL_GAP: DNSEvasionHypothesis.RELEVANT_EVIDENCE_TYPES,
+    "SIGNATURE_MATCHED_THREAT": SuricataSignatureHypothesis.RELEVANT_EVIDENCE_TYPES,
+})
 
 
 class DeviceProfileBenignHypothesis(Hypothesis):

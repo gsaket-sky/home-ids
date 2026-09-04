@@ -182,8 +182,11 @@ check("baseline_familiarity is actually threaded into the validate() call",
       "baseline_familiarity=baseline_familiarity" in _soc_src)
 
 _ai_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "ai_soc.py").read_text(encoding="utf-8")
+# PHASE 63: >=4 rather than ==4, same reasoning as Phase 58's own version check --
+# a later phase (63) legitimately bumps it further -- see
+# test_phase63_hypothesis_independence.py for that one's own coverage.
 check("VALIDATOR_SCHEMA_VERSION was bumped again for this change",
-      "VALIDATOR_SCHEMA_VERSION = 4" in _ai_soc_src and VALIDATOR_SCHEMA_VERSION == 4)
+      VALIDATOR_SCHEMA_VERSION >= 4)
 
 check("FAMILIARITY_TRUST_BAR is imported from fp_engine.py, not redefined locally",
       "from intelligence.fp_engine import FAMILIARITY_TRUST_BAR" in _ai_soc_src)

@@ -519,6 +519,88 @@ def _evidence_relevance_breakdown(representative: dict) -> "dict | None":
     }
 
 
+def _candidate_alternate_hypotheses(representative: dict) -> "list[str] | None":
+    """PHASE 63 (Gap 6 item 4, hypothesis independence at the LLM layer): the
+    deterministic engine already scores every attack hypothesis independently and
+    takes the max (HypothesisEngine.evaluate_all()) -- weakening one hypothesis
+    provably cannot touch another's score there. The LLM prompt asks for exactly one
+    `hypothesis` name and nothing stops it generalizing "this evidence weakens
+    hypothesis A" into "therefore benign overall" without checking B/C/D. This finds
+    every OTHER hypothesis (by name, deduped by underlying class -- see below) whose
+    RELEVANT_EVIDENCE_TYPES overlaps this alert's own hee_evidence_types, i.e. a
+    hypothesis with real evidence-driven reason to also be considered, not this
+    system's own scoring (scaffolding, same treatment as _evidence_relevance_breakdown
+    -- safe to show the model, states nothing about which alert IS malicious).
+
+    Same None-degradation contract as _evidence_relevance_breakdown(): None when this
+    alert's own hypothesis isn't covered by HYPOTHESIS_RELEVANT_EVIDENCE_TYPES yet, or
+    there's no hee_evidence_types (pre-Phase-58 alert) -- not an error. Unlike that
+    function, an empty list IS a meaningful, real answer once covered ("checked,
+    nothing else applies"), distinct from None ("not computed").
+
+    Dedup by id() of the RELEVANT_EVIDENCE_TYPES frozenset, not by name: several
+    hypothesis classes here have multiple dynamic names sharing one evidence set
+    (NetworkIntrusionHypothesis's NETWORK_INTRUSION/LATERAL_MOVEMENT,
+    ConnectionAbuseHypothesis's 3 names, DNSEvasionHypothesis's 3 names) -- without
+    this, an alert overlapping one of those classes would list 2-3 near-duplicate
+    "candidates" that are really the same underlying hypothesis under a different
+    name."""
+    if not representative.get("hee_evidence_types"):
+        return None
+    sig = _signature_base(representative.get("signature", ""))
+    own_relevant = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(sig)
+    if own_relevant is None:
+        return None
+    present = set(representative.get("hee_evidence_types", []) or [])
+    seen_ids = {id(own_relevant)}
+    candidates = []
+    for name, relevant in HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.items():
+        if id(relevant) in seen_ids:
+            continue
+        seen_ids.add(id(relevant))
+        if present & relevant:
+            candidates.append(name)
+    return sorted(candidates)
+
+
+def _apply_confidence_calibration(raw_ttl, raw_confidence: float, calibrated: "float | None") -> "float | None":
+    """PHASE 63b (Gap 6 item 5, self-activating -- no human step): ConfidenceCalibrator.
+    get_calibrated() already returns None below MIN_SAMPLES_FOR_CALIBRATION real
+    observations and a real posterior mean once that's crossed -- the self-gating
+    contract is already built into that function. This is the ONLY consumer of it
+    (immunization TTL, per explicit product decision -- NOT the persistent Ollama-
+    response/fingerprint cache TTL from Phase 57, a different concept; NOT the
+    DeterministicValidator PASS/FAIL gate; NOT the malicious track, which is
+    deliberately slower to accumulate real volume by design). Before any bucket has
+    real data this always returns `raw_ttl` unchanged -- byte-identical to pre-Phase-63b
+    behavior -- so activation requires no further code change, deploy, or human step,
+    only real observations accumulating.
+
+    `raw_ttl=None` (LLM didn't suggest a TTL, or it was invalid) returns None
+    unchanged regardless of calibration -- mark_false_positive() already falls back to
+    its own 14-day default for that case, nothing to adjust here. `calibrated=None`
+    (bucket still short of MIN_SAMPLES_FOR_CALIBRATION) returns `raw_ttl` unchanged --
+    the "not activated yet" branch. Otherwise scales by
+    `calibrated / max(raw_confidence, 0.01)`, clamped to [0.4, 1.5] so the multiplier
+    itself stays interpretable -- the real TTL floor/ceiling safety is already
+    mark_false_positive()'s own [MIN_TRUST_ENTRY_TTL_SECONDS, MAX_TRUST_ENTRY_TTL_SECONDS]
+    clamp (Phase 52), not reimplemented here. A calibrated value confirming or
+    exceeding the model's self-reported confidence extends trust modestly; a bucket
+    calibration shows is less reliable than the model felt shortens it, forcing sooner
+    re-validation."""
+    if raw_ttl is None:
+        return None
+    if calibrated is None:
+        return raw_ttl
+    try:
+        raw_ttl = float(raw_ttl)
+    except (TypeError, ValueError):
+        return raw_ttl
+    factor = calibrated / max(float(raw_confidence or 0.0), 0.01)
+    factor = max(0.4, min(1.5, factor))
+    return raw_ttl * factor
+
+
 def _build_alert_evidence_graph(representative: dict) -> "EvidenceGraph | None":
     """PHASE 61 (Gap 6 item 5, evidence graph): builds a per-alert EvidenceGraph from
     the same hee_evidence_types (Phase 58) and HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
@@ -863,6 +945,10 @@ def main():
         "be the sole item in supporting_evidence. A 'benign' classification with an empty "
         "supporting_evidence list, or one whose supporting_evidence is only the absence of "
         "bad reputation, will be rejected. "
+        "If the prompt lists 'Other candidate hypotheses' for this alert, you must "
+        "independently rule out EVERY one of them before classifying benign -- "
+        "weakening or ruling out the hypothesis you named does not by itself clear a "
+        "different one. "
         "You must respond ONLY with a valid JSON object matching this schema: "
         "{\"hypothesis\": \"<specific named explanation, not just 'benign' or 'malicious'>\", "
         "\"classification\": \"benign|malicious\", \"confidence\": 0.0-1.0, "
@@ -870,6 +956,7 @@ def main():
         "\"supporting_evidence\": [\"<concrete observation that supports the hypothesis>\", ...], "
         "\"contradicting_evidence\": [\"<concrete observation that argues against it, if any>\"], "
         "\"missing_evidence\": [\"<what would make you more confident, if anything>\"], "
+        "\"hypotheses_ruled_out\": [\"<other candidate hypothesis name>: <short reason it doesn't fit>\", ...], "
         "\"recommended_action\": \"suppress|block|none\", "
         "\"ttl_seconds\": <how long this verdict should be trusted before re-evaluation, e.g. 86400>}"
     )
@@ -933,11 +1020,14 @@ def main():
             # comment for the incident this fixed.
             evidence_only_payload = _build_evidence_only_payload(representative)
             prompt_text = f"Alert Payload:\n{json.dumps(evidence_only_payload, indent=2)}"
-            # PHASE 59: scaffolding, not a verdict (see _evidence_relevance_breakdown's
-            # own docstring) -- appended as its own clearly-labeled section so the model
-            # can't mistake it for part of the raw Alert Payload above. None whenever
-            # this alert's hypothesis isn't yet covered (most aren't) -- prompt is
-            # byte-identical to before this phase in that case, not silently different.
+            # PHASE 59 (widened to all 9 attack hypotheses by PHASE 63, see
+            # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES): scaffolding, not a verdict (see
+            # _evidence_relevance_breakdown's own docstring) -- appended as its own
+            # clearly-labeled section so the model can't mistake it for part of the raw
+            # Alert Payload above. None whenever this alert's hypothesis isn't covered
+            # (a pre-Phase-58 alert missing hee_evidence_types, or a signature outside
+            # this system's own named vocabulary) -- prompt is byte-identical to before
+            # this phase in that case, not silently different.
             relevance = _evidence_relevance_breakdown(representative)
             if relevance:
                 prompt_text += (
@@ -947,6 +1037,23 @@ def main():
                     "'present_irrelevant' list is real evidence on this alert, just not "
                     "germane to this hypothesis, do not treat it as support either way):\n"
                     f"{json.dumps(relevance, indent=2)}"
+                )
+
+            # PHASE 63 (Gap 6 item 4, hypothesis independence): a real, non-empty
+            # candidate list means this alert has evidence overlapping ANOTHER named
+            # hypothesis too -- the model must rule each one out, not just clear the
+            # hypothesis it happened to name. Empty/None -> nothing appended, prompt
+            # unchanged from before this phase (same degrade-quietly contract as above).
+            candidates = _candidate_alternate_hypotheses(representative)
+            if candidates:
+                prompt_text += (
+                    "\n\nOther candidate hypotheses whose relevant evidence is ALSO "
+                    "present on this alert (evidence-driven, not this system's own "
+                    "scoring): "
+                    f"{json.dumps(candidates)}. Weakening or ruling out the hypothesis "
+                    "above does NOT by itself clear these -- you must independently "
+                    "address each one in 'hypotheses_ruled_out' before classifying "
+                    "benign."
                 )
             feats = representative.get("features", {}) or {}
             rep_value = max(
@@ -989,6 +1096,9 @@ def main():
                 # PHASE 58b: absent (0, "unknown" tier) for alerts published before this
                 # existed -- degrades the same way as every other hee_* field here.
                 "rep_tier": representative.get("hee_rep_tier"),
+                # PHASE 63: None/empty degrades to a no-op in the validator, same
+                # backward-compat treatment as every other ground_truth field here.
+                "candidate_hypotheses": _candidate_alternate_hypotheses(representative) or [],
             }
 
             # PHASE 58b (destination-ownership/baseline-familiarity validator
@@ -1253,9 +1363,22 @@ def main():
                 # PHASE 52: threads the LLM's own suggested ttl_seconds (Phase 51) through
                 # as this specific immunization's TTL override -- fp_engine.mark_false_positive()
                 # clamps it to a sane range and falls back to the 14-day default if absent/invalid.
+                # PHASE 63b: scaled by this confidence bucket's calibrated reliability, if it
+                # has one yet -- see _apply_confidence_calibration()'s own docstring. A no-op
+                # (raw_ttl passed through unchanged) until a bucket has real volume.
+                raw_ttl = response_json.get("ttl_seconds")
+                raw_confidence = float(response_json.get("confidence", 0.0) or 0.0)
+                calibrated_confidence = calibrator.get_calibrated("benign", raw_confidence)
+                adjusted_ttl = _apply_confidence_calibration(raw_ttl, raw_confidence, calibrated_confidence)
+                if calibrated_confidence is not None and adjusted_ttl != raw_ttl:
+                    LOGGER.info(
+                        "[CALIBRATION] benign confidence bucket for %.2f calibrated to %.2f -- "
+                        "immunization TTL adjusted %s -> %s seconds.",
+                        raw_confidence, calibrated_confidence, raw_ttl, adjusted_ttl,
+                    )
                 mark_result = fp_engine.mark_false_positive(
                     representative, alert_hostname, target_domain, source="llm_validated",
-                    ttl_seconds=response_json.get("ttl_seconds"),
+                    ttl_seconds=adjusted_ttl,
                 )
                 base_domain = mark_result.get("base_domain", "")
                 if pcache_key in cache:

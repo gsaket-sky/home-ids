@@ -340,8 +340,17 @@ check("all THREE _immunize_domain() call sites inside mark_false_positive() also
       _fp_src.count("device_id=device_id,") >= 3 and _fp_src.count("ttl_seconds=ttl_seconds,") == 3)
 
 _soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
-check("ollama_soc.py threads the LLM's own ttl_seconds through to mark_false_positive()",
-      'ttl_seconds=response_json.get("ttl_seconds")' in _soc_src)
+# PHASE 63b: the LLM's raw ttl_seconds now passes through
+# _apply_confidence_calibration() before reaching mark_false_positive() (a no-op,
+# returning it unchanged, until a confidence bucket has real calibration data -- see
+# test_phase63_hypothesis_independence.py's Section D) rather than being passed
+# literally -- check both halves of that chain instead of the old single literal call.
+check("ollama_soc.py captures the LLM's own ttl_seconds as raw_ttl",
+      'raw_ttl = response_json.get("ttl_seconds")' in _soc_src)
+check("...and threads the (possibly calibration-adjusted) result through to "
+      "mark_false_positive()",
+      "ttl_seconds=adjusted_ttl" in _soc_src
+      and "adjusted_ttl = _apply_confidence_calibration(raw_ttl, raw_confidence, calibrated_confidence)" in _soc_src)
 
 print()
 if FAILURES:
