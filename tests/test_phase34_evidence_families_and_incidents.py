@@ -233,7 +233,10 @@ check("SOURCE-GUARD: the incident key is derived from the corrected alert_dest_i
       "incident_id = _incident_key(dev_id, alert_dest_ip, alert_target_domain, primary_sig_base)" in _pipeline_src)
 check("SOURCE-GUARD: ollama_soc.py now imports the shared incident_key module instead "
       "of maintaining its own independent grouping-key logic",
-      "from incident_key import target_for_key as _target_for_key_raw, incident_key as _incident_key" in _ollama_src)
+      # PHASE 59: reformatted to a multi-line import (also pulls in signature_base) --
+      # see test_phase59_evidence_relevance.py for that change's own coverage.
+      "from incident_key import (" in _ollama_src
+      and "target_for_key as _target_for_key_raw, incident_key as _incident_key," in _ollama_src)
 
 
 print()

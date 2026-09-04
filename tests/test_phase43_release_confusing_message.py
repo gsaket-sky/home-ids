@@ -22,6 +22,16 @@ network-calling code) rather than live invocation.
 import sys
 from pathlib import Path as _PathForSysPath
 
+# BUGFIX (pre-existing, unrelated to any Phase this session touched -- found while
+# running the full suite): this file printed a literal emoji/em-dash without the
+# UTF-8 reconfigure guard every other test file in this repo already has, crashing
+# with UnicodeEncodeError under a Windows console's default cp1252 codec.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 _ALERTS_PATH = _PathForSysPath(__file__).resolve().parent.parent / "src" / "mitigation" / "alerts.py"
 
 FAILURES = []
