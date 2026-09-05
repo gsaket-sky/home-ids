@@ -44,6 +44,17 @@ router_integration:
   fritzbox:
     fritz_ip: 192.168.1.1  # only read when type == fritzbox
 
+# Live ingestion daemon (src/v13/ingest/daemon.py, Phase 7 wiring). Paths are
+# relative to the v13 process's own working directory; state/ is already
+# gitignored repo-wide (same convention as v-current's state/ids_state.json).
+ingest:
+  zeek_mount_dir: /mnt/v13-zeek       # .94's Zeek logs, read-only SMB mount on .19
+  cursor_dir: state/v13_ingest_cursors
+  graph_db_path: state/v13_graph.db
+  poll_interval_seconds: 2.0          # matches config.yaml.example's own poll_interval default
+  prune_interval_seconds: 3600
+  evidence_retention_days: 90         # matches graph/store.py's DEFAULT_EVIDENCE_RETENTION_DAYS
+
 # --- Mapping from today's config.yaml.example, for reference during the eventual
 # per-mechanism migration (not automated -- a human reads this when wiring a
 # mechanism's config over, per mechanism, same discipline as everything else here):

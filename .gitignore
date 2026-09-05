@@ -27,6 +27,10 @@ reports/
 # tracked, safe-to-publish template instead; the real config.yaml is now
 # deployment-local only, same as state/ and reports/ above.
 config.yaml
+# Same reasoning as config.yaml above, applied to v13: config_v13.example.yaml
+# (dummy subnets/IPs) is the tracked template; a real config_v13.yaml on .19
+# would hold this network's actual home_subnets and must never be committed.
+config_v13.yaml
 context/
 # Environment Secrets
 .env
