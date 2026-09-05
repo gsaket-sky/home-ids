@@ -81,11 +81,14 @@ with tempfile.TemporaryDirectory() as tmp:
     mount_dir = tmp_path / "mount"
     mount_dir.mkdir()
     graph_db_path = tmp_path / "nested" / "v13_graph.db"
+    pihole_log_path = tmp_path / "pihole.log"
+    pihole_log_path.write_text("", encoding="utf-8")
 
     config = {
         "network": {"subnets": ["192.168.77.0/24"]},
         "ingest": {
             "zeek_mount_dir": str(mount_dir),
+            "pihole_log_path": str(pihole_log_path),
             "cursor_dir": str(tmp_path / "cursors"),
             "graph_db_path": str(graph_db_path),
             "poll_interval_seconds": 0.01,
@@ -94,6 +97,8 @@ with tempfile.TemporaryDirectory() as tmp:
     }
     daemon = IngestDaemon(config)
     check("IngestDaemon builds one Zeek source per configured log file", len(daemon.sources) > 0)
+    check("IngestDaemon builds a Pi-hole log source and DNS feature store (A5)",
+          daemon.pihole_source is not None and daemon.pihole_store is not None)
     check("IngestDaemon creates the graph db's parent directory if missing", graph_db_path.parent.exists())
     check("IngestDaemon opens a real GraphStore", daemon.store is not None)
 
@@ -136,6 +141,32 @@ with tempfile.TemporaryDirectory() as tmp:
     if exfil_rows:
         check("that evidence carries a real destination_id (A2's fix, exercised end-to-end via the daemon)",
               exfil_rows[0].destination_id == "8.8.4.4")
+
+    # --- A5: a device seen ONLY via DNS traffic (no Zeek conn/arp event this
+    # cycle) is still picked up and evaluated ---
+    with open(pihole_log_path, "a", encoding="utf-8") as f:
+        f.write("Sep  6 00:38:15 dnsmasq[1146]: query[A] quiet-device-lookup.example from 192.168.77.70\n")
+        f.write("Sep  6 00:38:15 dnsmasq[1146]: cached quiet-device-lookup.example is 1.2.3.4\n")
+    devices_dns_only = daemon._poll_once()
+    check("_poll_once picks up a device seen only via Pi-hole/DNS traffic, not just Zeek",
+          "192.168.77.70" in devices_dns_only)
+
+    # --- A5: a real DNS-tunneling-shaped query (single-label > 55 chars,
+    # high entropy) produces real dns_tunnel_v2 evidence via the full daemon,
+    # not just at the PiHoleFeatureStore unit-test level (sources.py's own
+    # test) ---
+    tunneling_label = "b4f19e2a7c3d8f01b4f19e2a7c3d8f01b4f19e2a7c3d8f01b4f19e2a7c3d8f01"  # 64 chars
+    tunneling_domain = f"{tunneling_label}.dns-tunnel-test.example"
+    with open(pihole_log_path, "a", encoding="utf-8") as f:
+        f.write(f"Sep  6 00:39:00 dnsmasq[1146]: query[A] {tunneling_domain} from 192.168.77.71\n")
+        f.write(f"Sep  6 00:39:00 dnsmasq[1146]: cached {tunneling_domain} is <CNAME>\n")
+    tunnel_evidence_count = daemon._run_cycle()
+    check("_run_cycle processes the DNS-tunneling-shaped device and reports evidence",
+          tunnel_evidence_count > 0)
+    stored_tunnel = daemon.store.get_evidence_for_device("192.168.77.71")
+    tunnel_rows = [e for e in stored_tunnel if e.evidence_type == "dns_tunnel_v2"]
+    check("a real long, high-entropy DNS label lands as dns_tunnel_v2 evidence via the full daemon (A5)",
+          len(tunnel_rows) > 0)
 
     # --- pruning is time-gated, not run every cycle ---
     last_prune_before = daemon._last_prune

@@ -16,6 +16,7 @@ Not part of the pytest suite -- run directly:
 import json
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path as _PathForSysPath
 from typing import Optional
@@ -35,6 +36,8 @@ def check(name, cond, detail=""):
 from v13.ingest.sources import (  # noqa: E402
     ZeekLogSource, ZEEK_LOG_FILES, build_zeek_sources, poll_all,
     _build_fallback_context, run_detection_cycle,
+    PiHoleLogSource, PiHoleFeatureStore,
+    _STATUS_BLOCKED, _STATUS_ALLOWED, _STATUS_NXDOMAIN,
 )
 from v13.evidence.model import NO_DESTINATION  # noqa: E402
 
@@ -218,6 +221,155 @@ class _EmptyDetector:
 
 check("run_detection_cycle returns an empty list, not an error, when detect() finds nothing",
       run_detection_cycle(_FakeExtractor2(), _EmptyDetector(), "192.168.1.52") == [])
+
+
+# --- run_detection_cycle: dns_features merge (A5) ---
+class _MergeCheckDetector:
+    def __init__(self):
+        self.seen_features = None
+
+    def detect(self, device, features, **kw):
+        self.seen_features = features
+        return []
+
+
+merge_detector = _MergeCheckDetector()
+run_detection_cycle(_FakeExtractor2(), merge_detector, "192.168.1.53",
+                      dns_features={"suspicious_domains": 20, "entropy_avg": 4.1})
+check("dns_features are merged into the features dict passed to detect()",
+      merge_detector.seen_features is not None
+      and merge_detector.seen_features.get("suspicious_domains") == 20
+      and merge_detector.seen_features.get("entropy_avg") == 4.1)
+check("Zeek-derived features survive the merge alongside dns_features",
+      merge_detector.seen_features.get("last_dest_ip") == "10.0.0.99")
+
+merge_detector2 = _MergeCheckDetector()
+run_detection_cycle(_FakeExtractor2(), merge_detector2, "192.168.1.54")
+check("omitting dns_features leaves behavior unchanged (no merge attempted)",
+      "suspicious_domains" not in merge_detector2.seen_features)
+
+
+# --- PiHoleLogSource: dnsmasq text-log parsing (A5) ---
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_path = _PathForSysPath(tmp)
+    log_path = tmp_path / "pihole.log"
+    cursor_dir = tmp_path / "cursors"
+
+    log_path.write_text("", encoding="utf-8")
+    source = PiHoleLogSource(log_path, cursor_dir)
+
+    events = []
+
+    def _cb(ts, domain, client_ip, status, qtype):
+        events.append((domain, client_ip, status, qtype))
+
+    def _write(lines):
+        with open(log_path, "a", encoding="utf-8") as f:
+            for line in lines:
+                f.write(line + "\n")
+
+    # gravity-blocked query -> BLOCKED
+    _write([
+        "Sep  6 00:38:15 dnsmasq[1146]: query[A] ichnaea.netflix.com from 192.168.77.85",
+        "Sep  6 00:38:15 dnsmasq[1146]: gravity blocked ichnaea.netflix.com is 0.0.0.0",
+    ])
+    n = source.poll(_cb)
+    check("a gravity-blocked query is emitted once, classified BLOCKED", n == 1 and events[-1] == ("ichnaea.netflix.com", "192.168.77.85", _STATUS_BLOCKED, "A"))
+
+    # dnsmasq's own anti-WPAD-hijack denial -> BLOCKED
+    _write([
+        "Sep  6 00:26:49 dnsmasq[1146]: query[A] wpad.fritz.box from 192.168.77.20",
+        "Sep  6 00:26:49 dnsmasq[1146]: exactly denied wpad.fritz.box is 0.0.0.0",
+    ])
+    source.poll(_cb)
+    check("an 'exactly denied' resolution is classified BLOCKED", events[-1][2] == _STATUS_BLOCKED)
+
+    # a real answer via a CNAME chain -> only the top-level queried domain
+    # correlates; the chain's intermediate hops (never their own `query...from`
+    # line) are silently skipped, not misattributed.
+    _write([
+        "Sep  6 00:38:15 dnsmasq[1146]: query[A] cdn-0.nflximg.com from 192.168.77.85",
+        "Sep  6 00:38:15 dnsmasq[1146]: cached cdn-0.nflximg.com is <CNAME>",
+        "Sep  6 00:38:15 dnsmasq[1146]: cached dscg.netflix.com.edgesuite.net is <CNAME>",
+        "Sep  6 00:38:15 dnsmasq[1146]: forwarded cdn-0.nflximg.com to 127.0.0.1#5335",
+        "Sep  6 00:38:15 dnsmasq[1146]: reply cdn-0.nflximg.com is <CNAME>",
+    ])
+    before = len(events)
+    n = source.poll(_cb)
+    check("a CNAME chain emits exactly one event, for the originally-queried domain only",
+          n == 1 and len(events) == before + 1 and events[-1][0] == "cdn-0.nflximg.com")
+    check("a real resolved answer (not NXDOMAIN, not blocked) is classified ALLOWED",
+          events[-1][2] == _STATUS_ALLOWED)
+
+    # an NXDOMAIN answer, regardless of which verb carries it
+    _write([
+        "Sep  6 00:27:06 dnsmasq[1146]: query[AAAA] sky.fritz.box from 192.168.77.30",
+        "Sep  6 00:27:06 dnsmasq[1146]: cached sky.fritz.box is NXDOMAIN",
+    ])
+    source.poll(_cb)
+    check("an NXDOMAIN answer is classified NXDOMAIN regardless of verb", events[-1] == ("sky.fritz.box", "192.168.77.30", _STATUS_NXDOMAIN, "AAAA"))
+
+    # an intermediate 'forwarded ... to ...' line alone (no matching 'is' line yet)
+    # must not be treated as terminal
+    before = len(events)
+    _write(["Sep  6 00:40:00 dnsmasq[1146]: forwarded standalone.example.com to 127.0.0.1#5335"])
+    n = source.poll(_cb)
+    check("a bare 'forwarded ... to ...' line with no 'is' clause is not treated as terminal", n == 0 and len(events) == before)
+
+    # a resolution line with no preceding query line has nothing to correlate against
+    before = len(events)
+    _write(["Sep  6 00:41:00 dnsmasq[1146]: cached orphan.example.com is 1.2.3.4"])
+    n = source.poll(_cb)
+    check("a resolution line with no pending query is silently skipped, not misattributed", n == 0 and len(events) == before)
+
+    # non-dnsmasq / malformed lines are ignored, not fatal
+    before = len(events)
+    _write(["Sep  6 00:42:00 systemd[1]: some unrelated service log line"])
+    n = source.poll(_cb)
+    check("a non-dnsmasq syslog line is ignored, not fatal", n == 0 and len(events) == before)
+
+    # --- cursor persistence across a fresh instance ---
+    source2 = PiHoleLogSource(log_path, cursor_dir)
+    _write([
+        "Sep  6 00:43:00 dnsmasq[1146]: query[A] resumed.example.com from 192.168.77.40",
+        "Sep  6 00:43:00 dnsmasq[1146]: cached resumed.example.com is 5.6.7.8",
+    ])
+    events2 = []
+    n = source2.poll(lambda ts, d, c, s, q: events2.append((d, c, s, q)))
+    check("a new PiHoleLogSource instance resumes from the saved cursor, not from EOF or 0",
+          n == 1 and events2[0][0] == "resumed.example.com")
+
+    # --- rotation clears pending state too (a query pending before rotation
+    # can never be legitimately resolved by lines from a DIFFERENT file) ---
+    log_path.unlink()
+    log_path.write_text(
+        "Sep  6 00:44:00 dnsmasq[1146]: query[A] postrotate.example.com from 192.168.77.50\n"
+        "Sep  6 00:44:00 dnsmasq[1146]: cached postrotate.example.com is 9.9.9.9\n",
+        encoding="utf-8",
+    )
+    events3 = []
+    n = source2.poll(lambda ts, d, c, s, q: events3.append((d, c, s, q)))
+    check("a rotated log file is detected, re-read from position 0", n == 1 and events3[0][0] == "postrotate.example.com")
+
+
+# --- PiHoleFeatureStore: real RollingWindow + real FeatureExtractor.compute() ---
+store = PiHoleFeatureStore()
+check("an unseen device returns zero features, not an error",
+      store.compute_features("192.168.1.99")["total"] == 0)
+
+now = time.time()
+for i in range(20):
+    store.ingest_query(now, f"a{i}b{i}c{i}d{i}e{i}f{i}g{i}h{i}xyz{i}.evil-tunnel-domain.example", "192.168.1.60", _STATUS_ALLOWED, "TXT")
+feats = store.compute_features("192.168.1.60", now=now, window_seconds=300)
+check("PiHoleFeatureStore produces real dns_tunneling-shaped signal from many long, high-entropy labels",
+      feats["dns_tunneling_domains"] > 0 or feats["max_label_length"] > 28)
+check("dns_qtypes is fed the real DNS query type, not left empty", sum(store._states["192.168.1.60"].rolling.dns_qtypes.values()) == 20)
+
+blocked_store = PiHoleFeatureStore()
+for i in range(10):
+    blocked_store.ingest_query(now, f"blocked{i}.example.com", "192.168.1.61", _STATUS_BLOCKED, "A")
+blocked_feats = blocked_store.compute_features("192.168.1.61", now=now, window_seconds=300)
+check("a device with only blocked queries shows blocked_ratio == 1.0", blocked_feats["blocked_ratio"] == 1.0)
 
 
 print(f"\n{'='*60}")

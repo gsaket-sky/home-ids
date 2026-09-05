@@ -70,33 +70,41 @@ correctly across poll cycles. Config loaded from a real, gitignored
 `config_v13.yaml` on `.19` (`network.subnets: [192.168.77.0/24]` — never
 committed, same split as `config.yaml`/`config.yaml.example`).
 
-### A5. `sources.py` doesn't produce any Pi-hole/DNS-behavior evidence yet
-**What**: found while building `src/v13/ingest/sources.py` (2026-09-06):
-v-current's `PiHoleCollector` (`extractors/dns_features.py`) reads Pi-hole's
-FTL **sqlite database** directly — but that database is NOT part of the
-`v13-pihole` Samba share at all (confirmed via direct `ls` on `.19`'s mount;
-only Pi-hole's own text logs, `pihole.log`/`FTL.log`, are shared). Even if it
-were shared, SQLite's own documentation says WAL mode (which `pihole-FTL.db`
-uses) is unreliable over a network filesystem — a second, independent reason
-not to try reading it remotely. `pihole.log`'s free-text dnsmasq lines
-(`query[A] example.com from 1.2.3.4` / `gravity blocked ...` / `cached ...` /
-`forwarded ... to ...` / `reply ... is ...`) CAN reconstruct roughly what
-`PiHoleCollector.poll()` extracts from the DB, but need their own new
-line-correlation parser — not attempted this session.
-**Why it's open**: a real, separate parsing subsystem, not a small addition to
-`sources.py`'s existing Zeek tailer — found and scoped, not silently skipped.
-**Consequence**: every evidence type that depends on Pi-hole/DNS features
-(`dns_dga_burst`, `dns_tunnel_v2`, the `is_telemetry`/`top_domain`-gated
-branches) is NOT yet produced by `sources.py`'s `run_detection_cycle()` — only
-Zeek-native evidence types are (confirmed safe, not silently wrong:
-`ThreatSignalDetector.detect()`'s DNS-behavior branches all read
-`features.get(key, 0.0/None)`, so missing keys default to "no signal," the
-same as a real device with nothing to report for that signal, not a crash or
-a false alert).
-**When**: before Phase 7's parallel run can claim DNS-behavior-hypothesis
-parity with v-current — not needed for the Zeek-native hypotheses
-(exfiltration, beaconing, lateral movement, JA3/JA4, ARP sweep) to start
-producing real comparison data now.
+### A5. ~~`sources.py` doesn't produce any Pi-hole/DNS-behavior evidence yet~~ — DONE (2026-09-06)
+**Resolved**: `src/v13/ingest/sources.py` gained `PiHoleLogSource` (a new
+dnsmasq-format text-log parser, grammar confirmed via direct `grep` against
+`.19`'s live `pihole.log`, not assumed — correlates a `query[TYPE] domain
+from client_ip` line with its own subsequent `<verb> domain is <value>`
+resolution line; a CNAME chain's intermediate hops, which never had their own
+query line, correctly go uncorrelated and are silently skipped, not
+misattributed) and `PiHoleFeatureStore` (a per-device wrapper reusing
+`core/state.py`'s real `RollingWindow`/`BoundedSet` and
+`extractors/dns_features.py`'s real `FeatureExtractor.compute()` UNCHANGED —
+feature computation itself was never the problem, only the sqlite-DB
+ingestion path was unavailable). `run_detection_cycle()` gained an optional
+`dns_features` param, merged into the Zeek-derived features dict before
+calling `detect()` — no key collisions between the two sources, confirmed by
+direct comparison. `daemon.py` wires a `PiHoleLogSource` against `.19`'s
+`/mnt/v13-pihole/pihole.log` alongside the existing Zeek sources, so a device
+seen only via DNS traffic (no Zeek conn/arp event that cycle) is still
+evaluated. **Verified two ways**: 12 new unit checks in
+`tests/test_v13_ingest_sources.py` (line-grammar parsing, classification,
+CNAME-chain correlation, cursor persistence/rotation) plus 3 new end-to-end
+checks in `tests/test_v13_ingest_daemon.py` — a real, long, high-entropy DNS
+label fed through the actual dnsmasq log-line format produced genuine
+`dns_tunnel_v2` evidence via the full daemon, not just at the unit level.
+**Known, documented limitation carried forward, not silently accepted**:
+`top_domain` still isn't wired (stays `None`), so `detect()`'s
+telemetry-domain dampening won't suppress DNS evidence for telemetry-heavy
+devices the way v-current's live behavior does — the two domain-EXAMPLE
+branches (which carry real attribution, matching #17's own point) are
+unaffected since they already exclude telemetry domains at the source.
+**Also flagged**: `dns_qtypes` is fed the real DNS query type (from
+`pihole.log`'s own `query[TYPE]` line) rather than v-current's
+`row.get("reply_type", 0)` (a Pi-hole FTL DB column unavailable from text
+logs) — a deliberate divergence that arguably matches this field's own
+documented intent ("Tracks DNS qtypes") better than v-current's own value
+does, not a regression.
 
 ### A6. Suricata reactive-capture is NOT a tailable log stream — real scope cut, not built
 **What**: found while building `src/v13/ingest/sources.py` (2026-09-06):
@@ -352,11 +360,14 @@ needs the whole burst-trigger subsystem, not a tailer).
 producing real graph evidence from real production Zeek data, resource-capped
 and stable.
 
-**Next real blocker**: A5 (no Pi-hole/DNS-behavior evidence yet — needs a new
-`pihole.log` text parser) is now the most concrete remaining gap in what the
-live daemon actually produces; A6 (Suricata reactive-capture) is a larger,
-separately-scoped initiative. Neither blocks the parallel run from generating
-real Zeek-native comparison data starting now.
+**A5 is also done** (2026-09-06) — Pi-hole/DNS-behavior evidence
+(`dns_dga_burst`, `dns_tunnel_v2`) is now genuinely produced by the live
+daemon, verified end-to-end with a real DNS-tunneling-shaped query.
+
+**Next real blocker**: A6 (Suricata reactive-capture) — a larger,
+separately-scoped initiative (replicating the whole burst-trigger/dispatch
+subsystem, not a log tailer). Everything else in Group A is now closed; the
+parallel run is generating real Zeek- AND DNS-derived comparison data.
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,

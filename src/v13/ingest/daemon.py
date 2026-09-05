@@ -41,7 +41,9 @@ sys.path.insert(0, str(_SRC_DIR))
 from extractors.zeek_features import ZeekFeatureExtractor  # noqa: E402
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # noqa: E402
 from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
-from v13.ingest.sources import build_zeek_sources, run_detection_cycle  # noqa: E402
+from v13.ingest.sources import (  # noqa: E402
+    build_zeek_sources, run_detection_cycle, PiHoleLogSource, PiHoleFeatureStore,
+)
 
 LOGGER = logging.getLogger("v13.ingest.daemon")
 
@@ -83,6 +85,7 @@ class IngestDaemon:
         cursor_dir = Path(ingest_cfg.get("cursor_dir", "state/v13_ingest_cursors"))
         graph_db_path = Path(ingest_cfg.get("graph_db_path", "state/v13_graph.db"))
         graph_db_path.parent.mkdir(parents=True, exist_ok=True)
+        pihole_log_path = Path(ingest_cfg.get("pihole_log_path", "/mnt/v13-pihole/pihole.log"))
 
         subnets = network_cfg.get("subnets", ["192.168.1.0/24", "192.168.50.0/24"])
 
@@ -90,14 +93,20 @@ class IngestDaemon:
         self.detector = ThreatSignalDetector()
         self.store = GraphStore(str(graph_db_path))
         self.sources = build_zeek_sources(mount_dir, cursor_dir)
+        # A5: Pi-hole/DNS-behavior evidence (V13_REMAINING_WORK.md) -- a separate
+        # source+store pair, not folded into self.sources, since PiHoleLogSource's
+        # callback shape (ts, domain, client_ip, status, qtype) is genuinely
+        # different from ZeekLogSource's (event_type, event_dict), not a drop-in.
+        self.pihole_source = PiHoleLogSource(pihole_log_path, cursor_dir)
+        self.pihole_store = PiHoleFeatureStore()
 
         self._running = True
         self._last_prune = time.time()
 
         LOGGER.info(
-            "IngestDaemon initialized: mount=%s cursor_dir=%s graph_db=%s "
+            "IngestDaemon initialized: mount=%s pihole_log=%s cursor_dir=%s graph_db=%s "
             "poll_interval=%.1fs subnets=%s",
-            mount_dir, cursor_dir, graph_db_path, self.poll_interval, subnets,
+            mount_dir, pihole_log_path, cursor_dir, graph_db_path, self.poll_interval, subnets,
         )
 
     def stop(self, *_args) -> None:
@@ -105,33 +114,42 @@ class IngestDaemon:
         self._running = False
 
     def _poll_once(self) -> Set[str]:
-        """Polls every Zeek source, feeds events into the extractor, and returns
-        the set of device (source) IPs seen this cycle -- run_detection_cycle()
-        needs one call per device, not one call per raw event, since
-        ThreatSignalDetector.detect() operates on a device's AGGREGATE features,
-        not a single event."""
+        """Polls every Zeek source AND the Pi-hole log source, feeds events into
+        the extractor/DNS feature store, and returns the set of device (source)
+        IPs seen this cycle -- run_detection_cycle() needs one call per device,
+        not one call per raw event, since ThreatSignalDetector.detect() operates
+        on a device's AGGREGATE features, not a single event. A device seen ONLY
+        via DNS traffic this cycle (e.g. a quiet device that just did a lookup)
+        is still included, not just Zeek-visible ones."""
         devices_seen: Set[str] = set()
 
-        def _callback(_event_type: str, event: dict) -> None:
+        def _zeek_callback(_event_type: str, event: dict) -> None:
             self.extractor.ingest(event)
             src = event.get("id.orig_h") or event.get("orig_h") or event.get("spa")
             if src:
                 devices_seen.add(src)
 
+        def _pihole_callback(ts: float, domain: str, client_ip: str, status: int, qtype: str) -> None:
+            self.pihole_store.ingest_query(ts, domain, client_ip, status, qtype)
+            devices_seen.add(client_ip)
+
         for source in self.sources.values():
-            source.poll(_callback)
+            source.poll(_zeek_callback)
+        self.pihole_source.poll(_pihole_callback)
         return devices_seen
 
     def _run_cycle(self) -> int:
         devices = self._poll_once()
+        now = time.time()
         total_evidence = 0
         for device_ip in devices:
-            evidence_items = run_detection_cycle(self.extractor, self.detector, device_ip)
+            dns_features = self.pihole_store.compute_features(device_ip, now=now)
+            evidence_items = run_detection_cycle(self.extractor, self.detector, device_ip,
+                                                    dns_features=dns_features)
             for ev in evidence_items:
                 self.store.insert_evidence(ev)
             total_evidence += len(evidence_items)
 
-        now = time.time()
         if now - self._last_prune >= self.prune_interval:
             deleted = self.store.prune_evidence(older_than_days=self.retention_days, now=now)
             if deleted:
