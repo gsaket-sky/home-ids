@@ -1,0 +1,53 @@
+# v13 generalized network/hardware config (design pass, Phase 0 -- see
+# Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md). Replaces hardcoded
+# single-value fields in config.yaml.example (gateway_ip, home_subnet/home_subnets,
+# a Fritz!Box-specific integration assumed always present) with lists/roles, so this
+# becomes a reusable IDS product config, not a home_ids-specific one. v-current's own
+# config.yaml.example is untouched -- this is a new, parallel schema for v13 only.
+
+network:
+  # Replaces home_subnet/home_subnets (config.yaml.example:115,120) -- an arbitrary
+  # list of monitored subnets instead of exactly one or two hardcoded CIDRs.
+  subnets:
+    - 192.168.1.0/24
+    - 192.168.50.0/24
+
+  # Replaces the single hardcoded gateway_ip (config.yaml.example:391) with a list
+  # of named roles -- identity.py's resolve_device_id() priority chain (Phase 1)
+  # walks this list generically instead of special-casing one IP literal. A device
+  # matching any trust_anchor's ip/mac gets that anchor's role as an identity signal;
+  # roles beyond "gateway" (nas, this_host, ...) are informational/product-config
+  # only for now, not yet consumed by identity resolution.
+  trust_anchors:
+    - role: gateway
+      ip: 192.168.1.1
+    - role: this_host
+      ip: 192.168.1.2
+    - role: nas
+      ip: 192.168.1.3
+
+# Drives SQLite cache size, retention/pruning aggressiveness (schema.sql's own
+# documented policy), and the local-vs-remote Ollama default. One of:
+#   pi_8gb    -- aggressive pruning, small local-model triage only (see llm_review
+#                design note: local mode never runs the full structured contract)
+#   x86_16gb  -- today's actual dev/test hardware profile (this box, or .19)
+#   custom    -- explicit overrides below, no built-in defaults applied
+hardware_profile: x86_16gb
+
+# Router-specific integrations become one pluggable collector among others instead
+# of an assumed dependency (config.yaml.example's fritzconnection usage today is
+# unconditional). `type: none` disables router-specific collection entirely --
+# a product deployment with an unsupported router still runs, just without whatever
+# that integration would have added.
+router_integration:
+  type: fritzbox  # fritzbox | none | (future: other vendors as they're added)
+  fritzbox:
+    fritz_ip: 192.168.1.1  # only read when type == fritzbox
+
+# --- Mapping from today's config.yaml.example, for reference during the eventual
+# per-mechanism migration (not automated -- a human reads this when wiring a
+# mechanism's config over, per mechanism, same discipline as everything else here):
+#   home_subnet / home_subnets   -> network.subnets
+#   gateway_ip                   -> network.trust_anchors[role=gateway].ip
+#   fritz_ip                     -> router_integration.fritzbox.fritz_ip
+#   (implicit "this IDS host")   -> network.trust_anchors[role=this_host].ip

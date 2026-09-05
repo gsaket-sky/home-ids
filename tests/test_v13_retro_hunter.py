@@ -1,0 +1,139 @@
+"""
+Standalone runtime test for v13's RetroHunter (src/v13/retro_hunter.py, Phase 6 --
+Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+
+Covers: the core historical re-scan loop (real graph query, not a JSONL scan),
+per-device evidence write-back for a threat-intel match, dedup-by-destination for
+the lookup itself while still preserving per-device attribution in the output,
+confidence-sorted findings, and clean no-op behavior when nothing matches or the
+lookback window excludes everything.
+
+Not part of the pytest suite -- run directly:
+`.venv/Scripts/python.exe tests/test_v13_retro_hunter.py`
+"""
+import sys
+import tempfile
+from pathlib import Path as _PathForSysPath
+sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
+
+FAILURES = []
+
+
+def check(name, cond, detail=""):
+    status = "PASS" if cond else "FAIL"
+    print(f"[{status}] {name}" + (f" — {detail}" if detail and not cond else ""))
+    if not cond:
+        FAILURES.append(name)
+
+
+from v13.graph.store import GraphStore  # noqa: E402
+from v13.evidence.model import Evidence  # noqa: E402
+from v13.retro_hunter import RetroHunter  # noqa: E402
+
+tmpdir = tempfile.mkdtemp(prefix="v13_retro_test_")
+db_path = str(_PathForSysPath(tmpdir) / "test_retro.db")
+store = GraphStore(db_path)
+
+NOW = 1_000_000.0
+DAY = 86400.0
+
+# Two devices touched the same now-malicious domain within the lookback window;
+# one device touched a domain that stays clean; one touch is too old to count.
+store.insert_evidence(Evidence(device_id="dev1", destination_id="evil-later.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 2 * DAY, source="s", value=2.0))
+store.insert_evidence(Evidence(device_id="dev2", destination_id="evil-later.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 5 * DAY, source="s", value=2.0))
+store.insert_evidence(Evidence(device_id="dev3", destination_id="always-clean.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 1 * DAY, source="s", value=1.0))
+store.insert_evidence(Evidence(device_id="dev4", destination_id="evil-later.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 20 * DAY, source="s", value=2.0))  # outside 14-day window
+
+lookup_calls = []
+
+
+def fake_threat_intel_lookup(domain):
+    lookup_calls.append(domain)
+    if domain == "evil-later.example.com":
+        return {"confidence": 4.5, "tags": ["botnet"], "source": "ThreatFox"}
+    return None
+
+
+hunter = RetroHunter(store, threat_intel_lookup=fake_threat_intel_lookup)
+findings = hunter.hunt(days_back=14, now=NOW)
+
+# --- core matching behavior ---
+check("both devices that touched the now-malicious domain within the window get a finding",
+      {f.device_id for f in findings} == {"dev1", "dev2"}, f"got {[f.device_id for f in findings]}")
+check("the clean domain's device produces no finding", "dev3" not in {f.device_id for f in findings})
+check("the too-old touch (outside the 14-day window) is excluded even though the domain matched",
+      "dev4" not in {f.device_id for f in findings})
+check("each finding carries the real confidence/tags/source from the lookup",
+      all(f.confidence == 4.5 and f.tags == ["botnet"] and f.source == "ThreatFox" for f in findings))
+
+# --- dedup-by-destination for the lookup, while preserving per-device attribution ---
+check("the threat-intel lookup itself is called once per distinct destination, not once per device "
+      "(dev1 and dev2 share one domain -- only one lookup call for it)",
+      lookup_calls.count("evil-later.example.com") == 1)
+check("...but the OUTPUT still attributes the finding to each device separately -- v13 evidence is "
+      "inherently device-attributed, unlike v-current's fully-deduped domain set", len(findings) == 2)
+
+# --- evidence write-back: checked HERE, before any second hunt() call runs (below)
+# also matches this same destination and would inflate the count for this device. ---
+dev1_evidence = store.get_evidence_for_device("dev1")
+retro_evidence = [e for e in dev1_evidence if e.source == "retro_hunter"]
+check("a real reputation Evidence item is written back for the confirmed device",
+      len(retro_evidence) == 1 and retro_evidence[0].evidence_type == "reputation"
+      and retro_evidence[0].independence_family == "reputation")
+check("the written-back evidence carries the real confidence value from the intel match",
+      retro_evidence[0].value == 4.5)
+check("the written-back evidence is timestamped at discovery time (now), not the original "
+      "connection's own timestamp -- these are genuinely different points in time",
+      retro_evidence[0].timestamp == NOW)
+check("dev3 (clean domain) gets NO retro_hunter evidence written back",
+      not any(e.source == "retro_hunter" for e in store.get_evidence_for_device("dev3")))
+
+# --- confidence-sorted output ---
+store.insert_evidence(Evidence(device_id="dev5", destination_id="less-bad.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 1 * DAY, source="s", value=1.0))
+
+
+def multi_confidence_lookup(domain):
+    if domain == "evil-later.example.com":
+        return {"confidence": 4.5, "tags": [], "source": "ThreatFox"}
+    if domain == "less-bad.example.com":
+        return {"confidence": 2.0, "tags": [], "source": "URLHaus"}
+    return None
+
+
+hunter2 = RetroHunter(store, threat_intel_lookup=multi_confidence_lookup)
+findings2 = hunter2.hunt(days_back=14, now=NOW)
+check("findings are sorted by confidence, highest first",
+      findings2[0].confidence >= findings2[-1].confidence and findings2[0].confidence == 4.5)
+
+# --- clean no-op behavior ---
+hunter_no_matches = RetroHunter(store, threat_intel_lookup=lambda d: None)
+no_findings = hunter_no_matches.hunt(days_back=14, now=NOW)
+check("a threat-intel lookup that never matches anything produces an empty finding list cleanly",
+      no_findings == [])
+
+empty_store = GraphStore(str(_PathForSysPath(tmpdir) / "empty.db"))
+hunter_empty = RetroHunter(empty_store, threat_intel_lookup=fake_threat_intel_lookup)
+check("hunting against a store with zero evidence at all produces an empty list, no crash",
+      hunter_empty.hunt(days_back=14, now=NOW) == [])
+empty_store.close()
+
+store.close()
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} check(s) FAILED:")
+    for f in FAILURES:
+        print(f"   - {f}")
+    sys.exit(1)
+else:
+    print("All v13 retro-hunter checks PASSED.")
