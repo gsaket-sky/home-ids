@@ -59,16 +59,25 @@ correctly deferred, not skipped.
 own first step) — not after. A systemd resource slice or cgroup limit, sized
 against `.19`'s real 31GB/8-core headroom (confirmed this session).
 
-### A4. No auto-deploy mechanism exists between the NAS repo and either box
-**What**: every file this session pushed to `.94` or `.19` went via a manual
-`scp`, one file at a time. There's no mechanism for `.19` to receive the v13
-codebase at all yet, let alone automatically on future changes.
-**Why it's open**: this is Phase 7's own first deliverable per the plan
-("Deployment automation") — it hasn't been started until now.
-**When**: now — this is what "proceed to deploy" (this session) means concretely.
-See the Deployment section of the plan/dependency map for the intended design
-(NAS repo → `.94` auto-deploy mirroring the existing manual backup/`ast.parse`/
-restart discipline; `.19` pulls the same repo, runs its own entry point).
+### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
+**Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
+this session found `.94`'s deployed directory was never a git repo at all (pure
+`scp` historically) and this repo's only real remote is GitHub — a dedicated,
+repo-scoped, read-only Deploy Key was set up per box (`.94`, `.19`), each with
+its own separate keypair (a compromise of one can't affect the other). Both
+boxes now `git fetch`/pull on a 15-minute cron. `.19` (nothing live to protect
+yet) runs the full v13 test suite after every pull and auto-rolls-back on
+failure. `.94` (production) syncs ONLY code directories (`src/`, `tests/`,
+`Documentation/`, `zeek_scripts/`, `tools/`) — never `config.yaml`, `.env`,
+`state/`, `models/`, or anything else runtime-specific — backs up first,
+validates every `.py` file's syntax, rolls back on any failure, and
+**deliberately never restarts `soc.service` automatically** (a live security
+service restart is a materially different risk than a disk sync while the
+process keeps running unaffected; that stays a separate, explicit human
+action). Verified end-to-end: `soc.service` confirmed still active and
+unaffected after the first real sync; the full v13 test suite passes in both
+`.94`'s and `.19`'s own Python environments (3.12.3 on `.19`), not just
+locally.
 
 ---
 
@@ -254,10 +263,14 @@ automatically even then.
 
 ## Priority summary (my read, not a decision already made)
 
-**Actually blocking today's "proceed to deploy" work**: A1 (real threat-intel
-lookup), A4 (the deploy mechanism itself). A2/A3 matter within Phase 7 but
-slightly later in its own sequence (once ingest and the running process
-respectively exist to attach them to).
+**A4 is done** (2026-09-05) — v13 is now deployed and verified on both `.94`
+(inert, alongside production, not restarted) and `.19` (its dedicated home),
+with automated pull-and-verify on both going forward.
+
+**Next real blocker**: A1 (`retro_hunter.py` still has no real threat-intel
+lookup wired in — it's deployed but can't produce a genuine finding yet). A2/A3
+matter slightly later in Phase 7's own sequence (once the live ingest layer and
+a genuinely running v13 process respectively exist to attach them to).
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,
