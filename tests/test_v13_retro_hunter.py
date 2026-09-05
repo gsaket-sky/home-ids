@@ -13,6 +13,7 @@ Not part of the pytest suite -- run directly:
 """
 import sys
 import tempfile
+from unittest.mock import patch, MagicMock
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
 
@@ -28,7 +29,31 @@ def check(name, cond, detail=""):
 
 from v13.graph.store import GraphStore  # noqa: E402
 from v13.evidence.model import Evidence  # noqa: E402
-from v13.retro_hunter import RetroHunter  # noqa: E402
+from v13.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
+import intelligence.threat_intel  # noqa: E402  -- forces the namespace package into sys.modules so mock.patch's dotted-string resolution can find it below
+
+# --- real_threat_intel_lookup_factory: ThreatIntel mocked, NO real network calls ---
+mock_ti_instance = MagicMock()
+mock_ti_instance.lookup_domain = MagicMock(return_value={"confidence": 3.0, "tags": ["test"], "source": "MockFeed"})
+
+with patch("intelligence.threat_intel.ThreatIntel", return_value=mock_ti_instance) as mock_ti_class:
+    lookup = real_threat_intel_lookup_factory({"otx_api_key": "x"}, "/tmp/fake_state", refresh=True)
+
+check("real_threat_intel_lookup_factory constructs a ThreatIntel instance with the given config",
+      mock_ti_class.call_args.kwargs.get("otx_api_key") == "x")
+check("real_threat_intel_lookup_factory calls _refresh_all() when refresh=True",
+      mock_ti_instance._refresh_all.called)
+check("real_threat_intel_lookup_factory returns ThreatIntel's OWN lookup_domain method directly "
+      "(a genuine pass-through, not a wrapper reimplementing the lookup)",
+      lookup is mock_ti_instance.lookup_domain)
+check("the returned lookup callable produces ThreatIntel's real return shape unchanged",
+      lookup("evil.example.com") == {"confidence": 3.0, "tags": ["test"], "source": "MockFeed"})
+
+mock_ti_instance2 = MagicMock()
+with patch("intelligence.threat_intel.ThreatIntel", return_value=mock_ti_instance2):
+    real_threat_intel_lookup_factory({}, "/tmp/fake_state", refresh=False)
+check("refresh=False skips the network-calling _refresh_all() entirely",
+      not mock_ti_instance2._refresh_all.called)
 
 tmpdir = tempfile.mkdtemp(prefix="v13_retro_test_")
 db_path = str(_PathForSysPath(tmpdir) / "test_retro.db")

@@ -20,18 +20,19 @@ future confusion would come from omitting.
 These aren't optional polish — the parallel run can't produce meaningful
 comparison data without them.
 
-### A1. `retro_hunter.py`'s threat-intel lookup is currently a test stub
-**What**: v13's `RetroHunter` takes `threat_intel_lookup` as an injected
-dependency (by design, see `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s Phase 6
-section) — but nothing has wired in a REAL lookup function yet (v-current's
-`ThreatIntel.lookup_domain()`, URLHaus/FeodoTracker/ThreatFox/OTX).
-**Why it's open**: the injection point was built deliberately so this could be
-wired in later without a redesign — but "later" hasn't happened yet, so
-`retro_hunter.py` currently can't produce a single real finding.
-**When**: before Phase 7's parallel run is expected to produce useful
-retro-hunt output — i.e., part of the initial wiring work, not after. Likely the
-simplest real lookup is v-current's own `ThreatIntel` class, imported and called
-directly (its own feed-refresh logic doesn't need re-implementing, just calling).
+### A1. ~~`retro_hunter.py`'s threat-intel lookup is currently a test stub~~ — DONE (2026-09-06)
+**Resolved**: added `real_threat_intel_lookup_factory(config, state_dir,
+refresh=True)` to `src/v13/retro_hunter.py`. It constructs v-current's own
+`intelligence.threat_intel.ThreatIntel` (feed-refresh logic reused as-is, not
+reimplemented) and returns its `lookup_domain` bound method directly as the
+injected `threat_intel_lookup` callable — confirmed `lookup_domain(domain:
+str) -> Optional[dict]` already returns exactly the `{confidence, tags,
+source}` shape `RetroHunter` expects, so this is a genuine pass-through, not an
+adapter. 5 new mock-based tests added to `tests/test_v13_retro_hunter.py`
+(construction args, `_refresh_all()` call behavior for both `refresh=True` and
+`refresh=False`, and that the real bound method is returned unchanged) — full
+file now 18/18. All 12 v13 test files (227+ unit checks + the 15-check
+integration test) independently re-confirmed passing after this change.
 
 ### A2. `zeek_exfiltration`/`zeek_beaconing` never carry a real destination
 **What**: these two v-current detectors (`threat_signals.py:247-274`) never set
@@ -267,10 +268,14 @@ automatically even then.
 (inert, alongside production, not restarted) and `.19` (its dedicated home),
 with automated pull-and-verify on both going forward.
 
-**Next real blocker**: A1 (`retro_hunter.py` still has no real threat-intel
-lookup wired in — it's deployed but can't produce a genuine finding yet). A2/A3
-matter slightly later in Phase 7's own sequence (once the live ingest layer and
-a genuinely running v13 process respectively exist to attach them to).
+**A1 is also done** (2026-09-06) — `retro_hunter.py` now has a real
+threat-intel lookup wired in via `real_threat_intel_lookup_factory()`.
+
+**Next real blocker**: A2 (`zeek_exfiltration`/`zeek_beaconing` still lack a
+real destination) and A3 (resource isolation on `.19`) — both wait on the same
+thing, `src/v13/ingest/sources.py`, since that's the chokepoint that both
+supplies `fallback_context` (A2) and gives Phase 7 an actual running v13
+process to isolate (A3).
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,

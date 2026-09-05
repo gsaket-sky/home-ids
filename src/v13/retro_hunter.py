@@ -36,10 +36,38 @@ MarkFalsePositiveResult already uses) and job-health/GeoIP-enrichment reporting.
 """
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from v13.graph.store import GraphStore
 from v13.evidence.model import Evidence
+
+
+def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
+                                       refresh: bool = True) -> Callable[[str], Optional[Dict[str, Any]]]:
+    """Wires in v-current's REAL ThreatIntel (intelligence/threat_intel.py,
+    URLHaus/FeodoTracker/ThreatFox/OTX) as RetroHunter's injected lookup --
+    confirmed via direct read that ThreatIntel.lookup_domain(domain) already
+    returns exactly the Optional[dict] shape ({confidence, tags, source} or
+    None) RetroHunter expects, so this is a genuine one-line wiring, not a
+    reimplementation (the whole point of the injected-dependency design, Phase 6).
+
+    refresh=True (the real-usage default) calls ThreatIntel._refresh_all() once
+    up front -- a real network call against external feeds, matching
+    v-current's own run_retro_hunt() -- so this factory itself is NOT called
+    from any test (tests use a plain fake callable instead, see
+    tests/test_v13_retro_hunter.py). Set refresh=False only when reusing an
+    already-warm on-disk cache from a prior run without paying for a fresh
+    network round-trip."""
+    from intelligence.threat_intel import ThreatIntel
+    ti = ThreatIntel(
+        cache_dir=str(Path(state_dir) / "ti_cache"),
+        otx_api_key=config.get("otx_api_key", ""),
+        refresh_interval=3600,
+    )
+    if refresh:
+        ti._refresh_all()
+    return ti.lookup_domain
 
 
 @dataclass
