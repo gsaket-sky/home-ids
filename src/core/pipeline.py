@@ -479,6 +479,7 @@ class EnginePipeline:
         self.fp_engine = AutonomousFPEngine(
             config=self.config,
             state_dir=str(state_dir),
+            state_manager=self.state_manager,
         )
         if self.ti_engine:
             self.ti_engine.fp_engine = self.fp_engine
@@ -1108,6 +1109,18 @@ class EnginePipeline:
                 
                 reputation_value = max(ti_risk, abuse_risk, vt_risk)
                 if ti_match or abuse_risk > 0.0 or vt_risk > 0.0:
+                    # PHASE 64 (reputation independence-scoping redesign): domain=
+                    # was never populated here before -- reputation_target (set above,
+                    # :841-926) is already the specific domain/IP that actually produced
+                    # this max TI/VT/AbuseIPDB score (the same causal-attribution fix
+                    # documented in this file's own reputation-target-selection comments),
+                    # so attaching it here is just exposing an already-correct value on
+                    # the Evidence item, not a new computation. Lets decision_engine.py
+                    # tell "this reputation hit is about the SAME destination the winning
+                    # attack hypothesis's own evidence points at" apart from "some
+                    # unrelated domain elsewhere in this device's rolling window also has
+                    # a nonzero reputation score" -- see decision_engine.py's own comment
+                    # for how this is consumed.
                     self.evidence_store.add(Evidence(
                         type="reputation",
                         source="threat_intel",
@@ -1116,7 +1129,8 @@ class EnginePipeline:
                         value=reputation_value,
                         confidence=0.95 if reputation_value >= 4.0 else 0.8,
                         independence_group="reputation",
-                        provenance="detector:reputation"
+                        provenance="detector:reputation",
+                        domain=reputation_target if reputation_target and reputation_target != "unknown" else None,
                     ))
                 
                 # 2. Get Reputation
@@ -2024,6 +2038,28 @@ class EnginePipeline:
                                 "Telegram suppressed for %s: occurrence #%d of ongoing incident '%s' (age %.0fs)",
                                 hostname, incident_notify.occurrence_count, incident_id, incident_notify.incident_age_seconds,
                             )
+
+                        if fp_verdict["suppress"] and telegram_worthy:
+                            # PHASE 64: the reset below (PHASE 6's own comment: "leaving stale
+                            # counters ... would let it immediately re-trigger from leftover state
+                            # on its next cycle") only ever ran inside the alert-send branch --
+                            # never when CL-AFPE genuinely suppressed a HIGH/CRITICAL decision as a
+                            # false positive. RollingWindow.domains/domain_timestamps/dns_qtypes
+                            # (state.py) are unbounded Counters/deques (unlike events/long_events,
+                            # which self-prune via deque maxlen) -- with no reset, a device whose
+                            # HIGH/CRITICAL verdicts keep getting correctly suppressed accumulates
+                            # them indefinitely, staling the dns_behavior features computed from
+                            # them for as long as suppression continues. Deliberately scoped to
+                            # `telegram_worthy` (HIGH/CRITICAL) only, not SUSPICIOUS and not the
+                            # `incident_notify.should_notify==False` withheld-repeat case just above
+                            # -- both of those are still analytically ongoing (persistence-escalation
+                            # depends on the SAME primary_sig recurring across cycles, which itself
+                            # depends on state.rolling continuing to accumulate), so resetting there
+                            # would erase state an active incident still needs. Only a suppressed
+                            # HIGH/CRITICAL cycle -- CL-AFPE positively concluding this specific
+                            # story is a false positive -- gets its window cleared.
+                            self.zeek_fx.reset_client(known_ips_snapshot)
+                            state.rolling.reset()
 
                         if not fp_verdict["suppress"] and telegram_worthy and incident_notify.should_notify:
 

@@ -1,18 +1,23 @@
 import time
 from typing import List, Dict, Any, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
-from intelligence.hypotheses.engine import HypothesisEngine
+from intelligence.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
 
-# SHADOW MODE (Gap 3, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): how long a hard-stop
-# type (arp_spoofing/geofencing_violation/suricata_signature_match) is trusted as "this cycle's
+# Gap 3, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md: how long a hard-stop type
+# (arp_spoofing/geofencing_violation/suricata_signature_match) is trusted as "this cycle's
 # own event" rather than a stale EvidenceStore replay. Deliberately far shorter than
 # EvidenceStore's own 600s general TTL (evidence.py) -- a hard-stop is meant to represent "this
 # verifiable fact just happened," not "this fact happened at some point in the last 10
 # minutes." honeypot_access uses features["zeek_honeypot_hits"] directly instead (the exact
 # same raw signal pipeline.py itself uses to decide whether to create the evidence at all,
 # sidestepping the timing question entirely) -- this constant is for the other three, which
-# don't have as direct a raw-feature equivalent readily available here yet.
+# don't have as direct a raw-feature equivalent readily available here yet, and (as of
+# PHASE 64) remain SHADOW-ONLY: fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit have
+# never produced a single live divergence in state/shadow_decisions.jsonl since 2026-08-26
+# (checked directly, not assumed), unlike honeypot's 58 confirmed stale-echo cases -- there's
+# no live evidence yet that this 120s proxy is calibrated correctly for the other three, so
+# only honeypot's freshness check (fresh_honeypot below) was flipped live.
 _HARD_STOP_FRESHNESS_SECONDS = 120
 
 def _safe_float(val: Any) -> float:
@@ -44,21 +49,24 @@ class DecisionEngine:
         # VERSION 11 (P1 follow-up): baseline_familiarity is the same kind of optional,
         # defaulted, single-consumer parameter -- see DeviceProfileBenignHypothesis's
         # own docstring for what it means and how it's computed.
-        # SHADOW MODE (Gap 3): features is the same optional/defaulted/single-consumer
-        # pattern -- only the shadow honeypot freshness check below reads it; every
-        # existing caller that hasn't been updated to pass it (tests, regression_tester.py)
-        # is unaffected, since the shadow computation never influences the live verdict.
+        # PHASE 64 (Gap 3 honeypot flip, live): features is the same optional/defaulted/
+        # single-consumer pattern -- only the honeypot freshness check below (fresh_honeypot)
+        # reads it; any existing caller that hasn't been updated to pass it (tests,
+        # regression_tester.py) falls back to fresh_honeypot=False, matching the old
+        # has_honeypot-based behavior for a device with genuinely fresh honeypot evidence
+        # but no features dict available (conservative: no false negative, just no freshness
+        # discount either -- see the trail line below for how a stale-but-present hit is
+        # still surfaced diagnostically even when it no longer hard-stops).
         # BUGFIX (2026-09-01, live shadow-divergence flood: 51 "home-router ... Internal
         # Honeypot Accessed" divergences in one session, all the router at one of its
         # several IPv6/IPv4 identifiers): is_safe is the SAME optional/defaulted/
-        # single-consumer pattern, added because the shadow honeypot check below
-        # (fresh_honeypot) copied pipeline.py's raw-feature read
-        # (features.get("zeek_honeypot_hits", 0) > 0) to dodge EvidenceStore staleness,
-        # but silently dropped the "and not is_safe" half of that SAME condition at its
-        # source (pipeline.py's evidence-creation gate, ~line 1033) -- safe_ips devices
-        # like the router touching the honeypot for benign reasons is explicitly
-        # expected and exempted live, but the shadow computation had no way to know
-        # that, since is_safe was never passed in at all.
+        # single-consumer pattern, added because the freshness check below (fresh_honeypot)
+        # copied pipeline.py's raw-feature read (features.get("zeek_honeypot_hits", 0) > 0)
+        # to dodge EvidenceStore staleness, but silently dropped the "and not is_safe" half
+        # of that SAME condition at its source (pipeline.py's evidence-creation gate, ~line
+        # 1033) -- safe_ips devices like the router touching the honeypot for benign reasons
+        # is explicitly expected and exempted live, but this check had no way to know that
+        # until is_safe was threaded through too.
         hyp_results = self.hypothesis_engine.evaluate_all(ev_store, rep, device_type, baseline_familiarity)
         
         attack_score = hyp_results["attack"]["score"]
@@ -88,6 +96,38 @@ class DecisionEngine:
         # group-membership test against the canonical ATTACK_EVIDENCE_FAMILIES registry
         # (evidence.py) is both simpler and strictly more correct than the old hybrid.
         attack_evidence = [e for e in ev_store if e.independence_group in ATTACK_EVIDENCE_FAMILIES]
+
+        # PHASE 64 (Gap 6 item 3 follow-through, redesigned after a first attempt was
+        # caught by test_phase38_comprehensive_scenarios.py's own existing golden case --
+        # see DECISION_LOGIC_DEPENDENCY_MAP.md for that attempt's category error).
+        # "reputation" evidence is added on ANY nonzero TI/VT/AbuseIPDB score anywhere in
+        # the device's rolling window (pipeline.py) -- untargeted, that's still
+        # legitimate weak corroboration (the existing golden case: a DGA burst plus SOME
+        # independent reputation signal, neither evidence item carrying a domain, is
+        # supposed to reach HIGH -- correctly left alone below, since neither side has
+        # domain info to compare). What's NOT legitimate corroboration is a reputation
+        # hit AFFIRMATIVELY about a DIFFERENT destination than the one the winning attack
+        # hypothesis's own evidence points at (e.g. a DNS_TUNNELING verdict about
+        # domain X "corroborated" by a reputation hit that pipeline.py itself attributed
+        # to a completely unrelated domain Y elsewhere in the window). Only strip a
+        # reputation item when BOTH sides carry a domain and they provably differ --
+        # never when either side is domain-less (that's the ambiguous case the existing
+        # test already covers, and this fix must not touch it), so this can only ever
+        # remove a source the evidence itself proves is unrelated, never one merely
+        # lacking proof of relation. Monotonic: can only demote a verdict, never escalate
+        # one -- same fail-safe direction Gap 1/G6 shipped live without a shadow period.
+        winning_attack_name = hyp_results["attack"]["name"]
+        relevant_types = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(winning_attack_name)
+        hyp_domains = {
+            e.domain for e in attack_evidence
+            if relevant_types and e.type in relevant_types and e.domain
+        } if relevant_types else set()
+        if hyp_domains:
+            attack_evidence = [
+                e for e in attack_evidence
+                if not (e.independence_group == "reputation" and e.domain and e.domain not in hyp_domains)
+            ]
+
         independence_groups = {e.independence_group for e in attack_evidence if e.independence_group}
         num_independent_sources = len(independence_groups)
 
@@ -104,6 +144,22 @@ class DecisionEngine:
         rep_abuse = getattr(rep, "abuse_risk", 0.0) or 0.0
 
         has_honeypot = any(e.type == "honeypot_access" for e in ev_store)
+        # PHASE 64 (Gap 3 honeypot flip, live): has_honeypot above checks only PRESENCE in
+        # ev_store, which EvidenceStore (evidence.py) keeps "active" for up to 600s after
+        # creation -- a single real hit used to re-fire the identical CRITICAL verdict on
+        # every pipeline cycle for up to 10 more minutes. fresh_honeypot reads
+        # features["zeek_honeypot_hits"] directly instead (the same raw signal pipeline.py
+        # itself gates evidence-creation on, at its own call site) -- sidesteps the timing
+        # question entirely rather than needing its own freshness-window constant.
+        # Confirmed live (not inferred): a home-router "Internal Honeypot Accessed" CRITICAL
+        # alert with features["zeek_honeypot_hits"]==0 in its own persisted snapshot -- the
+        # verdict's own evidence contradicted it. 58 confirmed stale-echo divergences in
+        # state/shadow_decisions.jsonl since 2026-08-26 with zero false negatives (every
+        # genuinely fresh hit shadow-agreed with live) before this flip.
+        fresh_honeypot = (
+            bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
+            and not is_safe
+        )
         has_arp_spoof = any(e.type == "arp_spoofing" for e in ev_store)
         has_geofence = any(e.type == "geofencing_violation" for e in ev_store)
         # VERSION 11 (P2, Suricata follow-up): a genuinely high-severity Suricata rule
@@ -132,7 +188,7 @@ class DecisionEngine:
 
         trail: List[str] = [
             (
-                f"Hard-stop checks: honeypot={'YES' if has_honeypot else 'no'}, "
+                f"Hard-stop checks: honeypot={'YES' if fresh_honeypot else ('stale' if has_honeypot else 'no')}, "
                 f"arp_spoofing={'YES' if has_arp_spoof else 'no'}, "
                 f"geofencing={'YES' if has_geofence else 'no'}, "
                 f"confirmed_exploit={'YES' if has_confirmed_exploit else 'no'}"
@@ -165,7 +221,7 @@ class DecisionEngine:
         # smarter over time" signal across all of Brain 1, not just CL-AFPE.
         decision_path = "benign"
 
-        if has_honeypot:
+        if fresh_honeypot:
             state = DecisionState.CRITICAL
             action = "block"
             explanation = "Internal Honeypot Accessed"
@@ -301,44 +357,36 @@ class DecisionEngine:
 
         # SHADOW MODE (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): computed alongside
         # the real verdict above, never substituted for it here -- state/action/explanation
-        # returned below are UNCHANGED by any of this. Combines both fixes found via a
-        # third-party review + live verification:
-        #   Gap 1 (rep.verified_ioc): tier==5 currently fires identically whether it came
-        #   from a genuine curated-feed IOC match (ti_score) or an aggregate VT/AbuseIPDB
-        #   score alone. Backtest (scripts/shadow_backtest.py, 80 historical "Confirmed
-        #   Malicious IOC" alerts): verified_ioc was True for ZERO of them. A live example
-        #   also showed "corroborating evidence exists" (num_independent_sources>=1) being
-        #   treated as equivalent to "the evidence supports an attack conclusion" when the
-        #   competing BENIGN hypothesis actually scored higher -- attack_wins closes that.
+        # returned below are UNCHANGED by any of this. Combines the remaining still-shadow
+        # fixes found via a third-party review + live verification:
+        #   Gap 1 (rep.verified_ioc) and Gap 3's honeypot freshness (fresh_honeypot, computed
+        #   above alongside has_honeypot) are both LIVE now, not shadow -- this block still
+        #   reuses their live values/branches so the shadow comparison stays apples-to-apples
+        #   with what actually ran, it just no longer needs its own copies of that logic.
         #   Gap 2 (shadow_attack_score/name, from HypothesisEngine.evaluate_all()):
         #   NetworkIntrusionHypothesis.evaluate() currently weighs a generic Zeek `weird`
         #   notice identically to a real malicious JA3/JA4 TLS fingerprint match under one
         #   `has_malicious_tls` boolean -- evaluate_shadow() splits them. Only relevant when
         #   NETWORK_INTRUSION was (or would become) the winning attack hypothesis.
-        #   Gap 3 (fresh_honeypot/fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit):
-        #   has_honeypot etc. above check only PRESENCE in ev_store, which EvidenceStore
-        #   (evidence.py) keeps "active" for up to 600s after creation -- a single real hit
-        #   re-fires the identical hard-stop verdict on every pipeline cycle for up to 10
-        #   minutes afterward, each with that cycle's own unrelated "most notable
-        #   connection" in the display line. Confirmed live: a home-router "Internal
-        #   Honeypot Accessed" CRITICAL alert with features["zeek_honeypot_hits"]==0 in its
-        #   own persisted snapshot -- the verdict's own evidence contradicts it. Backtest
-        #   (state/alerts.json, all "Internal Honeypot Accessed" alerts ever): 6 of 16 were
-        #   this exact stale-echo pattern. honeypot uses features["zeek_honeypot_hits"]
-        #   directly (the same raw signal pipeline.py itself gates evidence-creation on, at
-        #   its own call site) rather than a second timing constant; the other three don't
-        #   have as convenient a raw-feature reference here yet, so they use
-        #   _HARD_STOP_FRESHNESS_SECONDS against e.timestamp as a diagnostic proxy pending
-        #   the same live confirmation honeypot already got.
+        #   [STALE COMMENT, PHASE 64] this block used to also compute Gap 2 (NetworkIntrusion
+        #   ja3/notice split) as shadow-only -- that flipped live too (hypotheses/engine.py,
+        #   NetworkIntrusionHypothesis.evaluate() now calls use_gap2_fix=True directly), so
+        #   shadow_attack/hyp_results["attack"] are identical for that hypothesis now; kept
+        #   here only because decision_engine.py's shadow computation still needs SOME
+        #   attack-score source and shadow_attack degrades to hyp_results["attack"] cleanly.
+        #   Gap 3, remaining shadow-only (fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit):
+        #   same PRESENCE-vs-freshness problem honeypot had (has_arp_spoof/has_geofence/
+        #   has_confirmed_exploit above check only ev_store presence, up to EvidenceStore's
+        #   600s TTL) -- but unlike honeypot, these three have never produced a single live
+        #   divergence in state/shadow_decisions.jsonl (checked directly), so there's no live
+        #   evidence yet that _HARD_STOP_FRESHNESS_SECONDS=120 is correctly calibrated for
+        #   them the way honeypot's own raw-feature check was confirmed to be. Stay
+        #   shadow-only pending that same live confirmation.
         shadow_attack = hyp_results.get("shadow_attack", hyp_results["attack"])
         shadow_attack_name = shadow_attack["name"]
         shadow_attack_score = shadow_attack["score"]
 
         now_ts = time.time()
-        fresh_honeypot = (
-            bool(features) and _safe_float((features or {}).get("zeek_honeypot_hits", 0)) > 0
-            and not is_safe
-        )
         fresh_arp_spoof = any(
             e.type == "arp_spoofing" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
         )

@@ -95,7 +95,9 @@ try:
     
     print("  -> Edge Case 6: Honeypot / Geofencing Critical (Expected: 10.0)")
     store.add(Evidence(type="honeypot_access", source="mock", timestamp=time.time(), device="dev6", value=1.0, confidence=1.0, provenance="mock", independence_group="honeypot"))
-    decision = de.evaluate(store.get_for_device("dev6"), MockRep(tier=3))
+    # PHASE 64: Gap 3's honeypot hard-stop is now freshness-gated (features["zeek_honeypot_hits"]),
+    # not bare Evidence presence -- pass it here so this demo still shows the documented CRITICAL.
+    decision = de.evaluate(store.get_for_device("dev6"), MockRep(tier=3), features={"zeek_honeypot_hits": 1})
     print(f"     ✅ Decision: {decision['state']} (Risk: {decision['threat_confidence'] * 10.0})")
     
 except ImportError as e:

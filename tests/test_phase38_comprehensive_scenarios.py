@@ -293,8 +293,28 @@ check("REGRESSION GUARD: a low-severity Suricata match is real evidence (SUSPICI
 # ═══════════════════════════════════════════════════════════════════════════════════
 honeypot_ev = fresh_store([Evidence(type="honeypot_access", source="zeek", timestamp=time.time(),
                                      device="dev_hp", value=1.0, confidence=1.0, independence_group="honeypot")], "dev_hp")
+# PHASE 64 (Gap 3 honeypot flip, live): the live hard-stop now gates on FRESH evidence
+# (features["zeek_honeypot_hits"] > 0, the same raw signal pipeline.py itself gates
+# evidence-creation on) rather than bare Evidence presence in ev_store -- features=
+# reflects the real calling convention every live caller (pipeline.py) already uses.
 check("honeypot access is a CRITICAL hard-stop",
-      de.evaluate(honeypot_ev, ReputationVector(domain="", tier=3))["state"] == "CRITICAL")
+      de.evaluate(honeypot_ev, ReputationVector(domain="", tier=3),
+                   features={"zeek_honeypot_hits": 1})["state"] == "CRITICAL")
+
+decision_stale_honeypot = de.evaluate(honeypot_ev, ReputationVector(domain="", tier=3),
+                                       features={"zeek_honeypot_hits": 0})
+check("THE FIX (Gap 3): the SAME honeypot_access Evidence, still sitting in ev_store from "
+      "an earlier cycle (EvidenceStore's 600s TTL) but with NO fresh hit this cycle "
+      "(features['zeek_honeypot_hits']==0), no longer re-fires the CRITICAL hard-stop -- "
+      "this is the exact stale-echo pattern confirmed live (home-router) and backtested "
+      "(58/58 shadow divergences agreed) before this flip",
+      decision_stale_honeypot["state"] != "CRITICAL", f"got {decision_stale_honeypot}")
+
+decision_no_features = de.evaluate(honeypot_ev, ReputationVector(domain="", tier=3))
+check("REGRESSION GUARD: a caller that doesn't pass features= at all (no live signal "
+      "available, e.g. an old test or script not yet updated) fails safe to NOT a "
+      "hard-stop, rather than crashing or defaulting to the old presence-only behavior",
+      decision_no_features["state"] != "CRITICAL", f"got {decision_no_features}")
 
 arp_ev = fresh_store([Evidence(type="arp_spoofing", source="zeek", timestamp=time.time(),
                                 device="dev_arp", value=10.0, confidence=1.0, independence_group="zeek_network")], "dev_arp")
@@ -375,6 +395,34 @@ decision_corroborated = de.evaluate(corroborated_dga, ReputationVector(domain=""
 check("the SAME DGA signal, corroborated by an independent reputation-family hit, "
       "can reach HIGH",
       decision_corroborated["state"] == "HIGH", f"got {decision_corroborated}")
+
+# PHASE 64 (reputation domain-linkage redesign): neither evidence item above carries a
+# `domain` -- the ambiguous case, left permissive on purpose (matches real reputation
+# evidence before pipeline.py started attaching `domain=reputation_target`). These two
+# new cases exercise the actual redesigned behavior: a reputation hit genuinely about
+# the SAME destination as the DGA finding still corroborates; one AFFIRMATIVELY about a
+# DIFFERENT destination elsewhere in the device's window does not.
+dga_same_domain = fresh_store([
+    Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_same",
+             value=20.0, confidence=0.9, independence_group="dns_behavior", domain="xkq93jf.example.com"),
+    Evidence(type="reputation", source="threat_intel", timestamp=time.time(), device="dev_same",
+             value=1.5, confidence=0.8, independence_group="reputation", domain="xkq93jf.example.com"),
+], "dev_same")
+decision_same_domain = de.evaluate(dga_same_domain, ReputationVector(domain="", tier=4))
+check("a reputation hit genuinely about the SAME domain as the DGA finding still "
+      "corroborates it to HIGH",
+      decision_same_domain["state"] == "HIGH", f"got {decision_same_domain}")
+
+dga_diff_domain = fresh_store([
+    Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_diff",
+             value=20.0, confidence=0.9, independence_group="dns_behavior", domain="xkq93jf.example.com"),
+    Evidence(type="reputation", source="threat_intel", timestamp=time.time(), device="dev_diff",
+             value=1.5, confidence=0.8, independence_group="reputation", domain="totally-unrelated-cdn.example.net"),
+], "dev_diff")
+decision_diff_domain = de.evaluate(dga_diff_domain, ReputationVector(domain="", tier=4))
+check("THE FIX: a reputation hit AFFIRMATIVELY about a DIFFERENT domain than the DGA "
+      "finding no longer counts as independent corroboration -- stays SUSPICIOUS, not HIGH",
+      decision_diff_domain["state"] == "SUSPICIOUS", f"got {decision_diff_domain}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

@@ -117,17 +117,29 @@ check("REGRESSION GUARD: omitting is_safe entirely (every existing caller that h
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section E: REGRESSION GUARD -- the LIVE verdict was never wrong and is untouched by
-# is_safe in this exact scenario (ev_store has no honeypot_access evidence either way,
-# since pipeline.py's own creation gate already excluded it for a safe_ips device --
-# this bug only ever affected the shadow diagnostic column, never a real alert)
+# Section E: PHASE 64 UPDATE -- Gap 3's honeypot freshness check flipped LIVE (was
+# shadow-only when this test was first written; see decision_engine.py's own comment).
+# The live verdict now DOES react to fresh_honeypot the same way shadow_state always
+# did -- this section used to assert the live verdict was untouched (true only while
+# the check was shadow-only); it now asserts the live verdict correctly MATCHES
+# shadow_state in both the exempted and non-exempted case, which is the actual point of
+# flipping this live: a genuinely non-exempt device's fresh honeypot hit must now
+# produce a REAL alert, not just a shadow-log diagnostic line nobody but an operator
+# reading state/shadow_decisions.jsonl would ever see.
 # ═══════════════════════════════════════════════════════════════════════════════════
-check("REGRESSION GUARD: the LIVE verdict (not shadow_*) stays BENIGN regardless of "
-      "is_safe -- this bug never produced a real, live false alert, only a misleading "
-      "shadow-mode divergence notification",
-      result_safe["state"] == "BENIGN" and result_unsafe["state"] == "BENIGN",
-      f"got live state={result_safe['state']!r} (is_safe=True) / "
-      f"{result_unsafe['state']!r} (is_safe=False)")
+check("THE FLIP (Phase 64): a safe_ips device's fresh honeypot hit still does NOT "
+      "produce a live CRITICAL verdict -- the is_safe exemption applies identically to "
+      "the now-live check as it always did to the shadow one",
+      result_safe["state"] == "BENIGN",
+      f"got live state={result_safe['state']!r} (is_safe=True)")
+check("THE FLIP (Phase 64): a genuinely non-exempt device's fresh honeypot hit NOW "
+      "produces a real live CRITICAL verdict, matching shadow_state -- before this "
+      "flip this scenario silently stayed BENIGN live while shadow correctly said "
+      "CRITICAL, i.e. exactly the home-router-shaped bug this whole file exists to "
+      "cover was, until now, only ever caught in the diagnostic column, never live",
+      result_unsafe["state"] == "CRITICAL" and result_unsafe["state"] == result_unsafe["shadow_state"],
+      f"got live state={result_unsafe['state']!r} vs shadow_state={result_unsafe['shadow_state']!r} "
+      f"(is_safe=False)")
 
 print()
 if FAILURES:

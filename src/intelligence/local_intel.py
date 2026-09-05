@@ -41,10 +41,23 @@ class LocalConfirmedIntel:
         self._store: Dict[str, Dict[str, dict]] = {k: {} for k in _KINDS}
         self._load()
 
-    def record(self, kind: str, value: str, device_id: str, reason: str = "") -> bool:
+    def _entry_ttl(self, entry: dict) -> float:
+        """PHASE 67 (HEE_ROADMAP.md item 6, malicious-track calibration wiring):
+        per-entry TTL override, same shape-agnostic pattern as fp_engine.py's own
+        `_trust_entry_ttl()` (Phase 52) -- an entry without a stored `ttl_seconds`
+        (every entry written before this phase) falls back to the instance-wide
+        `self._ttl`, so a live upgrade never breaks reading pre-existing entries."""
+        ttl = entry.get("ttl_seconds")
+        return float(ttl) if ttl else self._ttl
+
+    def record(self, kind: str, value: str, device_id: str, reason: str = "",
+               ttl_seconds: Optional[float] = None) -> bool:
         """Records a confirmed IOC. Returns True if this is a NEW entry, False if it
         was a refresh of an already-known one -- same is_new convention as
-        fp_engine.py's _immunize_domain()."""
+        fp_engine.py's _immunize_domain(). `ttl_seconds` (PHASE 67, optional) overrides
+        the instance-wide default for THIS entry only -- same per-entry-override shape
+        as fp_engine.py's trust cache (Phase 52); None (every caller before this phase)
+        means "use the instance default", not "no TTL"."""
         if kind not in _KINDS or not value or str(value).lower() in ("unknown", "null", "none", ""):
             return False
         now = time.time()
@@ -58,10 +71,13 @@ class LocalConfirmedIntel:
                 sources = existing.setdefault("sources", [])
                 if device_id not in sources:
                     sources.append(device_id)
+                if ttl_seconds:
+                    existing["ttl_seconds"] = float(ttl_seconds)
             else:
                 bucket[value] = {
                     "first_confirmed": now, "last_confirmed": now, "count": 1,
                     "sources": [device_id], "reason": reason,
+                    "ttl_seconds": float(ttl_seconds) if ttl_seconds else self._ttl,
                 }
         self._save()
         if is_new:
@@ -77,7 +93,7 @@ class LocalConfirmedIntel:
         now = time.time()
         with self._lock:
             entry = self._store[kind].get(value)
-        if entry and (now - entry["last_confirmed"]) < self._ttl:
+        if entry and (now - entry["last_confirmed"]) < self._entry_ttl(entry):
             return entry
         return None
 
@@ -88,7 +104,7 @@ class LocalConfirmedIntel:
             return set()
         now = time.time()
         with self._lock:
-            return {v for v, e in self._store[kind].items() if (now - e["last_confirmed"]) < self._ttl}
+            return {v for v, e in self._store[kind].items() if (now - e["last_confirmed"]) < self._entry_ttl(e)}
 
     def prune_expired(self) -> int:
         """Removes expired entries across all kinds. Returns the count pruned. Meant
@@ -99,7 +115,7 @@ class LocalConfirmedIntel:
         with self._lock:
             for kind in _KINDS:
                 bucket = self._store[kind]
-                expired = [key for key, e in bucket.items() if (now - e["last_confirmed"]) >= self._ttl]
+                expired = [key for key, e in bucket.items() if (now - e["last_confirmed"]) >= self._entry_ttl(e)]
                 for key in expired:
                     del bucket[key]
                     pruned += 1

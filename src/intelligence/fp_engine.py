@@ -51,7 +51,7 @@ import math
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # ---------------------------------------------------------------------------
 # Prometheus Metrics
@@ -225,16 +225,27 @@ class AutonomousFPEngine:
     - Written to state/autonomous_muted.jsonl for full audit trail
     """
 
-    def __init__(self, config: dict, state_dir: str = "state"):
+    def __init__(self, config: dict, state_dir: str = "state", state_manager: Any = None):
         """
         Initialise the FP Engine. ML models load in background threads
         so the main pipeline is NEVER blocked at startup.
 
         Args:
-            config:     The IDS config dictionary (from config.yaml).
-            state_dir:  Path to the state directory. Default: "state/"
+            config:         The IDS config dictionary (from config.yaml).
+            state_dir:      Path to the state directory. Default: "state/"
+            state_manager:  PHASE 64: optional core.state_guard.StateManager instance,
+                             used only by mark_false_positive()'s device-identity check
+                             (see that method's own comment). Optional/defaulted/
+                             single-consumer, same pattern as every other cross-module
+                             dependency threaded through this codebase (e.g.
+                             DecisionEngine.evaluate()'s features/is_safe params) --
+                             None for any caller that doesn't have a live StateManager
+                             handy (most standalone scripts construct a fresh
+                             AutonomousFPEngine without one), which makes the check a
+                             no-op for those callers rather than a hard requirement.
         """
         self.config = config
+        self.state_manager = state_manager
 
         # -----------------------------------------------------------------
         # File system paths for persistence
@@ -954,7 +965,8 @@ class AutonomousFPEngine:
             return False
 
     def record_confirmed_threat(self, device_id: str, base_domain: str, dest_ip: str, reason: str,
-                                 signature: str = "", asn_owner: str = "") -> None:
+                                 signature: str = "", asn_owner: str = "",
+                                 ttl_seconds: Optional[float] = None) -> None:
         """Public: the ONE call BOTH confirmation paths use -- fp_engine's own Stage-1
         hard-stop internally, and pipeline.py's HIGH/CRITICAL decision bar externally
         (a HIGH/CRITICAL can come from 2+ independent hypothesis evidence sources with
@@ -967,7 +979,15 @@ class AutonomousFPEngine:
         calibrate a SPECIFIC detector (e.g. arp_sweep_unique_targets_threshold, gated on
         the CONNECTION_ABUSE signature) on a confirmed-vs-corrected RATIO, not just
         corrected count. Never raises -- a bookkeeping failure must not take down the
-        confirmed-threat verdict itself."""
+        confirmed-threat verdict itself.
+
+        `ttl_seconds` (PHASE 67, optional, HEE_ROADMAP.md item 6): per-entry TTL
+        override for the local_intel.py record, same shape as mark_false_positive()'s
+        existing per-entry TTL override (Phase 52) -- None (every existing caller)
+        means "use local_intel's own instance-wide default", not "no TTL". The
+        malicious-track confidence-calibration wiring (ollama_soc.py) is the one
+        caller that supplies this; fp_engine's own internal Stage-1 hard-stop call
+        site is deliberately left at None/default."""
         try:
             # BUGFIX: found via a production alerts.json audit -- amazon.com (188
             # confirmations), amazonalexa.com (139), netflix.com (97), and
@@ -999,7 +1019,7 @@ class AutonomousFPEngine:
                 )
                 base_domain = None
             if base_domain:
-                self.local_intel.record("domain", base_domain, device_id, reason=reason)
+                self.local_intel.record("domain", base_domain, device_id, reason=reason, ttl_seconds=ttl_seconds)
             if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner):
                 LOGGER.warning(
                     "[LOCAL INTEL] Refusing to record known-safe/private/multicast IP '%s' "
@@ -1008,7 +1028,7 @@ class AutonomousFPEngine:
                 )
                 dest_ip = "unknown"
             if dest_ip and dest_ip != "unknown":
-                self.local_intel.record("ip", dest_ip, device_id, reason=reason)
+                self.local_intel.record("ip", dest_ip, device_id, reason=reason, ttl_seconds=ttl_seconds)
             # PHASE 21-METRICS: this subsystem had zero Prometheus visibility before --
             # cheap to just re-set both gauges from the store's own current size every
             # call rather than trying to track deltas separately.
@@ -1674,6 +1694,33 @@ class AutonomousFPEngine:
         # Every other signature keeps the exact domain-based behavior from before this.
         signature = alert_payload.get("signature", "")
         device_id = alert_payload.get("device", {}).get("id", "unknown")
+
+        # PHASE 64 (HEE_ROADMAP.md item 3, "correct device identity" -- unblocked once the
+        # device-identity-fragmentation fix shipped/live-verified 2026-08-25, see
+        # DEVICE_IDENTITY_LIFECYCLE.md): an immunization scoped to a device_id that no
+        # longer canonically exists (e.g. it was folded into a richer identity by
+        # StateManager.merge_into_canonical() sometime after this alert was originally
+        # published) would either under-protect (the real device keeps alerting under its
+        # NEW canonical id, never covered by this immunization) or scope trust to an
+        # identity nothing is tracked under anymore. self.state_manager is optional (None
+        # for most callers -- see __init__'s own comment) so this is a no-op wherever a
+        # live StateManager isn't available; only checked when device_id is a real value,
+        # not the "unknown" fallback (nothing to validate against without one).
+        if self.state_manager is not None and device_id and device_id != "unknown" \
+                and not self.state_manager.has_device(device_id):
+            LOGGER.warning(
+                "🛡️ [FP ENGINE » MARK FP] %s: REFUSED — device_id '%s' no longer resolves "
+                "to a known canonical device (merged into a different identity, or evicted, "
+                "since this alert was published). Immunizing it now would scope trust to an "
+                "identity nothing is currently tracked under.",
+                hostname, device_id,
+            )
+            return {
+                "base_domain": "", "is_new_immunization": False, "domain": "",
+                "ip_immunized": "", "threshold_bumped": False,
+                "refused": True,
+                "refused_reason": f"device_id '{device_id}' is not a currently-known canonical device.",
+            }
 
         # BUGFIX (live audit): this method had no guard at all against being called on
         # a HARD-STOP-sourced alert -- decision_engine.py's honeypot/arp_spoofing/

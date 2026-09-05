@@ -212,6 +212,7 @@ from intelligence.ai_soc import DeterministicValidator, VALIDATOR_SCHEMA_VERSION
 from intelligence.confidence_calibration import ConfidenceCalibrator
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.fp_engine import AutonomousFPEngine
+from intelligence.local_intel import DEFAULT_TTL_SECONDS as CONFIRMED_INTEL_DEFAULT_TTL_SECONDS
 from intelligence.geoip import GeoIPEngine
 from mitigation.ips import IPSMitigator
 from core.state_guard import StateManager
@@ -517,6 +518,83 @@ def _evidence_relevance_breakdown(representative: dict) -> "dict | None":
         "absent_relevant": sorted(relevant - present),
         "present_irrelevant": sorted(present - relevant - {"reputation"}),
     }
+
+
+def _evidence_relevance_taxonomy(representative: dict) -> "dict | None":
+    """PHASE 65 (HEE_ROADMAP.md item 2, full 4-way SUPPORTS/CONTRADICTS/NEUTRAL/
+    IRRELEVANT evidence taxonomy): an ADDITIVE reframing of
+    _evidence_relevance_breakdown()'s existing 3-way data into the reviewer's own
+    4-way vocabulary -- deliberately NOT a replacement, and deliberately does NOT touch
+    the LLM prompt schema or the two existing regression suites that assert the 3-way
+    shape (`_evidence_relevance_breakdown()` itself, its prompt-injection call site, and
+    its `.md`-report call site are all untouched). The roadmap's own "why not done"
+    reasoning for this item was specifically that a full restructuring was judged not
+    worth the churn since CONTRADICTS' role was already covered elsewhere (the LLM's own
+    `contradicting_evidence` list, self-consistency-checked in `ai_soc.py`) -- reusing
+    THAT mechanism here would be redundant, not a second genuine signal, and it's also
+    an LLM OUTPUT, unavailable at prompt-build time (chicken-and-egg: this function (like
+    `_evidence_relevance_breakdown()`) only ever runs BEFORE the LLM call). Instead,
+    CONTRADICTS is sourced from `hee_hypotheses.attack.checklist.contradicting_score`
+    (Phase 65 item 1, this same session) -- the winning hypothesis's own LIVE-computed
+    counter-evidence signal (e.g. a trusted/known-infrastructure reputation tier
+    contradicting an attack theory), genuinely available pre-LLM and structurally
+    real, not fabricated to fill out a 4th bucket. Maps:
+      SUPPORTS    = present_relevant   (evidence present AND this hypothesis reads it)
+      IRRELEVANT  = present_irrelevant (evidence present, this hypothesis doesn't read it)
+      NEUTRAL     = absent_relevant    (evidence this hypothesis WOULD read, simply
+                                         absent -- an unmet expectation, not a counter-signal)
+      CONTRADICTS = bool(contradicting_score > 0) -- whether the hypothesis's own
+                     evaluation registered real counter-evidence, not a per-item list
+                     (the underlying score is a single aggregate, see Hypothesis.evaluate()
+                     implementations in hypotheses/engine.py; a per-evidence-item
+                     CONTRADICTS breakdown isn't materially different from what
+                     `contradicting_evidence` already provides).
+    Returns None under the same conditions _evidence_relevance_breakdown() does (this
+    alert's hypothesis isn't covered, or no hee_evidence_types)."""
+    base = _evidence_relevance_breakdown(representative)
+    if base is None:
+        return None
+    checklist = (representative.get("hee_hypotheses") or {}).get("attack", {}).get("checklist") or {}
+    return {
+        "hypothesis": base["hypothesis"],
+        "supports": base["present_relevant"],
+        "neutral": base["absent_relevant"],
+        "irrelevant": base["present_irrelevant"],
+        "contradicts": bool((checklist.get("contradicting_score") or 0) > 0),
+    }
+
+
+def _hypothesis_checklist_line(representative: dict) -> "str | None":
+    """PHASE 65 (HEE_ROADMAP.md item 1, structured checklist): renders the winning
+    attack hypothesis's own required_satisfied/strong_score/contradicting_score --
+    every Hypothesis subclass already computed these internally, they were just never
+    exposed past the bare numeric score used for hypothesis competition.
+    HypothesisEngine.evaluate_all() (hypotheses/engine.py) now persists them onto
+    hee_hypotheses['attack']['checklist'] verbatim; pipeline.py needed NO changes to
+    carry this through -- it already copies the whole hee_hypotheses dict onto
+    alert_payload wholesale (Gap 4's own "no transformation" persistence pattern), so
+    this new key rides along automatically. Deliberately reads the LIVE numbers
+    computed at the moment this hypothesis actually won (not reconstructed later from
+    hee_evidence_types' type-names-only snapshot, the way _evidence_relevance_breakdown()
+    above has to) -- the exact "don't recompute a lossy approximation of a value that
+    was already computed correctly once" lesson this codebase's own Gap 4/6 root-cause
+    investigations already established elsewhere.
+
+    None for any alert published before this phase (no 'checklist' key at all -- old
+    hee_hypotheses dicts simply don't have one) or with no winning attack hypothesis
+    (the DIRECT_IOC_HIT fallback has no Hypothesis instance to read from) -- callers
+    must skip rendering entirely, same None-means-skip contract as
+    _evidence_relevance_breakdown()."""
+    hyp = (representative.get("hee_hypotheses") or {}).get("attack") or {}
+    checklist = hyp.get("checklist")
+    if not checklist:
+        return None
+    req = "satisfied" if checklist.get("required_satisfied") else "NOT satisfied"
+    return (
+        f"- **Hypothesis checklist ({hyp.get('name', '?')}):** required evidence "
+        f"{req} | strong-corroboration score={checklist.get('strong_score', 0):.1f} | "
+        f"contradicting score={checklist.get('contradicting_score', 0):.1f}"
+    )
 
 
 def _candidate_alternate_hypotheses(representative: dict) -> "list[str] | None":
@@ -873,7 +951,6 @@ def main():
     cache = _load_cache(cache_path, cache_ttl_seconds, calibrator=calibrator)
 
     validator = DeterministicValidator()
-    fp_engine = AutonomousFPEngine(config=config, state_dir=str(root_dir / "state"))
 
     # PHASE 14: mirrors middleware/routers/pihole_api.py's _ipc_immunize_logic() pattern --
     # a fresh StateManager + IPSMitigator per run, used only to release a Pi-hole block for
@@ -882,9 +959,16 @@ def main():
     # effect as the live pipeline calling it directly. Per explicit direction: an
     # autonomous correction should also undo containment that's no longer warranted, not
     # just stop future alerts -- block only what's absolutely necessary.
+    # PHASE 64: constructed BEFORE fp_engine now (was after) so the SAME state_manager can
+    # be threaded into AutonomousFPEngine's own optional device-identity check
+    # (fp_engine.py's mark_false_positive()) -- this is the autonomous LLM-validated
+    # correction path (Phase 4's own docstring: "the PRIMARY calibration signal" given
+    # realistic alert volume), so it's the highest-value place for that check to actually
+    # have a live StateManager to validate against.
     state_manager = StateManager(state_path=str(Path(config.get("state_path", "state/ids_state.json"))))
     state_manager.load_from_disk()
     ips_mitigator = IPSMitigator(config=config, state_manager=state_manager)
+    fp_engine = AutonomousFPEngine(config=config, state_dir=str(root_dir / "state"), state_manager=state_manager)
 
     report_lines = [
         f"# 🛡️ Home-IDS Daily SOC Report",
@@ -1221,6 +1305,27 @@ def main():
             report_lines.append(
                 f"- **Evidence relevance ({relevance['hypothesis']}):** " + " | ".join(rel_parts)
             )
+        # PHASE 65 (HEE_ROADMAP.md item 1): the required/strong/contradicting checklist
+        # each Hypothesis already computes internally -- the "why did this hypothesis
+        # fire/not fire" answer at a glance, right next to the relevance breakdown above.
+        checklist_line = _hypothesis_checklist_line(representative)
+        if checklist_line:
+            report_lines.append(checklist_line)
+        # PHASE 65 (HEE_ROADMAP.md item 2): the same relevance data above, reframed into
+        # the reviewer's own 4-way SUPPORTS/CONTRADICTS/NEUTRAL/IRRELEVANT vocabulary --
+        # additive, not a replacement for the "Evidence relevance" line above it.
+        taxonomy = _evidence_relevance_taxonomy(representative)
+        if taxonomy:
+            tax_parts = [f"CONTRADICTS: {'yes' if taxonomy['contradicts'] else 'no'}"]
+            if taxonomy["supports"]:
+                tax_parts.append(f"SUPPORTS: {', '.join(taxonomy['supports'])}")
+            if taxonomy["neutral"]:
+                tax_parts.append(f"NEUTRAL (expected, absent): {', '.join(taxonomy['neutral'])}")
+            if taxonomy["irrelevant"]:
+                tax_parts.append(f"IRRELEVANT: {', '.join(taxonomy['irrelevant'])}")
+            report_lines.append(
+                f"- **4-way taxonomy ({taxonomy['hypothesis']}):** " + " | ".join(tax_parts)
+            )
         # PHASE 61: graph-shaped rendering of the same relevance data right above,
         # inside a collapsible <details> block (GitHub-flavored markdown, same as
         # this repo's other reports render) -- collapsed by default so the common
@@ -1473,8 +1578,34 @@ def main():
             # poisoning bug once; dest_ip alone is the reliably-attributable part of this
             # verdict.
             dest_ip = representative.get("network_context", {}).get("destination_ip", "") or ""
+            # PHASE 67 (HEE_ROADMAP.md item 6, malicious-track calibration wiring):
+            # mirrors _apply_confidence_calibration()'s existing benign-TTL shape
+            # exactly (Phase 63b), applied to the malicious track for the first time.
+            # get_calibrated() already self-gates on MIN_SAMPLES_FOR_CALIBRATION (20
+            # real observations per bucket) -- this consults PRE-existing bucket state
+            # (the record_outcome() call below adds THIS observation for FUTURE
+            # calibration, not this one), so the confirmed-intel TTL below is
+            # byte-identical to the fixed 30-day default until the malicious track
+            # separately accumulates enough real volume, then starts modulating on its
+            # own -- no further code change, deploy, or human step required, the same
+            # "improves automatically as samples arrive" property the benign wiring
+            # already has. A calibrated value confirming or exceeding the model's
+            # self-reported confidence extends how long this IOC hard-stops OTHER
+            # devices; a bucket calibration shows is less reliable shortens it -- same
+            # safe, reversible, self-correcting direction as the benign TTL case
+            # (never a hard PASS/FAIL gate, per the explicit 2026-09-05 decision to
+            # keep item 5 TTL-only). Deliberately NOT applied to _apply_sigma_shift's
+            # TUNE_UP magnitude just below -- that's a real-time detection-sensitivity
+            # lever, not a self-correcting duration, a materially different risk
+            # profile this phase doesn't touch.
+            raw_confidence = float(response_json.get("confidence", 0.0))
+            calibrated_malicious = calibrator.get_calibrated("malicious", raw_confidence)
+            confirmed_intel_ttl = _apply_confidence_calibration(
+                CONFIRMED_INTEL_DEFAULT_TTL_SECONDS, raw_confidence, calibrated_malicious,
+            )
             fp_engine.record_confirmed_threat(
                 device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
+                ttl_seconds=confirmed_intel_ttl,
             )
             fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
             if pcache_key in cache:
@@ -1484,7 +1615,7 @@ def main():
             # confirmation (a validator-passed "malicious" verdict that just got acted
             # on), no need to wait for anything further to happen.
             try:
-                calibrator.record_outcome("malicious", float(response_json.get("confidence", 0.0)), correct=True)
+                calibrator.record_outcome("malicious", raw_confidence, correct=True)
             except Exception as e:
                 LOGGER.debug(f"Confidence-calibration harvest skipped for a confirmed threat: {e}")
             report_lines.append(

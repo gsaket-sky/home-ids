@@ -89,10 +89,10 @@ class NetworkIntrusionHypothesis(Hypothesis):
     session's own trust-cache hypothesis-scoping in fp_engine.py) to separately learn a
     new name while ALSO risking a scoring conflict between two classes claiming the
     same evidence. Naming only depends on has_lateral_scan, which is identical between
-    evaluate() and evaluate_shadow() (both call _evaluate_impl, only
-    has_malicious_tls/has_notable_notice differ by use_gap2_fix) -- both calls landing
-    on the SAME `self` (this class is HypothesisEngine's `self._network_intrusion`
-    shadow-mode target, and self.name is shared instance state written by whichever of
+    evaluate() and evaluate_shadow() (both call _evaluate_impl, now with IDENTICAL
+    use_gap2_fix=True since Gap 2's live flip below) -- both calls landing on the SAME
+    `self` (this class is HypothesisEngine's `self._network_intrusion` shadow-mode
+    target, and self.name is shared instance state written by whichever of
     evaluate()/evaluate_shadow() runs last within one evaluate_all() cycle) therefore
     always agree, so the shared-state read after the shadow call never shows a name the
     live call wouldn't itself have produced for the same evidence."""
@@ -113,18 +113,27 @@ class NetworkIntrusionHypothesis(Hypothesis):
         super().__init__(self._NAME_NETWORK_INTRUSION)
 
     def evaluate(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
-        return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=False)
+        # PHASE 64 (Gap 2 flipped live, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md):
+        # was use_gap2_fix=False until 9 days of live shadow comparison
+        # (state/shadow_decisions.jsonl, since 2026-08-26) produced zero NETWORK_INTRUSION
+        # divergences -- same empirical bar Gap 1's flip was held to. A generic
+        # zeek_notice no longer weighs the same as a real malicious_ja3/ja4 TLS-
+        # fingerprint match; see evaluate_shadow()'s docstring below for the split's own
+        # rationale (still accurate, just no longer describing shadow-only behavior).
+        return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=True)
 
     def evaluate_shadow(self, ev_store: List[Evidence], rep_vector: ReputationVector, device_type: str = "", baseline_familiarity: float = 0.0) -> float:
-        """SHADOW MODE (Gap 2, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): never called
-        by the live HypothesisEngine.evaluate_all() path -- only by its own shadow
-        computation (see that method below). Splits `has_malicious_tls` so a genuine
-        JA3/JA4 malware-TLS-fingerprint match is no longer weighted identically to ANY
-        Zeek `weird.log` policy notice -- most weird types are protocol edge-cases, not
-        malware indicators (third-party review finding: "don't let Zeek weird become
-        confirmed malicious"). A zeek_notice can still corroborate a genuine signal
-        (partial credit, capped below the 2-of-3 "strong" bar), it just can no longer
-        pose as equivalent to a cryptographic fingerprint match on its own."""
+        """Splits `has_malicious_tls` so a genuine JA3/JA4 malware-TLS-fingerprint match
+        is not weighted identically to ANY Zeek `weird.log` policy notice -- most weird
+        types are protocol edge-cases, not malware indicators (third-party review
+        finding: "don't let Zeek weird become confirmed malicious"). A zeek_notice can
+        still corroborate a genuine signal (partial credit, capped below the 2-of-3
+        "strong" bar), it just can no longer pose as equivalent to a cryptographic
+        fingerprint match on its own. PHASE 64: this is now identical to evaluate()
+        above (both use_gap2_fix=True) since Gap 2 flipped live -- kept as a distinct
+        method rather than removed because decision_engine.py's shadow block still
+        combines this call with Gap 3 (hard-stop freshness), which remains shadow-only
+        and unrelated to this split."""
         return self._evaluate_impl(ev_store, rep_vector, use_gap2_fix=True)
 
     def _evaluate_impl(self, ev_store: List[Evidence], rep_vector: ReputationVector, use_gap2_fix: bool) -> float:
@@ -746,8 +755,29 @@ class HypothesisEngine:
                 best_benign_score = score
                 best_benign = h
 
+        # PHASE 65 (HEE_ROADMAP.md item 1, structured checklist): every Hypothesis
+        # subclass already computes required_satisfied/strong_score/contradicting_score
+        # internally (each evaluate() call resets then sets these on `self`) -- it was
+        # just never exposed past the bare numeric score. `best_attack` is a reference to
+        # the winning instance captured DURING the loop above; its own instance state
+        # (distinct per hypothesis object, never shared) still reflects exactly what that
+        # hypothesis's own evaluate() call computed, unmutated by any other hypothesis's
+        # evaluation, since instance attributes aren't shared across objects. None when
+        # there's no winning attack hypothesis at all (the DIRECT_IOC_HIT fallback has no
+        # instance to read from) -- consumers must skip rendering, same None-means-skip
+        # contract as HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get() elsewhere in this codebase.
+        checklist = ({
+            "required_satisfied": best_attack.required_satisfied,
+            "strong_score": best_attack.strong_score,
+            "contradicting_score": best_attack.contradicting_score,
+        } if best_attack else None)
+
         return {
-            "attack": {"name": best_attack.name if best_attack else "DIRECT_IOC_HIT", "score": best_attack_score},
+            "attack": {
+                "name": best_attack.name if best_attack else "DIRECT_IOC_HIT",
+                "score": best_attack_score,
+                "checklist": checklist,
+            },
             "benign": {"name": best_benign.name if best_benign else "UNKNOWN_BENIGN", "score": best_benign_score},
             "shadow_attack": {
                 "name": shadow_best_attack.name if shadow_best_attack else "DIRECT_IOC_HIT",
