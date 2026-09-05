@@ -135,9 +135,23 @@ check("main() instantiates a ConfidenceCalibrator and threads it into _load_cach
       "calibrator = ConfidenceCalibrator(" in _soc_src
       and "cache = _load_cache(cache_path, cache_ttl_seconds, calibrator=calibrator)" in _soc_src)
 
-check("the confirmed-threat branch records an immediate malicious label right where "
-      "record_confirmed_threat() already fires",
-      'calibrator.record_outcome("malicious", float(response_json.get("confidence", 0.0)), correct=True)' in _soc_src)
+# PHASE 67 (HEE_ROADMAP.md item 6, malicious-track calibration wiring): this
+# assertion used to check the exact literal
+# `calibrator.record_outcome("malicious", float(response_json.get("confidence", 0.0)), correct=True)`
+# -- legitimately superseded, not broken, by Phase 67's own confirmed-intel-TTL
+# wiring, which needed that same confidence value THREE times in the same block
+# (get_calibrated(), _apply_confidence_calibration(), and this record_outcome() call)
+# and factored it into a single `raw_confidence` variable rather than repeating the
+# inline expression three times. Check the meaningful invariant instead of the exact
+# old substring: `raw_confidence` is computed from `response_json`'s own confidence
+# field, and `record_outcome("malicious", raw_confidence, correct=True)` is the call
+# that actually fires in the confirmed-threat branch.
+check("the confirmed-threat branch computes raw_confidence from response_json's own "
+      "confidence field",
+      'raw_confidence = float(response_json.get("confidence", 0.0))' in _soc_src)
+check("the confirmed-threat branch records an immediate malicious label using that "
+      "SAME raw_confidence, right where record_confirmed_threat() already fires",
+      'calibrator.record_outcome("malicious", raw_confidence, correct=True)' in _soc_src)
 
 check("ConfidenceCalibrator is imported from intelligence.confidence_calibration, "
       "not redefined locally",
