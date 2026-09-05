@@ -34,31 +34,92 @@ adapter. 5 new mock-based tests added to `tests/test_v13_retro_hunter.py`
 file now 18/18. All 12 v13 test files (227+ unit checks + the 15-check
 integration test) independently re-confirmed passing after this change.
 
-### A2. `zeek_exfiltration`/`zeek_beaconing` never carry a real destination
-**What**: these two v-current detectors (`threat_signals.py:247-274`) never set
-`.domain` on their `Evidence`. v13's ingest adapter (`evidence/ingest.py`) can
-accept a `fallback_context` to work around this per-call, but nothing has
-supplied it yet.
-**Why it's open**: fixing it needs either (a) the live ingest layer
-(`src/v13/ingest/sources.py`, not yet built) threading real connection-tuple
-context through at the point evidence is created, or (b) fixing the two
-detectors in v-current's own `threat_signals.py` (touches v-current, a separate
-decision from anything in the v13 effort itself).
-**When**: when `src/v13/ingest/sources.py` is built (part of Phase 7's wiring) —
-that's the natural chokepoint to supply `fallback_context` for these two types
-specifically. Until then, evidence from these two detectors will land in the
-graph with `NO_DESTINATION`, which is a known, bounded degradation (affects only
-these two evidence types' target-linkage quality), not a crash risk.
+### A2. ~~`zeek_exfiltration`/`zeek_beaconing` never carry a real destination~~ — DONE (2026-09-06)
+**Resolved**: `src/v13/ingest/sources.py`'s `run_detection_cycle()` supplies
+`fallback_context={"dest_ip": features["last_dest_ip"]}` — the SAME destination
+`threat_signals.py`'s own detector code already computes internally (via
+`ZeekFeatureExtractor._last_connection_meta`) but never attached to the
+`Evidence` it creates. Guarded against `ZeekFeatureExtractor`'s own "no
+connection seen yet" sentinel (`"unknown"`) so a device with no real connection
+data correctly still gets `NO_DESTINATION`, not a fake destination. Verified
+two ways: 26 unit checks in `tests/test_v13_ingest_sources.py`, and a live
+sanity check feeding a real massive-outbound-burst pattern through the REAL
+(imported, unmodified) `ZeekFeatureExtractor` + `ThreatSignalDetector` classes
+— produced `zeek_exfiltration` evidence with `destination_id="8.8.4.4"`
+instead of `NO_DESTINATION`, confirming this isn't just test-shaped.
 
-### A3. Resource isolation on `.19` doesn't exist yet
+### A3. Resource isolation on `.19` — still open, dependency partially resolved
 **What**: `.19` will run the full v13 parallel process AND its own dedicated
 Ollama once Phase 7 starts — no CPU/memory ceilings exist between them yet.
-**Why it's open**: there was no running v13 process to isolate until this
-session's build finished — isolating a process that doesn't exist yet was
-correctly deferred, not skipped.
-**When**: at the same time v13's process is first started on `.19` (Phase 7's
-own first step) — not after. A systemd resource slice or cgroup limit, sized
-against `.19`'s real 31GB/8-core headroom (confirmed this session).
+**Why it's open**: `src/v13/ingest/sources.py` (2026-09-06) provides the real
+tailing/detection building blocks, but there is still no long-running DAEMON
+that actually runs continuously on `.19` — `sources.py` today is library code
+(`ZeekLogSource`, `build_zeek_sources`, `poll_all`, `run_detection_cycle`), not
+yet wrapped in a polling loop + systemd unit. Isolating a process that doesn't
+exist yet is still correctly deferred, not skipped — same reasoning as before,
+just one step closer.
+**When**: when a daemon wrapper around `sources.py` (a polling loop calling
+`poll_all()`/`run_detection_cycle()` on an interval, writing into
+`GraphStore`) is built and actually started on `.19` — that specific step,
+not `sources.py`'s existence alone, is what needs a systemd resource slice
+sized against `.19`'s real 31GB/8-core headroom (confirmed this session).
+Deliberately not built/deployed in the same pass as `sources.py` itself — a
+new persistent process pulling real production data onto `.19` continuously
+is a real infrastructure change or that box, and should get the same explicit
+go-ahead the deploy-key/Ollama-relocation infra work earlier got, not be
+folded silently into a library-code change.
+
+### A5. `sources.py` doesn't produce any Pi-hole/DNS-behavior evidence yet
+**What**: found while building `src/v13/ingest/sources.py` (2026-09-06):
+v-current's `PiHoleCollector` (`extractors/dns_features.py`) reads Pi-hole's
+FTL **sqlite database** directly — but that database is NOT part of the
+`v13-pihole` Samba share at all (confirmed via direct `ls` on `.19`'s mount;
+only Pi-hole's own text logs, `pihole.log`/`FTL.log`, are shared). Even if it
+were shared, SQLite's own documentation says WAL mode (which `pihole-FTL.db`
+uses) is unreliable over a network filesystem — a second, independent reason
+not to try reading it remotely. `pihole.log`'s free-text dnsmasq lines
+(`query[A] example.com from 1.2.3.4` / `gravity blocked ...` / `cached ...` /
+`forwarded ... to ...` / `reply ... is ...`) CAN reconstruct roughly what
+`PiHoleCollector.poll()` extracts from the DB, but need their own new
+line-correlation parser — not attempted this session.
+**Why it's open**: a real, separate parsing subsystem, not a small addition to
+`sources.py`'s existing Zeek tailer — found and scoped, not silently skipped.
+**Consequence**: every evidence type that depends on Pi-hole/DNS features
+(`dns_dga_burst`, `dns_tunnel_v2`, the `is_telemetry`/`top_domain`-gated
+branches) is NOT yet produced by `sources.py`'s `run_detection_cycle()` — only
+Zeek-native evidence types are (confirmed safe, not silently wrong:
+`ThreatSignalDetector.detect()`'s DNS-behavior branches all read
+`features.get(key, 0.0/None)`, so missing keys default to "no signal," the
+same as a real device with nothing to report for that signal, not a crash or
+a false alert).
+**When**: before Phase 7's parallel run can claim DNS-behavior-hypothesis
+parity with v-current — not needed for the Zeek-native hypotheses
+(exfiltration, beaconing, lateral movement, JA3/JA4, ARP sweep) to start
+producing real comparison data now.
+
+### A6. Suricata reactive-capture is NOT a tailable log stream — real scope cut, not built
+**What**: found while building `src/v13/ingest/sources.py` (2026-09-06):
+`.19`'s live `v13-suricata` share has an `eve.json` sitting at 0 bytes even
+though the mount and Samba path both work correctly — because this
+deployment's `intelligence/detectors/suricata_scan.py` runs Suricata in short
+BATCH invocations against reactively-captured pcap bursts
+(`extractors/fritzbox_capture.py`'s `ReactiveCaptureDispatcher`, triggered a
+handful of times per hour), not continuously against live traffic. Each
+invocation writes to a per-run scratch `eve.json` that doesn't persist — there
+is no live, continuously-growing `eve.json` to tail at all in this
+architecture, confirmed by direct inspection, not assumed from the plan's
+original "Suricata eve.json" framing (which predates this finding).
+**Why it's open**: replicating this for v13 means replicating the ENTIRE
+reactive-capture trigger/dispatch subsystem (burst-triggering heuristics, pcap
+capture, invoking both Zeek and Suricata against it) — a substantial, separate
+subsystem, not a log tailer. Matches this project's own precedent for CL-AFPE
+(Group C) and retro-hunter (Group E)'s local-intel dependency: an honest,
+named scope cut, not a silent omission.
+**When**: a distinct, later initiative if v13 needs Suricata-sourced evidence
+at all — not connected to `sources.py`'s current Zeek-tailing scope. The
+`SuricataSignatureHypothesis` (`hypotheses/engine.py`, already ported and
+tested) simply receives no evidence from this path today; it isn't broken,
+it's unfed.
 
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
@@ -271,11 +332,26 @@ with automated pull-and-verify on both going forward.
 **A1 is also done** (2026-09-06) — `retro_hunter.py` now has a real
 threat-intel lookup wired in via `real_threat_intel_lookup_factory()`.
 
-**Next real blocker**: A2 (`zeek_exfiltration`/`zeek_beaconing` still lack a
-real destination) and A3 (resource isolation on `.19`) — both wait on the same
-thing, `src/v13/ingest/sources.py`, since that's the chokepoint that both
-supplies `fallback_context` (A2) and gives Phase 7 an actual running v13
-process to isolate (A3).
+**A2 is also done** (2026-09-06) — `src/v13/ingest/sources.py` built (Zeek
+JSON-lines log tailing, ported cursor logic, `run_detection_cycle()`), closing
+the `zeek_exfiltration`/`zeek_beaconing` destination gap using v-current's own
+already-computed `last_dest_ip`. Verified with 26 unit checks plus a live
+sanity check against the real, unmodified `ZeekFeatureExtractor`/
+`ThreatSignalDetector` classes.
+
+**Two new items found while building `sources.py`, both honest scope cuts, not
+silent gaps**: A5 (no Pi-hole/DNS-behavior evidence yet — the FTL sqlite DB
+isn't mount-accessible and wouldn't be reliable over SMB even if it were; needs
+a new `pihole.log` text parser) and A6 (Suricata reactive-capture is
+fundamentally not a tailable log stream in this deployment — replicating it
+needs the whole burst-trigger subsystem, not a tailer).
+
+**Next real blocker**: A3 (resource isolation on `.19`) — `sources.py` now
+provides the real building blocks, but there is still no long-running daemon
+wrapping them into an actual polling loop, and deliberately none was built in
+the same pass (a new persistent process pulling production data onto `.19`
+continuously is a real infra change that deserves its own explicit go-ahead,
+matching how the deploy-key/Ollama-relocation work was handled earlier).
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,
