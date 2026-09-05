@@ -48,26 +48,27 @@ sanity check feeding a real massive-outbound-burst pattern through the REAL
 — produced `zeek_exfiltration` evidence with `destination_id="8.8.4.4"`
 instead of `NO_DESTINATION`, confirming this isn't just test-shaped.
 
-### A3. Resource isolation on `.19` — still open, dependency partially resolved
-**What**: `.19` will run the full v13 parallel process AND its own dedicated
-Ollama once Phase 7 starts — no CPU/memory ceilings exist between them yet.
-**Why it's open**: `src/v13/ingest/sources.py` (2026-09-06) provides the real
-tailing/detection building blocks, but there is still no long-running DAEMON
-that actually runs continuously on `.19` — `sources.py` today is library code
-(`ZeekLogSource`, `build_zeek_sources`, `poll_all`, `run_detection_cycle`), not
-yet wrapped in a polling loop + systemd unit. Isolating a process that doesn't
-exist yet is still correctly deferred, not skipped — same reasoning as before,
-just one step closer.
-**When**: when a daemon wrapper around `sources.py` (a polling loop calling
-`poll_all()`/`run_detection_cycle()` on an interval, writing into
-`GraphStore`) is built and actually started on `.19` — that specific step,
-not `sources.py`'s existence alone, is what needs a systemd resource slice
-sized against `.19`'s real 31GB/8-core headroom (confirmed this session).
-Deliberately not built/deployed in the same pass as `sources.py` itself — a
-new persistent process pulling real production data onto `.19` continuously
-is a real infrastructure change or that box, and should get the same explicit
-go-ahead the deploy-key/Ollama-relocation infra work earlier got, not be
-folded silently into a library-code change.
+### A3. ~~Resource isolation on `.19`~~ — DONE (2026-09-06)
+**Resolved**: `src/v13/ingest/daemon.py` wraps `sources.py`'s tailer/detection
+functions into a continuous poll loop (2s interval, matching v-current's own
+`poll_interval` default), writing real v13 Evidence into a `GraphStore` at
+`state/v13_graph.db`. `src/v13/ops/v13-ingest.service` installs it as a
+systemd service on `.19` with `MemoryMax=2G`/`CPUQuota=100%` — sized as a
+ceiling against runaway behavior (a log-parsing bug spinning in a tight loop),
+not a tuned allocation, against `.19`'s confirmed 31GB/8-core spec and its
+Docker Ollama's own idle footprint (~780MB combined at check time, 30GB+
+free). **Verified live, not just "service is active"**: within ~90 seconds of
+starting, the daemon had picked up a real `arp_sweep` evidence item (device
+`.94` itself, ARP-scanning the LAN as part of its own normal Pi-hole/NAS
+discovery — a benign, expected pattern) through the FULL real pipeline (Zeek
+JSON log → `ZeekLogSource` tailer → real `ZeekFeatureExtractor.ingest()` →
+real `ThreatSignalDetector.detect()` → `v13.evidence.ingest.convert_list()` →
+`GraphStore.insert_evidence()`), confirmed by querying the live sqlite file
+directly. Memory held steady at ~11MB (0.5% of the 2G ceiling), CPU
+negligible. Per-log-type cursor files (`state/v13_ingest_cursors/`) persisted
+correctly across poll cycles. Config loaded from a real, gitignored
+`config_v13.yaml` on `.19` (`network.subnets: [192.168.77.0/24]` — never
+committed, same split as `config.yaml`/`config.yaml.example`).
 
 ### A5. `sources.py` doesn't produce any Pi-hole/DNS-behavior evidence yet
 **What**: found while building `src/v13/ingest/sources.py` (2026-09-06):
@@ -346,12 +347,16 @@ a new `pihole.log` text parser) and A6 (Suricata reactive-capture is
 fundamentally not a tailable log stream in this deployment — replicating it
 needs the whole burst-trigger subsystem, not a tailer).
 
-**Next real blocker**: A3 (resource isolation on `.19`) — `sources.py` now
-provides the real building blocks, but there is still no long-running daemon
-wrapping them into an actual polling loop, and deliberately none was built in
-the same pass (a new persistent process pulling production data onto `.19`
-continuously is a real infra change that deserves its own explicit go-ahead,
-matching how the deploy-key/Ollama-relocation work was handled earlier).
+**A3 is also done** (2026-09-06) — `src/v13/ingest/daemon.py` + the
+`v13-ingest.service` systemd unit are live on `.19` right now, verified
+producing real graph evidence from real production Zeek data, resource-capped
+and stable.
+
+**Next real blocker**: A5 (no Pi-hole/DNS-behavior evidence yet — needs a new
+`pihole.log` text parser) is now the most concrete remaining gap in what the
+live daemon actually produces; A6 (Suricata reactive-capture) is a larger,
+separately-scoped initiative. Neither blocks the parallel run from generating
+real Zeek-native comparison data starting now.
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,
