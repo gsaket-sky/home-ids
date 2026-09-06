@@ -272,6 +272,64 @@ behavior as the existing `shadow_decisions.jsonl` (only created on the FIRST
 actual divergence, not proactively) — absence just means no divergence has
 occurred in the first ~90s of runtime, not that anything is broken.
 
+### A11. ~~`sources.py` was silently missing two real v-current detectors~~ — FOUND AND FIXED (2026-09-06)
+**What was found**: the user asked to dig into the live dashboard's one real
+`DIFFERENT_PATH` finding (device `192.168.77.46`: v-current reached
+`HIGH`/`INTERNAL_RECONNAISSANCE`, v13 reached only `SUSPICIOUS`) specifically
+to check whether it would become recurring noise that wastes time and needs
+a correction + re-run later — a direct, load-bearing question for the flip
+decision. Root-caused by pulling both sides' REAL records for the exact same
+timestamp: **both sides computed the identical attack hypothesis and score**
+(`INTERNAL_RECONNAISSANCE`, 3.0) — this was never a disagreement about
+hypothesis scoring. The only difference was the independent-source count:
+v-current counted 2 (`arp_sweep` + `zeek_notice`), v13 counted 1. Querying
+v13's graph directly showed why: **v13 had ONLY EVER recorded `arp_sweep`
+evidence for this device, ever** — not a family-grouping disagreement (the
+actual question A10/#7 is about), a basic evidence-coverage gap.
+
+Traced to the actual cause: `.94`'s real `pipeline.py` runs TWO MORE
+detectors every cycle (`pipeline.py:990,994`) that `run_detection_cycle()`
+never called at all — `ZeekNetworkDetector`
+(`intelligence/detectors/zeek_network.py`, 51 lines: `malicious_ja3`/
+`malicious_ja4`/`zeek_notice`, sourced from
+`ZeekFeatureExtractor.get_alerts()`'s raw event list — a genuinely SEPARATE
+data path from `get_features()`'s aggregate counters used until now, not a
+subset of it) and `DNSBehaviorDetector`
+(`intelligence/detectors/dns_behavior.py`, 56 lines: `dns_rate`/
+`dns_entropy`/`dns_unique_ratio`, from the same features dict). Neither had
+been read before building `sources.py` — a genuine miss in this session's
+own "read the real source before porting" discipline, caught only because
+the user asked to investigate a specific, concrete divergence rather than
+accept the summary at face value.
+**Why this mattered for the flip decision specifically**: left unfixed, this
+would have kept confounding every future divergence-comparison run —
+`DIFFERENT_PATH`/`V13_ONLY` findings would mix genuine independence-family-
+grouping disagreements (what A10/gap_monitor.py actually needs to measure)
+with this unrelated, more basic coverage gap, indistinguishably. The longer
+it went unnoticed, the more accumulated comparator data would have needed to
+be discarded or re-derived once found — exactly the "wasted time, re-run
+required" scenario the user asked about. **Confirmed as a real, present
+risk, not a hypothetical one.**
+**Resolved**: both detectors — tiny, dependency-free, real v-current
+classes — are now called from `run_detection_cycle()` unmodified, alongside
+`ThreatSignalDetector.detect()`. `ZeekNetworkDetector` already sets its own
+`Evidence.domain` directly (unlike `zeek_exfiltration`/`zeek_beaconing`), so
+neither new detector's output needs `fallback_context`. `INDEPENDENCE_FAMILY_MAP`
+gained `dns_rate`/`dns_unique_ratio` → `"dns_behavior"`, matching v-current's
+own single-family grouping for `DNSBehaviorDetector`'s three evidence types
+(consistent with `dns_entropy`'s already-existing mapping). 8 new tests in
+`tests/test_v13_ingest_sources.py`; all 18 v13 test files re-confirmed
+passing. Deployed to `.19`, verified clean via the deploy pipeline's own test
+run, and `v13-ingest.service` restarted (new PID confirmed, no errors) to
+activate the fix.
+**Consequence for existing accumulated divergence data**: the ~12 real
+findings gathered before this fix (including the `DIFFERENT_PATH` case that
+triggered this investigation) should be read as confounded by this coverage
+gap, not as genuine signal about independence-family grouping specifically —
+worth keeping for the historical record, not worth drawing a flip conclusion
+from. Divergence data gathered AFTER this fix is on genuinely more solid
+ground for that purpose.
+
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
 this session found `.94`'s deployed directory was never a git repo at all (pure
@@ -530,20 +588,32 @@ tailer object across every poll) could permanently miss content that
 arrived between two "nothing new yet" ticks, since no baseline was ever
 persisted. Fixed by saving the cursor immediately after establishing an
 initial position. 9 new tests (`tests/test_v13_run_gap_check.py`); all 17
-v13 test files re-confirmed passing. A live snapshot dashboard is published
-at `https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`
-(refreshed manually on request, not auto-live).
+v13 test files re-confirmed passing. A dashboard is published at
+`https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`,
+genuinely live-updating via the Artifact platform's `db` capability, relayed
+by a session-local `CronCreate` job (auto-expires 7 days after creation —
+see the dependency map's own entry for exactly how this works and its real
+limits).
+
+**A11 is also done (2026-09-06)** — investigating that dashboard's one real
+`DIFFERENT_PATH` finding at the user's request uncovered a genuine,
+previously-missed evidence-coverage gap (`sources.py` never called
+`ZeekNetworkDetector`/`DNSBehaviorDetector`, two real v-current detectors
+`pipeline.py` runs every cycle) that would have confounded every future
+divergence-comparison run had it gone unnoticed. Fixed, tested, deployed,
+confirmed live on `.19`.
 
 **Next real blocker**: `src/v13/ops/gap_monitor.py` itself doesn't exist yet
 — everything it needs (real decisions, a real comparator now running
-automatically, an explicit answer on the automation question) is now in
-place. It still needs per-mechanism BARS documented (this project's own
-precedent: Gap 1/2's "N days shadow, zero divergences," Gap 3 honeypot's "58
-confirmed divergences, zero false negatives") before it can evaluate
-anything meaningfully — only 13 real (non-VCURRENT_ONLY) divergences have
-accumulated as of this snapshot, not nearly enough volume yet to draw a
-conclusion. A6 (Suricata reactive-capture) remains a larger,
-separately-scoped initiative, unrelated to the flip-monitor goal.
+automatically, an explicit answer on the automation question, and now a
+materially more complete evidence pipeline feeding it) is in place. It still
+needs per-mechanism BARS documented (this project's own precedent: Gap 1/2's
+"N days shadow, zero divergences," Gap 3 honeypot's "58 confirmed
+divergences, zero false negatives") before it can evaluate anything
+meaningfully — divergence data gathered before the A11 fix should be
+considered confounded, not a basis for that bar; data gathered after it is
+on genuinely more solid ground. A6 (Suricata reactive-capture) remains a
+larger, separately-scoped initiative, unrelated to the flip-monitor goal.
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,
