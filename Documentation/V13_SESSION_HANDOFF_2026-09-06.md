@@ -13,9 +13,18 @@ comparator now runs automatically every 15 minutes via a plain crontab entry
 on `.19` (`src/v13/ops/run_gap_check.py`) instead of needing a manual
 invocation — see `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s own entry for full
 detail, including a real cursor-persistence bug found and fixed along the
-way. A live-data snapshot dashboard is published separately at
-`https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`
-(manually refreshed, not auto-live).
+way. A dashboard is published separately at
+`https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`,
+genuinely live-updating via the Artifact platform's `db` capability — BUT
+that liveness is relayed by a `CronCreate` job in THIS session (id
+`e388ea04`), which is session-only and **auto-expires 2026-09-13** (7 days
+after creation) regardless of whether this session is still alive by then.
+**If you're reading this after that date, the dashboard has silently
+stopped updating** (it'll show its last-pushed data with a "stale"
+indicator, not an error) — re-create the relay job if live updates still
+matter, or just accept the page as a point-in-time snapshot. See
+`V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s entry for exactly how the relay works
+and why `.19`'s cron can't push to the artifact directly.
 
 ---
 
