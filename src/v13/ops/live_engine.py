@@ -25,6 +25,13 @@ same GraphStore. Both are best-effort -- a graph failure never affects the retur
 decision, only means this cycle is missing from the durable trail (logged loudly, not
 silent). `device_id=None` (the default) skips both entirely, unchanged from before this
 existed -- so existing callers that don't pass it keep working exactly as they do today.
+The decision row is deduped by (state, decision_path) per device (`_last_decision_key`,
+mirroring `src/v13/ingest/daemon.py`'s own `only_persist_if_changed_from` pattern) -- a
+real fix found live on `.94`'s first restart with this wiring: without it, every device
+writes a new decisions-table row every ~2s poll cycle regardless of whether the verdict
+actually changed (611 rows observed in well under a minute of real runtime before this
+was added). Evidence itself is never deduped this way -- every fresh item is a real
+observation worth recording.
 
 WHY QUERY UP TO THE LONGEST TTL, NOT A SHORTER "ROLLING WINDOW": confirmed by reading
 `src/v13/hypotheses/engine.py`'s own `compute_freshness()` -- it already discards
@@ -41,7 +48,7 @@ just because the service restarted for an unrelated reason.
 """
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from v13.evidence.ingest import convert_list
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
@@ -67,6 +74,16 @@ _v13_engine = V13DecisionEngine()
 
 _GRAPH_DB_PATH = "state/v13_graph.db"
 _graph_store: Optional[GraphStore] = None
+
+# Mirrors src/v13/ingest/daemon.py's own _last_decision_key dict + compute_decision()'s
+# only_persist_if_changed_from param exactly (see that docstring) -- without this, every
+# device gets a NEW decisions-table row every single ~2s poll cycle regardless of
+# whether the verdict actually changed (confirmed live: 611 decision rows after well
+# under a minute of real runtime on .94's first restart with this wiring). Evidence
+# itself is NOT deduped this way -- every fresh item is a real observation worth
+# recording; it's specifically the DERIVED verdict that shouldn't be re-written when
+# nothing about it changed.
+_last_decision_key: Dict[str, Tuple[str, str]] = {}
 
 
 def configure(graph_db_path: str) -> None:
@@ -131,20 +148,33 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
     """Best-effort: never raises out to the caller. A failure here means this
     cycle is missing from the durable audit trail -- it must never affect the
     live decision, which has already been computed and returned by the time
-    this runs."""
+    this runs.
+
+    The decision row is deduped by (state, decision_path) via _last_decision_key,
+    matching src/v13/ingest/daemon.py's own only_persist_if_changed_from pattern
+    exactly -- evidence is NEVER deduped this way (every fresh item is a real
+    observation), only the derived verdict row. Skips the graph entirely (no
+    transaction opened at all) when there's neither new evidence nor a changed
+    decision to write, for cheap no-op cycles."""
+    current_key = (decision["state"], decision["decision_path"])
+    decision_changed = _last_decision_key.get(device_id) != current_key
+    if not fresh_v2 and not decision_changed:
+        return
     try:
         store = _get_graph_store()
         with store.transaction():
             for ev in fresh_v2:
                 store.insert_evidence(ev)
-            store.insert_decision(
-                device_id=device_id, timestamp=timestamp,
-                state=decision["state"], decision_path=decision["decision_path"],
-                confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
-                risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
-                raw_payload=decision,
-                evidence_ids=[ev.evidence_id for ev in merged_v2],
-            )
+            if decision_changed:
+                store.insert_decision(
+                    device_id=device_id, timestamp=timestamp,
+                    state=decision["state"], decision_path=decision["decision_path"],
+                    confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
+                    risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
+                    raw_payload=decision,
+                    evidence_ids=[ev.evidence_id for ev in merged_v2],
+                )
+                _last_decision_key[device_id] = current_key
     except Exception as e:
         LOGGER.error(
             "Failed to write evidence/decision to GraphStore for device %r -- the live "

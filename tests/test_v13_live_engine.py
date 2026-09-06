@@ -228,6 +228,31 @@ check("E: a broken graph write never raises out of evaluate() -- the decision is
       r5["state"] == "BENIGN")
 live_engine._get_graph_store = _orig_get_store
 
+# Decision dedup: a real fix found live on .94's first restart with this wiring --
+# without it, every cycle writes a new decisions row per device regardless of whether
+# the verdict changed at all (611 rows observed in well under a minute of real runtime).
+_dedup_store = live_engine._get_graph_store()
+_t_dedup = _t0 + 500
+r_dedup_1 = live_engine.evaluate([], ReputationVector(domain="", tier=0), features={},
+                                    device_id="devDedup", now=_t_dedup)
+check("E: dedup -- the FIRST decision for a brand-new device is always written",
+      len(_dedup_store.get_decisions_since(_t_dedup - 1, _t_dedup + 1)) == 1)
+
+r_dedup_2 = live_engine.evaluate([], ReputationVector(domain="", tier=0), features={},
+                                    device_id="devDedup", now=_t_dedup + 2)
+check("E: dedup -- an UNCHANGED verdict (still BENIGN/benign) on the very next cycle "
+      "does NOT write a second decisions row",
+      len(_dedup_store.get_decisions_since(_t_dedup - 1, _t_dedup + 10)) == 1)
+check("E: dedup -- the RETURNED decision is correct regardless of whether it got written",
+      r_dedup_2["state"] == "BENIGN")
+
+honeypot_dedup_ev = []  # honeypot fires from features, not evidence
+r_dedup_3 = live_engine.evaluate(honeypot_dedup_ev, ReputationVector(domain="", tier=0),
+                                    features={"zeek_honeypot_hits": 1}, device_id="devDedup",
+                                    now=_t_dedup + 4)
+check("E: dedup -- a CHANGED verdict (BENIGN -> CRITICAL hard-stop) writes a new row",
+      len(_dedup_store.get_decisions_since(_t_dedup - 1, _t_dedup + 10)) == 2)
+
 # device_id=None (the default): zero graph interaction, unchanged from pre-Phase-1 behavior
 _calls_with_no_device_id = []
 live_engine._get_graph_store = lambda: _calls_with_no_device_id.append(1) or _orig_get_store()
