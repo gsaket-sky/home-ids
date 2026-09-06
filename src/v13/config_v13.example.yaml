@@ -55,6 +55,15 @@ ingest:
   prune_interval_seconds: 3600
   evidence_retention_days: 90         # matches graph/store.py's DEFAULT_EVIDENCE_RETENTION_DAYS
 
+# Divergence comparator (src/v13/compare/divergence_log.py, A8) run via a lightweight
+# cron entry (src/v13/ops/run_gap_check.py), same 15-min-cron pattern already used
+# for deploy_v13.sh -- not a new systemd service, matching "lightweight."
+compare:
+  alerts_mount_path: /mnt/v13-alerts/alerts.json  # .94's real alerts, via the v13-alerts Samba share
+  cursor_path: state/v13_divergence_cursor.json
+  output_path: state/v13_divergence.jsonl          # matches the plan's own stated design
+  lookback_seconds: 3600                            # wider than the 15-min cron interval, so a missed run doesn't lose data
+
 # --- Mapping from today's config.yaml.example, for reference during the eventual
 # per-mechanism migration (not automated -- a human reads this when wiring a
 # mechanism's config over, per mechanism, same discipline as everything else here):

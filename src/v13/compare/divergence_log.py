@@ -88,6 +88,21 @@ class AlertsJsonlTailer:
         self._load_cursor()
         if self._inode is None:
             self._seek_to_end()
+            # BUGFIX (found via test_v13_run_gap_check.py, 2026-09-06): unlike
+            # ZeekLogSource/PiHoleLogSource (used by a long-LIVED daemon
+            # process, constructed once and reused across every poll -- only
+            # a full process restart ever re-triggers this branch), this
+            # class is also used by run_gap_check.py's run_once(), which
+            # constructs a FRESH tailer every cron tick with no persistent
+            # object across calls. Without saving the cursor immediately
+            # here, a tick that finds nothing new (read_new_alerts()'s own
+            # early-return skips _save_cursor()) leaves no baseline behind --
+            # the NEXT tick's fresh construction re-seeks to whatever is the
+            # LATEST current EOF by then, permanently skipping anything that
+            # arrived in between. Saving here establishes a real, persisted
+            # baseline on the very first construction, not just the first
+            # one that happens to find something to process.
+            self._save_cursor()
 
     def _load_cursor(self) -> None:
         if not self.cursor_path.exists():
