@@ -763,6 +763,41 @@ scheduled_jobs:
       enabled: true
       cron: "*/5 * * * *"
 
+    # v13's automated per-mechanism flip monitor (Documentation/
+    # V13_ARCHITECTURE_DEPENDENCY_MAP.md's "Automated per-mechanism flip bars"
+    # section) -- checks real accumulated evidence against each mechanism's documented
+    # bar and, if it clears every hard safety veto, automatically flips that
+    # mechanism's v13_flags: entry below from "shadow" to "live". Never restarts
+    # soc.service itself (standing rule) -- sends a Telegram notification asking for
+    # that manual step instead. Lives in src/v13/ops/, not scripts/, hence the
+    # "script" override below.
+    gap_monitor:
+      enabled: true
+      cron: "*/15 * * * *"
+      script: "../v13/ops/gap_monitor.py"
+
+
+# =============================================================================
+# v13_flags — per-mechanism live/shadow switches for src/v13/ops/gap_monitor.py
+# =============================================================================
+# "shadow" (default, safe) = decision_engine.py computes and logs this mechanism's v13
+# verdict for comparison, but never changes what soc.service actually does.
+# "live" = on cycles this mechanism is eligible for, its v13 verdict REPLACES
+# v-current's real decision (state/explanation/decision_path/threat_confidence/action).
+#
+# gap_monitor.py flips a flag below to "live" automatically once that mechanism's own
+# documented bar clears (see the dependency map) -- but a config-file flip alone does
+# NOT take effect until soc.service is restarted, which stays a separate, explicit
+# human-triggered action (gap_monitor.py's own Telegram notification says so when it
+# flips one of these).
+v13_flags:
+  # Hypothesis independence-family scoring (A10) -- decision_engine.py's
+  # INDEPENDENCE_FAMILY_MAP-based corroboration count vs. the live independence_group
+  # field. Bar: not before 2026-09-13 AND >=200 eligible cycles (state/
+  # v13_independence_eligible_count.json) AND zero false-negative-shaped divergences
+  # (state/v13_independence_divergences.jsonl).
+  independence_family: shadow
+
 
 # =============================================================================
 # Secrets — NOT in this file

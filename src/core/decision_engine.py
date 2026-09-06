@@ -573,6 +573,7 @@ class DecisionEngine:
             "v13_state": v13_state,
             "v13_explanation": v13_explanation,
             "v13_decision_path": v13_decision_path,
+            "v13_threat_confidence": v13_threat_confidence,
             "v13_independence_changed": v13_independence_changed,
             "v13_eligible": v13_eligible,
         }

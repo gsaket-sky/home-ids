@@ -36,6 +36,10 @@ Sections:
   E. pipeline.py's logging wiring (source-level checks, not live I/O)
   F. v13_eligible is the real denominator for the A10 flip bar -- true on every
      cycle the shadow block actually re-resolves, independent of whether it diverges
+  G. _apply_v13_flip: the actual live/shadow switch config.yaml's
+     v13_flags.independence_family controls -- defaults to a no-op, and gap_monitor.py
+     (not yet built at the time this section was added) is the thing that would ever
+     set it to "live" automatically once A10's documented bar clears
 """
 import sys
 import time
@@ -185,6 +189,73 @@ check("F: _count_v13_eligible_cycle uses an atomic tmp-then-replace write (match
       ".tmp" in count_src and "replace(" in count_src)
 check("F: _count_v13_eligible_cycle never raises out to the caller",
       "except Exception" in count_src)
+
+
+# --- G. _apply_v13_flip: the actual live/shadow switch ---
+
+class _FakeSelfForFlip:
+    def __init__(self, config):
+        self.config = config
+
+_flip = EnginePipeline._apply_v13_flip
+
+def _flipped(decision, flag_value=None):
+    cfg = {} if flag_value is None else {"v13_flags": {"independence_family": flag_value}}
+    return _flip(_FakeSelfForFlip(cfg), dict(decision))
+
+# G1: absent v13_flags key entirely -- must behave identically to explicit "shadow"
+g1 = _flipped(result_div, flag_value=None)
+check("G: with NO v13_flags key at all, a real divergence is left completely untouched (default is shadow)",
+      g1["state"] == result_div["state"] and g1["decision_path"] == result_div["decision_path"])
+
+# G2: explicit "shadow" -- same as above, spelled out
+g2 = _flipped(result_div, flag_value="shadow")
+check("G: with v13_flags.independence_family explicitly 'shadow', a real divergence is untouched",
+      g2["state"] == result_div["state"] and g2 == g1)
+
+# G3: "live" but this cycle isn't eligible (honeypot hard-stop) -- must stay untouched
+g3 = _flipped(result_honeypot, flag_value="live")
+check("G: with flag='live' but v13_eligible=False (honeypot), the live decision is untouched",
+      g3["state"] == result_honeypot["state"] and g3["decision_path"] == result_honeypot["decision_path"])
+
+# G4: "live" AND eligible AND a real divergence -- state/explanation/decision_path/
+# threat_confidence/action must all become v13's values
+g4 = _flipped(result_div, flag_value="live")
+check("G: with flag='live' on a real divergence, state flips to v13's HIGH verdict",
+      g4["state"] == DecisionState.HIGH and g4["decision_path"] == "hypothesis_high")
+check("G: with flag='live' on a real divergence, explanation/threat_confidence also flip to v13's values",
+      g4["explanation"] == result_div["v13_explanation"] and g4["threat_confidence"] == result_div["v13_threat_confidence"])
+check("G: with flag='live' on a real divergence, action is correctly re-derived as 'alert' for hypothesis_high",
+      g4["action"] == "alert")
+
+# G5: "live" AND eligible but NO divergence (single-source case) -- values match anyway,
+# but action must still be correctly (re-)computed via the v13 path, not just copied
+g5 = _flipped(result_single, flag_value="live")
+check("G: with flag='live' on a non-diverging eligible case, action still resolves correctly ('monitor' for hypothesis_suspicious)",
+      g5["action"] == "monitor" and g5["decision_path"] == "hypothesis_suspicious")
+
+# G6: a corrupted/unknown v13_decision_path must fail safe, not raise, and leave the
+# live decision untouched
+corrupted = dict(result_div)
+corrupted["v13_decision_path"] = "not_a_real_path"
+g6 = _flip(_FakeSelfForFlip({"v13_flags": {"independence_family": "live"}}), corrupted)
+check("G: an unrecognized v13_decision_path fails safe -- live decision untouched, no exception",
+      g6["state"] == result_div["state"])
+
+# G7: pipeline.py source-level wiring -- flip must be called, and must come AFTER the
+# divergence log call (see _apply_v13_flip's own docstring for why order matters)
+check("G: _step calls _apply_v13_flip and reassigns its return value back onto `decision`",
+      "_apply_v13_flip" in step_src and "decision = self._apply_v13_flip(decision)" in step_src)
+_divergence_log_pos = step_src.find("_log_v13_independence_divergence(decision")
+_flip_pos = step_src.find("self._apply_v13_flip(decision)")
+check("G: _apply_v13_flip is called AFTER _log_v13_independence_divergence, not before",
+      _divergence_log_pos != -1 and _flip_pos != -1 and _divergence_log_pos < _flip_pos)
+
+flip_src = inspect.getsource(EnginePipeline._apply_v13_flip)
+check("G: _apply_v13_flip defaults to 'shadow' when the config key is absent (fail-safe default)",
+      '"shadow"' in flip_src or "'shadow'" in flip_src)
+check("G: _apply_v13_flip never raises out to the caller",
+      "except Exception" in flip_src)
 
 
 print(f"\n{'='*60}")

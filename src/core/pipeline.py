@@ -47,6 +47,21 @@ from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Au
 
 from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total, persistence_escalation_total
 
+# V13 FLIP (Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md, src/v13/ops/gap_monitor.py):
+# the action each v13_decision_path value resolves to, mirroring decision_engine.py's own
+# live decision_path->action mapping for EXACTLY the 5 path values v13_eligible covers
+# (see decision_engine.py's own comment on why only those 3 branches are re-resolved).
+# Kept here rather than duplicated inside decision_engine.py since this mapping is only
+# ever needed at the flip point, not by the shadow computation itself.
+_V13_DECISION_PATH_ACTION = {
+    "hard_stop": "block",                  # geofence, corroborated
+    "geofence_uncorroborated": "alert",
+    "tier5_corroborated": "block",
+    "tier5_uncorroborated": "monitor",
+    "hypothesis_high": "alert",
+    "hypothesis_suspicious": "monitor",
+}
+
 # PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
 # (and therefore have certain behavioral evidence dampened) when device_type came from an
 # operator-configured override — see core/identity.py's apply_device_type() and
@@ -1248,6 +1263,12 @@ class EnginePipeline:
                     self._count_v13_eligible_cycle()
                 if decision.get("v13_independence_changed"):
                     self._log_v13_independence_divergence(decision, dev_id, hostname, client_ip)
+
+                # V13 FLIP: must run AFTER the divergence log above (see that method's own
+                # comment) -- a no-op unless config.yaml's v13_flags.independence_family is
+                # explicitly "live" (default "shadow"), and even then only on cycles this
+                # mechanism is eligible for.
+                decision = self._apply_v13_flip(decision)
 
                 # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                 # Deliberately gated on the HEE's OWN verdict for THIS cycle being
@@ -2685,6 +2706,54 @@ class EnginePipeline:
             tmp_path.replace(path)
         except Exception as e:
             LOGGER.debug("Failed to update v13_independence_eligible_count.json: %s", e)
+
+    def _apply_v13_flip(self, decision: dict) -> dict:
+        """V13 FLIP: the actual live/shadow switch config.yaml's v13_flags.independence_family
+        controls, defaulting to "shadow" (a complete no-op -- config.get(..., "shadow") means
+        an absent key behaves identically to an explicit "shadow"). Only takes effect on a
+        cycle where decision["v13_eligible"] is True; every other cycle is untouched by
+        construction, matching decision_engine.py's own comment on why v13 and v-current agree
+        outside those 3 branches.
+
+        MUST be called AFTER _log_v13_independence_divergence above, never before -- that log's
+        "old_state"/"old_explanation" fields are meant to record what v-current's real live
+        verdict WAS, and mutating `decision` first would make every future divergence look like
+        v13 agreeing with itself. src/v13/ops/gap_monitor.py flips the config flag from "shadow"
+        to "live" automatically once a mechanism's documented bar clears (see the dependency
+        map's "Automated per-mechanism flip bars" section) -- this method is the other half of
+        that flip: the thing gap_monitor.py's config edit actually controls at runtime, not the
+        code that decides WHEN to flip it.
+
+        KNOWN LIMITATION (matches Gap 1's shadow_changed precedent exactly, not a new gap this
+        introduces): the geofencing re-evaluation further below (a second, separate
+        decision_engine.evaluate() call after appending geofencing_violation evidence) is NOT
+        covered by this flip, same as it was never covered by shadow_changed's own logging --
+        that second decision always uses v-current's verdict regardless of this flag.
+
+        Never raises -- any error here falls back to the live v-current decision untouched,
+        the currently-proven path, same fail-safe direction as every other v13 shadow method."""
+        try:
+            v13_flags = self.config.get("v13_flags") or {}
+            if v13_flags.get("independence_family", "shadow") != "live":
+                return decision
+            if not decision.get("v13_eligible"):
+                return decision
+            v13_path = decision.get("v13_decision_path")
+            v13_action = _V13_DECISION_PATH_ACTION.get(v13_path)
+            if v13_action is None:
+                LOGGER.warning(
+                    "v13_flags.independence_family=live but v13_decision_path %r has no "
+                    "action mapping -- leaving this cycle's live decision untouched.", v13_path,
+                )
+                return decision
+            decision["state"] = decision["v13_state"]
+            decision["explanation"] = decision["v13_explanation"]
+            decision["decision_path"] = v13_path
+            decision["threat_confidence"] = decision["v13_threat_confidence"]
+            decision["action"] = v13_action
+        except Exception as e:
+            LOGGER.error("Failed to apply v13 flip, falling back to live v-current decision: %s", e)
+        return decision
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """
