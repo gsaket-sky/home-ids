@@ -194,6 +194,24 @@ store.insert_decision(device_id="no_prior_device", timestamp=6_000_001.0, state=
 check("insert_decision auto-upserts a device that never had a prior row",
       store._conn.execute("SELECT 1 FROM devices WHERE device_id = 'no_prior_device'").fetchone() is not None)
 
+# --- get_decisions_since (A8 prerequisite: divergence comparator's read side) ---
+store.insert_decision(device_id="window_dev", timestamp=6_100_000.0, state="HIGH",
+                        decision_path="hypothesis_high", confidence=0.9, risk_score=8.0,
+                        raw_payload={"marker": "in_window"})
+store.insert_decision(device_id="window_dev", timestamp=6_200_000.0, state="BENIGN",
+                        decision_path="benign", confidence=0.0, risk_score=0.0,
+                        raw_payload={"marker": "after_until"})
+in_window = store.get_decisions_since(6_050_000.0, until=6_150_000.0)
+check("get_decisions_since returns decisions within [since, until)",
+      any(d["raw_payload"].get("marker") == "in_window" for d in in_window))
+check("get_decisions_since excludes decisions at or after `until`",
+      not any(d["raw_payload"].get("marker") == "after_until" for d in in_window))
+check("get_decisions_since parses raw_payload_json back into a real dict",
+      isinstance(in_window[0]["raw_payload"], dict))
+no_until = store.get_decisions_since(6_050_000.0)
+check("get_decisions_since with no `until` includes everything from `since` onward",
+      any(d["raw_payload"].get("marker") == "after_until" for d in no_until))
+
 store.close()
 
 print()

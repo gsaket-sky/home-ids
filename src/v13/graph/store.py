@@ -229,6 +229,28 @@ class GraphStore:
         ).fetchall()
         return [(r["device_id"], r["destination_id"]) for r in rows]
 
+    def get_decisions_since(self, since: float, until: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Real decisions (A7) in [since, until) -- the divergence comparator's
+        (A8) own read side. raw_payload is parsed back into a dict (stored as
+        JSON text, per insert_decision()); mechanism_flags likewise."""
+        if until is not None:
+            rows = self._conn.execute(
+                "SELECT * FROM decisions WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+                (since, until),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM decisions WHERE timestamp >= ? ORDER BY timestamp",
+                (since,),
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["raw_payload"] = json.loads(d.pop("raw_payload_json") or "{}")
+            d["mechanism_flags"] = json.loads(d.pop("mechanism_flags_json") or "{}")
+            out.append(d)
+        return out
+
     def get_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
                    src_id: Optional[str] = None, dst_kind: Optional[str] = None,
                    dst_id: Optional[str] = None) -> List[Dict[str, Any]]:

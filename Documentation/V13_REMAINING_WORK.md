@@ -153,30 +153,46 @@ spy-based check that the correct destination gets classified, 3 in
 `test_v13_ingest_daemon.py` including the dedup behavior end-to-end). All 15+
 v13 test files re-confirmed passing.
 
-### A8. `divergence_log.py` (the comparator) is not built — real infra needed first
-**What**: the plan's `gap_monitor.py` is supposed to evaluate DIVERGENCE DATA
-between v13's decisions (now real, A7) and v-current's real decisions (from
-`.94`'s `state/alerts.json`, confirmed this session: real path
-`/home/<deploy-user>/myscripts/home-ids/SOC/state/alerts.json`, JSONL, one
-record per line, ~100MB/35,800 lines as of 2026-09-06, each carrying
-`incident_id`/`hee_decision_path`/`hee_hypotheses`/`hee_rep_tier` and more).
-Nothing currently correlates the two. `.19` has NO read access to `.94`'s
-`state/` directory at all — the three existing Samba shares
-(`v13-zeek`/`v13-suricata`/`v13-pihole`) deliberately only cover raw sensor
-logs, not `state/`.
-**Why it's open**: building the actual comparator needs a NEW piece of
-cross-host infrastructure (a fourth read-only Samba share exposing
-`alerts.json`, or an equivalent), plus real correlation logic across two
-STRUCTURALLY DIFFERENT decision pipelines (v13's daemon evaluates a narrower
-evidence set — Zeek+Pi-hole only, no ML/GeoIP/CL-AFPE/Ollama-informed
-thresholds — against v-current's full pipeline) — correlating by
-device/timestamp/signature-shape rather than expecting identical inputs to
-produce identical evidence, which they structurally can't. Real, non-trivial
-design work, not a small addition.
-**When**: before `gap_monitor.py` can evaluate anything real. Should also
-settle the actual correlation strategy explicitly (by device_id + time window
-+ signature-shape, matching the plan's own stated approach) before writing
-code, not improvised inline.
+### A8. ~~`divergence_log.py` (the comparator) is not built~~ — DONE (2026-09-06)
+**Resolved**: a fourth read-only Samba share (`v13-alerts`) was added on
+`.94`, exposing a NARROW export directory (a hardlink to `state/alerts.json`
+only, NOT the whole `state/` tree — which also holds trust caches and
+reactive-capture data this comparator has no need for and shouldn't be
+exposed to). Required one small permission fix found live: `/home/<deploy-
+user>` itself was `750` (no traverse for other users) — the other three
+shares' paths sit under world-traversable system directories
+(`/opt/`, `/var/log/`) so this gap was never hit before; fixed with a
+minimal `chmod o+x` (traverse-only, not list) on that one directory, not a
+broader permission change. Mounted read-only on `.19` at `/mnt/v13-alerts`
+via the same `fstab`/`x-systemd.automount` pattern as the other three shares.
+
+`src/v13/compare/divergence_log.py` — built. `AlertsJsonlTailer` tails the
+100MB+, continuously-growing `alerts.json` incrementally (same cursor
+algorithm as `ZeekLogSource`/`PiHoleLogSource`, an independent third copy,
+not shared code — a deliberate scope trim given this session's time
+constraints). `compare_window()` correlates by device IP (v-current's real
+`device.ip` field vs. v13's own `device_id`, which — a real, flagged
+limitation — is the raw source IP in the current daemon wiring, not routed
+through `identity/resolver.py`'s stable-hash device_id) within a
+`TOLERANCE_SECONDS=300` window, classifying each pairing as `AGREE` (same
+decision_path), `DIFFERENT_PATH` (both flagged, disagreed on what),
+`VCURRENT_ONLY` (v-current alerted, v13 either called it benign nearby or
+never evaluated it at all — the two are distinguished via
+`v13_evaluated_but_benign`), or `V13_ONLY` (v13 flagged, no v-current alert
+nearby). A v13 BENIGN decision with nothing to compare against correctly
+produces NO divergence record at all — confirmed via direct test, not
+assumed. Divergences append to a JSONL file, matching the plan's own stated
+design (`state/v13_divergence.jsonl`).
+
+**25 new tests** (`tests/test_v13_divergence_log.py`) cover the tailer's
+cursor/rotation/partial-line behavior, field extraction from a real alert
+record's confirmed shape, the full classification matrix including tolerance-
+window edges (an alert just outside tolerance correctly produces TWO
+independent unmatched records, one per side — not a bug, both signals
+genuinely missed each other), and `run_comparison()`'s end-to-end wiring.
+`GraphStore` gained `get_decisions_since()` (8 more tests in
+`test_v13_graph_store.py`) as this module's read side into v13's own
+decisions table.
 
 ### A9. ~~The automated flip monitor's PRODUCTION-EDITING step needs re-confirmation~~ — RE-CONFIRMED (2026-09-06)
 **Resolved**: explicitly asked the user, given the architecture change this
@@ -432,15 +448,22 @@ daemon, verified end-to-end with a real DNS-tunneling-shaped query.
 evidence) on `.19`, with a dedup guard so unchanging verdicts don't spam the
 audit trail.
 
-**Next real blockers, in order**: A8 (the divergence comparator — needs a new
-Samba share exposing `.94`'s `alerts.json`, plus real cross-pipeline
-correlation logic, before it can produce any real divergence data) and A9 (a
-genuinely open decision, not a build task — whether `gap_monitor.py`'s
-auto-edit-`.94`'s-config step should still be "fully automatic" now that the
-real architecture, an independent process rather than an in-process shadow
-hook, is known). A6 (Suricata reactive-capture) remains a larger,
-separately-scoped initiative, lower priority than A8/A9 for the flip-monitor
-goal specifically.
+**A8 is also done** (2026-09-06) — the divergence comparator is built and
+tested (25 checks), backed by a new, narrowly-scoped Samba share on `.94`.
+
+**A9 is resolved** (2026-09-06) — the user explicitly re-confirmed "keep
+fully automatic" for `gap_monitor.py`'s production-editing step, made with
+full knowledge of the architecture change. No longer an open question.
+
+**Next real blocker**: `src/v13/ops/gap_monitor.py` itself doesn't exist yet
+— everything it needs (real decisions, a real comparator, an explicit
+answer on the automation question) is now in place. It still needs
+per-mechanism BARS documented (this project's own precedent: Gap 1/2's "N
+days shadow, zero divergences," Gap 3 honeypot's "58 confirmed divergences,
+zero false negatives") before it can evaluate anything meaningfully — no
+real divergence data has accumulated yet since the comparator only just
+started running. A6 (Suricata reactive-capture) remains a larger,
+separately-scoped initiative, unrelated to the flip-monitor goal.
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,
