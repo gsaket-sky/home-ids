@@ -178,31 +178,21 @@ settle the actual correlation strategy explicitly (by device_id + time window
 + signature-shape, matching the plan's own stated approach) before writing
 code, not improvised inline.
 
-### A9. The automated flip monitor's PRODUCTION-EDITING step needs re-confirmation
-**What**: the plan's "Automated incremental flips" describes `gap_monitor.py`
-ultimately toggling a `v13_flags.<mechanism>: shadow|live` flag in `.94`'s OWN
-`config.yaml` and reloading `soc.service` — with ZERO per-flip human approval
-(the user's explicit original choice, "fully automatic, notify after the
-fact"). That decision was made before this session discovered that v13 on
-`.19` runs as a fully INDEPENDENT process against its own narrower evidence
-pipeline, not as an in-process shadow hook inside `.94`'s `pipeline.py` the
-way the plan originally envisioned — a materially different architecture than
-what "flip this mechanism live" was designed against. Every other
-`.94`-affecting action this whole effort has taken (deploy key setup, service
-restarts) has gotten explicit human confirmation at the time, never silent
-automation — auto-editing production's live config is a strictly larger risk
-than anything built or run so far.
-**Why it's open**: this is a decision only the user can make, and the
-premise it was originally decided under has changed. Not something to build
-past silently.
-**When**: before writing any code that would let `gap_monitor.py` actually
-edit `.94`'s `config.yaml` or restart `soc.service` — re-confirm with the
-user whether "fully automatic" still applies now that the real architecture
-(independent process, not in-process shadow hook) is known, or whether a
-notify-and-wait-for-approval model fits this specific action better. Building
-`gap_monitor.py`'s EVALUATION logic (reading divergence data, checking it
-against documented bars) doesn't require this decision yet — only the
-ACTUATION step (editing `.94`) does.
+### A9. ~~The automated flip monitor's PRODUCTION-EDITING step needs re-confirmation~~ — RE-CONFIRMED (2026-09-06)
+**Resolved**: explicitly asked the user, given the architecture change this
+session discovered (v13 runs as a fully independent process on `.19`, not an
+in-process shadow hook inside `.94`'s `pipeline.py` as the plan originally
+envisioned) — **the user re-confirmed "keep fully automatic"**: `gap_monitor.py`
+still edits `.94`'s `config.yaml` and restarts `soc.service` on its own once a
+mechanism clears its documented bar, notifying only after the fact, with no
+per-flip human approval. This stands as a deliberate, informed decision made
+WITH knowledge of the architecture change, not a holdover from before it was
+discovered — recorded here so a future session doesn't need to re-litigate
+it, and doesn't mistake it for an unexamined default either. The hard safety
+vetoes from the original plan (regression suite must pass, zero
+false-negative-shaped divergence, no auto-decision on a genuinely novel case)
+remain non-negotiable regardless of this choice — they were never part of
+what "fully automatic" was asking to relax.
 
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
