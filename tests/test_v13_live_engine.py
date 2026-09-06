@@ -253,6 +253,61 @@ r_dedup_3 = live_engine.evaluate(honeypot_dedup_ev, ReputationVector(domain="", 
 check("E: dedup -- a CHANGED verdict (BENIGN -> CRITICAL hard-stop) writes a new row",
       len(_dedup_store.get_decisions_since(_t_dedup - 1, _t_dedup + 10)) == 2)
 
+# Evidence content-key dedup: the MORE serious bug found live -- EvidenceStore.get_for_
+# device() returns the SAME still-fresh v1 item on every cycle for up to its full TTL,
+# and convert() assigns a fresh evidence_id every call, so naive per-cycle insertion
+# re-writes the SAME real observation as a new graph row every single cycle it remains
+# in EvidenceStore (confirmed live: 12,766 rows / 28.7MB after 9 minutes of real runtime).
+_t_repeat = _t0 + 600
+_repeating_v1_ev = [V1Evidence(type="dns_entropy", source="dns_features", timestamp=_t_repeat,
+                                  device="devRepeat", value=4.5, confidence=0.8,
+                                  independence_group="dns_behavior")]
+for _cycle in range(5):
+    live_engine.evaluate(_repeating_v1_ev, ReputationVector(domain="", tier=3), features={},
+                            device_id="devRepeat", now=_t_repeat + _cycle * 2)
+check("E: the SAME v1 evidence item (identical device/type/source/timestamp) handed to "
+      "evaluate() across 5 separate cycles -- exactly what EvidenceStore's own TTL-based "
+      "retention does in real production -- is written to the graph EXACTLY ONCE, not "
+      "5 times",
+      len(_dedup_store.get_evidence_for_device("devRepeat")) == 1,
+      f"got {len(_dedup_store.get_evidence_for_device('devRepeat'))} rows")
+
+_new_v1_ev = [V1Evidence(type="dns_entropy", source="dns_features", timestamp=_t_repeat + 100,
+                            device="devRepeat", value=4.5, confidence=0.8,
+                            independence_group="dns_behavior")]
+live_engine.evaluate(_repeating_v1_ev + _new_v1_ev, ReputationVector(domain="", tier=3),
+                        features={}, device_id="devRepeat", now=_t_repeat + 100)
+check("E: a GENUINELY new evidence item (different timestamp) alongside the same repeated "
+      "one IS written -- the fix recognizes new content, it doesn't just stop writing "
+      "anything for this device",
+      len(_dedup_store.get_evidence_for_device("devRepeat")) == 2)
+
+# White-box check: the merged list actually handed to the decision engine must not
+# contain the same real observation twice just because it exists both fresh (this
+# cycle's active_evidence_v1) AND in the graph (written on an earlier cycle for the
+# SAME content) -- captured via a thin wrapper around _v13_engine.evaluate().
+_captured_merged = []
+_orig_v13_engine_for_merge_check = live_engine._v13_engine
+
+
+class _CapturingEngine:
+    def evaluate(self, evidence_list, *a, **kw):
+        _captured_merged.append(list(evidence_list))
+        return _orig_v13_engine_for_merge_check.evaluate(evidence_list, *a, **kw)
+
+
+live_engine._v13_engine = _CapturingEngine()
+live_engine.evaluate(_repeating_v1_ev, ReputationVector(domain="", tier=3), features={},
+                        device_id="devRepeat", now=_t_repeat + 200)
+live_engine._v13_engine = _orig_v13_engine_for_merge_check
+
+merged_keys = [live_engine._content_key(ev) for ev in _captured_merged[-1]]
+check("E: the merge into the decision input is deduped by content, not evidence_id -- "
+      "the repeated observation appears exactly once in the merged list, even though "
+      "it exists both fresh (this cycle) and in the graph's own windowed read",
+      len(merged_keys) == len(set(merged_keys)),
+      f"got {len(merged_keys)} items, {len(set(merged_keys))} unique")
+
 # device_id=None (the default): zero graph interaction, unchanged from pre-Phase-1 behavior
 _calls_with_no_device_id = []
 live_engine._get_graph_store = lambda: _calls_with_no_device_id.append(1) or _orig_get_store()

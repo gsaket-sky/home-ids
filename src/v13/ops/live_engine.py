@@ -85,6 +85,33 @@ _graph_store: Optional[GraphStore] = None
 # nothing about it changed.
 _last_decision_key: Dict[str, Tuple[str, str]] = {}
 
+# device_id -> set of content keys already written to the graph. A MUCH more serious
+# bug than the decision-dedup above, found the same minute on the same restart:
+# EvidenceStore.get_for_device() returns the SAME still-fresh v1 item on EVERY cycle
+# for up to its full TTL (600s default, 86400s reputation -- ~300 cycles at the 2s poll
+# interval for a behavioral item alone), and evidence/ingest.py's convert() assigns a
+# FRESH, non-deterministic evidence_id on every call with no content-based dedup. Naive
+# per-cycle insertion of "this cycle's fresh_v2" therefore re-writes the SAME real
+# observation as a brand-new graph row every single cycle it remains in EvidenceStore --
+# confirmed live: 12,766 evidence rows / 28.7MB after 9 minutes of real runtime, ~2
+# orders of magnitude more than the real observation rate. v1 Evidence has no id field
+# of its own, so (device, type, source, timestamp) is used as a stable content key --
+# EvidenceStore never mutates an item's timestamp after creation, so the SAME real
+# observation produces the SAME key every cycle it's returned. Pruned against each
+# cycle's own active-evidence key set, so memory never grows past what EvidenceStore
+# itself is currently holding for that device -- when EvidenceStore lets an item expire,
+# this forgets it too.
+_written_evidence_keys: Dict[str, set] = {}
+
+
+def _content_key(ev) -> tuple:
+    """Same stable identity for both v1 Evidence (.type/.device) and v2 Evidence
+    (.evidence_type/.device_id) -- needed to recognize a v2 item (already converted)
+    against the SAME real observation converted again in a later cycle."""
+    device = getattr(ev, "device_id", None) or getattr(ev, "device", None)
+    etype = getattr(ev, "evidence_type", None) or getattr(ev, "type", None)
+    return (device, etype, ev.source, ev.timestamp)
+
 
 def configure(graph_db_path: str) -> None:
     """Optional: call once at startup to point the live graph store somewhere other
@@ -150,20 +177,26 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
     live decision, which has already been computed and returned by the time
     this runs.
 
-    The decision row is deduped by (state, decision_path) via _last_decision_key,
-    matching src/v13/ingest/daemon.py's own only_persist_if_changed_from pattern
-    exactly -- evidence is NEVER deduped this way (every fresh item is a real
-    observation), only the derived verdict row. Skips the graph entirely (no
-    transaction opened at all) when there's neither new evidence nor a changed
-    decision to write, for cheap no-op cycles."""
+    Evidence is only inserted the FIRST cycle it's seen (see _written_evidence_keys'
+    own module-level comment for why this matters -- without it, the same real
+    observation gets re-written every cycle it remains in EvidenceStore). The
+    decision row is separately deduped by (state, decision_path) via
+    _last_decision_key, matching src/v13/ingest/daemon.py's own
+    only_persist_if_changed_from pattern. Skips the graph entirely (no transaction
+    opened at all) when there's neither new evidence nor a changed decision."""
+    written = _written_evidence_keys.setdefault(device_id, set())
+    current_fresh_keys = {_content_key(ev) for ev in fresh_v2}
+    written &= current_fresh_keys  # forget anything EvidenceStore itself has let expire
+    new_v2 = [ev for ev in fresh_v2 if _content_key(ev) not in written]
+
     current_key = (decision["state"], decision["decision_path"])
     decision_changed = _last_decision_key.get(device_id) != current_key
-    if not fresh_v2 and not decision_changed:
+    if not new_v2 and not decision_changed:
         return
     try:
         store = _get_graph_store()
         with store.transaction():
-            for ev in fresh_v2:
+            for ev in new_v2:
                 store.insert_evidence(ev)
             if decision_changed:
                 store.insert_decision(
@@ -175,6 +208,10 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
                     evidence_ids=[ev.evidence_id for ev in merged_v2],
                 )
                 _last_decision_key[device_id] = current_key
+        # Only mark as written AFTER a successful commit -- a failed write leaves
+        # these keys untracked, so they're correctly retried next cycle instead of
+        # being silently lost from the graph forever.
+        written.update(_content_key(ev) for ev in new_v2)
     except Exception as e:
         LOGGER.error(
             "Failed to write evidence/decision to GraphStore for device %r -- the live "
@@ -201,8 +238,13 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         merged_v2 = fresh_v2
         if device_id:
             windowed_v2 = _query_graph_window(device_id, ts)
-            seen_ids = {ev.evidence_id for ev in windowed_v2}
-            merged_v2 = windowed_v2 + [ev for ev in fresh_v2 if ev.evidence_id not in seen_ids]
+            # Dedup by CONTENT, not evidence_id -- convert() assigns a fresh, random
+            # evidence_id on every call, so the same real observation converted fresh
+            # this cycle and the same observation read back from the graph (written on
+            # an earlier cycle) would never match on evidence_id alone, double-counting
+            # it in the merged list handed to the decision engine.
+            fresh_keys = {_content_key(ev) for ev in fresh_v2}
+            merged_v2 = [ev for ev in windowed_v2 if _content_key(ev) not in fresh_keys] + fresh_v2
 
         decision = _v13_engine.evaluate(
             merged_v2, rep_vector, device_type=device_type,
