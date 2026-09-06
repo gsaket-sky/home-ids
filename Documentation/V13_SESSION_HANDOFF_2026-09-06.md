@@ -165,6 +165,20 @@ in place — but it still needs:
   (see Addendum 2 above and `V13_ARCHITECTURE_DEPENDENCY_MAP.md`) — 7-day
   time floor (not before 2026-09-13) + 15-20 real eligible comparisons +
   zero false-negative-shaped divergences. Not yet met; just documented.
+- **UPDATE (Addendum 3, same day, ~15:31 CEST): `gap_monitor.py` now exists and is
+  live on `.94`.** See `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s "A12" entry for full
+  detail — the actual live/shadow switch (`pipeline.py`'s `_apply_v13_flip()`) and
+  the automated monitor (`src/v13/ops/gap_monitor.py`) are both built, tested (44
+  new checks across two files), deployed, and as of this addendum `.94`'s REAL
+  `config.yaml` has the `v13_flags:` section and the `gap_monitor` scheduler entry
+  (added with explicit confirmation, backed up first to
+  `/tmp/config.yaml.pre-gap-monitor-backup` on `.94`). `scheduler.py` re-reads
+  config.yaml fresh every 60s loop and runs as its own always-live process
+  (confirmed via `ps aux`, PID separate from `soc.service`'s main process) — so
+  `gap_monitor.py` starts firing on its `*/15 * * * *` schedule WITHOUT needing a
+  `soc.service` restart. It will find `waiting_time_floor` every tick until
+  2026-09-13 (harmless, no Telegram noise — see `run_once()`'s own routine-vs-
+  noteworthy distinction). This item in §5 above is now DONE, not open.
 - **The actual `v13_flags`-driven live/shadow config read** — A10 only wired
   the mechanism to shadow-compute and log; nothing reads a config flag to
   actually switch behavior yet.
