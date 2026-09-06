@@ -390,6 +390,31 @@ device_identity:
   # configured. Leave blank ("") to disable this special-case. [LIVE]
   gateway_ip: 192.168.1.1
 
+  # v13 full-architecture plan, Phase 2 -- NOT YET LIVE (nothing reads this on
+  # `.94` yet; Phase 3 is what actually switches identity resolution over to it).
+  # Additive, side-by-side with gateway_ip above, which stays authoritative for
+  # v-current's own identity.py until then. Generalizes the single gateway_ip
+  # special case to an arbitrary list of named "trust anchors" -- an IDS product
+  # needs to recognize "this is well-known infrastructure" for however many such
+  # devices a deployment has (gateway, NAS, a second AP, ...), not just one.
+  # Loaded via src/v13/config/trust_anchors.py's load_trust_anchors_from_config()
+  # into the Dict[str, TrustAnchor] shape src/v13/identity/resolver.py's
+  # resolve_device_id() expects -- a malformed entry is skipped and logged, not a
+  # crash. Mirrors src/v13/config_v13.example.yaml's own schema exactly.
+  network:
+    trust_anchors:
+      - role: gateway
+        ip: 192.168.1.1
+      - role: this_host
+        ip: 192.168.1.2
+
+  # Drives SQLite cache size / retention-pruning aggressiveness / local-vs-remote
+  # Ollama default in later phases -- not yet consumed by any live behavior, just
+  # validated (src/v13/config/trust_anchors.py's load_hardware_profile(), which
+  # falls back to "x86_16gb" on anything unrecognized). One of:
+  #   pi_8gb | x86_16gb | custom
+  hardware_profile: x86_16gb
+
 
 # -----------------------------------------------------------------------------
 # geofencing — block traffic to specific countries by GeoIP

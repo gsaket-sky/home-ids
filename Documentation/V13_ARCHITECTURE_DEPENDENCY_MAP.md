@@ -378,6 +378,18 @@ Two real gaps found and closed, both purely additive:
 
 **Lesson for future phases**: this is exactly why the plan's own "benchmark before wiring in, not after" instruction existed for write COST — but nothing in that benchmarking caught write CORRECTNESS (duplicate-content insertion), because the benchmark script inserted synthetic, always-distinct evidence per cycle, never simulating `EvidenceStore`'s real "same item returned across many cycles" behavior. Future phases touching live per-cycle wiring should specifically test the "repeated/persisting evidence across many cycles" case, not just fresh-per-cycle synthetic load.
 
+### A16. Full-architecture plan, Phase 2: `trust_anchors`/`hardware_profile` config loader (2026-09-06)
+
+**Why**: Phase 3 (identity resolution wiring) needs a real config-loading path from `.94`'s actual `config.yaml` into the `Dict[str, TrustAnchor]` shape `src/v13/identity/resolver.py`'s `resolve_device_id()` already expects. Confirmed before writing any code: `trust_anchors`/`hardware_profile` were 100% unbuilt in live code — `src/v13/config_v13.example.yaml` documented the schema and `resolver.py`'s `TrustAnchor` dataclass consumed it, but nothing loaded a real config file into that shape yet.
+
+**New `src/v13/config/trust_anchors.py`**: `load_trust_anchors_from_config(config)` reads `config["network"]["trust_anchors"]` (a list of `{role, ip, mac}` dicts) and returns the exact `Dict[str, TrustAnchor]` `resolve_device_id()` expects — directly usable with zero adaptation. `load_hardware_profile(config)` validates `config["hardware_profile"]` against the three real values (`pi_8gb`/`x86_16gb`/`custom`), falling back to `x86_16gb` on anything absent or unrecognized. Both fail safe on malformed input (skip the bad entry, log a warning, never raise) — one bad entry in a product config shouldn't crash identity resolution.
+
+**`config.yaml.example`**: added a `network:`/`hardware_profile` block right alongside `device_identity.gateway_ip` (purely additive — `gateway_ip` stays authoritative for v-current's own `identity.py` until Phase 3 actually switches the live call site over). Same block added to `.94`'s real `config.yaml`.
+
+**Deployment status**: purely additive, nothing reads these keys yet (Phase 3's job) — deployed via the normal code-only sync, no restart needed since nothing behavioral changed.
+
+**Verified**: 16 new checks in `tests/test_v13_config_trust_anchors.py` covering the real config shape, empty/absent input, 7 distinct malformed-entry shapes (wrong type, missing role, empty role, non-string role, non-string ip/mac) all skipped without raising, duplicate-role handling (first wins), the nested `network:` key lookup, and `hardware_profile` validation/fallback. Full v13 suite re-confirmed clean.
+
 ## Open items carried from the plan
 
 - Whether `IDS_PRODUCT`'s existing NAS-hosted commit history gets carried into its eventual new GitHub repo, or that repo starts fresh — deferred until that milestone is actually reached.
