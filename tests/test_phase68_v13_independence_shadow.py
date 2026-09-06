@@ -34,6 +34,8 @@ Sections:
      irrelevant there
   D. v13_independence_changed correctly gates when a divergence would be logged
   E. pipeline.py's logging wiring (source-level checks, not live I/O)
+  F. v13_eligible is the real denominator for the A10 flip bar -- true on every
+     cycle the shadow block actually re-resolves, independent of whether it diverges
 """
 import sys
 import time
@@ -155,6 +157,34 @@ check("E: _log_v13_independence_divergence never raises out to the caller (try/e
 step_src = inspect.getsource(EnginePipeline._step)
 check("E: the live pipeline gates the new log call on decision.get('v13_independence_changed')",
       "v13_independence_changed" in step_src and "_log_v13_independence_divergence" in step_src)
+
+
+# --- F. v13_eligible: the real denominator, independent of whether it diverges ---
+
+check("F: v13_eligible is False on the trivial empty case (benign branch never reads independence count)",
+      result_empty["v13_eligible"] is False)
+check("F: v13_eligible is True for a single-source hypothesis_suspicious case, even with zero divergence",
+      result_single["v13_eligible"] is True and result_single["v13_independence_changed"] is False)
+check("F: v13_eligible is True for the real two-family divergence case (B above)",
+      result_div["v13_eligible"] is True)
+check("F: v13_eligible is False for a honeypot hard-stop (never reads independence count)",
+      result_honeypot["v13_eligible"] is False)
+check("F: v13_eligible is False for tier5_confirmed (never reads independence count)",
+      result_confirmed["v13_eligible"] is False)
+check("F: v13_eligible is False for the benign-shaped case",
+      result_benign["v13_eligible"] is False)
+
+check("F: pipeline.py counts every eligible cycle via _count_v13_eligible_cycle, gated on decision.get('v13_eligible')",
+      "v13_eligible" in step_src and "_count_v13_eligible_cycle" in step_src)
+
+count_src = inspect.getsource(EnginePipeline._count_v13_eligible_cycle)
+check("F: _count_v13_eligible_cycle writes to its OWN file, separate from the divergence log",
+      "v13_independence_eligible_count.json" in count_src
+      and 'open(tmp_path, "w"' in count_src)
+check("F: _count_v13_eligible_cycle uses an atomic tmp-then-replace write (matches state_guard.py's pattern)",
+      ".tmp" in count_src and "replace(" in count_src)
+check("F: _count_v13_eligible_cycle never raises out to the caller",
+      "except Exception" in count_src)
 
 
 print(f"\n{'='*60}")

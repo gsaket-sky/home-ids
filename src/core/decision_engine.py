@@ -516,7 +516,14 @@ class DecisionEngine:
         v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
             state, explanation, decision_path, threat_confidence
         )
+        # v13_eligible: true for every cycle that reaches one of the 3 branches this
+        # shadow block actually re-resolves, regardless of whether it diverges --
+        # a real denominator for the A10 flip bar, since v13_independence_changed
+        # alone only tells you about the (rare) disagreements, never the total
+        # sample they're a fraction of.
+        v13_eligible = False
         if decision_path in ("hard_stop", "geofence_uncorroborated") and "Geofencing" in explanation:
+            v13_eligible = True
             if v13_num_independent_sources >= 1 and attack_score > benign_score:
                 v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
                     DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop", 0.95
@@ -526,6 +533,7 @@ class DecisionEngine:
                     DecisionState.HIGH, "Geofencing Policy Violation (Uncorroborated)", "geofence_uncorroborated", 0.70
                 )
         elif decision_path in ("tier5_corroborated", "tier5_uncorroborated"):
+            v13_eligible = True
             if v13_num_independent_sources >= 1 and attack_score > benign_score:
                 v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
                     DecisionState.CRITICAL, "Corroborated Reputation Signal", "tier5_corroborated", 0.85
@@ -535,6 +543,7 @@ class DecisionEngine:
                     DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)", "tier5_uncorroborated", 0.45
                 )
         elif decision_path in ("hypothesis_high", "hypothesis_suspicious"):
+            v13_eligible = True
             if v13_num_independent_sources >= 2 and attack_score >= 3.0:
                 v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
                     DecisionState.HIGH, hyp_results["attack"]["name"], "hypothesis_high", 0.85
@@ -565,4 +574,5 @@ class DecisionEngine:
             "v13_explanation": v13_explanation,
             "v13_decision_path": v13_decision_path,
             "v13_independence_changed": v13_independence_changed,
+            "v13_eligible": v13_eligible,
         }

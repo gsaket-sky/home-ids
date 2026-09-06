@@ -26,6 +26,26 @@ matter, or just accept the page as a point-in-time snapshot. See
 `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s entry for exactly how the relay works
 and why `.19`'s cron can't push to the artifact directly.
 
+**Addendum 2 (same day, 2026-09-06 ~12:50 CEST)**: A11 (a real evidence-coverage
+gap — `sources.py` never called `ZeekNetworkDetector`/`DNSBehaviorDetector`,
+both of which `.94`'s live pipeline calls every cycle) was found, fixed,
+tested (8 new checks, 18/18 files green), and deployed to `.19`
+(`v13-ingest.service` restarted). This resets the comparator's "clean data"
+clock — divergences gathered before this fix are historical record, not
+signal about independence-family grouping. The first automated dashboard-relay
+tick after this fix ran clean (totals up, no new severity disagreement). A
+concrete flip bar for A10 is now documented in
+`V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s "Automated per-mechanism flip bars"
+section: **don't consider flipping A10 before 2026-09-13** (7-day time floor,
+matching Gap 1/2's own precedent) **and** at least 15-20 real
+divergence-eligible comparisons logged in
+`state/v13_independence_divergences.jsonl` on `.94`, with a hard, unconditional
+veto on any false-negative-shaped divergence found in that window regardless
+of time/volume. As of this addendum: ~1.5h post-A11-fix-restart, 120 real
+alerts processed, 0 divergences logged (file doesn't exist yet on `.94`) —
+too small a sample to mean anything yet, check again in a few days rather
+than treating this as "already clean."
+
 ---
 
 ## 1. What this is, in one paragraph
@@ -141,11 +161,10 @@ decisions:
 Its prerequisites (A7 real decisions, A8 real comparator, A9 the automation
 decision, A10 at least one mechanism actually wired into `.94`) are now all
 in place — but it still needs:
-- **Per-mechanism bars documented** (matching this project's own precedent:
-  Gap 1/2's "N days shadow, zero divergences," Gap 3 honeypot's "58 confirmed
-  divergences, zero false negatives") — impossible to write meaningfully
-  until real divergence data has actually accumulated on `.94` for the A10
-  mechanism, which only started running today.
+- **Per-mechanism bars**: a concrete proposed bar for A10 is now documented
+  (see Addendum 2 above and `V13_ARCHITECTURE_DEPENDENCY_MAP.md`) — 7-day
+  time floor (not before 2026-09-13) + 15-20 real eligible comparisons +
+  zero false-negative-shaped divergences. Not yet met; just documented.
 - **The actual `v13_flags`-driven live/shadow config read** — A10 only wired
   the mechanism to shadow-compute and log; nothing reads a config flag to
   actually switch behavior yet.

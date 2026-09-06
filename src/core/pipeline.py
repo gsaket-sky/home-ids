@@ -1244,6 +1244,8 @@ class EnginePipeline:
                 # never-alters-`decision` pattern as the Gap-1 shadow check just above,
                 # a SEPARATE divergence log so it doesn't interleave with/confuse that
                 # unrelated experiment (freshness, not independence-family grouping).
+                if decision.get("v13_eligible"):
+                    self._count_v13_eligible_cycle()
                 if decision.get("v13_independence_changed"):
                     self._log_v13_independence_divergence(decision, dev_id, hostname, client_ip)
 
@@ -2657,6 +2659,32 @@ class EnginePipeline:
                 f.write(json.dumps(entry) + "\n")
         except Exception as e:
             LOGGER.debug("Failed to write v13_independence_divergences.jsonl: %s", e)
+
+    def _count_v13_eligible_cycle(self) -> None:
+        """V13 SHADOW: increments a small persisted counter every cycle that reaches one
+        of the 3 branches decision_engine.py's independence-family shadow block actually
+        re-resolves (decision["v13_eligible"]), regardless of whether it diverges. This is
+        the real denominator for A10's flip bar -- v13_independence_divergences.jsonl only
+        ever records the (rare) disagreements, never the total sample they're a fraction
+        of, so "the file doesn't exist yet" alone can't be read as a sample size. Never
+        raises -- same best-effort guarantee as the two loggers above."""
+        try:
+            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "v13_independence_eligible_count.json"
+            now = time.time()
+            count, first_seen = 1, now
+            if path.exists():
+                try:
+                    existing = json.loads(path.read_text(encoding="utf-8"))
+                    count = int(existing.get("count", 0)) + 1
+                    first_seen = existing.get("first_seen", now)
+                except Exception:
+                    pass
+            tmp_path = path.with_suffix(".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({"count": count, "first_seen": first_seen, "last_seen": now}, f)
+            tmp_path.replace(path)
+        except Exception as e:
+            LOGGER.debug("Failed to update v13_independence_eligible_count.json: %s", e)
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """

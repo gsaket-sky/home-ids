@@ -300,6 +300,14 @@ Neither had been read as part of this session's "read the real source before por
 
 Not yet applicable for auto-flipping — the independence-family mechanism (A10) is now shadow-computing on `.94`, and the cross-host comparator runs automatically every 15 minutes against a materially more complete evidence pipeline as of A11's fix — but only a handful of real (non-`VCURRENT_ONLY`) divergences have accumulated since, nowhere near enough volume yet to document a real bar, following the same precedent this project already uses for v-current (Gap 1/2's "N days shadow, zero divergences," Gap 3 honeypot's "58 confirmed divergences, zero false negatives"). `src/v13/ops/gap_monitor.py` itself still doesn't exist.
 
+**Proposed concrete bar for A10 (independence-family scoring), documented 2026-09-06, not yet met**: a hybrid of the two existing precedent styles, because pure calendar time is a weak proxy here — A10 only diverges on the narrower subset of cases with 2+ evidence families reaching `hypothesis_high`/`hypothesis_suspicious`, not on every alert.
+
+- **Time floor**: at least 7 calendar days of continuous shadow-computation *after* the A11 fix (i.e. not before 2026-09-13) — matching Gap 1/2's own timescale. (Coincidentally the same date the session's `CronCreate` dashboard-relay job expires — that's a scheduling coincidence, not the reason for the date.)
+- **Volume floor**: at least 15-20 real divergence-eligible comparisons recorded in `state/v13_independence_divergences.jsonl` on `.94` (not just alerts — actual cases where `v13_num_independent_sources` differs from v-current's `num_independent_sources`), mirroring Gap 3's volume-based bar rather than a raw day-count, since eligible cases are rarer than total alerts.
+- **Hard veto, unconditional**: zero false-negative-shaped divergences — any case where v13's family grouping would have called something LESS severe than v-current's actual live verdict blocks the flip regardless of how much time/volume has passed, same asymmetric-risk stance that kept `arp_spoof`/`geofence`/`confirmed_exploit` shadow-only.
+
+**Progress toward this bar as of 2026-09-06 12:49 CEST** (~1.5h post-A11-fix-restart): 120 real alerts processed, 0 entries in `v13_independence_divergences.jsonl` (file doesn't exist yet) — either a genuinely clean early signal, or simply that no multi-family-disagreement case has occurred yet in this window. Not yet meaningful sample size in either direction. Re-check this section's progress line the next time this file is touched.
+
 ## Open items carried from the plan
 
 - Whether `IDS_PRODUCT`'s existing NAS-hosted commit history gets carried into its eventual new GitHub repo, or that repo starts fresh — deferred until that milestone is actually reached.
