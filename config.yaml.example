@@ -763,6 +763,19 @@ scheduled_jobs:
       enabled: true
       cron: "*/5 * * * *"
 
+    # v13 GraphStore retention enforcement (v13 full-architecture plan, Phase 1
+    # follow-up) -- deletes evidence older than GraphStore.DEFAULT_EVIDENCE_RETENTION_
+    # DAYS (90) unless a recent decision still references it. Real motivation, not a
+    # speculative safeguard: a since-fixed write-path bug demonstrated real runaway
+    # growth potential (state/v13_graph.db reached 264MB / 43K duplicate evidence rows
+    # in under 20 minutes before the fix), and nothing was enforcing this at all on
+    # .94 until this job existed. Lives in src/v13/ops/, not scripts/, hence the
+    # "script" override below.
+    live_prune:
+      enabled: true
+      cron: "15 3 * * *"
+      script: "../v13/ops/live_prune.py"
+
 
 # =============================================================================
 # engine — v13 fast-cutover rollback switch (Documentation/
