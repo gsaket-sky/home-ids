@@ -25,10 +25,17 @@ What the override actually changes, concretely:
    happens to see the anchor with a MAC attached.
 3. Real MAC-randomization detection (`resolver.is_locally_administered_mac()`) --
    confirmed via direct investigation that no such check existed anywhere in this
-   codebase before Phase 3. A detected-randomized MAC is excluded from the
-   mac_bindings lookup (branch 3) and from the raw-MAC-fallback branch (branch 6) --
-   anchoring a device_id to a value known to rotate is actively counterproductive;
-   the IP/hostname-based branches are preferred instead for such a MAC.
+   codebase before Phase 3. Scoped narrowly to trust-anchor MAC *learning* only
+   (never permanently record a rotating-looking MAC as an anchor's canonical MAC).
+   It deliberately does NOT gate the general mac_bindings lookup or MAC-based
+   resolution for ordinary devices: a locally-administered bit does not mean a MAC
+   is rotating right now -- modern iOS/Android "private Wi-Fi address" MACs are
+   randomized per-SSID but stable across reconnects to the same network, so on a
+   single fixed home network this bit is set on most modern phones' otherwise
+   perfectly stable MACs. An earlier version of this file excluded these from
+   mac_bindings entirely, which broke exactly the continuity it was meant to
+   protect (found live in production within 90 seconds of first deploying, fixed
+   before this was allowed to run unattended -- see the dependency map).
 4. `mac_bindings` (branch 3, "does this MAC already resolve to a known device_id")
    is NOT reinvented -- reuses `self.state_manager.get_device_id_for_mac()` directly,
    v-current's own real, already-persisted-to-disk mechanism, unchanged.
@@ -146,11 +153,20 @@ class LiveIdentityManager(DeviceIdentityManager):
                     return v13_stable_device_id(anchor.ip) if anchor.ip else _anchor_device_id(role)
 
         # Branch 3 (mac_bindings): reuses state_manager's own real, already-persisted
-        # MAC->device_id index directly -- not reinvented. Excluded entirely for a
-        # detected-randomized MAC: a stale binding under a randomized MAC that has
-        # since rotated would incorrectly attribute new traffic to an old identity.
+        # MAC->device_id index directly -- not reinvented. Checked regardless of
+        # `randomized`: a locally-administered bit does NOT mean the MAC is actually
+        # rotating right now -- modern iOS/Android "private Wi-Fi address" MACs are
+        # randomized PER-SSID but STABLE across reconnects to the SAME network, so on
+        # a single fixed home network this bit is set on most modern phones' otherwise
+        # perfectly stable MACs. A prior version of this method excluded these from
+        # the lookup entirely, which discarded the real persisted binding and forced
+        # every such phone through the IP-based cold-start branch on every call --
+        # fragmenting its identity every time its IP changed, exactly the failure this
+        # method exists to prevent. Found live in production (55 vs. 51 devices within
+        # 90 seconds of this manager going live, traced to this exact line) before
+        # this comment was corrected -- see the dependency map entry for this incident.
         mac_bindings = {}
-        if mac_addr != "unknown" and not randomized:
+        if mac_addr != "unknown":
             existing = self.state_manager.get_device_id_for_mac(mac_addr)
             if existing:
                 mac_bindings[mac_addr] = existing
@@ -160,14 +176,6 @@ class LiveIdentityManager(DeviceIdentityManager):
         # since 1/2 are already fully handled above with the v-current-compatible
         # formula; letting the pure function re-match them with its own role-based
         # formula would silently undo that.
-        result = v13_resolve_device_id(
+        return v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
         )
-
-        # Branch 6 (raw MAC fallback) fired -- but for a randomized MAC, anchoring
-        # identity to a value known to rotate is actively counterproductive. Fall
-        # back to the IP-based anchor (branch 7) instead.
-        if randomized and result == v13_stable_device_id(mac_addr):
-            result = v13_stable_device_id(client_ip)
-
-        return result

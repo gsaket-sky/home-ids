@@ -19,9 +19,14 @@ Sections:
   D. Persistence: a learned anchor MAC survives a fresh LiveIdentityManager
      instance pointed at the SAME GraphStore (simulating a restart) -- v-current's
      own _gateway_mac is pure in-memory and would NOT survive this
-  E. MAC-randomization fix: a locally-administered MAC is excluded from
-     mac_bindings and the raw-MAC-fallback branch, falling back to the IP anchor
-     instead -- the real, deliberate behavioral difference from v-current
+  E. MAC-randomization: scoped ONLY to trust-anchor MAC *learning* (never
+     permanently record a rotating-looking MAC as an anchor's canonical MAC).
+     Deliberately does NOT gate the general mac_bindings lookup or MAC-based
+     resolution for ordinary devices -- an earlier version did, and broke live
+     in production within 90 seconds of first deploying (a locally-administered
+     bit does not mean a MAC is rotating right now; modern iOS/Android "private
+     Wi-Fi address" MACs are stable per-network). See the dependency map's
+     incident writeup and live_manager.py's own corrected docstring.
 """
 import sys
 import tempfile
@@ -140,44 +145,51 @@ check("D: a fresh LiveIdentityManager (simulating a restart) still recognizes th
       == live_mgr_d1.resolve_device_id(GATEWAY_IP))
 
 
-# --- E. MAC-randomization fix: excluded from mac_bindings + raw-MAC-fallback ---
+# --- E. MAC-randomization: scoped to anchor-learning only ---
 
 state_e = _fresh_state_manager("e")
+RANDOM_MAC = "02:00:00:aa:bb:cc"  # locally-administered bit set -- e.g. a modern
+                                  # iPhone/Android per-network private Wi-Fi address
+
+# THE ACTUAL PRODUCTION INCIDENT, reproduced as a regression guard: a device with a
+# locally-administered-looking MAC that already has a real, persisted mac_binding
+# (state_manager.get_device_id_for_mac()) MUST continue to resolve to that SAME
+# device_id regardless of the IP it's currently seen on -- exactly what broke live
+# on `.94` within 90 seconds of first deploying this manager (51 -> 55 devices),
+# traced to an earlier version excluding randomized-looking MACs from this lookup.
 live_mgr_e = LiveIdentityManager(state_e, {"gateway_ip": GATEWAY_IP}, _fresh_graph_store("e"), {})
-RANDOM_MAC = "02:00:00:aa:bb:cc"  # locally-administered bit set
+state_e.get_or_create(device_id="real_stable_phone", client_ip="192.168.77.77", hostname="unknown")
+state_e.bind_mac(RANDOM_MAC, "real_stable_phone")
+result_e1 = live_mgr_e.resolve_device_id("192.168.77.201", mac_addr=RANDOM_MAC)
+check("E: REGRESSION GUARD (production incident) -- a locally-administered-looking "
+      "MAC with an existing persisted mac_binding still resolves to that SAME "
+      "device_id even on a NEW IP, exactly matching a real non-randomized MAC",
+      result_e1 == "real_stable_phone")
 
-# First call with a non-trackable IP + the randomized MAC -- v-current's OWN logic
-# would fall to the raw-MAC-fallback branch (stable_device_id(mac)); v13's fix should
-# instead fall to the IP-based fallback.
-result_e1 = live_mgr_e.resolve_device_id("::1", mac_addr=RANDOM_MAC)
+# For a genuinely first-contact randomized-looking MAC (no anchor match, no existing
+# binding), LiveIdentityManager must behave IDENTICALLY to v-current -- no IP-anchor
+# override branch exists anymore.
 vcurrent_mgr_e = DeviceIdentityManager(_fresh_state_manager("e_vcurrent"), {"gateway_ip": GATEWAY_IP})
-vcurrent_result_e1 = vcurrent_mgr_e.resolve_device_id("::1", mac_addr=RANDOM_MAC)
-check("E: v-current's OWN logic really does anchor a non-trackable-IP device to the "
-      "raw MAC (confirms this scenario genuinely exercises the MAC-fallback branch, "
-      "not some other path)",
-      vcurrent_result_e1 == v_current_stable_device_id(RANDOM_MAC))
-check("E: LiveIdentityManager instead anchors to the IP (stable_device_id('::1')), "
-      "NOT the randomized MAC -- the real, deliberate behavioral difference",
-      result_e1 == v13_stable_device_id("::1") and result_e1 != v13_stable_device_id(RANDOM_MAC))
+live_mgr_e2 = LiveIdentityManager(_fresh_state_manager("e2"), {"gateway_ip": GATEWAY_IP}, _fresh_graph_store("e2"), {})
+result_e2 = live_mgr_e2.resolve_device_id("::1", mac_addr=RANDOM_MAC)
+vcurrent_result_e2 = vcurrent_mgr_e.resolve_device_id("::1", mac_addr=RANDOM_MAC)
+check("E: a first-contact locally-administered-looking MAC resolves IDENTICALLY to "
+      "v-current (no special-casing outside of anchor-learning)",
+      result_e2 == vcurrent_result_e2)
 
-# state_manager.bind_mac() a real, ACTUALLY-REGISTERED device_id under the randomized
-# MAC first (get_device_id_for_mac() correctly treats an unregistered device_id as a
-# stale/dangling reference and returns None, so the bound id must be real), THEN
-# confirm a later call with the SAME randomized MAC does NOT reuse that binding.
-state_e.get_or_create(device_id="stale_device_from_prior_rotation", client_ip="192.168.77.77", hostname="unknown")
-state_e.bind_mac(RANDOM_MAC, "stale_device_from_prior_rotation")
-result_e2 = live_mgr_e.resolve_device_id("2001:db8::99", mac_addr=RANDOM_MAC)
-check("E: a randomized MAC's mac_bindings entry (branch 3) is deliberately ignored -- "
-      "does NOT return the stale device_id bound under this rotating MAC",
-      result_e2 != "stale_device_from_prior_rotation")
-
-# REGRESSION GUARD: a REAL (non-randomized) MAC still uses mac_bindings normally.
-state_e.get_or_create(device_id="real_stable_device", client_ip="192.168.77.78", hostname="unknown")
-state_e.bind_mac("f0:18:98:aa:bb:cc", "real_stable_device")
-result_e3 = live_mgr_e.resolve_device_id("2001:db8::100", mac_addr="f0:18:98:aa:bb:cc")
-check("E: REGRESSION GUARD -- a real, non-randomized MAC still correctly uses an "
-      "existing mac_binding (the fix is scoped to randomized MACs only)",
-      result_e3 == "real_stable_device")
+# The ONE place randomization still matters: an anchor's canonical MAC is never
+# LEARNED (persisted) from a locally-administered-looking observation, even though
+# resolution to the anchor's own id still succeeds via the IP match (branch 1).
+state_e3 = _fresh_state_manager("e3")
+graph_e3 = _fresh_graph_store("e3")
+anchors_e3 = {"gateway": TrustAnchor(role="gateway", ip=GATEWAY_IP, mac=None)}
+live_mgr_e3 = LiveIdentityManager(state_e3, {"gateway_ip": GATEWAY_IP}, graph_e3, anchors_e3)
+result_e3 = live_mgr_e3.resolve_device_id(GATEWAY_IP, mac_addr=RANDOM_MAC)
+check("E: the anchor's IP match still resolves correctly even when the observed "
+      "MAC looks randomized", result_e3 == v13_stable_device_id(GATEWAY_IP))
+check("E: a locally-administered-looking MAC observed at the anchor's IP is NOT "
+      "learned as the anchor's canonical MAC",
+      live_mgr_e3._get_learned_anchor_macs().get("gateway") is None)
 
 
 print(f"\n{'='*60}")
