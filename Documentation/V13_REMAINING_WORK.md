@@ -260,6 +260,13 @@ this project has used for every prior flip), decide whether to flip this
 mechanism live via an actual `v13_flags` config read — not built yet, and a
 separate step from `gap_monitor.py`'s own automation, which still needs to
 exist to make that flip itself automatic per A9.
+**Deployment status (2026-09-06)**: code pushed, pulled onto `.94`, and
+syntax-validated via the existing deploy pipeline (commit `84d82f3`) — but
+`soc.service` has deliberately NOT been restarted, matching this project's
+own standing rule that a live security-service restart is a separate,
+explicit human action, never folded into a code sync. The shadow computation
+is staged and ready but not yet actually running/logging on `.94` until that
+restart happens.
 
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
