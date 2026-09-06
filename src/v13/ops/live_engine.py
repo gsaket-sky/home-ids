@@ -131,6 +131,15 @@ def _get_graph_store() -> GraphStore:
     return _graph_store
 
 
+def get_graph_store() -> GraphStore:
+    """Public accessor for the SAME lazily-initialized GraphStore singleton this
+    module's own evaluate() uses -- v13 full-architecture plan, Phase 3:
+    LiveIdentityManager needs the same graph (one file, one source of truth per
+    process) for its own anchor-MAC persistence, rather than opening a second,
+    independent connection to the same db file."""
+    return _get_graph_store()
+
+
 def _build_fallback_context(features: dict) -> Optional[Dict[str, str]]:
     dest_ip = str((features or {}).get("last_dest_ip", "") or "")
     if not dest_ip or dest_ip == _NO_DEST_SENTINEL:

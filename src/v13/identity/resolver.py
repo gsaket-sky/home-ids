@@ -54,6 +54,28 @@ def stable_device_id(raw_client: str) -> str:
     return hashlib.sha256(cleaned.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
+def is_locally_administered_mac(mac: Optional[str]) -> bool:
+    """v13 full-architecture plan, Phase 3: real MAC-randomization detection --
+    confirmed via direct investigation that NO such check existed anywhere in this
+    codebase before this function (the only prior "signal" was OUI-lookup failure in
+    utils.get_mac_vendor(), an indirect side effect, not a deliberate flag). The
+    locally-administered bit is the second-least-significant bit of a MAC's first
+    octet (IEEE 802-2014 sec 8.2.2) -- set on every privacy-randomized MAC modern
+    iOS/Android devices generate per-network or per-session, and essentially never
+    set on a real burned-in vendor MAC. A True result means "this MAC is expected to
+    change again later" -- anchoring a device_id to it via the raw-MAC-fallback
+    branch (resolve_device_id()'s own last resort) is actively counterproductive for
+    such a MAC, unlike for the vast majority of real, stable vendor MACs."""
+    if not mac or mac == "unknown":
+        return False
+    try:
+        first_octet_str = mac.split(":")[0].split("-")[0]
+        first_octet = int(first_octet_str, 16)
+    except (ValueError, IndexError):
+        return False
+    return bool(first_octet & 0x02)
+
+
 def is_generic_hostname(hostname: Optional[str]) -> bool:
     """Matches core/identity.py's _is_generic_hostname() exactly."""
     if not hostname or hostname == "unknown":

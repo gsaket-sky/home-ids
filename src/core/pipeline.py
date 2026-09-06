@@ -45,6 +45,30 @@ from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 from v13.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
+from v13.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
+from v13.config.trust_anchors import load_trust_anchors_from_config  # v13 full-architecture plan, Phase 3
+
+
+def _ip_family(ip: str) -> str:
+    """v13 full-architecture plan, Phase 3: a real display gap found by direct
+    investigation, not guessed -- alert payloads carry whatever raw address was
+    active THIS cycle (client_ip) with no address-family label at all. Confirmed
+    live this session: a real alert for the router showed a bare `fe80::...` link-
+    local literal in `device.ip` with nothing explaining why "the router" suddenly
+    displays an IPv6 address that cycle (this is the gateway's own MAC-based
+    cross-address-family unification, identity.py:186-195, working as designed --
+    just with zero indication of that in the alert itself). Never raises -- an
+    unparseable ip string (shouldn't happen, but this must never break alert
+    delivery) falls back to "unknown"."""
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return "unknown"
+    if parsed.version == 4:
+        return "ipv4"
+    if parsed.is_link_local:
+        return "ipv6-link-local"
+    return "ipv6-global"
 
 from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total, persistence_escalation_total
 
@@ -368,12 +392,36 @@ class EnginePipeline:
         state_dir = Path(state_path).parent
         state_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir = state_dir  # PHASE 18: sync_relay_metrics() needs this every cycle
-        
+
+        # v13 full-architecture plan, Phase 1: point the live graph store at THIS box's
+        # own state dir (matching every other state file's location) rather than the
+        # module's bare relative default -- avoids depending on soc.service's CWD
+        # happening to already be the right directory. Moved here (before
+        # self.identity_manager below) specifically so Phase 3's LiveIdentityManager
+        # can call v13_live_engine.get_graph_store() and get the CORRECTLY-configured
+        # singleton, not one lazily initialized against the wrong default path.
+        v13_live_engine.configure(str(state_dir / "v13_graph.db"))
+
         self.state_manager = state_manager or StateManager(state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)))
         if state_manager is None:
             self.state_manager.load_from_disk(alpha=float(self.config.get("baseline_alpha", 0.05)))
-            
-        self.identity_manager = DeviceIdentityManager(self.state_manager, self.config)
+
+        # v13 full-architecture plan, Phase 3: config.get("engine", "v13") == "v13"
+        # (the default) swaps in LiveIdentityManager -- a real DeviceIdentityManager
+        # SUBCLASS (Fritz!Box polling, process_dns_identities/process_zeek_identities,
+        # apply_device_type, orphan-merge cleanup all inherited UNCHANGED; only
+        # resolve_device_id() itself is overridden) generalizing the single hardcoded
+        # gateway_ip to config.yaml's network.trust_anchors (Phase 2's loader) plus
+        # real MAC-randomization detection. Same rollback flag as the decision engine
+        # (A13) -- "v_current" uses the real, unmodified DeviceIdentityManager exactly
+        # as before Phase 3 existed.
+        if self.config.get("engine", "v13") == "v13":
+            trust_anchors = load_trust_anchors_from_config(self.config)
+            self.identity_manager = LiveIdentityManager(
+                self.state_manager, self.config, v13_live_engine.get_graph_store(), trust_anchors,
+            )
+        else:
+            self.identity_manager = DeviceIdentityManager(self.state_manager, self.config)
 
         self.ti_engine = ti_engine
         self.ml_registry = ml_registry
@@ -441,11 +489,6 @@ class EnginePipeline:
         self.zeek_detector = ZeekNetworkDetector()
         self.threat_signal_detector = ThreatSignalDetector()  # PHASE 1
         self.decision_engine = DecisionEngine()
-        # v13 full-architecture plan, Phase 1: point the live graph store at THIS box's
-        # own state dir (matching every other state file's location) rather than the
-        # module's bare relative default -- avoids depending on soc.service's CWD
-        # happening to already be the right directory.
-        v13_live_engine.configure(str(state_dir / "v13_graph.db"))
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(
             token=self.config.get("telegram_token", ""), 
@@ -1677,7 +1720,18 @@ class EnginePipeline:
                         alert_payload = {
                             "type": "ids_alert",
                             "timestamp": now,
-                            "device": {"id": dev_id, "ip": client_ip, "hostname": hostname, "type": state.device_type},
+                            "device": {
+                                "id": dev_id, "ip": client_ip, "hostname": hostname, "type": state.device_type,
+                                # v13 full-architecture plan, Phase 3: closes a real operator-confusion
+                                # gap -- see _ip_family()'s own docstring above for the real incident
+                                # that prompted this. other_known_ips lets an operator immediately see
+                                # this device's OTHER addresses (e.g. its IPv4 alongside an IPv6-only
+                                # alert) instead of needing to cross-reference dev_id manually.
+                                "ip_family": _ip_family(client_ip),
+                                "other_known_ips": sorted(
+                                    ip for ip in getattr(state, "known_ips", set()) if ip and ip != client_ip
+                                ),
+                            },
                             "network_context": {
                                 "destination_ip": alert_dest_ip, "destination_port": dest_port, "service_name": service_name,
                                 "data_type": dest_proto, "payload_size_bytes": outbound_bytes, "payload_classification": data_classification,

@@ -229,6 +229,26 @@ check("outside any transaction() block, behavior is unchanged -- each call still
 
 txn_store.close()
 
+# --- device metadata read/update (v13 full-architecture plan, Phase 3) ---
+check("get_device_metadata returns {} for a device that doesn't exist yet",
+      store.get_device_metadata("nonexistent_dev") == {})
+
+store.update_device_metadata("metadev", {"learned_mac": "aa:bb:cc:dd:ee:ff"})
+check("update_device_metadata auto-upserts the device row",
+      store._conn.execute("SELECT 1 FROM devices WHERE device_id='metadev'").fetchone() is not None)
+check("get_device_metadata returns the just-written key",
+      store.get_device_metadata("metadev") == {"learned_mac": "aa:bb:cc:dd:ee:ff"})
+
+store.update_device_metadata("metadev", {"role": "gateway"})
+check("update_device_metadata MERGES new keys rather than replacing the whole dict",
+      store.get_device_metadata("metadev") == {"learned_mac": "aa:bb:cc:dd:ee:ff", "role": "gateway"})
+
+store.update_device_metadata("metadev", {"learned_mac": "11:22:33:44:55:66"})
+check("update_device_metadata OVERWRITES an existing key with the same name",
+      store.get_device_metadata("metadev")["learned_mac"] == "11:22:33:44:55:66")
+check("...without disturbing OTHER existing keys",
+      store.get_device_metadata("metadev")["role"] == "gateway")
+
 # --- generic edge query/delete (used by cl_afpe/engine.py, Phase 4) ---
 store.add_edge("device", "queryedge_dev", "destination", "queryedge_dest", "trusts", timestamp=999.0,
                  metadata={"source": "test"})

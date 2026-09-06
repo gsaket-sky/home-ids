@@ -99,6 +99,43 @@ class GraphStore:
             )
         self._maybe_commit()
 
+    def update_device_metadata(self, device_id: str, updates: Dict[str, Any],
+                                 timestamp: Optional[float] = None) -> None:
+        """Merges `updates` into a device's metadata_json (shallow -- top-level keys in
+        `updates` overwrite the same key in the existing dict, everything else is left
+        alone). Auto-upserts the device row first, so this is safe to call for a
+        device_id that hasn't been seen via insert_evidence()/insert_decision() yet
+        (v13 full-architecture plan, Phase 3 -- used to persist a trust anchor's
+        learned MAC, surviving restarts, unlike v-current's own single in-memory
+        `_gateway_mac` field)."""
+        self.upsert_device(device_id, timestamp=timestamp)
+        row = self._conn.execute(
+            "SELECT metadata_json FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        try:
+            current = json.loads(row["metadata_json"]) if row and row["metadata_json"] else {}
+        except (TypeError, ValueError):
+            current = {}
+        current.update(updates)
+        self._conn.execute(
+            "UPDATE devices SET metadata_json = ? WHERE device_id = ?",
+            (json.dumps(current), device_id),
+        )
+        self._maybe_commit()
+
+    def get_device_metadata(self, device_id: str) -> Dict[str, Any]:
+        """Returns the device's metadata_json as a dict, or {} if the device doesn't
+        exist yet or its metadata is malformed -- never raises."""
+        row = self._conn.execute(
+            "SELECT metadata_json FROM devices WHERE device_id = ?", (device_id,)
+        ).fetchone()
+        if row is None or not row["metadata_json"]:
+            return {}
+        try:
+            return json.loads(row["metadata_json"])
+        except (TypeError, ValueError):
+            return {}
+
     def resolve_canonical_device_id(self, device_id: str) -> str:
         """Walks the merged_into_device_id chain to the ultimate canonical id.
         Unlike v-current's merge_into_canonical() (state_guard.py), an orphan's row

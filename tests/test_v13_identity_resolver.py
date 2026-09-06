@@ -27,7 +27,26 @@ def check(name, cond, detail=""):
 
 from v13.identity.resolver import (  # noqa: E402
     resolve_device_id, stable_device_id, is_generic_hostname, TrustAnchor,
+    is_locally_administered_mac,
 )
+
+# --- is_locally_administered_mac (Phase 3): real MAC-randomization detection ---
+check("a real vendor MAC (Apple OUI, globally-unique bit) is NOT flagged as randomized",
+      is_locally_administered_mac("f0:18:98:aa:bb:cc") is False)
+check("a locally-administered MAC (2nd-LSB of first octet set, e.g. iOS private "
+      "address randomization) IS flagged as randomized",
+      is_locally_administered_mac("02:00:00:aa:bb:cc") is True)
+check("the locally-administered bit check is independent of the other bits in the octet",
+      is_locally_administered_mac("06:aa:bb:cc:dd:ee") is True
+      and is_locally_administered_mac("0a:aa:bb:cc:dd:ee") is True)
+check("a hyphen-separated MAC is parsed the same as colon-separated",
+      is_locally_administered_mac("02-00-00-aa-bb-cc") is True)
+check("None/empty/'unknown' all return False, never raise",
+      is_locally_administered_mac(None) is False
+      and is_locally_administered_mac("") is False
+      and is_locally_administered_mac("unknown") is False)
+check("a malformed MAC string fails safe to False, doesn't raise",
+      is_locally_administered_mac("not-a-mac") is False)
 
 # --- stable_device_id / is_generic_hostname match core/identity.py exactly ---
 check("stable_device_id is deterministic", stable_device_id("192.168.1.1") == stable_device_id("192.168.1.1"))
