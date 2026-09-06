@@ -517,14 +517,32 @@ tested (25 checks), backed by a new, narrowly-scoped Samba share on `.94`.
 fully automatic" for `gap_monitor.py`'s production-editing step, made with
 full knowledge of the architecture change. No longer an open question.
 
+**Comparator now runs on its own (2026-09-06)**: `src/v13/ops/run_gap_check.py`
++ a `*/15 * * * *` crontab entry on `.19` (matching `deploy_v13.sh`'s own
+existing cron pattern — a plain crontab entry, not a new systemd service,
+deliberately lightweight per the user's own ask) calls `run_comparison()`
+automatically now, so divergence data accumulates without a manual run.
+Found and fixed a real bug while building this: `AlertsJsonlTailer` only
+saved its cursor lazily (inside `read_new_alerts()`, when there was
+something to process) — a stateless caller that constructs a fresh tailer
+every cron tick (unlike the long-lived ingest daemon, which reuses one
+tailer object across every poll) could permanently miss content that
+arrived between two "nothing new yet" ticks, since no baseline was ever
+persisted. Fixed by saving the cursor immediately after establishing an
+initial position. 9 new tests (`tests/test_v13_run_gap_check.py`); all 17
+v13 test files re-confirmed passing. A live snapshot dashboard is published
+at `https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`
+(refreshed manually on request, not auto-live).
+
 **Next real blocker**: `src/v13/ops/gap_monitor.py` itself doesn't exist yet
-— everything it needs (real decisions, a real comparator, an explicit
-answer on the automation question) is now in place. It still needs
-per-mechanism BARS documented (this project's own precedent: Gap 1/2's "N
-days shadow, zero divergences," Gap 3 honeypot's "58 confirmed divergences,
-zero false negatives") before it can evaluate anything meaningfully — no
-real divergence data has accumulated yet since the comparator only just
-started running. A6 (Suricata reactive-capture) remains a larger,
+— everything it needs (real decisions, a real comparator now running
+automatically, an explicit answer on the automation question) is now in
+place. It still needs per-mechanism BARS documented (this project's own
+precedent: Gap 1/2's "N days shadow, zero divergences," Gap 3 honeypot's "58
+confirmed divergences, zero false negatives") before it can evaluate
+anything meaningfully — only 13 real (non-VCURRENT_ONLY) divergences have
+accumulated as of this snapshot, not nearly enough volume yet to draw a
+conclusion. A6 (Suricata reactive-capture) remains a larger,
 separately-scoped initiative, unrelated to the flip-monitor goal.
 
 **Everything else genuinely can wait** — either because it's what the parallel
