@@ -26,6 +26,33 @@ matter, or just accept the page as a point-in-time snapshot. See
 `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s entry for exactly how the relay works
 and why `.19`'s cron can't push to the artifact directly.
 
+**Addendum 4 (same day, 2026-09-06, later): everything above this line describes the
+RETIRED per-mechanism approach — read A13 in `V13_ARCHITECTURE_DEPENDENCY_MAP.md` first.**
+The user explicitly changed this box's risk tolerance mid-session: `.94` is now a
+real-traffic testbed for `IDS_PRODUCT`, not critical home-security infrastructure, and
+asked to move fast to the full EvidenceGraph architecture. Per two follow-up questions,
+this became an in-place engine swap on `.94` itself (not moving the "brain" to `.19`),
+with real mitigation/actuation live immediately. Two Explore agents investigated the
+real code first (not memory) and found the swap was far more surgical than expected:
+v13's `HypothesisEngine`/`DecisionEngine` already return a dict with every key
+`pipeline.py`'s downstream code needs, using matching `decision_path` strings and plain
+string `DecisionState` constants on both sides (no enum hazard) — so everything
+downstream of the decision call (CL-AFPE, mitigation, alerting, `ollama_soc.py`'s
+`hee_*` fields) keeps working unchanged. What actually shipped: a new
+`src/v13/ops/live_engine.py` adapter, `pipeline.py`'s two decision-engine call sites now
+branch on `config.get("engine", "v13")` (default `"v13"`; `"v_current"` is the instant
+rollback), and the entire A9/A10/`gap_monitor.py`/eligible-counter apparatus was removed
+cleanly (not commented out — git history is the reference). Two pre-existing, documented
+v13 design choices were adopted now rather than gradually: the finer independence-family
+split, and freshness-aware hard-stops (the exact fix Gap-3's own shadow experiment was
+trying to prove safe). 12 new tests (`tests/test_v13_live_engine.py`); all 18 v13 test
+files plus v-current's own golden-case regression suite (`test_phase38`/`34`/`54`/`42`)
+re-confirmed passing after the cleanup. Full detail, including the explicit scope cuts
+(CL-AFPE, `GraphStore` not wired into the live hot path) and the one disclosed side
+effect (Gap 1/2/3's own shadow experiment goes quiet under `engine: "v13"`), is in
+`V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s A13 entry — that's now the real starting point
+for a cold-start session, not the material below.
+
 **Addendum 2 (same day, 2026-09-06 ~12:50 CEST)**: A11 (a real evidence-coverage
 gap — `sources.py` never called `ZeekNetworkDetector`/`DNSBehaviorDetector`,
 both of which `.94`'s live pipeline calls every cycle) was found, fixed,

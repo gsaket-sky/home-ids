@@ -44,23 +44,9 @@ from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
+from v13.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
 
 from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total, persistence_escalation_total
-
-# V13 FLIP (Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md, src/v13/ops/gap_monitor.py):
-# the action each v13_decision_path value resolves to, mirroring decision_engine.py's own
-# live decision_path->action mapping for EXACTLY the 5 path values v13_eligible covers
-# (see decision_engine.py's own comment on why only those 3 branches are re-resolved).
-# Kept here rather than duplicated inside decision_engine.py since this mapping is only
-# ever needed at the flip point, not by the shadow computation itself.
-_V13_DECISION_PATH_ACTION = {
-    "hard_stop": "block",                  # geofence, corroborated
-    "geofence_uncorroborated": "alert",
-    "tier5_corroborated": "block",
-    "tier5_uncorroborated": "monitor",
-    "hypothesis_high": "alert",
-    "hypothesis_suspicious": "monitor",
-}
 
 # PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
 # (and therefore have certain behavioral evidence dampened) when device_type came from an
@@ -1241,34 +1227,38 @@ class EnginePipeline:
                 # 1033) -- without it, a safe_ips device (the router) touching the
                 # honeypot for a benign reason diverged CRITICAL in shadow on every
                 # single cycle it happened, live BENIGN, with nothing wrong.
-                decision = self.decision_engine.evaluate(
-                    active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                    features=features, is_safe=is_safe,
-                )
-
-                # SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): log-only,
-                # never alters `decision` or anything downstream of it -- see
-                # decision_engine.evaluate()'s own shadow-computation comment for what this
-                # compares. Only appends when the shadow verdict actually diverges from the
-                # live one, so this file stays small and every line is something worth a look.
-                if decision.get("shadow_changed"):
-                    self._log_shadow_divergence(decision, dev_id, hostname, client_ip)
-
-                # V13 SHADOW (Documentation/V13_REMAINING_WORK.md, first mechanism wired
-                # into .94's live pipeline -- HEE review #7/Roadmap #8): same log-only,
-                # never-alters-`decision` pattern as the Gap-1 shadow check just above,
-                # a SEPARATE divergence log so it doesn't interleave with/confuse that
-                # unrelated experiment (freshness, not independence-family grouping).
-                if decision.get("v13_eligible"):
-                    self._count_v13_eligible_cycle()
-                if decision.get("v13_independence_changed"):
-                    self._log_v13_independence_divergence(decision, dev_id, hostname, client_ip)
-
-                # V13 FLIP: must run AFTER the divergence log above (see that method's own
-                # comment) -- a no-op unless config.yaml's v13_flags.independence_family is
-                # explicitly "live" (default "shadow"), and even then only on cycles this
-                # mechanism is eligible for.
-                decision = self._apply_v13_flip(decision)
+                # V13 FAST CUTOVER (Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md, the
+                # entry recording this cutover): v13's EvidenceGraph-based
+                # hypothesis/decision engine is now the LIVE decision path, not a shadow
+                # comparison -- superseding A10's earlier per-mechanism shadow-flip
+                # machinery (that whole apparatus checked ONE mechanism at a time before
+                # flipping; this replaces the entire engine at once, per an explicit,
+                # deliberate risk-tolerance change: this box is being used as a real-
+                # traffic testbed for IDS_PRODUCT, not run as a critical home-security
+                # system right now). `engine: "v_current"` in config.yaml is the instant
+                # rollback switch (config edit + restart, no redeploy) if anything looks
+                # wrong -- kept from the superseded plan since it costs nothing.
+                #
+                # Known, deliberate consequence: Gap 1/2/3's OWN shadow experiment
+                # (shadow_changed/_log_shadow_divergence, DECISION_LOGIC_DEPENDENCY_MAP.md)
+                # was computed INSIDE core/decision_engine.py's evaluate() -- since that's
+                # no longer the primary engine, it stops producing new shadow_decisions.jsonl
+                # entries while engine="v13". Not preserved artificially (comparing against
+                # v-current's own internal experiment stops being meaningful once v-current
+                # itself isn't primary) -- see the dependency map entry for the full record.
+                if self.config.get("engine", "v13") == "v13":
+                    decision = v13_live_engine.evaluate(
+                        active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
+                        features=features, is_safe=is_safe,
+                        fallback_evaluate=self.decision_engine.evaluate,
+                    )
+                else:
+                    decision = self.decision_engine.evaluate(
+                        active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
+                        features=features, is_safe=is_safe,
+                    )
+                    if decision.get("shadow_changed"):
+                        self._log_shadow_divergence(decision, dev_id, hostname, client_ip)
 
                 # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                 # Deliberately gated on the HEE's OWN verdict for THIS cycle being
@@ -1336,8 +1326,15 @@ class EnginePipeline:
                                         # "Geofencing Policy Violation" branch below, same pattern as every
                                         # other hard-stop evidence type.
                                         active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip))
-                                        # Force re-evaluate decision
-                                        decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
+                                        # Force re-evaluate decision (V13 FAST CUTOVER: same engine
+                                        # selection as the main call site above, kept consistent)
+                                        if self.config.get("engine", "v13") == "v13":
+                                            decision = v13_live_engine.evaluate(
+                                                active_evidence, rep_vector, getattr(state, "device_type", ""),
+                                                fallback_evaluate=self.decision_engine.evaluate,
+                                            )
+                                        else:
+                                            decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
                                         risk = decision["threat_confidence"] * 10.0
                                         factors = [{"name": decision["explanation"], "score": risk}]
                                 
@@ -2653,107 +2650,6 @@ class EnginePipeline:
                 f.write(json.dumps(entry) + "\n")
         except Exception as e:
             LOGGER.debug("Failed to write shadow_decisions.jsonl: %s", e)
-
-    def _log_v13_independence_divergence(self, decision: dict, dev_id: str, hostname: str, client_ip: str) -> None:
-        """V13 SHADOW (Documentation/V13_REMAINING_WORK.md): append-only, best-effort log
-        of every cycle where decision_engine.py's v13-independence-family shadow
-        computation would have produced a different verdict than the live one (which
-        still uses independence_group, the ad-hoc per-detector field this whole v13
-        effort exists to replace with a centralized, evidence-type-keyed mapping). Never
-        raises -- a logging failure here must not affect real detection/containment in
-        any way, same guarantee as _log_shadow_divergence above. Read
-        state/v13_independence_divergences.jsonl after real observation time to decide
-        whether this is safe to flip live -- feeds src/v13/ops/gap_monitor.py (not yet
-        built) once enough data has accumulated to document a real bar."""
-        try:
-            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "v13_independence_divergences.jsonl"
-            entry = {
-                "ts": time.time(), "device_id": dev_id, "hostname": hostname, "client_ip": client_ip,
-                "old_state": decision.get("state"), "old_explanation": decision.get("explanation"),
-                "old_decision_path": decision.get("decision_path"),
-                "new_state": decision.get("v13_state"), "new_explanation": decision.get("v13_explanation"),
-                "new_decision_path": decision.get("v13_decision_path"),
-                "independent_sources": decision.get("independent_sources"),
-                "v13_num_independent_sources": decision.get("v13_num_independent_sources"),
-            }
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception as e:
-            LOGGER.debug("Failed to write v13_independence_divergences.jsonl: %s", e)
-
-    def _count_v13_eligible_cycle(self) -> None:
-        """V13 SHADOW: increments a small persisted counter every cycle that reaches one
-        of the 3 branches decision_engine.py's independence-family shadow block actually
-        re-resolves (decision["v13_eligible"]), regardless of whether it diverges. This is
-        the real denominator for A10's flip bar -- v13_independence_divergences.jsonl only
-        ever records the (rare) disagreements, never the total sample they're a fraction
-        of, so "the file doesn't exist yet" alone can't be read as a sample size. Never
-        raises -- same best-effort guarantee as the two loggers above."""
-        try:
-            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "v13_independence_eligible_count.json"
-            now = time.time()
-            count, first_seen = 1, now
-            if path.exists():
-                try:
-                    existing = json.loads(path.read_text(encoding="utf-8"))
-                    count = int(existing.get("count", 0)) + 1
-                    first_seen = existing.get("first_seen", now)
-                except Exception:
-                    pass
-            tmp_path = path.with_suffix(".tmp")
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump({"count": count, "first_seen": first_seen, "last_seen": now}, f)
-            tmp_path.replace(path)
-        except Exception as e:
-            LOGGER.debug("Failed to update v13_independence_eligible_count.json: %s", e)
-
-    def _apply_v13_flip(self, decision: dict) -> dict:
-        """V13 FLIP: the actual live/shadow switch config.yaml's v13_flags.independence_family
-        controls, defaulting to "shadow" (a complete no-op -- config.get(..., "shadow") means
-        an absent key behaves identically to an explicit "shadow"). Only takes effect on a
-        cycle where decision["v13_eligible"] is True; every other cycle is untouched by
-        construction, matching decision_engine.py's own comment on why v13 and v-current agree
-        outside those 3 branches.
-
-        MUST be called AFTER _log_v13_independence_divergence above, never before -- that log's
-        "old_state"/"old_explanation" fields are meant to record what v-current's real live
-        verdict WAS, and mutating `decision` first would make every future divergence look like
-        v13 agreeing with itself. src/v13/ops/gap_monitor.py flips the config flag from "shadow"
-        to "live" automatically once a mechanism's documented bar clears (see the dependency
-        map's "Automated per-mechanism flip bars" section) -- this method is the other half of
-        that flip: the thing gap_monitor.py's config edit actually controls at runtime, not the
-        code that decides WHEN to flip it.
-
-        KNOWN LIMITATION (matches Gap 1's shadow_changed precedent exactly, not a new gap this
-        introduces): the geofencing re-evaluation further below (a second, separate
-        decision_engine.evaluate() call after appending geofencing_violation evidence) is NOT
-        covered by this flip, same as it was never covered by shadow_changed's own logging --
-        that second decision always uses v-current's verdict regardless of this flag.
-
-        Never raises -- any error here falls back to the live v-current decision untouched,
-        the currently-proven path, same fail-safe direction as every other v13 shadow method."""
-        try:
-            v13_flags = self.config.get("v13_flags") or {}
-            if v13_flags.get("independence_family", "shadow") != "live":
-                return decision
-            if not decision.get("v13_eligible"):
-                return decision
-            v13_path = decision.get("v13_decision_path")
-            v13_action = _V13_DECISION_PATH_ACTION.get(v13_path)
-            if v13_action is None:
-                LOGGER.warning(
-                    "v13_flags.independence_family=live but v13_decision_path %r has no "
-                    "action mapping -- leaving this cycle's live decision untouched.", v13_path,
-                )
-                return decision
-            decision["state"] = decision["v13_state"]
-            decision["explanation"] = decision["v13_explanation"]
-            decision["decision_path"] = v13_path
-            decision["threat_confidence"] = decision["v13_threat_confidence"]
-            decision["action"] = v13_action
-        except Exception as e:
-            LOGGER.error("Failed to apply v13 flip, falling back to live v-current decision: %s", e)
-        return decision
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """

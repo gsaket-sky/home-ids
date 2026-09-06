@@ -603,7 +603,9 @@ previously-missed evidence-coverage gap (`sources.py` never called
 divergence-comparison run had it gone unnoticed. Fixed, tested, deployed,
 confirmed live on `.19`.
 
-**Next real blocker**: `src/v13/ops/gap_monitor.py` itself doesn't exist yet
+**SUPERSEDED (2026-09-06)**: the "next real blocker" paragraph below described the per-mechanism gap-monitor path. That whole approach is now retired — see `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s A13 entry. The user changed this box's risk tolerance (a real-traffic `IDS_PRODUCT` testbed now, not critical home-security infrastructure) and asked to cut over v13's WHOLE engine in-place instead of flipping mechanisms one at a time. `gap_monitor.py` and everything it depended on (A9's decision, A10's shadow hook, the eligible-cycle counter) has been removed, not built further. Kept below for historical record only.
+
+**Next real blocker (historical, retired 2026-09-06 — see A13)**: `src/v13/ops/gap_monitor.py` itself doesn't exist yet
 — everything it needs (real decisions, a real comparator now running
 automatically, an explicit answer on the automation question, and now a
 materially more complete evidence pipeline feeding it) is in place. It still
