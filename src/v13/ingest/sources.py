@@ -66,6 +66,30 @@ real FeatureExtractor.compute(), both imported unmodified. See
 PiHoleLogSource's own docstring for the exact dnsmasq log grammar this
 targets (confirmed via direct grep against .19's live pihole.log, not
 assumed) and its documented correlation limitations.
+
+A11 (found 2026-09-06 while root-causing a real divergence flagged on the
+live comparator dashboard): run_detection_cycle() below originally called
+ONLY ThreatSignalDetector.detect() -- but pipeline.py's own real per-cycle
+loop (pipeline.py:990,994) ALSO runs two more detectors every cycle that
+this module never wired in at all: ZeekNetworkDetector (malicious_ja3/
+malicious_ja4/zeek_notice, sourced from ZeekFeatureExtractor.get_alerts()'s
+raw event list -- a genuinely SEPARATE data path from get_features()'s
+aggregate counters, not a subset of it) and DNSBehaviorDetector (dns_rate/
+dns_entropy/dns_unique_ratio, from the same features dict). CONCRETE IMPACT
+CONFIRMED, not theoretical: a real device (192.168.77.46) had v-current
+reach HIGH/INTERNAL_RECONNAISSANCE (2 independent sources: arp_sweep +
+zeek_notice) while v13 reached only SUSPICIOUS for the IDENTICAL attack
+hypothesis and score (INTERNAL_RECONNAISSANCE, 3.0) -- v13's own graph had
+ONLY EVER recorded arp_sweep for this device, ever. This was NOT a genuine
+independence-family-grouping disagreement (the actual question A10/#7 is
+about) -- it was v13 simply never having produced zeek_notice evidence at
+all, an entirely different, more basic coverage gap. Left unfixed, this
+would have confounded every future divergence-comparison run: DIFFERENT_PATH/
+V13_ONLY findings would mix real family-grouping questions with this
+unrelated evidence-coverage gap, made worse the longer it went unnoticed
+(more accumulated data to discard/re-derive once found). Both detectors are
+tiny (51 and 56 lines), dependency-free, real v-current classes -- reused
+here unmodified, not new detection logic, just wiring that was missing.
 """
 import json
 import logging
@@ -82,6 +106,8 @@ from v13.decision.engine import DecisionEngine
 from v13.graph.store import GraphStore
 from v13.graph.window import RollingWindowView
 from extractors.dns_features import FeatureExtractor
+from intelligence.detectors.dns_behavior import DNSBehaviorDetector
+from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from v13.evidence.ingest import convert_list
 from v13.evidence.model import NO_DESTINATION
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
@@ -99,6 +125,12 @@ _NEEDS_LAST_DEST_IP_FALLBACK = frozenset({"zeek_exfiltration", "zeek_beaconing"}
 # ZeekFeatureExtractor._last_connection_meta's own "no data yet" sentinel
 # (zeek_features.py:394) -- never a real destination, must not be attached as one.
 _NO_DEST_SENTINEL = "unknown"
+
+# A11: both classes are stateless (ZeekNetworkDetector has no __init__ state at
+# all; DNSBehaviorDetector's is `pass`) -- module-level singletons, not
+# reconstructed every run_detection_cycle() call.
+_ZEEK_NETWORK_DETECTOR = ZeekNetworkDetector()
+_DNS_BEHAVIOR_DETECTOR = DNSBehaviorDetector()
 
 
 class ZeekLogSource:
@@ -281,13 +313,30 @@ def run_detection_cycle(extractor, detector, device_ip, ti_engine=None,
     features = extractor.get_features(device_ip)
     if dns_features:
         features = {**features, **dns_features}
-    v1_evidence = detector.detect(
+    v1_evidence = list(detector.detect(
         device_ip, features, top_domain=None,
         arp_sweep_threshold=arp_sweep_threshold,
         conn_abuse_unique_ip_threshold=conn_abuse_unique_ip_threshold,
         long_conn_duration_threshold=long_conn_duration_threshold,
         ti_engine=ti_engine,
-    )
+    ))
+
+    # A11 (found 2026-09-06 while investigating a real, misleading divergence
+    # on the live comparator dashboard -- see V13_REMAINING_WORK.md): pipeline.py
+    # runs TWO MORE detectors alongside ThreatSignalDetector every real cycle
+    # (pipeline.py:990,994) that this function never called at all --
+    # ZeekNetworkDetector (malicious_ja3/malicious_ja4/zeek_notice, from
+    # ZeekFeatureExtractor.get_alerts()'s raw event list, a completely separate
+    # data path from get_features()'s aggregate counters) and
+    # DNSBehaviorDetector (dns_rate/dns_entropy/dns_unique_ratio, from the same
+    # features dict). Both are tiny, dependency-free, real v-current classes,
+    # reused here unmodified -- not new detection logic, just wiring that was
+    # missing. ZeekNetworkDetector already sets its own Evidence.domain
+    # directly (unlike zeek_exfiltration/beaconing), so neither of these two
+    # need fallback_context.
+    v1_evidence.extend(_ZEEK_NETWORK_DETECTOR.detect(device_ip, extractor.get_alerts(device_ip)))
+    v1_evidence.extend(_DNS_BEHAVIOR_DETECTOR.detect(device_ip, features))
+
     if not v1_evidence:
         return []
 

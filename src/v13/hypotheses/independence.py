@@ -56,6 +56,13 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "dns_tunnel_v2": "dns_behavior",
     "dns_dga_burst": "dns_behavior",
     "dns_evasion_anomaly": "dns_behavior",
+    # DNSBehaviorDetector's other two evidence types (intelligence/detectors/
+    # dns_behavior.py) -- v-current itself groups all three (rate/entropy/
+    # unique_ratio) under one independence_group="dns_behavior", so mapping
+    # these here too matches v-current's own grouping choice for this
+    # detector specifically, consistent with dns_entropy above.
+    "dns_rate": "dns_behavior",
+    "dns_unique_ratio": "dns_behavior",
 
     # TLS handshake fingerprinting -- same underlying sensor (ClientHello).
     "malicious_ja3": "tls_fingerprint",

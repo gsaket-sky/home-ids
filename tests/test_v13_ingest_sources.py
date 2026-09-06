@@ -189,6 +189,13 @@ class _FakeExtractor2:
     def get_features(self, device_ip):
         return {"last_dest_ip": "10.0.0.99", "zeek_outbound_bytes": 3000000}
 
+    def get_alerts(self, device_ip):
+        # A11: run_detection_cycle() now unconditionally calls get_alerts()
+        # too (ZeekNetworkDetector) -- empty by default so every EXISTING
+        # test above (about ThreatSignalDetector/fallback_context wiring)
+        # stays isolated from A11's own new coverage below.
+        return []
+
 
 results = run_detection_cycle(_FakeExtractor2(), _FakeDetector(), "192.168.1.50")
 by_type = {ev.evidence_type: ev for ev in results}
@@ -205,6 +212,9 @@ check("independence_family is populated from INDEPENDENCE_FAMILY_MAP, not left d
 class _FakeExtractorUnknownDest:
     def get_features(self, device_ip):
         return {"last_dest_ip": "unknown"}
+
+    def get_alerts(self, device_ip):
+        return []
 
 
 detector_with_no_dest = _FakeDetector()
@@ -247,6 +257,52 @@ merge_detector2 = _MergeCheckDetector()
 run_detection_cycle(_FakeExtractor2(), merge_detector2, "192.168.1.54")
 check("omitting dns_features leaves behavior unchanged (no merge attempted)",
       "suspicious_domains" not in merge_detector2.seen_features)
+
+
+# --- run_detection_cycle: A11, the ZeekNetworkDetector/DNSBehaviorDetector
+# wiring found while root-causing a real, misleading divergence on the live
+# comparator dashboard (192.168.77.46: v-current reached HIGH using
+# arp_sweep+zeek_notice as 2 independent sources; v13 only ever had
+# arp_sweep, since these two real v-current detectors were never called at
+# all -- not a family-grouping question, a genuine missing-evidence gap). ---
+class _FakeExtractorWithAlerts:
+    """A device with real zeek_notice/malicious_ja3 alerts (ZeekNetworkDetector's
+    input) AND real DNS features (DNSBehaviorDetector's input) -- isolates
+    A11's new wiring from ThreatSignalDetector's own logic by pairing it with
+    _EmptyDetector below."""
+    def get_features(self, device_ip):
+        return {"last_dest_ip": "unknown", "query_rate": 150.0, "entropy_avg": 4.5}
+
+    def get_alerts(self, device_ip):
+        return [
+            {"type": "zeek_notice", "note": "SSL::Invalid_Server_Cert", "confidence": 0.75,
+              "dest_ip": "10.0.0.77"},
+            {"type": "malicious_ja3", "server": "evil-c2.example.com", "confidence": 0.95},
+        ]
+
+
+a11_results = run_detection_cycle(_FakeExtractorWithAlerts(), _EmptyDetector(), "192.168.1.60")
+a11_by_type = {ev.evidence_type: ev for ev in a11_results}
+check("A11: ZeekNetworkDetector's zeek_notice evidence is now produced (previously never called)",
+      "zeek_notice" in a11_by_type)
+check("A11: zeek_notice keeps ZeekNetworkDetector's own real destination attribution (dest_ip)",
+      a11_by_type["zeek_notice"].destination_id == "10.0.0.77")
+check("A11: ZeekNetworkDetector's malicious_ja3 evidence is now produced",
+      "malicious_ja3" in a11_by_type)
+check("A11: malicious_ja3 keeps its own real domain attribution (server SNI)",
+      a11_by_type["malicious_ja3"].destination_id == "evil-c2.example.com")
+check("A11: DNSBehaviorDetector's dns_rate evidence is now produced (query_rate=150 > 100 threshold)",
+      "dns_rate" in a11_by_type)
+check("A11: DNSBehaviorDetector's dns_entropy evidence is now produced (entropy_avg=4.5 > 4.0 threshold)",
+      "dns_entropy" in a11_by_type)
+check("A11: new evidence types get a real independence_family, not the defaulted fallback",
+      not a11_by_type["zeek_notice"].features.get("independence_family_defaulted", False)
+      and not a11_by_type["dns_rate"].features.get("independence_family_defaulted", False))
+
+quiet_results = run_detection_cycle(_FakeExtractor2(), _EmptyDetector(), "192.168.1.61")
+check("A11: a device with no zeek alerts and unexceptional DNS features produces no new evidence "
+       "from these two detectors (they don't fire spuriously)",
+      quiet_results == [])
 
 
 # --- PiHoleLogSource: dnsmasq text-log parsing (A5) ---
