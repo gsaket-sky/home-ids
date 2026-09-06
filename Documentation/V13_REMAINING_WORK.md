@@ -260,13 +260,17 @@ this project has used for every prior flip), decide whether to flip this
 mechanism live via an actual `v13_flags` config read — not built yet, and a
 separate step from `gap_monitor.py`'s own automation, which still needs to
 exist to make that flip itself automatic per A9.
-**Deployment status (2026-09-06)**: code pushed, pulled onto `.94`, and
-syntax-validated via the existing deploy pipeline (commit `84d82f3`) — but
-`soc.service` has deliberately NOT been restarted, matching this project's
-own standing rule that a live security-service restart is a separate,
-explicit human action, never folded into a code sync. The shadow computation
-is staged and ready but not yet actually running/logging on `.94` until that
-restart happens.
+**Deployment status (2026-09-06): LIVE on `.94`**. Code pushed, pulled, and
+syntax-validated via the existing deploy pipeline (commit `84d82f3`), then
+`soc.service` restarted by explicit user instruction (new PID confirmed,
+clean startup journal — no errors traceable to this change; two unrelated,
+pre-existing external-API rate-limit warnings from AbuseIPDB/VirusTotal are
+routine and not caused by this work). The shadow computation now runs
+unconditionally on every real decision cycle. `state/v13_independence_
+divergences.jsonl` doesn't exist yet as of the restart — same lazy-create
+behavior as the existing `shadow_decisions.jsonl` (only created on the FIRST
+actual divergence, not proactively) — absence just means no divergence has
+occurred in the first ~90s of runtime, not that anything is broken.
 
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
