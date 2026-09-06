@@ -9,6 +9,7 @@ Every Hypothesis.evaluate() (Phase 3) still takes a fresh per-cycle snapshot fro
 this store via plain queries -- nothing here holds a mutated in-memory graph object
 across cycles, preserving the pure-evaluation model HEE_ROADMAP.md said not to break.
 """
+import contextlib
 import json
 import sqlite3
 import time
@@ -33,6 +34,7 @@ class GraphStore:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        self._in_transaction = False
         if is_new:
             self._apply_schema()
 
@@ -43,6 +45,37 @@ class GraphStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def _maybe_commit(self) -> None:
+        """Every mutating method calls this instead of self._conn.commit() directly.
+        Outside a transaction() block, behavior is unchanged (commits immediately,
+        same as before this existed). Inside one, defers to the transaction's own
+        single commit at the end -- this is what lets a whole poll cycle's writes
+        (many insert_evidence() calls + one insert_decision()) cost one commit
+        instead of the ~4-per-item cost each of those methods used to pay alone."""
+        if not self._in_transaction:
+            self._conn.commit()
+
+    @contextlib.contextmanager
+    def transaction(self):
+        """Groups every write made inside the `with` block into a single commit
+        (or a single rollback if the block raises) -- callers writing a whole
+        cycle's worth of evidence + a decision should wrap that in one of these
+        rather than let each insert_evidence()/insert_decision() call commit on
+        its own. Nested `with store.transaction():` blocks are a no-op pass-through
+        (only the outermost one actually commits/rolls back)."""
+        if self._in_transaction:
+            yield
+            return
+        self._in_transaction = True
+        try:
+            yield
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+        finally:
+            self._in_transaction = False
 
     # --- devices -----------------------------------------------------------
 
@@ -64,7 +97,7 @@ class GraphStore:
                 "WHERE device_id = ?",
                 (ts, display_label, device_type, device_id),
             )
-        self._conn.commit()
+        self._maybe_commit()
 
     def resolve_canonical_device_id(self, device_id: str) -> str:
         """Walks the merged_into_device_id chain to the ultimate canonical id.
@@ -100,7 +133,7 @@ class GraphStore:
             (canonical_id, orphan_id),
         )
         self.add_edge("device", orphan_id, "device", canonical_id, "merged_into", ts)
-        self._conn.commit()
+        self._maybe_commit()
 
     # --- destinations --------------------------------------------------------
 
@@ -115,7 +148,7 @@ class GraphStore:
             )
         else:
             self._conn.execute("UPDATE destinations SET last_seen = ? WHERE destination_id = ?", (ts, destination_id))
-        self._conn.commit()
+        self._maybe_commit()
 
     # --- evidence --------------------------------------------------------------
 
@@ -138,13 +171,14 @@ class GraphStore:
         self.add_edge("device", ev.device_id, "evidence", ev.evidence_id, "observed", ev.timestamp)
         if ev.destination_id != NO_DESTINATION:
             self.add_edge("evidence", ev.evidence_id, "destination", ev.destination_id, "targets", ev.timestamp)
-        self._conn.commit()
+        self._maybe_commit()
 
     def insert_decision(self, device_id: str, timestamp: float, state: str,
                           decision_path: str, confidence: float, risk_score: float,
                           winning_hypothesis_id: Optional[str] = None,
                           mechanism_flags: Optional[Dict[str, str]] = None,
-                          raw_payload: Optional[Dict[str, Any]] = None) -> str:
+                          raw_payload: Optional[Dict[str, Any]] = None,
+                          evidence_ids: Optional[List[str]] = None) -> str:
         # winning_hypothesis_id references the `hypotheses` table's own versioned
         # registry (schema.sql) -- not yet populated by any v13 module (a
         # separate, not-yet-built concern: registering/versioning hypothesis
@@ -158,7 +192,17 @@ class GraphStore:
         shadow vs. live AT DECISION TIME, so a later divergence found while a
         mechanism was still shadow-only is distinguishable from one found after
         it flipped live -- schema.sql's own stated reason for this column,
-        confirmed via direct read, not guessed. Returns the generated decision_id."""
+        confirmed via direct read, not guessed.
+
+        evidence_ids (Phase 1 fix, v13 full-architecture plan): the evidence_id of
+        every Evidence item that contributed to this decision -- creates an
+        evidence->decision 'supports' edge for each. Without this, prune_evidence()'s
+        own "don't delete evidence a decision still references" exception (see that
+        method's docstring) checks for edges that nothing ever created, silently
+        pruning evidence a decision's raw_payload_json still points to. Callers pass
+        the SAME evidence list they gave the decision engine, by evidence_id.
+
+        Returns the generated decision_id."""
         decision_id = uuid.uuid4().hex
         self.upsert_device(device_id, timestamp=timestamp)
         self._conn.execute(
@@ -168,7 +212,9 @@ class GraphStore:
             (decision_id, device_id, timestamp, winning_hypothesis_id, state, decision_path,
              confidence, risk_score, json.dumps(mechanism_flags or {}), json.dumps(raw_payload or {})),
         )
-        self._conn.commit()
+        for eid in (evidence_ids or []):
+            self.add_edge("evidence", eid, "decision", decision_id, "supports", timestamp)
+        self._maybe_commit()
         return decision_id
 
     def get_evidence_for_device(self, device_id: str, since: Optional[float] = None,
@@ -215,7 +261,7 @@ class GraphStore:
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (src_kind, src_id, dst_kind, dst_id, relation, ts, json.dumps(metadata or {})),
         )
-        self._conn.commit()
+        self._maybe_commit()
 
     def get_device_destinations_since(self, since: float) -> List[Any]:
         """Distinct (device_id, destination_id) pairs observed since `since` --
@@ -279,7 +325,7 @@ class GraphStore:
 
     def delete_edge(self, edge_id: int) -> None:
         self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
-        self._conn.commit()
+        self._maybe_commit()
 
     # --- retention (schema.sql's own documented policy) -------------------------
 
@@ -297,7 +343,7 @@ class GraphStore:
             ")",
             (cutoff, cutoff),
         )
-        self._conn.commit()
+        self._maybe_commit()
         return cur.rowcount
 
 

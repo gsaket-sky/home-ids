@@ -14,8 +14,14 @@ Sections:
      Evidence shape as the input
   D. Fail-safe: an engine that raises falls back to v-current's own evaluate(), loudly
      logged, never silent
+  E. Graph read/write (v13 full-architecture plan, Phase 1): a windowed merge across
+     two separate evaluate() calls reaches a verdict neither call alone could reach
+     from its own fresh evidence -- the concrete "behavioral pattern across cycles"
+     case the graph wiring exists to catch -- plus restart-survival and both
+     directions' fail-safes (a broken read/write never blocks or corrupts a decision)
 """
 import sys
+import tempfile
 import time
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
@@ -142,6 +148,94 @@ check("D: with no fallback_evaluate supplied at all, the original exception prop
       _raised)
 
 live_engine._v13_engine = _orig_v13_engine
+
+
+# --- E. Graph read/write: windowed merge, restart-survival, both fail-safes ---
+
+_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_test_")
+_graph_db_path = str(_PathForSysPath(_tmpdir) / "e_graph.db")
+live_engine.configure(_graph_db_path)
+
+_t0 = 2_000_000.0
+lateral_scan_ev = [V1Evidence(type="zeek_lateral_scan", source="zeek", timestamp=_t0, device="devA",
+                                 value=1.0, confidence=0.9, independence_group="zeek_network")]
+r1 = live_engine.evaluate(lateral_scan_ev, ReputationVector(domain="", tier=3), features={},
+                             device_id="devA", now=_t0)
+check("E: cycle 1 alone (one family, zeek_lateral_scan) stays SUSPICIOUS, not HIGH -- "
+      "matches the SAME single-source case already proven in test_v13_decision_engine.py",
+      r1["state"] == "SUSPICIOUS" and r1["decision_path"] == "hypothesis_suspicious")
+
+_store_check = live_engine._get_graph_store()
+check("E: cycle 1's fresh evidence was actually written to the graph",
+      len(_store_check.get_evidence_for_device("devA")) == 1)
+check("E: cycle 1's decision was actually written to the graph",
+      len(_store_check.get_decisions_since(_t0 - 1)) == 1)
+
+# Cycle 2, 60s later: a DIFFERENT evidence type that also wouldn't reach HIGH alone --
+# passed as this cycle's ONLY fresh evidence (simulating a fresh pipeline.py cycle,
+# which would only hand live_engine THIS cycle's new detector output, not cycle 1's
+# already-handled evidence). Cycle 1's lateral_scan evidence is NOT included here --
+# the only way this reaches HIGH is if evaluate() pulls it back in from the graph.
+ja3_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_t0 + 60, device="devA",
+                       value=1.0, confidence=0.9, independence_group="zeek_network")]
+r2 = live_engine.evaluate(ja3_ev, ReputationVector(domain="", tier=3), features={},
+                             device_id="devA", now=_t0 + 60)
+check("E: cycle 2's OWN fresh evidence alone (just malicious_ja3) would also only be one "
+      "family -- this scenario is only meaningful if cycle 1's evidence wasn't silently "
+      "reused some other way; confirmed by checking cycle 2's fresh-only conversion count",
+      len(live_engine._convert_active_evidence(ja3_ev, {})) == 1)
+check("E: cycle 2 reaches HIGH -- proves the windowed graph read merged cycle 1's "
+      "still-fresh lateral_scan evidence back in, something a single cycle's own fresh "
+      "evidence list structurally could not represent on its own",
+      r2["state"] == "HIGH" and r2["decision_path"] == "hypothesis_high",
+      f"got {r2['state']}/{r2['decision_path']}")
+
+check("E: cycle 2 only wrote ITS OWN fresh evidence (1 new row), not a re-insert of "
+      "cycle 1's already-persisted item -- total rows for devA is 2, not 3+",
+      len(_store_check.get_evidence_for_device("devA")) == 2)
+
+# Restart-survival: force live_engine to drop its in-memory GraphStore handle and
+# reopen the SAME db file from scratch (simulating a fresh process after a restart),
+# then confirm cycle 1+2's history is still there for a third cycle.
+live_engine.configure(_graph_db_path)
+check("E: configure() with the same path forces a fresh GraphStore object, not a cached one",
+      live_engine._graph_store is None)
+
+r3 = live_engine.evaluate([], ReputationVector(domain="", tier=3), features={},
+                             device_id="devA", now=_t0 + 90)
+check("E: after a simulated restart (fresh GraphStore handle, same db file), a THIRD "
+      "cycle with ZERO fresh evidence of its own still sees devA's persisted history and "
+      "reaches HIGH -- the actual restart-survival property EvidenceStore cannot offer "
+      "(100% in-memory, wiped on every real restart)",
+      r3["state"] == "HIGH", f"got {r3['state']}")
+
+# Fail-safe: a broken graph READ degrades to fresh-evidence-only, never raises
+_orig_get_store = live_engine._get_graph_store
+live_engine._get_graph_store = lambda: (_ for _ in ()).throw(RuntimeError("simulated read failure"))
+r4 = live_engine.evaluate(ja3_ev, ReputationVector(domain="", tier=3), features={},
+                             device_id="devA", now=_t0 + 120)
+check("E: a broken graph read never raises out of evaluate() -- degrades to this cycle's "
+      "fresh evidence only (back to SUSPICIOUS, since devA's history is unreachable)",
+      r4["state"] == "SUSPICIOUS")
+live_engine._get_graph_store = _orig_get_store
+
+# Fail-safe: a broken graph WRITE never affects the already-computed decision
+live_engine._get_graph_store = lambda: (_ for _ in ()).throw(RuntimeError("simulated write failure"))
+r5 = live_engine.evaluate([], ReputationVector(domain="", tier=0), features={},
+                             device_id="devB-neverwritten", now=_t0)
+check("E: a broken graph write never raises out of evaluate() -- the decision is already "
+      "computed by the time the write is attempted, so it's returned regardless",
+      r5["state"] == "BENIGN")
+live_engine._get_graph_store = _orig_get_store
+
+# device_id=None (the default): zero graph interaction, unchanged from pre-Phase-1 behavior
+_calls_with_no_device_id = []
+live_engine._get_graph_store = lambda: _calls_with_no_device_id.append(1) or _orig_get_store()
+live_engine.evaluate([], ReputationVector(domain="", tier=0), features={})
+check("E: omitting device_id entirely means the graph is never touched at all -- "
+      "existing callers that don't pass it are completely unaffected by this feature",
+      len(_calls_with_no_device_id) == 0)
+live_engine._get_graph_store = _orig_get_store
 
 
 print(f"\n{'='*60}")

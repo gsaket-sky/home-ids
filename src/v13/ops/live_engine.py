@@ -16,13 +16,38 @@ the one piece of the old per-mechanism-flip caution machinery kept from the supe
 plan -- a fail-safe costs nothing and this project always keeps an escape hatch. Any
 fallback firing is logged loudly (never silent) since it should never happen in normal
 operation and would mean something needs investigating.
+
+GRAPH WRITE + WINDOWED READ (v13 full-architecture plan, Phase 1): when `device_id` is
+supplied, every call also (a) queries `RollingWindowView.evidence_in_window()` for that
+device's persisted history and merges it with this cycle's fresh evidence before
+deciding, and (b) writes this cycle's fresh evidence + the resulting decision into the
+same GraphStore. Both are best-effort -- a graph failure never affects the returned
+decision, only means this cycle is missing from the durable trail (logged loudly, not
+silent). `device_id=None` (the default) skips both entirely, unchanged from before this
+existed -- so existing callers that don't pass it keep working exactly as they do today.
+
+WHY QUERY UP TO THE LONGEST TTL, NOT A SHORTER "ROLLING WINDOW": confirmed by reading
+`src/v13/hypotheses/engine.py`'s own `compute_freshness()` -- it already discards
+anything older than 600s (default) / 86400s (reputation family) per item, matching
+v-current's `EvidenceStore` TTLs exactly. Querying a shorter window than that would only
+ever return a SUBSET of what scoring already considers fresh; querying up to the longest
+TTL and letting `compute_freshness()` do the real trimming is simpler and strictly
+correct. The actual new capability this unlocks is NOT "see further back in time than a
+single cycle already could" (a single cycle's `EvidenceStore`-backed `active_evidence`
+already covers the same TTL window) -- it's that this survives a `soc.service` restart,
+which wipes `EvidenceStore` completely (100% in-memory, no persistence at all) but not
+the graph. A device mid-way through building up a slow pattern doesn't lose that history
+just because the service restarted for an unrelated reason.
 """
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from v13.evidence.ingest import convert_list
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
 from v13.decision.engine import DecisionEngine as V13DecisionEngine
+from v13.graph.store import GraphStore
+from v13.graph.window import RollingWindowView
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
 
@@ -33,7 +58,33 @@ LOGGER = logging.getLogger("home_ids.v13_live_engine")
 _NEEDS_LAST_DEST_IP_FALLBACK = frozenset({"zeek_exfiltration", "zeek_beaconing"})
 _NO_DEST_SENTINEL = "unknown"  # ZeekFeatureExtractor._last_connection_meta's own "no data yet" sentinel
 
+# The longest TTL hypotheses/engine.py's own compute_freshness() honors (the
+# "reputation" independence_family, 86400s) -- see the module docstring above for why
+# querying up to this bound, not a shorter one, is the correct design.
+_GRAPH_QUERY_WINDOW_SECONDS = 86400
+
 _v13_engine = V13DecisionEngine()
+
+_GRAPH_DB_PATH = "state/v13_graph.db"
+_graph_store: Optional[GraphStore] = None
+
+
+def configure(graph_db_path: str) -> None:
+    """Optional: call once at startup to point the live graph store somewhere other
+    than the default 'state/v13_graph.db' (relative to the process's CWD, matching
+    every other v13 ops file's own state_dir convention). Safe to call before any
+    real evaluate() call; if never called, the default path is opened lazily on
+    first use with a device_id."""
+    global _GRAPH_DB_PATH, _graph_store
+    _GRAPH_DB_PATH = graph_db_path
+    _graph_store = None  # force re-init against the new path on next use
+
+
+def _get_graph_store() -> GraphStore:
+    global _graph_store
+    if _graph_store is None:
+        _graph_store = GraphStore(_GRAPH_DB_PATH)
+    return _graph_store
 
 
 def _build_fallback_context(features: dict) -> Optional[Dict[str, str]]:
@@ -59,19 +110,80 @@ def _convert_active_evidence(v1_evidence_list, features: dict):
     return out
 
 
+def _query_graph_window(device_id: str, now: float) -> List:
+    """Best-effort: returns [] on any failure rather than raising, so a graph
+    problem degrades to "decide on this cycle's fresh evidence only" (exactly
+    today's pre-Phase-1 behavior), never blocks a real decision."""
+    try:
+        store = _get_graph_store()
+        window = RollingWindowView(store)
+        return window.evidence_in_window(device_id, _GRAPH_QUERY_WINDOW_SECONDS, now=now)
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to query GraphStore window for device %r, deciding on this "
+            "cycle's fresh evidence only: %s", device_id, e,
+        )
+        return []
+
+
+def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: List,
+                   decision: Dict[str, Any]) -> None:
+    """Best-effort: never raises out to the caller. A failure here means this
+    cycle is missing from the durable audit trail -- it must never affect the
+    live decision, which has already been computed and returned by the time
+    this runs."""
+    try:
+        store = _get_graph_store()
+        with store.transaction():
+            for ev in fresh_v2:
+                store.insert_evidence(ev)
+            store.insert_decision(
+                device_id=device_id, timestamp=timestamp,
+                state=decision["state"], decision_path=decision["decision_path"],
+                confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
+                risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
+                raw_payload=decision,
+                evidence_ids=[ev.evidence_id for ev in merged_v2],
+            )
+    except Exception as e:
+        LOGGER.error(
+            "Failed to write evidence/decision to GraphStore for device %r -- the live "
+            "decision itself is already made and unaffected by this: %s",
+            device_id, e, exc_info=True,
+        )
+
+
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
-             is_safe: bool = False, fallback_evaluate=None) -> Dict[str, Any]:
+             is_safe: bool = False, fallback_evaluate=None,
+             device_id: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
     """The live call site `pipeline.py` uses in place of
     `core/decision_engine.py`'s `DecisionEngine.evaluate()`. Same positional/keyword
-    shape as v-current's own `evaluate()` so the call site swap in pipeline.py is a
-    one-line change, not a signature rework."""
+    shape as v-current's own `evaluate()` (plus the new, optional `device_id`/`now`)
+    so the original call site swap in pipeline.py stayed a one-line change; passing
+    `device_id` is what opts a call into the graph read/write behavior described in
+    this module's own docstring above -- omitting it (the default) is unaffected by
+    any of that, identical to this function's pre-Phase-1 behavior."""
     try:
-        v2_evidence = _convert_active_evidence(active_evidence_v1, features or {})
-        return _v13_engine.evaluate(
-            v2_evidence, rep_vector, device_type=device_type,
+        fresh_v2 = _convert_active_evidence(active_evidence_v1, features or {})
+        ts = now if now is not None else time.time()
+
+        merged_v2 = fresh_v2
+        if device_id:
+            windowed_v2 = _query_graph_window(device_id, ts)
+            seen_ids = {ev.evidence_id for ev in windowed_v2}
+            merged_v2 = windowed_v2 + [ev for ev in fresh_v2 if ev.evidence_id not in seen_ids]
+
+        decision = _v13_engine.evaluate(
+            merged_v2, rep_vector, device_type=device_type,
             baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
+            now=ts,
         )
+
+        if device_id:
+            _write_graph(device_id, ts, fresh_v2, merged_v2, decision)
+
+        return decision
     except Exception as e:
         LOGGER.error(
             "v13 live engine raised %s -- falling back to v-current's decision engine "

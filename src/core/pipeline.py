@@ -441,6 +441,11 @@ class EnginePipeline:
         self.zeek_detector = ZeekNetworkDetector()
         self.threat_signal_detector = ThreatSignalDetector()  # PHASE 1
         self.decision_engine = DecisionEngine()
+        # v13 full-architecture plan, Phase 1: point the live graph store at THIS box's
+        # own state dir (matching every other state file's location) rather than the
+        # module's bare relative default -- avoids depending on soc.service's CWD
+        # happening to already be the right directory.
+        v13_live_engine.configure(str(state_dir / "v13_graph.db"))
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(
             token=self.config.get("telegram_token", ""), 
@@ -1251,6 +1256,7 @@ class EnginePipeline:
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
                         features=features, is_safe=is_safe,
                         fallback_evaluate=self.decision_engine.evaluate,
+                        device_id=dev_id, now=now,
                     )
                 else:
                     decision = self.decision_engine.evaluate(
@@ -1327,7 +1333,16 @@ class EnginePipeline:
                                         # other hard-stop evidence type.
                                         active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip))
                                         # Force re-evaluate decision (V13 FAST CUTOVER: same engine
-                                        # selection as the main call site above, kept consistent)
+                                        # selection as the main call site above, kept consistent).
+                                        # Deliberately NOT passed device_id/now here (Phase 1, v13
+                                        # full-architecture plan): v13's evidence/ingest.py assigns
+                                        # a FRESH evidence_id on every convert() call, no dedup by
+                                        # content -- since `active_evidence` here is the SAME list
+                                        # already converted+written once by the main call site above
+                                        # (plus one new geofencing_violation item), passing device_id
+                                        # would re-insert every one of those items again as genuine
+                                        # duplicate graph rows. This second, rare re-evaluation path
+                                        # stays graph-uninvolved until that's worth solving properly.
                                         if self.config.get("engine", "v13") == "v13":
                                             decision = v13_live_engine.evaluate(
                                                 active_evidence, rep_vector, getattr(state, "device_type", ""),

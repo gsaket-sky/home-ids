@@ -690,5 +690,6 @@ def compute_decision(store: GraphStore, device_id: str,
         confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
         risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
         raw_payload=decision,
+        evidence_ids=[ev.evidence_id for ev in evidence_list],
     )
     return decision, decision_id

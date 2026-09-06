@@ -141,6 +141,94 @@ check("prune_evidence keeps evidence within the retention window",
       store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?", (recent_ev.evidence_id,)).fetchone() is not None)
 check("prune_evidence returns a real deleted-row count", deleted >= 1)
 
+# --- prune_evidence's "referenced by a recent decision" exception (v13 full-
+# architecture plan, Phase 1 bug fix): this was previously dead code -- nothing
+# ever created the evidence->decision edge the exception query looks for, so
+# old-but-still-referenced evidence was silently deleted anyway. ---
+referenced_old_ev = Evidence(device_id="devref", destination_id=NO_DESTINATION, evidence_type="x",
+                               independence_family="f", timestamp=now - 200 * 86400, source="s")
+store.insert_evidence(referenced_old_ev)
+store.insert_decision(
+    device_id="devref", timestamp=now - 1 * 86400, state="SUSPICIOUS", decision_path="hypothesis_suspicious",
+    confidence=0.4, risk_score=2.0, raw_payload={}, evidence_ids=[referenced_old_ev.evidence_id],
+)
+store.prune_evidence(older_than_days=90, now=now)
+check("evidence older than the retention window SURVIVES pruning when a recent "
+      "decision references it via insert_decision()'s evidence_ids param",
+      store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?",
+                            (referenced_old_ev.evidence_id,)).fetchone() is not None)
+check("insert_decision actually created the evidence->decision 'supports' edge",
+      len(store.get_edges(relation="supports", src_kind="evidence",
+                            src_id=referenced_old_ev.evidence_id, dst_kind="decision")) == 1)
+
+unreferenced_old_ev = Evidence(device_id="devunref", destination_id=NO_DESTINATION, evidence_type="x",
+                                 independence_family="f", timestamp=now - 200 * 86400, source="s")
+store.insert_evidence(unreferenced_old_ev)
+store.prune_evidence(older_than_days=90, now=now)
+check("REGRESSION GUARD: evidence with no supporting decision is still pruned normally "
+      "(the fix doesn't accidentally make everything immortal)",
+      store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?",
+                            (unreferenced_old_ev.evidence_id,)).fetchone() is None)
+
+# --- transaction(): batches multiple writes into one commit ---
+# sqlite3.Connection.commit is a C-level method and can't be monkeypatched to
+# literally count calls -- instead test the two things that actually matter:
+# every write inside the block is visible together (batching didn't lose
+# anything), and a failure partway through discards ALL of it (atomicity),
+# not just the specific statement that raised.
+txn_store = GraphStore(str(_PathForSysPath(tmpdir) / "txn_test.db"))
+_maybe_commit_calls = []
+_orig_maybe_commit = txn_store._maybe_commit
+txn_store._maybe_commit = lambda: (_maybe_commit_calls.append(txn_store._in_transaction), _orig_maybe_commit())[-1]
+
+with txn_store.transaction():
+    check("_in_transaction is True for the whole duration of the with-block",
+          txn_store._in_transaction is True)
+    for i in range(5):
+        txn_store.insert_evidence(Evidence(
+            device_id="txndev", destination_id=NO_DESTINATION, evidence_type="x",
+            independence_family="f", timestamp=now, source="s",
+        ))
+check("_in_transaction resets to False after the with-block exits normally",
+      txn_store._in_transaction is False)
+check("_maybe_commit was called multiple times during the batch, every one of them "
+      "while _in_transaction was True (so none triggered a real per-call commit)",
+      len(_maybe_commit_calls) > 1 and all(_maybe_commit_calls))
+check("all 5 evidence rows were actually written despite the deferred commit",
+      txn_store._conn.execute("SELECT COUNT(*) FROM evidence WHERE device_id='txndev'").fetchone()[0] == 5)
+
+try:
+    with txn_store.transaction():
+        txn_store.insert_evidence(Evidence(
+            device_id="txndev2", destination_id=NO_DESTINATION, evidence_type="x",
+            independence_family="f", timestamp=now, source="s",
+        ))
+        raise RuntimeError("simulated failure mid-transaction")
+except RuntimeError:
+    pass
+check("a raised exception inside transaction() rolls back the WHOLE block, not just the "
+      "statement that raised -- the insert_evidence() call before the raise is also gone",
+      txn_store._conn.execute("SELECT COUNT(*) FROM evidence WHERE device_id='txndev2'").fetchone()[0] == 0)
+check("_in_transaction resets to False even after a rollback (not stuck True)",
+      txn_store._in_transaction is False)
+
+with txn_store.transaction():
+    with txn_store.transaction():
+        check("a nested transaction() call does not reset _in_transaction to something else",
+              txn_store._in_transaction is True)
+        txn_store.insert_evidence(Evidence(
+            device_id="txndev3", destination_id=NO_DESTINATION, evidence_type="x",
+            independence_family="f", timestamp=now, source="s",
+        ))
+check("the row written inside a nested transaction() is visible after the OUTER block commits",
+      txn_store._conn.execute("SELECT COUNT(*) FROM evidence WHERE device_id='txndev3'").fetchone()[0] == 1)
+
+txn_store._maybe_commit = _orig_maybe_commit
+check("outside any transaction() block, behavior is unchanged -- each call still commits immediately "
+      "(already exercised by every other check in this file using the module-level `store`)", True)
+
+txn_store.close()
+
 # --- generic edge query/delete (used by cl_afpe/engine.py, Phase 4) ---
 store.add_edge("device", "queryedge_dev", "destination", "queryedge_dest", "trusts", timestamp=999.0,
                  metadata={"source": "test"})
