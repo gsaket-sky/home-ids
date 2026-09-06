@@ -210,6 +210,57 @@ false-negative-shaped divergence, no auto-decision on a genuinely novel case)
 remain non-negotiable regardless of this choice — they were never part of
 what "fully automatic" was asking to relax.
 
+### A10. ~~`.94`'s live `pipeline.py` had ZERO hooks for anything v13-related~~ — FIRST MECHANISM WIRED (2026-09-06)
+**What was found**: even with A7 (real v13 decisions) and A8 (a real comparator)
+both done, `gap_monitor.py`'s whole premise — flip a `v13_flags.<mechanism>`
+config value and have `.94`'s live code behave differently — had nothing to
+attach to. Confirmed via direct grep: `.94`'s real `pipeline.py`,
+`decision_engine.py`, and `config.yaml.example` contained zero references to
+`v13` or any `v13_flags` value. v13 on `.19` running as an independent
+process (A2-A9) generates excellent COMPARISON data, but was never wired as
+an in-process shadow-then-live branch inside `.94`'s own decision code the
+way the original plan's "Automated incremental flips" section actually
+described. Auto-editing `.94`'s config (A9) would have been a complete
+no-op without this.
+**Resolved (first mechanism only)**: user chose hypothesis independence-
+family scoring (lowest-risk: a pure scoring refinement, doesn't touch
+hard-stops or actuation) as the first real mechanism wired into `.94`'s live
+`decision_engine.py`/`pipeline.py`, as a genuine, PURELY ADDITIVE shadow
+computation — the live decision path is completely unchanged; new
+`v13_state`/`v13_explanation`/`v13_decision_path`/`v13_independence_changed`
+fields are computed alongside it and logged (only on divergence) to a new
+`state/v13_independence_divergences.jsonl`, mirroring the existing Gap-1/2/3
+shadow pattern already established in this exact file (separate log file so
+it doesn't interleave with that unrelated experiment). `v13_flags`-based
+live-flipping is NOT built yet — this step only gets the mechanism computing
+and logging real shadow data, matching how every prior Gap in this project
+started (shadow first, flip only after real accumulated evidence).
+**Design decision, documented not improvised**: rather than re-deriving the
+live tree's full elif priority order a second time (risking silent drift
+from the real branch order, the exact failure mode the existing Gap-3 shadow
+block's own comment warns against), the new shadow re-evaluation is keyed
+off the ALREADY-COMPUTED `decision_path`/`explanation` (which already
+correctly encode which branch fired, accounting for every higher-priority
+hard-stop) — provably safe by construction, not by careful hand-matching.
+**Verified**: a real, working divergence demonstrated on a realistic
+scenario — two evidence items (`malicious_ja3` + `zeek_notice`) that
+v-current's `ATTACK_EVIDENCE_FAMILIES` groups under one shared
+`"zeek_network"` family (1 independent source, capped at SUSPICIOUS) but
+v13's `INDEPENDENCE_FAMILY_MAP` correctly treats as 2 separate families
+(clearing the `>=2` HIGH bar) — exactly the real-world shape issue #7 was
+about. 20 new tests (`tests/test_phase68_v13_independence_shadow.py`) plus 4
+existing, unrelated `.94` test files re-run for regression confidence
+(`test_phase38_comprehensive_scenarios.py`'s own corroboration golden case,
+`test_phase34_evidence_families_and_incidents.py`,
+`test_phase54_g6_geofence_and_g7_hypothesis_naming.py`,
+`test_phase42_tier5_verified_ioc_split.py`) — all pass, zero regressions.
+**When to pick this back up**: after real shadow-divergence data has
+accumulated on `.94` (same "N days, zero false negatives" evidentiary bar
+this project has used for every prior flip), decide whether to flip this
+mechanism live via an actual `v13_flags` config read — not built yet, and a
+separate step from `gap_monitor.py`'s own automation, which still needs to
+exist to make that flip itself automatic per A9.
+
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
 this session found `.94`'s deployed directory was never a git repo at all (pure

@@ -1239,6 +1239,14 @@ class EnginePipeline:
                 if decision.get("shadow_changed"):
                     self._log_shadow_divergence(decision, dev_id, hostname, client_ip)
 
+                # V13 SHADOW (Documentation/V13_REMAINING_WORK.md, first mechanism wired
+                # into .94's live pipeline -- HEE review #7/Roadmap #8): same log-only,
+                # never-alters-`decision` pattern as the Gap-1 shadow check just above,
+                # a SEPARATE divergence log so it doesn't interleave with/confuse that
+                # unrelated experiment (freshness, not independence-family grouping).
+                if decision.get("v13_independence_changed"):
+                    self._log_v13_independence_divergence(decision, dev_id, hostname, client_ip)
+
                 # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                 # Deliberately gated on the HEE's OWN verdict for THIS cycle being
                 # BENIGN/ANOMALOUS -- never records a port/ASN/domain the system itself
@@ -2622,6 +2630,33 @@ class EnginePipeline:
                 f.write(json.dumps(entry) + "\n")
         except Exception as e:
             LOGGER.debug("Failed to write shadow_decisions.jsonl: %s", e)
+
+    def _log_v13_independence_divergence(self, decision: dict, dev_id: str, hostname: str, client_ip: str) -> None:
+        """V13 SHADOW (Documentation/V13_REMAINING_WORK.md): append-only, best-effort log
+        of every cycle where decision_engine.py's v13-independence-family shadow
+        computation would have produced a different verdict than the live one (which
+        still uses independence_group, the ad-hoc per-detector field this whole v13
+        effort exists to replace with a centralized, evidence-type-keyed mapping). Never
+        raises -- a logging failure here must not affect real detection/containment in
+        any way, same guarantee as _log_shadow_divergence above. Read
+        state/v13_independence_divergences.jsonl after real observation time to decide
+        whether this is safe to flip live -- feeds src/v13/ops/gap_monitor.py (not yet
+        built) once enough data has accumulated to document a real bar."""
+        try:
+            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "v13_independence_divergences.jsonl"
+            entry = {
+                "ts": time.time(), "device_id": dev_id, "hostname": hostname, "client_ip": client_ip,
+                "old_state": decision.get("state"), "old_explanation": decision.get("explanation"),
+                "old_decision_path": decision.get("decision_path"),
+                "new_state": decision.get("v13_state"), "new_explanation": decision.get("v13_explanation"),
+                "new_decision_path": decision.get("v13_decision_path"),
+                "independent_sources": decision.get("independent_sources"),
+                "v13_num_independent_sources": decision.get("v13_num_independent_sources"),
+            }
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            LOGGER.debug("Failed to write v13_independence_divergences.jsonl: %s", e)
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """

@@ -131,6 +131,26 @@ class DecisionEngine:
         independence_groups = {e.independence_group for e in attack_evidence if e.independence_group}
         num_independent_sources = len(independence_groups)
 
+        # V13 SHADOW (Documentation/V13_REMAINING_WORK.md, "first mechanism to wire" --
+        # HEE review finding #7 / Roadmap #8, "genuine per-hypothesis evidence
+        # independence"). independence_group above is set ad-hoc, per detector, at
+        # evidence-creation time (the VERSION 10 comment above already documents this
+        # exact conflation as a past bug source: arp_sweep's "lan_recon" group was once
+        # silently excluded because nobody had centrally registered it). v13's
+        # INDEPENDENCE_FAMILY_MAP (src/v13/hypotheses/independence.py) is a centralized,
+        # evidence-TYPE-keyed registry instead -- e.g. it splits JA3/JA4 + zeek_notice +
+        # exfiltration + beaconing into 3 separate families where ATTACK_EVIDENCE_FAMILIES
+        # groups them all as one ("zeek_network"). This block reuses the SAME
+        # already-filtered `attack_evidence` list above (identical Gap-64 domain-linkage
+        # stripping) and swaps ONLY the family-grouping function, isolating this one
+        # variable exactly the way the fresh_arp_spoof/fresh_geofence shadow block below
+        # isolates freshness alone. Purely additive: does not change
+        # num_independent_sources, attack_evidence, or anything the live decision path
+        # below reads.
+        from v13.hypotheses.independence import family_for as _v13_family_for
+        v13_independence_groups = {_v13_family_for(e.type) for e in attack_evidence}
+        v13_num_independent_sources = len(v13_independence_groups)
+
         # PHASE 8 FIX: a human-readable record of what this evaluation actually checked, in
         # the order it checked it, built alongside the decision itself (not reconstructed
         # after the fact from the final numbers) so a Telegram alert can show the real
@@ -477,6 +497,54 @@ class DecisionEngine:
             )
         shadow_changed = shadow_decision_path != decision_path or shadow_explanation != explanation
 
+        # V13 SHADOW, continued (v13_num_independent_sources computed above): re-resolves
+        # ONLY the 3 branches whose outcome actually reads num_independent_sources
+        # (geofence corroboration, tier-5 corroboration, hypothesis HIGH-vs-SUSPICIOUS) --
+        # every other live branch (hard-stops from honeypot/arp/confirmed-exploit,
+        # tier5_confirmed, tier4_unconfirmed, ml_anomaly, benign) never reads it at all,
+        # so the shadow verdict for those is identical to live BY CONSTRUCTION (the
+        # initial assignment below), not by re-deriving the live tree's full elif
+        # priority order a third time -- keying off the ALREADY-COMPUTED decision_path/
+        # explanation (which already correctly encode which branch fired, accounting for
+        # every higher-priority hard-stop) is strictly safer than hand-reconstructing
+        # that priority chain in parallel and risking it silently drifting out of sync,
+        # the exact failure mode the fresh_geofence shadow block's own comment above
+        # warns against ("must NOT diverge from live for a completely different,
+        # unrelated reason"). decision_path=="hard_stop" is shared by honeypot/arp_spoof/
+        # confirmed_exploit/geofence, so the geofence case is disambiguated by explanation
+        # text (the only "hard_stop" explanation containing "Geofencing").
+        v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+            state, explanation, decision_path, threat_confidence
+        )
+        if decision_path in ("hard_stop", "geofence_uncorroborated") and "Geofencing" in explanation:
+            if v13_num_independent_sources >= 1 and attack_score > benign_score:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop", 0.95
+                )
+            else:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.HIGH, "Geofencing Policy Violation (Uncorroborated)", "geofence_uncorroborated", 0.70
+                )
+        elif decision_path in ("tier5_corroborated", "tier5_uncorroborated"):
+            if v13_num_independent_sources >= 1 and attack_score > benign_score:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.CRITICAL, "Corroborated Reputation Signal", "tier5_corroborated", 0.85
+                )
+            else:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)", "tier5_uncorroborated", 0.45
+                )
+        elif decision_path in ("hypothesis_high", "hypothesis_suspicious"):
+            if v13_num_independent_sources >= 2 and attack_score >= 3.0:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.HIGH, hyp_results["attack"]["name"], "hypothesis_high", 0.85
+                )
+            else:
+                v13_state, v13_explanation, v13_decision_path, v13_threat_confidence = (
+                    DecisionState.SUSPICIOUS, hyp_results["attack"]["name"], "hypothesis_suspicious", 0.40
+                )
+        v13_independence_changed = v13_decision_path != decision_path or v13_explanation != explanation
+
         return {
             "state": state,
             "action": action,
@@ -492,4 +560,9 @@ class DecisionEngine:
             "shadow_explanation": shadow_explanation,
             "shadow_decision_path": shadow_decision_path,
             "shadow_changed": shadow_changed,
+            "v13_num_independent_sources": v13_num_independent_sources,
+            "v13_state": v13_state,
+            "v13_explanation": v13_explanation,
+            "v13_decision_path": v13_decision_path,
+            "v13_independence_changed": v13_independence_changed,
         }
