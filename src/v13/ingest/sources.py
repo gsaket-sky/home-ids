@@ -77,8 +77,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 from collections import deque
 
 from core.state import BoundedSet, RollingWindow
+from intelligence.reputation.classifier import ReputationClassifier
+from v13.decision.engine import DecisionEngine
+from v13.graph.store import GraphStore
+from v13.graph.window import RollingWindowView
 from extractors.dns_features import FeatureExtractor
 from v13.evidence.ingest import convert_list
+from v13.evidence.model import NO_DESTINATION
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
 
 LOGGER = logging.getLogger("v13.ingest.sources")
@@ -549,3 +554,92 @@ class PiHoleFeatureStore:
         for domain in state.rolling.domains.keys():
             state.seen_domains.add(domain)
         return features
+
+
+# --- A7: v13 decision computation (prerequisite for the automated flip monitor) ---
+#
+# HONEST GAP, found while wiring this (2026-09-06): the plan's own "Automated
+# incremental flips" section describes gap_monitor.py evaluating DIVERGENCE
+# DATA between v13 and v-current -- but until now, nothing on .19 ever
+# computed a v13 DECISION at all; run_detection_cycle() (above) only ever
+# produced and stored EVIDENCE. There was no verdict to diverge from anything.
+# This section closes that gap using v13's own already-built, already-tested
+# HypothesisEngine + DecisionEngine (Phase 3) -- genuinely new WIRING, not new
+# detection logic.
+#
+# Reputation is real but deliberately partial: ReputationClassifier
+# (intelligence/reputation/classifier.py) is reused UNCHANGED, but called with
+# every external score (vt_score/ti_score/abuse_score) at its zero default --
+# no live VirusTotal/AbuseIPDB/ThreatIntel API wiring exists on .19. This means
+# tier can reach 0/1/2/3 (static known-domain/ASN-based classification, all
+# real) but never 4/5 (which need a real external signal) from this path alone
+# -- a real, bounded limitation, not fake data standing in for real data.
+
+
+def compute_decision(store: GraphStore, device_id: str,
+                       decision_engine: Optional[DecisionEngine] = None,
+                       reputation_classifier: Optional[ReputationClassifier] = None,
+                       window_seconds: float = RollingWindowView.LONG_WINDOW_SECONDS,
+                       now: Optional[float] = None,
+                       only_persist_if_changed_from: Optional[Tuple[str, str]] = None
+                       ) -> Optional[Tuple[dict, Optional[str]]]:
+    """Queries this device's accumulated graph evidence (a fresh snapshot each
+    call, via RollingWindowView -- never a mutated cross-cycle object, matching
+    every other v13 module's pure-per-cycle evaluation model), classifies a
+    representative destination's reputation, and runs the real DecisionEngine.
+    Returns (decision_dict, decision_id), or None if this device has no
+    evidence in the window yet (nothing to decide).
+
+    only_persist_if_changed_from, if given, is the caller's own
+    (state, decision_path) from this device's last PERSISTED decision -- if
+    the freshly-computed decision matches it exactly, nothing is written to
+    the decisions table and decision_id comes back None (the decision is
+    still fully computed and returned either way, so a caller re-evaluating
+    every cycle -- matching v-current's own re-evaluate-every-poll pattern --
+    doesn't have to call this twice). Without it, every call persists
+    unconditionally, matching this function's original behavior. This exists
+    because a live daemon calling compute_decision() every poll interval for
+    every active device would otherwise write a near-identical row every
+    cycle forever, turning the decisions table (meant as a bounded audit
+    trail for Phase 7's divergence comparator) into an unbounded, mostly-
+    redundant log -- the same "don't re-alert on unchanged state" discipline
+    this codebase already applies elsewhere (e.g. reset_client() after an
+    alert)."""
+    now = now if now is not None else time.time()
+    decision_engine = decision_engine or DecisionEngine()
+    reputation_classifier = reputation_classifier or ReputationClassifier()
+
+    window = RollingWindowView(store)
+    evidence_list = window.evidence_in_window(device_id, window_seconds, now=now)
+    if not evidence_list:
+        return None
+
+    # The most recently-observed real destination stands in for "the
+    # destination this cycle's decision is about" -- matches this codebase's
+    # own established preference (pipeline.py's target-selection logic, and
+    # v13's own evidence/ingest.py fallback_context) for "most recent known
+    # attribution" when no single canonical target is otherwise obvious.
+    target_domain = ""
+    for ev in reversed(evidence_list):
+        if ev.destination_id != NO_DESTINATION:
+            target_domain = ev.destination_id
+            break
+    rep = reputation_classifier.classify(target_domain)
+
+    decision = decision_engine.evaluate(evidence_list, rep, now=now)
+
+    if only_persist_if_changed_from is not None:
+        current_key = (decision["state"], decision["decision_path"])
+        if current_key == only_persist_if_changed_from:
+            return decision, None
+
+    decision_id = store.insert_decision(
+        device_id=device_id,
+        timestamp=now,
+        state=decision["state"],
+        decision_path=decision["decision_path"],
+        confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
+        risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
+        raw_payload=decision,
+    )
+    return decision, decision_id

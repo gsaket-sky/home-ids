@@ -9,8 +9,10 @@ Every Hypothesis.evaluate() (Phase 3) still takes a fresh per-cycle snapshot fro
 this store via plain queries -- nothing here holds a mutated in-memory graph object
 across cycles, preserving the pure-evaluation model HEE_ROADMAP.md said not to break.
 """
+import json
 import sqlite3
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -137,6 +139,37 @@ class GraphStore:
         if ev.destination_id != NO_DESTINATION:
             self.add_edge("evidence", ev.evidence_id, "destination", ev.destination_id, "targets", ev.timestamp)
         self._conn.commit()
+
+    def insert_decision(self, device_id: str, timestamp: float, state: str,
+                          decision_path: str, confidence: float, risk_score: float,
+                          winning_hypothesis_id: Optional[str] = None,
+                          mechanism_flags: Optional[Dict[str, str]] = None,
+                          raw_payload: Optional[Dict[str, Any]] = None) -> str:
+        # winning_hypothesis_id references the `hypotheses` table's own versioned
+        # registry (schema.sql) -- not yet populated by any v13 module (a
+        # separate, not-yet-built concern: registering/versioning hypothesis
+        # definitions as graph rows). Left None here deliberately rather than
+        # inventing a fake row to satisfy the FK; the winning hypothesis NAME is
+        # still fully recoverable from raw_payload_json's own "hypotheses" key.
+        """Writes one row to schema.sql's `decisions` table -- the audit trail
+        Phase 7's divergence comparator reads (raw_payload_json carries the full
+        DecisionEngine.evaluate() return dict for that purpose, per schema.sql's
+        own column comment). mechanism_flags records which mechanisms were
+        shadow vs. live AT DECISION TIME, so a later divergence found while a
+        mechanism was still shadow-only is distinguishable from one found after
+        it flipped live -- schema.sql's own stated reason for this column,
+        confirmed via direct read, not guessed. Returns the generated decision_id."""
+        decision_id = uuid.uuid4().hex
+        self.upsert_device(device_id, timestamp=timestamp)
+        self._conn.execute(
+            "INSERT INTO decisions (decision_id, device_id, timestamp, winning_hypothesis_id, "
+            "state, decision_path, confidence, risk_score, mechanism_flags_json, raw_payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (decision_id, device_id, timestamp, winning_hypothesis_id, state, decision_path,
+             confidence, risk_score, json.dumps(mechanism_flags or {}), json.dumps(raw_payload or {})),
+        )
+        self._conn.commit()
+        return decision_id
 
     def get_evidence_for_device(self, device_id: str, since: Optional[float] = None,
                                   resolve_merges: bool = True) -> List[Evidence]:

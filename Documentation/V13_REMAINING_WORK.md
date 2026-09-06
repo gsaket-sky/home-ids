@@ -130,6 +130,80 @@ at all — not connected to `sources.py`'s current Zeek-tailing scope. The
 tested) simply receives no evidence from this path today; it isn't broken,
 it's unfed.
 
+### A7. ~~v13 never computed a DECISION, only evidence~~ — DONE (2026-09-06)
+**Resolved**: found while starting to build the automated flip monitor
+(`gap_monitor.py`) — its whole premise is evaluating DIVERGENCE between v13's
+decisions and v-current's, but until now nothing on `.19` ever computed a v13
+decision at all; `run_detection_cycle()` only ever produced and stored
+evidence. `src/v13/ingest/sources.py` gained `compute_decision()`, wiring
+v13's own already-built `HypothesisEngine`/`DecisionEngine` (Phase 3) against
+a fresh `RollingWindowView` query of the device's accumulated graph evidence,
+classifying a representative destination via v-current's real
+`ReputationClassifier` (reused unchanged — real tiers 0-3 from static
+known-domain/ASN lists, but never 4/5, since no live VirusTotal/AbuseIPDB/
+ThreatIntel API scoring is wired on `.19`, a real bounded limitation, not fake
+data). `GraphStore` gained `insert_decision()`, writing to schema.sql's
+already-designed-but-previously-unused `decisions` table. Wired into
+`daemon.py`'s `_run_cycle()` with a dedup guard (`only_persist_if_changed_from`)
+so a device's unchanging verdict isn't re-persisted every 2-second poll
+forever — only a genuine state transition writes a new row, matching this
+codebase's own "don't re-alert on unchanged state" discipline. 24 new tests
+(8 in `test_v13_graph_store.py`, 9 in `test_v13_ingest_sources.py` including a
+spy-based check that the correct destination gets classified, 3 in
+`test_v13_ingest_daemon.py` including the dedup behavior end-to-end). All 15+
+v13 test files re-confirmed passing.
+
+### A8. `divergence_log.py` (the comparator) is not built — real infra needed first
+**What**: the plan's `gap_monitor.py` is supposed to evaluate DIVERGENCE DATA
+between v13's decisions (now real, A7) and v-current's real decisions (from
+`.94`'s `state/alerts.json`, confirmed this session: real path
+`/home/<deploy-user>/myscripts/home-ids/SOC/state/alerts.json`, JSONL, one
+record per line, ~100MB/35,800 lines as of 2026-09-06, each carrying
+`incident_id`/`hee_decision_path`/`hee_hypotheses`/`hee_rep_tier` and more).
+Nothing currently correlates the two. `.19` has NO read access to `.94`'s
+`state/` directory at all — the three existing Samba shares
+(`v13-zeek`/`v13-suricata`/`v13-pihole`) deliberately only cover raw sensor
+logs, not `state/`.
+**Why it's open**: building the actual comparator needs a NEW piece of
+cross-host infrastructure (a fourth read-only Samba share exposing
+`alerts.json`, or an equivalent), plus real correlation logic across two
+STRUCTURALLY DIFFERENT decision pipelines (v13's daemon evaluates a narrower
+evidence set — Zeek+Pi-hole only, no ML/GeoIP/CL-AFPE/Ollama-informed
+thresholds — against v-current's full pipeline) — correlating by
+device/timestamp/signature-shape rather than expecting identical inputs to
+produce identical evidence, which they structurally can't. Real, non-trivial
+design work, not a small addition.
+**When**: before `gap_monitor.py` can evaluate anything real. Should also
+settle the actual correlation strategy explicitly (by device_id + time window
++ signature-shape, matching the plan's own stated approach) before writing
+code, not improvised inline.
+
+### A9. The automated flip monitor's PRODUCTION-EDITING step needs re-confirmation
+**What**: the plan's "Automated incremental flips" describes `gap_monitor.py`
+ultimately toggling a `v13_flags.<mechanism>: shadow|live` flag in `.94`'s OWN
+`config.yaml` and reloading `soc.service` — with ZERO per-flip human approval
+(the user's explicit original choice, "fully automatic, notify after the
+fact"). That decision was made before this session discovered that v13 on
+`.19` runs as a fully INDEPENDENT process against its own narrower evidence
+pipeline, not as an in-process shadow hook inside `.94`'s `pipeline.py` the
+way the plan originally envisioned — a materially different architecture than
+what "flip this mechanism live" was designed against. Every other
+`.94`-affecting action this whole effort has taken (deploy key setup, service
+restarts) has gotten explicit human confirmation at the time, never silent
+automation — auto-editing production's live config is a strictly larger risk
+than anything built or run so far.
+**Why it's open**: this is a decision only the user can make, and the
+premise it was originally decided under has changed. Not something to build
+past silently.
+**When**: before writing any code that would let `gap_monitor.py` actually
+edit `.94`'s `config.yaml` or restart `soc.service` — re-confirm with the
+user whether "fully automatic" still applies now that the real architecture
+(independent process, not in-process shadow hook) is known, or whether a
+notify-and-wait-for-approval model fits this specific action better. Building
+`gap_monitor.py`'s EVALUATION logic (reading divergence data, checking it
+against documented bars) doesn't require this decision yet — only the
+ACTUATION step (editing `.94`) does.
+
 ### A4. ~~No auto-deploy mechanism exists between the NAS repo and either box~~ — DONE (2026-09-05)
 **Resolved**: the design evolved from "NAS → .94/.19" to "GitHub → .94/.19" once
 this session found `.94`'s deployed directory was never a git repo at all (pure
@@ -364,10 +438,19 @@ and stable.
 (`dns_dga_burst`, `dns_tunnel_v2`) is now genuinely produced by the live
 daemon, verified end-to-end with a real DNS-tunneling-shaped query.
 
-**Next real blocker**: A6 (Suricata reactive-capture) — a larger,
-separately-scoped initiative (replicating the whole burst-trigger/dispatch
-subsystem, not a log tailer). Everything else in Group A is now closed; the
-parallel run is generating real Zeek- AND DNS-derived comparison data.
+**A7 is also done** (2026-09-06) — v13 now computes real DECISIONS (not just
+evidence) on `.19`, with a dedup guard so unchanging verdicts don't spam the
+audit trail.
+
+**Next real blockers, in order**: A8 (the divergence comparator — needs a new
+Samba share exposing `.94`'s `alerts.json`, plus real cross-pipeline
+correlation logic, before it can produce any real divergence data) and A9 (a
+genuinely open decision, not a build task — whether `gap_monitor.py`'s
+auto-edit-`.94`'s-config step should still be "fully automatic" now that the
+real architecture, an independent process rather than an in-process shadow
+hook, is known). A6 (Suricata reactive-capture) remains a larger,
+separately-scoped initiative, lower priority than A8/A9 for the flip-monitor
+goal specifically.
 
 **Everything else genuinely can wait** — either because it's what the parallel
 run's own data is supposed to answer (Group B), or because it's real,

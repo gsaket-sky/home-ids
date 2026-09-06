@@ -10,6 +10,7 @@ canonical device_id, unlike v-current's discard-on-merge), and retention pruning
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_v13_graph_store.py`
 """
+import json
 import sys
 import tempfile
 import time
@@ -166,6 +167,32 @@ check("get_device_destinations_since excludes pairs before the cutoff",
       ("retro_dev", "retro-dest.com") not in pairs_too_recent_cutoff)
 check("get_device_destinations_since excludes the NO_DESTINATION sentinel",
       not any(dest == NO_DESTINATION for _, dest in store.get_device_destinations_since(0)))
+
+# --- insert_decision (A7 prerequisite: v13 decision computation) ---
+store.upsert_device("decision_dev", timestamp=6_000_000.0)
+decision_id = store.insert_decision(
+    device_id="decision_dev", timestamp=6_000_000.0, state="HIGH",
+    decision_path="hypothesis_high", confidence=0.85, risk_score=7.2,
+    raw_payload={"state": "HIGH", "hypotheses": {"attack": {"name": "EXFILTRATION", "score": 7.2}}},
+)
+check("insert_decision returns a real, non-empty decision_id", bool(decision_id))
+row = store._conn.execute("SELECT * FROM decisions WHERE decision_id = ?", (decision_id,)).fetchone()
+check("insert_decision writes a real row to the decisions table", row is not None)
+check("insert_decision stores state/decision_path/confidence/risk_score as given",
+      row["state"] == "HIGH" and row["decision_path"] == "hypothesis_high"
+      and row["confidence"] == 0.85 and row["risk_score"] == 7.2)
+check("insert_decision stores raw_payload_json as real, parseable JSON",
+      json.loads(row["raw_payload_json"])["hypotheses"]["attack"]["name"] == "EXFILTRATION")
+check("insert_decision defaults mechanism_flags_json to an empty object when not given",
+      json.loads(row["mechanism_flags_json"]) == {})
+check("insert_decision leaves winning_hypothesis_id NULL when not given (no fake FK row invented)",
+      row["winning_hypothesis_id"] is None)
+check("insert_decision auto-upserts the device row if it doesn't already exist",
+      store._conn.execute("SELECT 1 FROM devices WHERE device_id = 'no_prior_device'").fetchone() is None)
+store.insert_decision(device_id="no_prior_device", timestamp=6_000_001.0, state="BENIGN",
+                        decision_path="no_evidence", confidence=0.0, risk_score=0.0)
+check("insert_decision auto-upserts a device that never had a prior row",
+      store._conn.execute("SELECT 1 FROM devices WHERE device_id = 'no_prior_device'").fetchone() is not None)
 
 store.close()
 

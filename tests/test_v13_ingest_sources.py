@@ -372,6 +372,69 @@ blocked_feats = blocked_store.compute_features("192.168.1.61", now=now, window_s
 check("a device with only blocked queries shows blocked_ratio == 1.0", blocked_feats["blocked_ratio"] == 1.0)
 
 
+# --- compute_decision: A7, the flip-monitor prerequisite (real decision computation) ---
+from v13.ingest.sources import compute_decision  # noqa: E402
+from v13.graph.store import GraphStore  # noqa: E402
+from v13.evidence.model import Evidence  # noqa: E402
+from intelligence.reputation.classifier import ReputationVector  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp_path = _PathForSysPath(tmp)
+    decision_store = GraphStore(str(tmp_path / "decisions_test.db"))
+
+    check("compute_decision returns None for a device with no evidence yet (nothing to decide)",
+          compute_decision(decision_store, "no_evidence_device") is None)
+
+    now2 = time.time()
+    decision_store.insert_evidence(Evidence(
+        device_id="dec_dev1", destination_id="192.168.1.61",
+        evidence_type="zeek_notice", independence_family="zeek_network",
+        timestamp=now2 - 100, source="threat_signals", confidence=0.6, value=1.0,
+    ))
+    decision_store.insert_evidence(Evidence(
+        device_id="dec_dev1", destination_id="9.9.9.9",
+        evidence_type="zeek_exfiltration", independence_family="data_transfer_pattern",
+        timestamp=now2, source="threat_signals", confidence=0.9, value=6.0,
+    ))
+    class _SpyReputationClassifier:
+        """Records which domain compute_decision() actually asked it to
+        classify, so target_domain selection can be verified directly rather
+        than inferred indirectly from the final decision."""
+        def __init__(self):
+            self.classified_domains = []
+
+        def classify(self, domain, **kwargs):
+            self.classified_domains.append(domain)
+            return ReputationVector(domain=domain, tier=3)
+
+    spy = _SpyReputationClassifier()
+    result = compute_decision(decision_store, "dec_dev1", reputation_classifier=spy, now=now2)
+    check("compute_decision returns a (decision_dict, decision_id) tuple for a device with real evidence",
+          result is not None and len(result) == 2)
+    decision, decision_id = result
+    check("the returned decision dict has DecisionEngine's real shape (state/decision_path/threat_confidence)",
+          "state" in decision and "decision_path" in decision and "threat_confidence" in decision)
+    check("target_domain is the MOST RECENT real destination (9.9.9.9), not the earlier one (192.168.1.61)",
+          spy.classified_domains == ["9.9.9.9"])
+
+    stored_row = decision_store._conn.execute(
+        "SELECT * FROM decisions WHERE decision_id = ?", (decision_id,)).fetchone()
+    check("compute_decision actually writes the decision to the graph store, not just returns it",
+          stored_row is not None and stored_row["device_id"] == "dec_dev1")
+
+    decision_store.insert_evidence(Evidence(
+        device_id="dec_dev2", destination_id=NO_DESTINATION,
+        evidence_type="zeek_notice", independence_family="zeek_network",
+        timestamp=now2, source="threat_signals", confidence=0.5, value=1.0,
+    ))
+    spy2 = _SpyReputationClassifier()
+    compute_decision(decision_store, "dec_dev2", reputation_classifier=spy2, now=now2)
+    check("a device with evidence but never a real destination classifies an empty domain, not a crash",
+          spy2.classified_domains == [""])
+
+    decision_store.close()
+
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")

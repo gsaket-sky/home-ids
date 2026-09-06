@@ -31,7 +31,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Set
+from typing import Dict, Set, Tuple
 
 import yaml
 
@@ -43,6 +43,7 @@ from intelligence.detectors.threat_signals import ThreatSignalDetector  # noqa: 
 from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from v13.ingest.sources import (  # noqa: E402
     build_zeek_sources, run_detection_cycle, PiHoleLogSource, PiHoleFeatureStore,
+    compute_decision,
 )
 
 LOGGER = logging.getLogger("v13.ingest.daemon")
@@ -99,6 +100,15 @@ class IngestDaemon:
         # different from ZeekLogSource's (event_type, event_dict), not a drop-in.
         self.pihole_source = PiHoleLogSource(pihole_log_path, cursor_dir)
         self.pihole_store = PiHoleFeatureStore()
+        # A7: last PERSISTED (state, decision_path) per device -- see
+        # compute_decision()'s only_persist_if_changed_from docstring for why
+        # this exists (an unbounded per-cycle write otherwise). In-memory only,
+        # NOT re-derived from the graph store's own decisions table on
+        # restart -- a real, small, flagged simplification: the first decision
+        # computed for each device after a daemon restart always persists
+        # once (an acceptable one-time redundant row, not an unbounded-growth
+        # risk, since restarts aren't frequent).
+        self._last_decision_key: Dict[str, Tuple[str, str]] = {}
 
         self._running = True
         self._last_prune = time.time()
@@ -149,6 +159,25 @@ class IngestDaemon:
             for ev in evidence_items:
                 self.store.insert_evidence(ev)
             total_evidence += len(evidence_items)
+
+            # A7: compute a real v13 decision from the device's ACCUMULATED graph
+            # evidence (not just this cycle's fresh items) -- compute_decision()
+            # queries a fresh window each call, matching v13's pure-per-cycle
+            # evaluation model. Every device with ANY evidence in the window gets
+            # re-evaluated every cycle (mirrors v-current's own re-evaluate-every-
+            # poll pattern), but only PERSISTED when the verdict actually changes
+            # -- see compute_decision()'s only_persist_if_changed_from docstring.
+            last_key = self._last_decision_key.get(device_ip)
+            result = compute_decision(self.store, device_ip, now=now,
+                                        only_persist_if_changed_from=last_key)
+            if result is not None:
+                decision, decision_id = result
+                if decision_id is not None:
+                    self._last_decision_key[device_ip] = (decision["state"], decision["decision_path"])
+                    if decision["state"] != "BENIGN":
+                        LOGGER.info("Decision for %s: %s (%s, confidence=%.2f)",
+                                     device_ip, decision["state"], decision["decision_path"],
+                                     decision.get("threat_confidence", 0.0) or 0.0)
 
         if now - self._last_prune >= self.prune_interval:
             deleted = self.store.prune_evidence(older_than_days=self.retention_days, now=now)

@@ -168,6 +168,27 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a real long, high-entropy DNS label lands as dns_tunnel_v2 evidence via the full daemon (A5)",
           len(tunnel_rows) > 0)
 
+    # --- A7: real decision computation, wired into the daemon, with dedup ---
+    decisions_after_first = daemon.store._conn.execute(
+        "SELECT COUNT(*) c FROM decisions WHERE device_id = '192.168.77.71'").fetchone()["c"]
+    check("_run_cycle produces at least one persisted decision for the tunneling device (A7)",
+          decisions_after_first >= 1)
+    check("the tunneling device's decision key is cached for next cycle's dedup check",
+          "192.168.77.71" in daemon._last_decision_key)
+
+    # A second cycle where this device is re-evaluated (a new, unrelated benign
+    # query keeps it in devices_seen) but its cumulative evidence hasn't
+    # meaningfully changed should re-compute the SAME verdict without writing
+    # a second, redundant decision row.
+    with open(pihole_log_path, "a", encoding="utf-8") as f:
+        f.write("Sep  6 00:39:05 dnsmasq[1146]: query[A] harmless-followup.example from 192.168.77.71\n")
+        f.write("Sep  6 00:39:05 dnsmasq[1146]: cached harmless-followup.example is 1.1.1.1\n")
+    daemon._run_cycle()
+    decisions_after_second = daemon.store._conn.execute(
+        "SELECT COUNT(*) c FROM decisions WHERE device_id = '192.168.77.71'").fetchone()["c"]
+    check("an unchanged verdict on a later cycle does NOT write a redundant decision row",
+          decisions_after_second == decisions_after_first)
+
     # --- pruning is time-gated, not run every cycle ---
     last_prune_before = daemon._last_prune
     daemon._run_cycle()
