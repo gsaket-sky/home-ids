@@ -8,6 +8,15 @@ open) directly, since they keep changing after this snapshot. The published
 plan/status artifact is at
 `https://claude.ai/code/artifact/10413936-63b9-4fd6-8793-f4dcfd24f13e`.
 
+**Addendum (same day, after this doc's original snapshot)**: the divergence
+comparator now runs automatically every 15 minutes via a plain crontab entry
+on `.19` (`src/v13/ops/run_gap_check.py`) instead of needing a manual
+invocation — see `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s own entry for full
+detail, including a real cursor-persistence bug found and fixed along the
+way. A live-data snapshot dashboard is published separately at
+`https://claude.ai/code/artifact/a3309d23-2333-41e4-aa17-8b4cb3b38f98`
+(manually refreshed, not auto-live).
+
 ---
 
 ## 1. What this is, in one paragraph
