@@ -40,7 +40,7 @@ from intelligence.hypotheses.evidence import Evidence as V1Evidence  # noqa: E40
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 from core.decision_engine import DecisionEngine as VCurrentDecisionEngine  # noqa: E402
 import v13.ops.live_engine as live_engine  # noqa: E402
-from v13.evidence.model import NO_DESTINATION  # noqa: E402
+from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 
 now = time.time()
 vcurrent_engine = VCurrentDecisionEngine()
@@ -350,10 +350,13 @@ live_engine.configure(_f_graph_db_path)
 _ft0 = 3_000_000.0
 
 
-def _capture_merged(v1_evidence, rep, device_id, now, features=None):
+def _capture_merged(v1_evidence, rep, device_id, now, features=None, device_type=""):
     """Runs evaluate() with a thin wrapper around _v13_engine.evaluate() (same
     pattern as Section E's own _CapturingEngine) and returns the exact merged
-    evidence list the decision engine actually saw for this one call."""
+    evidence list the decision engine actually saw for this one call.
+    device_type defaults to "" (matching every pre-existing call site here
+    unchanged) -- Section H (Release 14, N2) is the first caller to pass a
+    real one, since peer-deviation injection is gated on it being non-empty."""
     captured = []
     orig_engine = live_engine._v13_engine
 
@@ -364,7 +367,8 @@ def _capture_merged(v1_evidence, rep, device_id, now, features=None):
 
     live_engine._v13_engine = _Capture()
     try:
-        live_engine.evaluate(v1_evidence, rep, features=features or {}, device_id=device_id, now=now)
+        live_engine.evaluate(v1_evidence, rep, device_type=device_type, features=features or {},
+                               device_id=device_id, now=now)
     finally:
         live_engine._v13_engine = orig_engine
     return captured[-1]
@@ -553,6 +557,98 @@ check("G3: a bare IP or NO_DESTINATION never produces a real shape key",
       live_engine._dga_shape_key("8.8.8.8") == "" and live_engine._dga_shape_key(NO_DESTINATION) == "")
 check("G3: an empty/None domain never crashes, returns ''",
       live_engine._dga_shape_key("") == "" and live_engine._dga_shape_key(None) == "")
+
+# --- H. Release 14, N2: peer-cohort behavioral baselining ---
+
+_h0 = _ft0 + 700
+
+# Seed two "iot" peers with a normal, LOW distinct-destination count (2 each) --
+# directly via the graph, simulating their own prior evaluation cycles.
+for peer_id, dests in (("p1a_peer1", ["p1.example.com", "p2.example.com"]),
+                        ("p1a_peer2", ["p3.example.com", "p4.example.com"])):
+    _f_store.update_device_metadata(peer_id, {"device_type": "iot"}, timestamp=_h0)
+    for i, d in enumerate(dests):
+        _f_store.insert_evidence(Evidence(device_id=peer_id, destination_id=d, evidence_type="dns_rate",
+                                            independence_family="dns_behavior", timestamp=_h0 + i, source="s",
+                                            value=1.0))
+
+# The device under test: same "iot" type, but a MUCH higher destination count
+# (6 distinct, vs. the peers' average of 2 -- well past the 3x/min-5 bar)
+devN_dest_evidence = []
+for i in range(6):
+    devN_dest_evidence.append(Evidence(device_id="p1a_devN", destination_id=f"anomalous-{i}.example.com",
+                                         evidence_type="dns_rate", independence_family="dns_behavior",
+                                         timestamp=_h0 + 10 + i, source="s", value=1.0))
+    _f_store.insert_evidence(devN_dest_evidence[-1])
+
+devN_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 20, device="p1a_devN",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="anomalous-5.example.com")]
+merged_N1 = _capture_merged(devN_ev, ReputationVector(domain="", tier=3), "p1a_devN", _h0 + 20, device_type="iot")
+peer_dev_hits = [e for e in merged_N1 if e.evidence_type == "peer_deviation"]
+check("H1: a device with a distinct-destination count far above its iot peer "
+      "cohort's average (6 vs. 2) DOES get peer_deviation evidence",
+      len(peer_dev_hits) == 1, f"got {[e.evidence_type for e in merged_N1]}")
+check("H1: the synthetic evidence carries a lower confidence (0.6) -- an honest "
+      "reflection that this is a genuinely new, unvalidated heuristic",
+      peer_dev_hits and peer_dev_hits[0].confidence == 0.6)
+check("H1: the synthetic evidence's features name the real device_type/counts for audit",
+      peer_dev_hits and peer_dev_hits[0].features.get("device_type") == "iot"
+      and peer_dev_hits[0].features.get("peer_count") == 2)
+check("H1: peer_deviation was NEVER written to the graph itself",
+      not any(e.evidence_type == "peer_deviation" for e in _f_store.get_evidence_for_device("p1a_devN")))
+check("H1: this device's OWN device_type was persisted onto its graph metadata "
+      "as a side effect (so it becomes part of future cohort lookups too)",
+      _f_store.get_device_metadata("p1a_devN").get("device_type") == "iot")
+
+# REGRESSION GUARD: a device with a LOW, in-line-with-peers count does NOT trigger
+devO_dest_evidence = [Evidence(device_id="p1a_devO", destination_id="normal.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=_h0 + 30, source="s", value=1.0)]
+_f_store.insert_evidence(devO_dest_evidence[0])
+devO_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 31, device="p1a_devO",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="normal.example.com")]
+merged_O1 = _capture_merged(devO_ev, ReputationVector(domain="", tier=3), "p1a_devO", _h0 + 31, device_type="iot")
+check("H1: REGRESSION GUARD -- a device whose destination count is in line with "
+      "its cohort does NOT get peer_deviation evidence",
+      not any(e.evidence_type == "peer_deviation" for e in merged_O1))
+
+# REGRESSION GUARD: no device_type at all -- never even attempts the lookup
+merged_P1 = _capture_merged(devN_ev, ReputationVector(domain="", tier=3), "p1a_devN", _h0 + 40, device_type="")
+check("H2: REGRESSION GUARD -- an empty device_type never triggers peer_deviation, "
+      "matching every existing (device_type-less) caller's unaffected behavior",
+      not any(e.evidence_type == "peer_deviation" for e in merged_P1))
+
+# REGRESSION GUARD: not enough peers of this type for a meaningful comparison
+devQ_dest_evidence = [Evidence(device_id="p1a_devQ_peer", destination_id="q1.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=_h0 + 50, source="s", value=1.0)]
+_f_store.update_device_metadata("p1a_devQ_peer", {"device_type": "camera"}, timestamp=_h0 + 50)
+_f_store.insert_evidence(devQ_dest_evidence[0])
+for i in range(6):
+    _f_store.insert_evidence(Evidence(device_id="p1a_devQ", destination_id=f"cam-anomalous-{i}.example.com",
+                                        evidence_type="dns_rate", independence_family="dns_behavior",
+                                        timestamp=_h0 + 51 + i, source="s", value=1.0))
+devQ_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 60, device="p1a_devQ",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="cam-anomalous-5.example.com")]
+merged_Q1 = _capture_merged(devQ_ev, ReputationVector(domain="", tier=3), "p1a_devQ", _h0 + 60, device_type="camera")
+check("H2: REGRESSION GUARD -- only 1 real peer of this type (need >=2) means no "
+      "statistically meaningful comparison, so no peer_deviation is injected even "
+      "though the raw destination count is high",
+      not any(e.evidence_type == "peer_deviation" for e in merged_Q1))
+
+# --- H3: fail-safe -- a broken graph read never blocks the real decision ---
+_orig_get_store = live_engine._get_graph_store
+live_engine._get_graph_store = lambda: (_ for _ in ()).throw(RuntimeError("simulated graph failure"))
+try:
+    merged_R1 = _capture_merged(devN_ev, ReputationVector(domain="", tier=3), "p1a_devN", _h0 + 70, device_type="iot")
+finally:
+    live_engine._get_graph_store = _orig_get_store
+check("H3: FAIL-SAFE -- a broken graph read for peer-deviation never raises out of "
+      "evaluate(), degrading to no synthetic peer_deviation evidence this cycle",
+      not any(e.evidence_type == "peer_deviation" for e in merged_R1))
 
 _f_store.close()
 

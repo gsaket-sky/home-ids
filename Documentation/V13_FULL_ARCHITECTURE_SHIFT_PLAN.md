@@ -242,6 +242,19 @@ Everything below is genuinely new scope, not v13 cleanup. Same tracked-checklist
 discipline as Part 3 above: what, why it was cut/deferred, what completion
 requires, checkbox.
 
+> ## 🏁 Release 14 is COMPLETE (2026-09-07)
+>
+> Every item in this plan — Workstreams 0 through 6, plus N1 through N5 (N5
+> deliberately reconfirmed deferred; W4-4/N6 deliberately gated on Group B2's own
+> open validation question) — is now built, tested, committed, and pushed. Two
+> real bugs found and fixed along the way that weren't in the original scope at
+> all (the ML retrain/inference path split, and Suricata's 100%-timeout-rate
+> `--runmode=single` bug). **Only pending work is on `.94` itself** — the manual
+> action list in Part 2a, blocked by the auto-mode classifier on every automated
+> SSH write attempt this session — and the CL-AFPE live flip (W2-3), which is
+> correctly gated on real production data accumulating, not on more building.
+> See the artifact for the full item-by-item trackable checklist.
+
 ### Workstream 0 — Fix confirmed bugs first (not scope cuts, block trustworthy signal for everything below)
 
 - [x] **P0-1. Confirm v13 ops-job scheduling status directly on `.94`.** DONE
@@ -529,9 +542,34 @@ existing that nobody has built yet.
   `test_v13_graph_store.py`), including a merged-orphan-history check (looking
   up either the orphan or canonical id transparently returns the same full
   history).
-- [ ] **N2. Peer-cohort behavioral baselining.** Ongoing "does this device deviate
-  from similar devices" comparison, generalizing the cross-device query mechanism
-  Workstream 4/`CoordinatedTargetingHypothesis` already proves out.
+- [x] **N2. Peer-cohort behavioral baselining.** DONE 2026-09-07 — the LAST item
+  in this entire plan. Asked explicitly first: live detection signal vs.
+  reporting-only vs. skip, since this is the one N-item that's a genuinely NEW,
+  unvalidated anomaly heuristic rather than a query surface (N1) or a widened,
+  already-established correlation concept (N4). User chose the live signal.
+  Cohort = `device_type` (already computed, now also persisted onto
+  `device_metadata` as a side effect of evaluation — the cohort self-completes
+  over time, no backfill job needed). Metric = distinct-destination count over
+  a 7-day window (cheap, needs no new evidence field, a real anomaly axis for
+  many device classes — e.g. most IoT devices talk to a small, stable
+  destination set). New `GraphStore.get_devices_with_metadata_value()` +
+  `get_distinct_destination_count()`; `live_engine.py`'s
+  `_inject_peer_deviation_evidence()` (own injection call, not folded into
+  `_inject_graph_derived_evidence()`, precisely because it's a different risk
+  category) requires ≥2 real peers (a statistically meaningless comparison
+  otherwise) and both a ≥3x multiplier AND a ≥5 absolute floor (avoids
+  flagging trivial small-number swings) — first-pass, explicitly **not
+  empirically tuned**, same honesty framing as `INDEPENDENCE_FAMILY_MAP`. New
+  `PeerDeviationHypothesis`, deliberately capped at a SUSPICIOUS ceiling (3.0)
+  on its own — reflecting the lower confidence (0.6 vs. 1.0 for established
+  signals) explicitly rather than silently trusting an unvalidated heuristic;
+  reaching HIGH still requires a second, independent, corroborating family
+  (the decision engine's own ≥2-independent-source gate already enforces this
+  structurally, no extra code needed). 20 new tests across
+  `test_v13_graph_store.py`/`test_v13_hypotheses_engine.py`/
+  `test_v13_live_engine.py` (Section H — including a fail-safe and both
+  not-enough-peers and no-device_type regression guards). Full v13 suite +
+  `test_v13_integration.py` re-confirmed clean.
 - [x] **N3. Decision replay / regression testing harness.** DONE 2026-09-07. New
   `src/v13/ops/decision_replay.py` (manual/CI-style diagnostic, not a scheduled
   job): `get_decision_evidence()` resolves a historical decision's REAL

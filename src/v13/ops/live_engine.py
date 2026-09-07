@@ -442,6 +442,74 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
     return synthetic
 
 
+# Release 14, N2 tuning constants -- FIRST-PASS, NOT EMPIRICALLY TUNED against
+# this network's own real peer variance (same honest-status framing this
+# project's own INDEPENDENCE_FAMILY_MAP already uses for a similarly
+# unvalidated number). The divergence/false-positive data this signal itself
+# produces once live is what should validate or refute these, not a claim made
+# up front.
+_PEER_DEVIATION_WINDOW_SECONDS = 7 * 86400  # a week -- stable enough for a baseline, current enough to matter
+_PEER_DEVIATION_MIN_PEERS = 2  # need at least 2 OTHER same-type devices for a statistically meaningful average
+_PEER_DEVIATION_MULTIPLIER = 3.0  # this device's own count must be >= 3x its cohort's average
+_PEER_DEVIATION_MIN_ABSOLUTE_COUNT = 5  # avoid flagging trivial small-number swings (e.g. 1 -> 4 is "4x" but meaningless)
+
+
+def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float) -> List[Evidence]:
+    """Release 14, net-new capability N2: "does this device deviate from
+    similar devices" -- groups devices by device_type (already computed by
+    v-current's own identity/pipeline code, passed straight through here) and
+    compares THIS device's own distinct-destination count (the last 7 days)
+    against its cohort's average. Persists device_type onto this device's own
+    graph metadata as a side effect (best-effort, mirrors how trust-anchor MAC
+    learning already persists onto device_metadata) so get_devices_with_
+    metadata_value() has something to group on -- the cohort naturally gets
+    more complete as more devices are evaluated over time, no separate backfill
+    job needed.
+
+    HONEST STATUS, not hidden: this is a genuinely NEW anomaly heuristic, unlike
+    coordinated_targeting/fingerprint_campaign/dga_seed_campaign (all reuse
+    well-established, low-false-positive correlation concepts) -- real cohort
+    variance (two very different real-world usage patterns sharing one
+    device_type) could produce a real false positive with no live tuning data
+    yet. PeerDeviationHypothesis (hypotheses/engine.py) is deliberately capped
+    at a SUSPICIOUS ceiling on its own, never independently reaching HIGH,
+    reflecting that lower confidence explicitly rather than silently trusting
+    an unvalidated number the way an established signal would be.
+
+    Best-effort, matching every other graph read in this module: any failure
+    degrades to 'no synthetic evidence this cycle' and returns [], never blocks
+    the real decision."""
+    if not device_type:
+        return []
+    try:
+        store = _get_graph_store()
+        store.update_device_metadata(device_id, {"device_type": device_type}, timestamp=ts)
+        peers = [d for d in store.get_devices_with_metadata_value("device_type", device_type) if d != device_id]
+        if len(peers) < _PEER_DEVIATION_MIN_PEERS:
+            return []
+        since = ts - _PEER_DEVIATION_WINDOW_SECONDS
+        my_count = store.get_distinct_destination_count(device_id, since)
+        if my_count < _PEER_DEVIATION_MIN_ABSOLUTE_COUNT:
+            return []
+        peer_counts = [store.get_distinct_destination_count(p, since) for p in peers]
+        peer_avg = sum(peer_counts) / len(peer_counts)
+        if peer_avg > 0 and my_count >= peer_avg * _PEER_DEVIATION_MULTIPLIER:
+            return [Evidence(
+                device_id=device_id, destination_id=NO_DESTINATION, evidence_type="peer_deviation",
+                independence_family="peer_cohort_deviation", timestamp=ts,
+                source="v13_live_engine", confidence=0.6, value=float(my_count),
+                provenance=f"v13_live_engine:peer_deviation:{device_type}",
+                features={"device_type": device_type, "my_count": my_count,
+                          "peer_avg": round(peer_avg, 1), "peer_count": len(peers)},
+            )]
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to compute peer-cohort deviation for device %r (type=%r), deciding "
+            "without it this cycle: %s", device_id, device_type, e,
+        )
+    return []
+
+
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
              is_safe: bool = False, fallback_evaluate=None,
@@ -475,6 +543,15 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # never reach fresh_v2 (the graph-write path).
             fresh_destinations = {ev.destination_id for ev in fresh_v2}
             merged_v2 = merged_v2 + _inject_graph_derived_evidence(device_id, fresh_destinations, ts, fresh_v2)
+
+            # Release 14, N2: peer-cohort behavioral baselining -- a genuinely NEW,
+            # unvalidated heuristic (unlike coordinated_targeting/fingerprint_campaign/
+            # dga_seed_campaign, which all reuse well-established, low-false-positive
+            # correlation concepts), so kept as its own separate injection call rather
+            # than folded into _inject_graph_derived_evidence() above. See
+            # _inject_peer_deviation_evidence()'s own docstring for the honest-status
+            # framing and why PeerDeviationHypothesis is deliberately capped low.
+            merged_v2 = merged_v2 + _inject_peer_deviation_evidence(device_id, device_type, ts)
 
         decision = _v13_engine.evaluate(
             merged_v2, rep_vector, device_type=device_type,

@@ -597,6 +597,51 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         return score
 
 
+class PeerDeviationHypothesis(Hypothesis):
+    """Release 14, net-new capability N2 -- a genuinely new detection
+    capability answering "does this device deviate from similar devices,"
+    generalizing the SAME cross-device-query mechanism Phase 1a/N4 already
+    proved out to a peer-COMPARISON question rather than a peer-CORROBORATION
+    one. `peer_deviation` evidence is synthesized per-cycle by
+    v13/ops/live_engine.py's _inject_peer_deviation_evidence() from a
+    device_type-grouped distinct-destination-count comparison, never written
+    back to the graph itself (derived context, same principle as every other
+    Phase 1a/N4 synthetic signal).
+
+    HONEST STATUS, not hidden: unlike coordinated_targeting/fingerprint_
+    campaign/dga_seed_campaign (all reuse well-established, low-false-positive
+    correlation concepts), this is a genuinely NEW, unvalidated anomaly
+    heuristic -- real cohort variance could produce a real false positive with
+    no live tuning data yet. Deliberately capped at a SUSPICIOUS ceiling (3.0)
+    on its own -- this signal alone should prompt a closer look via
+    corroboration with something else (the decision engine's own >=2-
+    independent-source bar for HIGH already enforces that structurally), never
+    an autonomous escalation to HIGH by itself the way an established signal
+    can reach."""
+    RELEVANT_EVIDENCE_TYPES = frozenset({"peer_deviation"})
+
+    def __init__(self):
+        super().__init__("PEER_COHORT_DEVIATION")
+
+    def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
+        self._reset_eval_state()
+        hits = [e for e in ev_store if e.evidence_type == "peer_deviation"]
+        self.required_satisfied = bool(hits)
+        if not self.required_satisfied:
+            return 0.0
+        best = max(e.effective_weight() for e in hits)
+        if rep_vector.tier in (1, 2):
+            self.contradicting_score += 1.0
+        if best >= 0.5 and self.contradicting_score == 0:
+            return 3.0
+        return 2.0
+
+
+HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.update({
+    "PEER_COHORT_DEVIATION": PeerDeviationHypothesis.RELEVANT_EVIDENCE_TYPES,
+})
+
+
 class HypothesisEngine:
     def __init__(self):
         self.attack_hypotheses: List[Hypothesis] = [
@@ -604,7 +649,7 @@ class HypothesisEngine:
             DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
             DNSEvasionHypothesis(), SuricataSignatureHypothesis(),
-            CoordinatedTargetingHypothesis(),
+            CoordinatedTargetingHypothesis(), PeerDeviationHypothesis(),
         ]
         self.benign_hypotheses: List[Hypothesis] = [
             AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis(),

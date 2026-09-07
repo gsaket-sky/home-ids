@@ -373,6 +373,43 @@ class GraphStore:
         ).fetchall()
         return [Evidence.from_row(dict(r)) for r in rows]
 
+    def get_devices_with_metadata_value(self, key: str, value: Any) -> List[str]:
+        """Release 14, N2 (peer-cohort behavioral baselining): all device_ids
+        whose metadata_json[key] == value -- a full table scan, parsed in
+        Python rather than a SQLite json_extract() query, deliberately, so this
+        doesn't depend on the JSON1 extension being available in every
+        deployment's SQLite build (the same reasoning every other v13 metadata
+        read in this module already applies). Device counts are small (tens,
+        not thousands) on any real deployment this project targets, so a full
+        scan is cheap -- this is a peer-cohort lookup run once per decision
+        cycle per device, not a hot inner loop."""
+        rows = self._conn.execute("SELECT device_id, metadata_json FROM devices").fetchall()
+        out = []
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+            except (TypeError, ValueError):
+                continue
+            if meta.get(key) == value:
+                out.append(r["device_id"])
+        return out
+
+    def get_distinct_destination_count(self, device_id: str, since: float) -> int:
+        """Release 14, N2: the behavioral metric peer-cohort baselining compares
+        a device against its cohort on -- how many DISTINCT destinations this
+        device has touched since `since`. Chosen because it's cheap (one
+        indexed COUNT DISTINCT), needs no new evidence field, and is a
+        genuinely meaningful anomaly axis for many device classes (e.g. most
+        IoT devices talk to a small, stable set of cloud endpoints; a sudden
+        jump in destination diversity is a real behavioral change worth a
+        peer comparison, independent of whether any single destination looks
+        suspicious on its own)."""
+        row = self._conn.execute(
+            "SELECT COUNT(DISTINCT destination_id) as c FROM evidence WHERE device_id = ? AND timestamp >= ?",
+            (device_id, since),
+        ).fetchone()
+        return int(row["c"]) if row and row["c"] is not None else 0
+
     def set_destination_reputation(self, destination_id: str, tier: int,
                                      timestamp: Optional[float] = None) -> None:
         """Writes a live reputation-tier cache onto the shared `destinations` row

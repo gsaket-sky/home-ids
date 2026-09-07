@@ -126,6 +126,16 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "fingerprint_campaign": "cross_device_correlation",
     "dga_seed_campaign": "cross_device_correlation",
 
+    # Release 14, N2 -- a genuinely distinct vantage point from cross_device_
+    # correlation above: THIS device's own behavior diverging from its peer
+    # cohort's norm, not another device corroborating a shared observation.
+    # Counts toward independent-source corroboration like any other real
+    # attack-shaped signal (never added to NON_ATTACK_FAMILIES) -- but
+    # PeerDeviationHypothesis itself is deliberately capped low, so this signal
+    # alone still can't reach HIGH without a second, different family
+    # corroborating it (the decision engine's own >=2-independent-source gate).
+    "peer_deviation": "peer_cohort_deviation",
+
     # Also Phase 1a: "this destination has never been contacted before" is a fact
     # ABOUT an existing observation (novelty), not itself an independent behavioral
     # signal the way a genuinely separate sensor is -- deliberately placed in

@@ -31,7 +31,7 @@ from v13.hypotheses.engine import (  # noqa: E402
     HypothesisEngine, DNSTunnelingHypothesis, NetworkIntrusionHypothesis,
     ConnectionAbuseHypothesis, DNSEvasionHypothesis, DeviceProfileBenignHypothesis,
     DGAHypothesis, ExfiltrationHypothesis, BeaconingHypothesis, DNSTunnelingV2Hypothesis,
-    CoordinatedTargetingHypothesis, compute_freshness, score_evidence,
+    CoordinatedTargetingHypothesis, PeerDeviationHypothesis, compute_freshness, score_evidence,
 )
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 
@@ -307,6 +307,33 @@ check("N4: coordinated_targeting and fingerprint_campaign co-occurring both coun
       "as hits (best-effective_weight/total_devices take the max across all three "
       "evidence types, not just one)",
       h.required_satisfied and score_mixed >= 3.0)
+
+# --- Release 14, N2: PeerDeviationHypothesis -- a genuinely new, deliberately capped signal ---
+h2 = PeerDeviationHypothesis()
+score_no_dev = h2.evaluate(score_evidence([ev("dns_rate", 10)], now=NOW), rep(3))
+check("N2: PeerDeviationHypothesis requires its own peer_deviation evidence -- "
+      "unrelated evidence types never satisfy it",
+      score_no_dev == 0.0 and not h2.required_satisfied)
+
+h2 = PeerDeviationHypothesis()
+score_dev = h2.evaluate(score_evidence([ev("peer_deviation", 15.0, confidence=0.6)], now=NOW), rep(3))
+check("N2: a genuine peer_deviation hit reaches SUSPICIOUS (3.0)",
+      h2.required_satisfied and score_dev == 3.0)
+
+h2 = PeerDeviationHypothesis()
+score_dev_contradicted = h2.evaluate(
+    score_evidence([ev("peer_deviation", 15.0, confidence=0.6)], now=NOW), rep(1),  # trusted destination
+)
+check("N2: a trusted-tier context contradicts peer_deviation, same "
+      "contradicting-evidence pattern every other hypothesis uses",
+      score_dev_contradicted == 2.0)
+
+check("N2: PeerDeviationHypothesis is capped at SUSPICIOUS (3.0) even with a "
+      "very high effective_weight -- deliberately never reaches HIGH on its own, "
+      "unlike an established signal such as coordinated_targeting",
+      PeerDeviationHypothesis().evaluate(
+          score_evidence([ev("peer_deviation", 50.0, confidence=1.0)], now=NOW), rep(3),
+      ) == 3.0)
 
 # --- HypothesisEngine.evaluate_all(): winner selection ---
 engine = HypothesisEngine()

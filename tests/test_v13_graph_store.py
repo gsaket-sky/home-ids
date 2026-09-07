@@ -454,6 +454,39 @@ check("get_evidence_by_type_since returns REAL Evidence objects with their own "
       "destination_id intact (needed for DGA shape computation downstream)",
       {e.destination_id for e in dga_evidence} == {"abcdefgh.ru", "qrstuvwx.ru"})
 
+# --- get_devices_with_metadata_value / get_distinct_destination_count (Release 14, N2) ---
+store.update_device_metadata("n2_dev_iot1", {"device_type": "iot"}, timestamp=9_000_000.0)
+store.update_device_metadata("n2_dev_iot2", {"device_type": "iot"}, timestamp=9_000_000.0)
+store.update_device_metadata("n2_dev_laptop1", {"device_type": "laptop"}, timestamp=9_000_000.0)
+
+iot_devices = store.get_devices_with_metadata_value("device_type", "iot")
+check("get_devices_with_metadata_value finds both real iot devices",
+      set(iot_devices) == {"n2_dev_iot1", "n2_dev_iot2"}, f"got {iot_devices}")
+check("get_devices_with_metadata_value excludes a device of a DIFFERENT type",
+      "n2_dev_laptop1" not in iot_devices)
+check("get_devices_with_metadata_value returns [] for a value nothing matches",
+      store.get_devices_with_metadata_value("device_type", "camera") == [])
+
+store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="a.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=9_100_000.0, source="s"))
+store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="b.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=9_100_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="a.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=9_100_020.0, source="s"))  # SAME destination again -- must not double-count
+store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="old.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=8_000_000.0, source="s"))  # before `since`
+
+count = store.get_distinct_destination_count("n2_dev_iot1", since=9_099_000.0)
+check("get_distinct_destination_count counts DISTINCT destinations, not raw evidence "
+      "rows (3 evidence rows within the window, only 2 distinct destinations)",
+      count == 2, f"got {count}")
+check("get_distinct_destination_count with no evidence at all for a device returns 0, "
+      "not an error", store.get_distinct_destination_count("n2_never_seen", since=0.0) == 0)
+
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",
       store.get_destination_reputation("never-cached.example.com") is None)
