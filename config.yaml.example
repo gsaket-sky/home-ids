@@ -780,6 +780,25 @@ scheduled_jobs:
       enabled: true
       cron: "30 */4 * * *"
 
+    # v13 full-architecture plan, Phase 5 -- v13's OWN LLM-review
+    # (src/v13/llm_review/), reviewing v13's own decisions/evidence graph directly
+    # rather than v-current's alerts.json. Runs ALONGSIDE the ollama_soc job above,
+    # NOT a replacement for it -- ollama_soc.py still does its own alert dedup/
+    # grouping, campaign correlation, and Telegram digest, none of which this has
+    # yet (see src/v13/ops/live_llm_review.py's own module docstring for the full
+    # scope cut). Writes to its own state/ollama_analysis_v13.jsonl, never touching
+    # ollama_soc.py's own state/ollama_analysis_cache.json, so the two can be
+    # compared on real decisions without either overwriting the other -- the
+    # explicit point of this phase before ever considering retiring ollama_soc.py.
+    # Scheduled 15 minutes after ollama_soc's own :30 run purely as a courtesy
+    # spacing (Ollama's own -np 1 setting already serializes any overlap safely;
+    # this isn't a correctness requirement). Lives in src/v13/ops/, not scripts/,
+    # hence the "script" override below.
+    live_llm_review:
+      enabled: true
+      cron: "45 */4 * * *"
+      script: "../v13/ops/live_llm_review.py"
+
     # Retroactive threat-intel re-scan of recent history. 2am.
     retro_hunter:
       enabled: true
