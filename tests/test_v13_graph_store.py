@@ -400,6 +400,48 @@ check("get_devices_targeting canonicalizes a merged orphan into its canonical id
       "(still just 2 distinct physical devices, not 3)",
       set(targeting_after_merge) == {"p1a_dev_a", "p1a_dev_b"}, f"got {targeting_after_merge}")
 
+# --- get_devices_sharing_provenance (Release 14, N4: JA3/JA4 fingerprint correlation) ---
+store.insert_evidence(Evidence(device_id="n4_dev_a", destination_id="x.example.com",
+                                 evidence_type="malicious_ja3", independence_family="tls_fingerprint",
+                                 timestamp=8_000_000.0, source="zeek", provenance="detector:zeek:malicious_ja3:abc123"))
+store.insert_evidence(Evidence(device_id="n4_dev_b", destination_id="y.example.com",
+                                 evidence_type="malicious_ja3", independence_family="tls_fingerprint",
+                                 timestamp=8_000_010.0, source="zeek", provenance="detector:zeek:malicious_ja3:abc123"))
+store.insert_evidence(Evidence(device_id="n4_dev_c", destination_id="z.example.com",
+                                 evidence_type="malicious_ja3", independence_family="tls_fingerprint",
+                                 timestamp=8_000_010.0, source="zeek", provenance="detector:zeek:malicious_ja3:DIFFERENT"))
+store.insert_evidence(Evidence(device_id="n4_dev_old", destination_id="x.example.com",
+                                 evidence_type="malicious_ja3", independence_family="tls_fingerprint",
+                                 timestamp=7_000_000.0, source="zeek", provenance="detector:zeek:malicious_ja3:abc123"))
+
+sharing = store.get_devices_sharing_provenance("malicious_ja3", "detector:zeek:malicious_ja3:abc123", since=7_999_000.0)
+check("get_devices_sharing_provenance finds both devices sharing the EXACT same "
+      "fingerprint hash", set(sharing) == {"n4_dev_a", "n4_dev_b"}, f"got {sharing}")
+check("get_devices_sharing_provenance excludes a device with a DIFFERENT hash, "
+      "even at the same evidence_type/timestamp", "n4_dev_c" not in sharing)
+check("get_devices_sharing_provenance excludes a device whose only match is before `since`",
+      "n4_dev_old" not in sharing)
+
+# --- get_evidence_by_type_since (Release 14, N4: DGA-seed correlation's raw fetch) ---
+store.insert_evidence(Evidence(device_id="n4_dga_a", destination_id="abcdefgh.ru",
+                                 evidence_type="dns_dga_burst", independence_family="dns_behavior",
+                                 timestamp=8_100_000.0, source="pihole"))
+store.insert_evidence(Evidence(device_id="n4_dga_b", destination_id="qrstuvwx.ru",
+                                 evidence_type="dns_dga_burst", independence_family="dns_behavior",
+                                 timestamp=8_100_010.0, source="pihole"))
+store.insert_evidence(Evidence(device_id="n4_dga_old", destination_id="zzzzzzzz.ru",
+                                 evidence_type="dns_dga_burst", independence_family="dns_behavior",
+                                 timestamp=7_000_000.0, source="pihole"))
+dga_evidence = store.get_evidence_by_type_since("dns_dga_burst", since=8_099_000.0)
+check("get_evidence_by_type_since returns evidence across MULTIPLE devices (not "
+      "scoped to one, unlike get_evidence_for_device)",
+      {e.device_id for e in dga_evidence} == {"n4_dga_a", "n4_dga_b"}, f"got {[e.device_id for e in dga_evidence]}")
+check("get_evidence_by_type_since respects `since` -- the older item is excluded",
+      not any(e.device_id == "n4_dga_old" for e in dga_evidence))
+check("get_evidence_by_type_since returns REAL Evidence objects with their own "
+      "destination_id intact (needed for DGA shape computation downstream)",
+      {e.destination_id for e in dga_evidence} == {"abcdefgh.ru", "qrstuvwx.ru"})
+
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",
       store.get_destination_reputation("never-cached.example.com") is None)

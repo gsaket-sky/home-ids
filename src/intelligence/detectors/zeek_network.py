@@ -14,6 +14,16 @@ class ZeekNetworkDetector:
                 # SNI server_name (a real hostname, more useful to a reader than a bare
                 # IP) and fall back to dest_ip when SNI wasn't present on the wire.
                 evidence_target = evt.get("server") or evt.get("dest_ip") or None
+                # Release 14, N4 (multi-signal campaign detection): the real fingerprint
+                # hash, encoded into provenance -- this codebase's own established
+                # "free-text discriminator slot" convention (see zeek_notice's note_type
+                # below). Previously this was just f"detector:zeek:{evt_type}" with no
+                # way to tell WHICH ja3/ja4 hash fired, so nothing downstream could ever
+                # answer "did another device see this SAME fingerprint" -- the hash
+                # itself was computed by Zeek and available on `evt`, just never
+                # propagated past this detector. v13/graph/store.py's
+                # get_devices_sharing_provenance() is the new consumer.
+                fingerprint_hash = evt.get("ja3") if evt_type == "malicious_ja3" else evt.get("ja4")
                 ev_list.append(Evidence(
                     type=evt_type,
                     source="zeek",
@@ -22,7 +32,7 @@ class ZeekNetworkDetector:
                     value=1.0,
                     confidence=evt.get("confidence", 0.95),
                     independence_group="zeek_network",
-                    provenance=f"detector:zeek:{evt_type}",
+                    provenance=f"detector:zeek:{evt_type}:{fingerprint_hash or 'unknown'}",
                     domain=evidence_target,
                 ))
             elif evt_type == "zeek_notice":

@@ -46,6 +46,7 @@ which wipes `EvidenceStore` completely (100% in-memory, no persistence at all) b
 the graph. A device mid-way through building up a slow pattern doesn't lose that history
 just because the service restarted for an unrelated reason.
 """
+import ipaddress
 import json
 import logging
 import time
@@ -104,6 +105,14 @@ _last_decision_key: Dict[str, Tuple[str, str]] = {}
 # that's already been pruned would be a false signal, not a stronger one).
 _COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
 _COORDINATED_TARGETING_MIN_OTHER_DEVICES = 1  # "2+ distinct devices" total = 1+ OTHER device
+
+# Release 14, net-new capability N4 (multi-signal campaign detection): widens the
+# SAME cross-device-correlation concept above to two more shared signals a real
+# campaign can share instead of (or alongside) a literal destination -- same
+# window/threshold constants reused, not re-derived, since this is the identical
+# underlying question ("is another device independently corroborating this").
+_FINGERPRINT_EVIDENCE_TYPES = ("malicious_ja3", "malicious_ja4")
+_DGA_EVIDENCE_TYPE = "dns_dga_burst"
 _REPUTATION_PROPAGATION_MIN_TIER = 5  # only a fully "corroborated" cached tier propagates
 _REPUTATION_PROPAGATION_TTL_SECONDS = 86400
 _FIRST_CONTACT_LOOKBACK_SECONDS = DEFAULT_EVIDENCE_RETENTION_DAYS * 86400
@@ -276,12 +285,54 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
         )
 
 
-def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float) -> List[Evidence]:
+def _dga_shape_key(domain: str) -> str:
+    """Release 14, N4: normalizes a DGA-shaped domain into a coarse "generation
+    shape" fingerprint -- the first label's length, its TLD, and its character-
+    class composition (hex-only / alphanumeric-with-digits / alpha-only). Real
+    DGA families commonly produce a highly consistent SHAPE across every domain
+    they generate (fixed length, fixed charset, fixed TLD), even though the
+    literal string differs per date/seed input -- an established DGA-clustering
+    heuristic, not invented for this feature. First-pass, not empirically tuned
+    against this network's own real DGA traffic (same honest-status framing this
+    project's own INDEPENDENCE_FAMILY_MAP already uses for a similarly
+    unvalidated number) -- the divergence data this correlation itself produces
+    is what should validate or refute it over time, not a claim made up front.
+    Returns "" for anything that isn't a real two-label-or-more domain (an IP,
+    NO_DESTINATION, or a malformed value) -- deliberately not a match key at all,
+    never grouped with another empty key."""
+    if not domain or domain == NO_DESTINATION or "." not in domain:
+        return ""
+    try:
+        ipaddress.ip_address(domain)
+        return ""  # a bare IP is not a DGA-generated hostname, never a match key
+    except ValueError:
+        pass
+    parts = domain.split(".")
+    label, tld = parts[0], parts[-1]
+    if not label:
+        return ""
+    is_hex = all(c in "0123456789abcdefABCDEF" for c in label)
+    has_digit = any(c.isdigit() for c in label)
+    charset_class = "hex" if is_hex else ("alnum_digit" if has_digit else "alpha")
+    return f"{len(label)}:{tld}:{charset_class}"
+
+
+def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
+                                      fresh_evidence: Optional[List[Evidence]] = None) -> List[Evidence]:
     """v13 full-architecture plan, Phase 1a: computes the three new graph-only-possible
     signals for THIS cycle's decision -- cross-device correlation, reputation
     propagation, and genuine first-contact scoring (see graph/window.py's
     devices_targeting()/domain_seen_before() and graph/store.py's
-    get_destination_reputation(), all built for exactly this).
+    get_destination_reputation(), all built for exactly this). Release 14, N4:
+    ALSO widens cross-device correlation to two more shared signals besides a
+    literal destination -- a shared JA3/JA4 TLS fingerprint (devices_sharing_
+    fingerprint(), an exact provenance match) and a shared DGA "generation
+    shape" (_dga_shape_key(), a computed similarity key) -- fed into the SAME
+    CoordinatedTargetingHypothesis, which now scores on any of the three.
+    `fresh_evidence` (optional, default None/[] for any existing caller that
+    hasn't been updated) is THIS cycle's own fresh v2 evidence list -- needed
+    for N4 because fingerprint/DGA correlation keys off evidence_type/provenance,
+    not destination_id alone.
 
     CRITICAL: the returned items are added ONLY to merged_v2 (this cycle's scoring
     input) by the caller, NEVER to fresh_v2 (the graph-write path). A synthetic item
@@ -295,8 +346,9 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float)
     to 'no synthetic evidence this cycle' and returns [], never blocks the real
     decision."""
     synthetic: List[Evidence] = []
+    fresh_evidence = fresh_evidence or []
     real_destinations = {d for d in destinations if d and d != NO_DESTINATION}
-    if not real_destinations:
+    if not real_destinations and not fresh_evidence:
         return synthetic
     try:
         store = _get_graph_store()
@@ -334,6 +386,53 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float)
                     source="v13_live_engine", confidence=1.0, value=1.0,
                     provenance="v13_live_engine:first_contact",
                 ))
+
+        # Release 14, N4a: shared JA3/JA4 fingerprint correlation -- an exact
+        # provenance match (the real hash, encoded at the detector), same
+        # cross-device-corroboration shape as coordinated_targeting above.
+        for ev in fresh_evidence:
+            if ev.evidence_type not in _FINGERPRINT_EVIDENCE_TYPES or not ev.provenance:
+                continue
+            others = window.devices_sharing_fingerprint(
+                ev.evidence_type, ev.provenance, _COORDINATED_TARGETING_WINDOW_SECONDS,
+                now=ts, exclude_device_id=device_id,
+            )
+            if len(others) >= _COORDINATED_TARGETING_MIN_OTHER_DEVICES:
+                synthetic.append(Evidence(
+                    device_id=device_id, destination_id=ev.destination_id, evidence_type="fingerprint_campaign",
+                    independence_family="cross_device_correlation", timestamp=ts,
+                    source="v13_live_engine", confidence=1.0, value=float(len(others) + 1),
+                    provenance="v13_live_engine:fingerprint_campaign",
+                    features={"other_devices": others, "shared_evidence_type": ev.evidence_type},
+                ))
+
+        # Release 14, N4b: shared DGA "generation shape" correlation -- a COMPUTED
+        # similarity key (_dga_shape_key()), not an exact stored value, so this
+        # needs its own cross-device scan rather than devices_sharing_fingerprint()'s
+        # exact-match query. Lower confidence than the fingerprint/destination
+        # signals (0.7, not 1.0) -- an honest reflection that shape-matching is a
+        # real but approximate heuristic, not a definitional match.
+        my_dga_shapes = {_dga_shape_key(ev.destination_id) for ev in fresh_evidence
+                          if ev.evidence_type == _DGA_EVIDENCE_TYPE}
+        my_dga_shapes.discard("")
+        if my_dga_shapes:
+            all_dga_evidence = store.get_evidence_by_type_since(
+                _DGA_EVIDENCE_TYPE, since=ts - _COORDINATED_TARGETING_WINDOW_SECONDS,
+            )
+            for shape_key in my_dga_shapes:
+                others = sorted({
+                    store.resolve_canonical_device_id(e.device_id) for e in all_dga_evidence
+                    if store.resolve_canonical_device_id(e.device_id) != device_id
+                    and _dga_shape_key(e.destination_id) == shape_key
+                })
+                if len(others) >= _COORDINATED_TARGETING_MIN_OTHER_DEVICES:
+                    synthetic.append(Evidence(
+                        device_id=device_id, destination_id=NO_DESTINATION, evidence_type="dga_seed_campaign",
+                        independence_family="cross_device_correlation", timestamp=ts,
+                        source="v13_live_engine", confidence=0.7, value=float(len(others) + 1),
+                        provenance=f"v13_live_engine:dga_seed_campaign:{shape_key}",
+                        features={"other_devices": others, "shape_key": shape_key},
+                    ))
     except Exception as e:
         LOGGER.warning(
             "Failed to compute Phase 1a graph-derived signals for device %r, deciding "
@@ -375,7 +474,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # _inject_graph_derived_evidence()'s own docstring for why these must
             # never reach fresh_v2 (the graph-write path).
             fresh_destinations = {ev.destination_id for ev in fresh_v2}
-            merged_v2 = merged_v2 + _inject_graph_derived_evidence(device_id, fresh_destinations, ts)
+            merged_v2 = merged_v2 + _inject_graph_derived_evidence(device_id, fresh_destinations, ts, fresh_v2)
 
         decision = _v13_engine.evaluate(
             merged_v2, rep_vector, device_type=device_type,

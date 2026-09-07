@@ -432,8 +432,10 @@ check("REGRESSION GUARD: a notice with no real type shows the plain description 
 # detector emits) are unaffected by the notice-specific change.
 tls_events = [{"type": "malicious_ja3", "ja3": "abc123", "dest_port": 443, "confidence": 0.95}]
 tls_evidence = detector.detect("dev1", tls_events)
-check("REGRESSION GUARD: malicious_ja3 evidence is unaffected by the zeek_notice change",
-      bool(tls_evidence) and tls_evidence[0].type == "malicious_ja3" and tls_evidence[0].provenance == "detector:zeek:malicious_ja3")
+check("REGRESSION GUARD: malicious_ja3 evidence is unaffected by the zeek_notice change "
+      "-- provenance now also carries the real ja3 hash (Release 14, N4), added after "
+      "this test was first written",
+      bool(tls_evidence) and tls_evidence[0].type == "malicious_ja3" and tls_evidence[0].provenance == "detector:zeek:malicious_ja3:abc123")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

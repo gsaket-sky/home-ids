@@ -87,3 +87,18 @@ class RollingWindowView:
         if exclude_device_id:
             devices = [d for d in devices if d != exclude_device_id]
         return devices
+
+    def devices_sharing_fingerprint(self, evidence_type: str, provenance: str, window_seconds: float,
+                                       now: Optional[float] = None,
+                                       exclude_device_id: Optional[str] = None) -> List[str]:
+        """Release 14, N4: the fingerprint-correlation analogue of
+        devices_targeting() above -- "which OTHER devices have evidence of this
+        exact type carrying this exact provenance (e.g. the same JA3/JA4 hash) in
+        the last N seconds." Thin wrapper, same shape as devices_targeting(), for
+        the same reason: keep GraphStore a plain CRUD layer, relation-specific
+        semantics live here."""
+        now = now if now is not None else time.time()
+        devices = self.store.get_devices_sharing_provenance(evidence_type, provenance, since=now - window_seconds)
+        if exclude_device_id:
+            devices = [d for d in devices if d != exclude_device_id]
+        return devices

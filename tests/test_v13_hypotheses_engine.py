@@ -282,6 +282,32 @@ check("HypothesisEngine.evaluate_all() surfaces COORDINATED_TARGETING as the win
       "attack hypothesis when it's the only evidence present",
       result_ct["attack"]["name"] == "COORDINATED_TARGETING")
 
+# --- Release 14, N4: CoordinatedTargetingHypothesis widened to fingerprint_campaign/
+# dga_seed_campaign -- same scoring logic, generalized evidence-type filter ---
+h = CoordinatedTargetingHypothesis()
+score_fingerprint = h.evaluate(score_evidence([ev("fingerprint_campaign", 2.0)], now=NOW), rep(3))
+check("N4: fingerprint_campaign alone satisfies CoordinatedTargetingHypothesis and "
+      "scores identically to coordinated_targeting at the same device count/confidence "
+      "-- the SAME underlying signal, just a different shared identifier",
+      h.required_satisfied and score_fingerprint == 3.0)
+
+h = CoordinatedTargetingHypothesis()
+score_dga = h.evaluate(
+    score_evidence([ev("dga_seed_campaign", 5.0, confidence=0.95)], now=NOW), rep(3),
+)
+check("N4: dga_seed_campaign with 3+ devices and high confidence also reaches HIGH "
+      "(4.0), the same strong_score bump path as coordinated_targeting",
+      score_dga == 4.0)
+
+h = CoordinatedTargetingHypothesis()
+score_mixed = h.evaluate(
+    score_evidence([ev("coordinated_targeting", 2.0), ev("fingerprint_campaign", 2.0)], now=NOW), rep(3),
+)
+check("N4: coordinated_targeting and fingerprint_campaign co-occurring both count "
+      "as hits (best-effective_weight/total_devices take the max across all three "
+      "evidence types, not just one)",
+      h.required_satisfied and score_mixed >= 3.0)
+
 # --- HypothesisEngine.evaluate_all(): winner selection ---
 engine = HypothesisEngine()
 result = engine.evaluate_all(

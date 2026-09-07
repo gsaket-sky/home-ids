@@ -341,6 +341,38 @@ class GraphStore:
         canonical_ids = {self.resolve_canonical_device_id(r["device_id"]) for r in rows}
         return sorted(canonical_ids)
 
+    def get_devices_sharing_provenance(self, evidence_type: str, provenance: str, since: float) -> List[str]:
+        """Release 14, net-new capability N4 (multi-signal campaign detection):
+        the SAME cross-device query get_devices_targeting() answers for a shared
+        DESTINATION, generalized to a shared PROVENANCE string -- e.g. a JA3/JA4
+        fingerprint hash, encoded into provenance at the detector (see
+        intelligence/detectors/zeek_network.py), matching this codebase's own
+        established "provenance is the free-text discriminator slot" convention
+        (already used for zeek_notice's note_type). An exact string match is
+        correct here (two devices sharing the literal SAME TLS fingerprint hash
+        is unambiguous), unlike DGA-seed correlation below, which needs a
+        COMPUTED similarity key instead of an exact stored value. Canonicalizes
+        each device_id, same reasoning as get_devices_targeting()."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT device_id FROM evidence WHERE evidence_type = ? AND provenance = ? AND timestamp >= ?",
+            (evidence_type, provenance, since),
+        ).fetchall()
+        canonical_ids = {self.resolve_canonical_device_id(r["device_id"]) for r in rows}
+        return sorted(canonical_ids)
+
+    def get_evidence_by_type_since(self, evidence_type: str, since: float) -> List[Evidence]:
+        """All evidence of one type across EVERY device since `since` -- unlike
+        get_evidence_for_device(), deliberately not scoped to one device. DGA-seed
+        correlation (Release 14, N4) needs this raw cross-device fetch because it
+        groups by a COMPUTED shape key (live_engine.py's own _dga_shape_key()),
+        not a single stored value get_devices_sharing_provenance() could match on
+        directly -- the grouping happens in Python after this fetch."""
+        rows = self._conn.execute(
+            "SELECT * FROM evidence WHERE evidence_type = ? AND timestamp >= ?",
+            (evidence_type, since),
+        ).fetchall()
+        return [Evidence.from_row(dict(r)) for r in rows]
+
     def set_destination_reputation(self, destination_id: str, tier: int,
                                      timestamp: Optional[float] = None) -> None:
         """Writes a live reputation-tier cache onto the shared `destinations` row

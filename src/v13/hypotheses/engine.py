@@ -382,21 +382,32 @@ class CoordinatedTargetingHypothesis(Hypothesis):
     `coordinated_targeting` evidence is synthesized per-cycle by
     v13/ops/live_engine.py from graph/window.py's devices_targeting() query, never
     written back to the graph itself (it's derived context, not a sensor
-    observation) -- see that module's own docstring."""
-    RELEVANT_EVIDENCE_TYPES = frozenset({"coordinated_targeting"})
+    observation) -- see that module's own docstring.
+
+    Release 14, net-new capability N4 (multi-signal campaign detection): widened
+    to ALSO score on `fingerprint_campaign` (2+ devices sharing the exact same
+    JA3/JA4 TLS fingerprint) and `dga_seed_campaign` (2+ devices hitting
+    different domains that share the same computed DGA "generation shape") --
+    the same underlying question ("is another device independently corroborating
+    this") answered via two more signals a coordinated campaign can share
+    instead of, or alongside, a literal destination. All three are synthesized
+    the same way (live_engine.py, never persisted), so the scoring logic below
+    is unchanged -- it already only reads .effective_weight()/.value generically."""
+    RELEVANT_EVIDENCE_TYPES = frozenset({"coordinated_targeting", "fingerprint_campaign", "dga_seed_campaign"})
 
     def __init__(self):
         super().__init__("COORDINATED_TARGETING")
 
     def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
         self._reset_eval_state()
-        hits = [e for e in ev_store if e.evidence_type == "coordinated_targeting"]
+        hits = [e for e in ev_store if e.evidence_type in self.RELEVANT_EVIDENCE_TYPES]
         self.required_satisfied = bool(hits)
         if not self.required_satisfied:
             return 0.0
         best = max(e.effective_weight() for e in hits)
         # .value carries the total number of devices (this one + the others) seen
-        # targeting the destination -- see live_engine.py's injection site.
+        # sharing the signal (destination, fingerprint, or DGA shape) -- see
+        # live_engine.py's injection sites.
         total_devices = max((e.value or 0) for e in hits)
 
         if rep_vector.tier in (1, 2):

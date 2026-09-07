@@ -198,8 +198,9 @@ print("done")
 PYEOF
 
 # 5. Restart soc.service to activate the model fix + shadow-code removal + Workstream 2
-#    wiring + the Suricata --runmode=workers fix (explicit, human-triggered, per the
-#    standing rule -- not something to automate)
+#    wiring + the Suricata --runmode=workers fix + N4's zeek_network.py provenance
+#    change (explicit, human-triggered, per the standing rule -- not something to
+#    automate)
 sudo systemctl restart soc.service
 sudo systemctl status soc.service --no-pager
 ```
@@ -524,13 +525,46 @@ existing that nobody has built yet.
 - [ ] **N2. Peer-cohort behavioral baselining.** Ongoing "does this device deviate
   from similar devices" comparison, generalizing the cross-device query mechanism
   Workstream 4/`CoordinatedTargetingHypothesis` already proves out.
-- [ ] **N3. Decision replay / regression testing harness.** Re-run any historical
-  decision against a newer hypothesis-engine version before shipping a change live —
-  every decision's exact supporting evidence is preserved via real `supports` edges,
-  not reconstructed from a log. High-value: de-risks every future scoring change.
-- [ ] **N4. Multi-signal campaign detection.** Widen `CoordinatedTargetingHypothesis`
-  to correlate by shared JA3/JA4 fingerprint or DGA seed, not just shared
-  destination — the query pattern already exists, this widens what it correlates on.
+- [x] **N3. Decision replay / regression testing harness.** DONE 2026-09-07. New
+  `src/v13/ops/decision_replay.py` (manual/CI-style diagnostic, not a scheduled
+  job): `get_decision_evidence()` resolves a historical decision's REAL
+  supporting evidence via its `supports` edges; `replay_decision()` re-runs the
+  CURRENT `DecisionEngine` against it and reports unchanged/changed/no-evidence-
+  available/replay-error; `replay_range()` + a `main()` CLI (`--since-days`,
+  `--device-id`, `--changed-only`, `--out`) drive it end-to-end. **Real,
+  documented limitation**: a decision's original `rep`/`device_type`/
+  `baseline_familiarity`/`is_safe` context isn't stored on the row and can't be
+  perfectly reconstructed — `_rep_from_evidence()` derives a best-effort
+  duck-typed rep from any `reputation` evidence present; the rest default to
+  safe/neutral values. Answers "does the current scoring logic reach a
+  different verdict against the same real evidence," a real regression signal
+  that doesn't need a byte-perfect environment reconstruction to be useful. 11
+  new tests in `tests/test_v13_decision_replay.py`.
+- [x] **N4. Multi-signal campaign detection.** DONE 2026-09-07, larger than
+  originally scoped — investigated first and found the JA3/JA4 hash was never
+  captured into Evidence at all (only a boolean flag), and DGA-seed correlation
+  needed genuinely new similarity logic, not just a query. User chose to build
+  both. **Fingerprint half**: `intelligence/detectors/zeek_network.py` (a live
+  v1 hot-path detector) now encodes the real ja3/ja4 hash into `provenance`
+  (this codebase's own established free-text-discriminator convention) —
+  additive only, doesn't change what triggers evidence or any existing scoring.
+  New `GraphStore.get_devices_sharing_provenance()` (exact match) +
+  `RollingWindowView.devices_sharing_fingerprint()` wrapper. **DGA-seed half**:
+  no detector change needed (the domain string is already in `destination_id`)
+  — new `_dga_shape_key()` in `live_engine.py` computes a coarse "generation
+  shape" (label length + TLD + charset class), an established DGA-clustering
+  heuristic, explicitly flagged as a first-pass/not-empirically-tuned number
+  matching `INDEPENDENCE_FAMILY_MAP`'s own honesty convention. New
+  `GraphStore.get_evidence_by_type_since()` for the cross-device scan the shape
+  grouping needs. Both wired into `_inject_graph_derived_evidence()` (same
+  never-persisted-to-the-graph pattern as `coordinated_targeting`) as two new
+  evidence types (`fingerprint_campaign`, `dga_seed_campaign`) feeding the SAME
+  `CoordinatedTargetingHypothesis`, now widened to score on any of the three
+  (unchanged scoring logic — it already read generically). 30 new tests across
+  `test_v13_graph_store.py`/`test_v13_graph_window.py`/`test_v13_live_engine.py`
+  (Section G)/`test_v13_hypotheses_engine.py`; 1 pre-existing test
+  (`test_phase32_lateral_movement_targets.py`) updated for the new provenance
+  format. Full v13 suite + `test_v13_integration.py` re-confirmed clean.
 - [ ] **N5. In-cycle LLM review.** Dispatch a review the moment an alert fires
   instead of waiting for the 4-hourly batch. Client/validator already built and
   already used by the batch job (Phase 5/8) — only async-dispatch wiring is new, and

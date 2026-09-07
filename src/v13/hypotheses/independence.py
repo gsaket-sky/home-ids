@@ -119,6 +119,13 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # same destination is real corroborating signal, not a context modifier).
     "coordinated_targeting": "cross_device_correlation",
 
+    # Release 14, N4: same family as coordinated_targeting above -- "another
+    # device independently corroborating this" is the same vantage point
+    # regardless of whether the shared signal is a destination, a JA3/JA4
+    # fingerprint, or a DGA generation shape.
+    "fingerprint_campaign": "cross_device_correlation",
+    "dga_seed_campaign": "cross_device_correlation",
+
     # Also Phase 1a: "this destination has never been contacted before" is a fact
     # ABOUT an existing observation (novelty), not itself an independent behavioral
     # signal the way a genuinely separate sensor is -- deliberately placed in

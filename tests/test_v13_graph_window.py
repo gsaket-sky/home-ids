@@ -123,6 +123,32 @@ check("devices_targeting with exclude_device_id leaves out the calling device it
 targeting_wide_window = window.devices_targeting("shared.com", window_seconds=10_000, now=NOW)
 check("a wide enough window does pick up dev3", "dev3" in targeting_wide_window)
 
+# --- devices_sharing_fingerprint (Release 14, N4: JA3/JA4 correlation) ---
+store.insert_evidence(Evidence(device_id="fp_dev1", destination_id="a.com", evidence_type="malicious_ja3",
+                                 independence_family="tls_fingerprint", timestamp=NOW - 60, source="zeek",
+                                 provenance="detector:zeek:malicious_ja3:sharedhash"))
+store.insert_evidence(Evidence(device_id="fp_dev2", destination_id="b.com", evidence_type="malicious_ja3",
+                                 independence_family="tls_fingerprint", timestamp=NOW - 60, source="zeek",
+                                 provenance="detector:zeek:malicious_ja3:sharedhash"))
+store.insert_evidence(Evidence(device_id="fp_dev3", destination_id="c.com", evidence_type="malicious_ja3",
+                                 independence_family="tls_fingerprint", timestamp=NOW - 4000, source="zeek",
+                                 provenance="detector:zeek:malicious_ja3:sharedhash"))  # outside short window
+
+sharing_all = window.devices_sharing_fingerprint(
+    "malicious_ja3", "detector:zeek:malicious_ja3:sharedhash", RollingWindowView.SHORT_WINDOW_SECONDS, now=NOW,
+)
+check("devices_sharing_fingerprint includes both devices within the short window",
+      set(sharing_all) == {"fp_dev1", "fp_dev2"}, f"got {sharing_all}")
+check("devices_sharing_fingerprint excludes the device outside the window",
+      "fp_dev3" not in sharing_all)
+
+sharing_excl_self = window.devices_sharing_fingerprint(
+    "malicious_ja3", "detector:zeek:malicious_ja3:sharedhash", RollingWindowView.SHORT_WINDOW_SECONDS,
+    now=NOW, exclude_device_id="fp_dev1",
+)
+check("devices_sharing_fingerprint with exclude_device_id leaves out the calling device",
+      sharing_excl_self == ["fp_dev2"], f"got {sharing_excl_self}")
+
 store.close()
 
 print()
