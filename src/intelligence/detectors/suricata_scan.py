@@ -76,9 +76,19 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
         return []
 
     scratch_dir.mkdir(parents=True, exist_ok=True)
+    # BUGFIX (2026-09-07, live incident): --runmode=single pins the ENTIRE batch scan
+    # to one CPU core regardless of how many are available -- confirmed live on `.94`
+    # (8 real cores) via journalctl: 151 timeouts / 0 successful scans in 48h straight,
+    # every single reactive-capture burst (bursts run up to ~170MB per radio) exceeding
+    # the 240s timeout on one core against a real, unturned 68,620-line ruleset.
+    # "workers" is Suricata's own recommended runmode for offline/batch pcap
+    # processing on a multi-core box (each worker thread independently processes a
+    # subset of flows) -- same detection logic/output shape, not a behavior change,
+    # just real parallelism this batch invocation was never using. Confirmed via
+    # `suricata --build-info` this box's real Suricata (8.0.3) supports it.
     cmd = [
         suricata_bin, "-r", str(pcap_path), "-l", str(scratch_dir),
-        "-S", str(rules_path), "-k", "none", "--runmode=single",
+        "-S", str(rules_path), "-k", "none", "--runmode=workers",
     ]
     try:
         result = subprocess.run(

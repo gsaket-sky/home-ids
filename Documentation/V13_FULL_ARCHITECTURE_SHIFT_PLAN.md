@@ -198,10 +198,17 @@ print("done")
 PYEOF
 
 # 5. Restart soc.service to activate the model fix + shadow-code removal + Workstream 2
-#    wiring (explicit, human-triggered, per the standing rule -- not something to automate)
+#    wiring + the Suricata --runmode=workers fix (explicit, human-triggered, per the
+#    standing rule -- not something to automate)
 sudo systemctl restart soc.service
 sudo systemctl status soc.service --no-pager
 ```
+
+**After this restart, worth watching specifically**: `sudo journalctl -u soc.service -f
+| grep -i suricata` during/after the next few reactive-capture bursts — confirm scans
+now complete within the 240s timeout instead of every single one timing out. If they
+still time out even with 8-core parallelism, the ruleset-trim/timeout-margin follow-ups
+noted in Workstream 6 become the next real step, not a re-guess at the runmode fix.
 
 After restart, worth a spot-check: `journalctl -u soc.service -n 50 --no-pager` for a
 clean startup with no new errors.
@@ -454,15 +461,53 @@ ever scoped the larger migration.
   unit tests for both new functions' fail-safe paths. Full `test_v13_retro_hunter.py`
   suite re-confirmed clean.
 
-### Workstream 6 — Suricata evidence pipeline (A6, the one genuinely large cut)
+### Workstream 6 — Suricata evidence pipeline (A6) — CLOSED 2026-09-07 (already-satisfied, stale framing corrected) + a real bug found and fixed along the way
 
-- [ ] **W6-1.** Design and build a v13-native Suricata evidence path. Why cut: not a
-  tailable log stream in this deployment at all — Suricata only runs in short batch
-  invocations against reactively-captured pcap bursts
-  (`extractors/fritzbox_capture.py`'s `ReactiveCaptureDispatcher`); replicating this
-  for v13 means replicating the entire burst-trigger/dispatch subsystem, not writing
-  a tailer. Treat as its own separately-scoped initiative — don't fold into any
-  other workstream above.
+- [x] **W6-1.** Re-investigated before building anything (the "why cut" reasoning
+  below predates A13's fast engine cutover and turned out to be stale). Read the
+  real code: `extractors/fritzbox_capture.py:670` already calls
+  `evidence_store.add(ev)` for every real Suricata signature match, writing
+  directly into v1's shared `EvidenceStore` — the SAME store `pipeline.py`'s
+  `active_evidence` is drawn from every cycle, which `v13_live_engine.evaluate()`
+  already converts via `convert_list()` with no type filtering. **v13's
+  `SuricataSignatureHypothesis` already receives real Suricata evidence
+  automatically, with zero v13-specific wiring ever needed** — the original A6
+  gap was scoped around `.19`'s separate standalone comparator daemon (which
+  can't tail Suricata independently), and that comparator's whole purpose
+  (deciding whether to trust v13 before cutover) is moot now that v13 already
+  *is* the live engine. No new code needed for the actual live decision path.
+  ~~Why cut: not a tailable log stream in this deployment at all — Suricata only
+  runs in short batch invocations against reactively-captured pcap bursts;
+  replicating this for v13 means replicating the entire burst-trigger/dispatch
+  subsystem, not writing a tailer.~~ (superseded reasoning, kept for the
+  historical record.)
+- [x] **A real, significant, pre-existing bug found by the live verification
+  smoke test** (not a v13 issue — affects v1 and v13 equally): checked `.94`'s
+  real `journalctl` logs before trusting the code-read alone. Over 48 hours: 139
+  reactive-capture bursts completed, **every single one** reporting
+  `suricata_findings: {}`; separately, 151 Suricata batch-scan invocations hit
+  their 240s timeout and were skipped. **Root cause**: `run_suricata_on_pcap()`
+  hardcoded `--runmode=single`, pinning the ENTIRE batch scan to one CPU core
+  regardless of availability — confirmed via SSH that `.94` has 8 real cores
+  (`nproc`) sitting mostly idle during each scan, against a genuinely large,
+  untrimmed 68,620-line ruleset and burst captures up to ~170MB per radio.
+  Suricata has effectively never produced a real detection via reactive capture
+  in production, independent of this migration. **Fixed**: `--runmode=single` →
+  `--runmode=workers` (Suricata's own recommended runmode for multi-core
+  offline/batch pcap processing — same detection logic, real parallelism this
+  invocation was never using). 2 new regression-guard tests in
+  `tests/test_phase37_suricata_batch_scan.py` (asserts `--runmode=workers` is
+  used, `--runmode=single` never reappears) — full file (30 checks) re-confirmed
+  clean. **Deliberately not also done, flagged as a real follow-up**: the
+  68,620-line ruleset is the full/untrimmed feed, not the "trimmed/security
+  policy" this module's own docstring says was the intended design — pruning it
+  is a real detection-coverage-vs-performance judgment call, left for a human
+  decision once the `--runmode` fix's real-world effect on scan duration can be
+  observed, not pre-emptively pruned blind. Also worth a later look if timeouts
+  persist post-fix: `reactive_capture_suricata_timeout_seconds` (240.0, the
+  config default `.94` is running) could still be raised as a safety margin, and
+  `.94`'s current 3.7GB/4GB swap usage is worth a health check even though it
+  isn't confirmed as a contributing cause here.
 
 ---
 

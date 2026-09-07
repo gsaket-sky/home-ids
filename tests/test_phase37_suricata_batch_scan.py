@@ -76,6 +76,22 @@ with tempfile.TemporaryDirectory() as tmpdir:
     check("a nonexistent suricata binary path returns [] gracefully (FileNotFoundError caught), no exception raised",
           result_missing_binary == [])
 
+    # BUGFIX regression guard (2026-09-07, live incident: 151 timeouts / 0 successful
+    # scans in 48h on `.94`, root-caused to --runmode=single pinning an 8-core box to
+    # one core against real burst sizes) -- the constructed command must use
+    # --runmode=workers, never silently regress back to single-threaded.
+    from unittest.mock import patch as _patch, MagicMock as _MagicMock
+    with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run:
+        mock_run.return_value = _MagicMock(returncode=0, stderr="")
+        run_suricata_on_pcap(fake_pcap, tmp / "scratch4", "/usr/bin/suricata", str(real_rules))
+        called_cmd = mock_run.call_args.args[0]
+        check("REGRESSION GUARD: the real Suricata invocation uses --runmode=workers, "
+              "not --runmode=single -- the single-threaded mode is what caused every "
+              "real batch scan on `.94` to time out against real burst sizes",
+              "--runmode=workers" in called_cmd)
+        check("REGRESSION GUARD: --runmode=single never reappears",
+              "--runmode=single" not in called_cmd)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: _parse_eve_json_alerts()
