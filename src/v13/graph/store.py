@@ -300,6 +300,59 @@ class GraphStore:
         )
         self._maybe_commit()
 
+    def get_devices_targeting(self, destination_id: str, since: float) -> List[str]:
+        """Distinct CANONICAL device_ids that have touched this destination since
+        `since` -- v13 full-architecture plan, Phase 1a: the real, cheap
+        cross-device query `idx_evidence_destination` exists to support ("which
+        devices have an edge targeting destination X in the last N minutes,"
+        schema.sql's own stated reason for that index). Canonicalizes each raw
+        device_id via resolve_canonical_device_id() and dedupes -- without this, a
+        device that fragmented across an old orphan id and its current canonical id
+        could be miscounted as two independent devices touching the same
+        destination, when it's really one physical device."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT device_id FROM evidence WHERE destination_id = ? AND timestamp >= ?",
+            (destination_id, since),
+        ).fetchall()
+        canonical_ids = {self.resolve_canonical_device_id(r["device_id"]) for r in rows}
+        return sorted(canonical_ids)
+
+    def set_destination_reputation(self, destination_id: str, tier: int,
+                                     timestamp: Optional[float] = None) -> None:
+        """Writes a live reputation-tier cache onto the shared `destinations` row
+        (v13 full-architecture plan, Phase 1a: network-wide reputation
+        propagation) -- schema.sql's own `reputation_tier_cache`/`reputation_cached_at`
+        columns, confirmed unused by anything before this. Once one device's
+        evidence confirms a destination as malicious (see retro_hunter.py's own
+        call site), any OTHER device touching the same destination can inherit
+        that verdict immediately via get_destination_reputation(), instead of each
+        device re-earning its own corroboration from zero. Auto-upserts the
+        destination row first, so this is safe to call for a destination not yet
+        seen via insert_evidence()."""
+        ts = timestamp if timestamp is not None else time.time()
+        dest_kind = "ip" if _looks_like_ip(destination_id) else "domain"
+        self.upsert_destination(destination_id, dest_kind, timestamp=ts)
+        self._conn.execute(
+            "UPDATE destinations SET reputation_tier_cache = ?, reputation_cached_at = ? "
+            "WHERE destination_id = ?",
+            (tier, ts, destination_id),
+        )
+        self._maybe_commit()
+
+    def get_destination_reputation(self, destination_id: str) -> Optional[Dict[str, Any]]:
+        """Returns {"tier": int, "cached_at": float} if this destination has a live
+        reputation cache, or None if it was never set (including a destination
+        that doesn't exist yet at all) -- never raises. Callers own their own
+        staleness policy; this method never expires anything itself (see
+        live_engine.py's own TTL constant for the actual policy applied to reads)."""
+        row = self._conn.execute(
+            "SELECT reputation_tier_cache, reputation_cached_at FROM destinations WHERE destination_id = ?",
+            (destination_id,),
+        ).fetchone()
+        if row is None or row["reputation_tier_cache"] is None:
+            return None
+        return {"tier": row["reputation_tier_cache"], "cached_at": row["reputation_cached_at"]}
+
     def get_device_destinations_since(self, since: float) -> List[Any]:
         """Distinct (device_id, destination_id) pairs observed since `since` --
         used by retro_hunter.py (Phase 6) to re-scan historical destinations

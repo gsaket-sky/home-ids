@@ -33,6 +33,17 @@ not ported: Telegram notification (an orchestration concern, kept out of this
 module for testability -- callers get the finding list back and decide how to
 notify, the same "hand data back, let the caller act" shape CL-AFPE's
 MarkFalsePositiveResult already uses) and job-health/GeoIP-enrichment reporting.
+
+3. NETWORK-WIDE REPUTATION PROPAGATION (v13 full-architecture plan, Phase 1a,
+   added after this module's initial Phase 6 build): every confirmed destination
+   also gets `store.set_destination_reputation(dest, tier=5, ...)` called once,
+   writing onto the shared `destinations` row so ANY other device touching that
+   destination inherits the verdict immediately (live_engine.py's own
+   get_destination_reputation() read), not just the specific device(s) this hunt
+   happened to already know about. A genuinely different mechanism from #2 above
+   (a per-device Evidence write-back) -- this one is destination-scoped, not
+   device-scoped, closing the gap check_local_intel_history() addresses for
+   v-current's own separate LocalConfirmedIntel store.
 """
 import time
 from dataclasses import dataclass, field
@@ -106,6 +117,18 @@ class RetroHunter:
             result = self.threat_intel_lookup(dest)
             if result:
                 intel_by_destination[dest] = result
+
+        # Phase 1a (v13 full-architecture plan): network-wide reputation propagation.
+        # A retro-hunt confirmation IS exactly a "one device's evidence confirms a
+        # destination as malicious" moment (ReputationVector's own tier-5 docstring:
+        # "corroborated (TI/VT match...) can justify auto-block") -- write it once per
+        # distinct destination (not per device-destination pair, since this is a fact
+        # about the DESTINATION, not about any one device) onto the shared graph row so
+        # any OTHER device touching it inherits the verdict immediately via
+        # live_engine.py's own get_destination_reputation() read, rather than waiting
+        # for its own turn in a future retro-hunt cycle.
+        for dest in intel_by_destination:
+            self.store.set_destination_reputation(dest, tier=5, timestamp=now)
 
         findings: List[RetroHuntFinding] = []
         for device_id, dest in pairs:

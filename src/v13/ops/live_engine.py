@@ -51,9 +51,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from v13.evidence.ingest import convert_list
+from v13.evidence.model import Evidence, NO_DESTINATION
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
 from v13.decision.engine import DecisionEngine as V13DecisionEngine
-from v13.graph.store import GraphStore
+from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS
 from v13.graph.window import RollingWindowView
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
@@ -84,6 +85,23 @@ _graph_store: Optional[GraphStore] = None
 # recording; it's specifically the DERIVED verdict that shouldn't be re-written when
 # nothing about it changed.
 _last_decision_key: Dict[str, Tuple[str, str]] = {}
+
+# v13 full-architecture plan, Phase 1a -- the new graph-only-possible capabilities'
+# tuning constants. Each mirrors a value already established elsewhere in this codebase
+# rather than inventing a new number: the coordinated-targeting window matches
+# RollingWindowView's own SHORT_WINDOW_SECONDS ("within a short window," the plan's own
+# phrasing); the reputation-propagation TTL matches hypotheses/engine.py's own
+# _REPUTATION_TTL_SECONDS (the same 86400s bound compute_freshness() already applies to
+# every other "reputation" family item, so a propagated verdict ages out on the same
+# schedule a directly-observed one would); the first-contact lookback matches
+# GraphStore's own DEFAULT_EVIDENCE_RETENTION_DAYS ("seen before" can only mean "within
+# what the graph actually still retains" -- claiming first-contact status against data
+# that's already been pruned would be a false signal, not a stronger one).
+_COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
+_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 1  # "2+ distinct devices" total = 1+ OTHER device
+_REPUTATION_PROPAGATION_MIN_TIER = 5  # only a fully "corroborated" cached tier propagates
+_REPUTATION_PROPAGATION_TTL_SECONDS = 86400
+_FIRST_CONTACT_LOOKBACK_SECONDS = DEFAULT_EVIDENCE_RETENTION_DAYS * 86400
 
 # device_id -> set of content keys already written to the graph. A MUCH more serious
 # bug than the decision-dedup above, found the same minute on the same restart:
@@ -214,7 +232,18 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
                     confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
                     risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
                     raw_payload=decision,
-                    evidence_ids=[ev.evidence_id for ev in merged_v2],
+                    # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
+                    # (_inject_graph_derived_evidence()) that is deliberately never passed
+                    # to insert_evidence() above -- an evidence->decision 'supports' edge
+                    # for an evidence_id that was never actually persisted would be a
+                    # dangling reference. All three synthetic evidence types share the
+                    # "v13_live_engine:" provenance prefix, so filtering on that (rather
+                    # than threading a separate is-synthetic flag through several layers)
+                    # is enough to exclude them here.
+                    evidence_ids=[
+                        ev.evidence_id for ev in merged_v2
+                        if not ev.provenance.startswith("v13_live_engine:")
+                    ],
                 )
                 _last_decision_key[device_id] = current_key
         # Only mark as written AFTER a successful commit -- a failed write leaves
@@ -227,6 +256,73 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
             "decision itself is already made and unaffected by this: %s",
             device_id, e, exc_info=True,
         )
+
+
+def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float) -> List[Evidence]:
+    """v13 full-architecture plan, Phase 1a: computes the three new graph-only-possible
+    signals for THIS cycle's decision -- cross-device correlation, reputation
+    propagation, and genuine first-contact scoring (see graph/window.py's
+    devices_targeting()/domain_seen_before() and graph/store.py's
+    get_destination_reputation(), all built for exactly this).
+
+    CRITICAL: the returned items are added ONLY to merged_v2 (this cycle's scoring
+    input) by the caller, NEVER to fresh_v2 (the graph-write path). A synthetic item
+    re-created fresh every cycle would look "new" by _content_key() every single time
+    (its own timestamp is `ts`, which changes every call) -- writing it to the graph
+    would re-create the exact evidence-duplication bug Phase 1's own incident already
+    found and fixed (see this module's own _written_evidence_keys docstring). These
+    items are graph-DERIVED context for scoring, not a sensor observation to persist.
+
+    Best-effort, matching every other graph read in this module: any failure degrades
+    to 'no synthetic evidence this cycle' and returns [], never blocks the real
+    decision."""
+    synthetic: List[Evidence] = []
+    real_destinations = {d for d in destinations if d and d != NO_DESTINATION}
+    if not real_destinations:
+        return synthetic
+    try:
+        store = _get_graph_store()
+        window = RollingWindowView(store)
+        for dest in real_destinations:
+            others = window.devices_targeting(
+                dest, _COORDINATED_TARGETING_WINDOW_SECONDS, now=ts, exclude_device_id=device_id,
+            )
+            if len(others) >= _COORDINATED_TARGETING_MIN_OTHER_DEVICES:
+                synthetic.append(Evidence(
+                    device_id=device_id, destination_id=dest, evidence_type="coordinated_targeting",
+                    independence_family="cross_device_correlation", timestamp=ts,
+                    source="v13_live_engine", confidence=1.0, value=float(len(others) + 1),
+                    provenance="v13_live_engine:coordinated_targeting",
+                    features={"other_devices": others},
+                ))
+
+            rep = store.get_destination_reputation(dest)
+            if (rep and rep["tier"] >= _REPUTATION_PROPAGATION_MIN_TIER
+                    and (ts - rep["cached_at"]) <= _REPUTATION_PROPAGATION_TTL_SECONDS):
+                synthetic.append(Evidence(
+                    device_id=device_id, destination_id=dest, evidence_type="reputation",
+                    independence_family="reputation", timestamp=ts,
+                    source="v13_live_engine", confidence=1.0, value=float(rep["tier"]),
+                    provenance="v13_live_engine:reputation_propagation",
+                ))
+
+            if not window.domain_seen_before(
+                device_id, dest, _FIRST_CONTACT_LOOKBACK_SECONDS, now=ts,
+                exclude_window_seconds=RollingWindowView.SHORT_WINDOW_SECONDS,
+            ):
+                synthetic.append(Evidence(
+                    device_id=device_id, destination_id=dest, evidence_type="first_contact",
+                    independence_family="novelty_context", timestamp=ts,
+                    source="v13_live_engine", confidence=1.0, value=1.0,
+                    provenance="v13_live_engine:first_contact",
+                ))
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to compute Phase 1a graph-derived signals for device %r, deciding "
+            "without them this cycle: %s", device_id, e,
+        )
+        return []
+    return synthetic
 
 
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
@@ -254,6 +350,14 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # it in the merged list handed to the decision engine.
             fresh_keys = {_content_key(ev) for ev in fresh_v2}
             merged_v2 = [ev for ev in windowed_v2 if _content_key(ev) not in fresh_keys] + fresh_v2
+
+            # Phase 1a: cross-device correlation / reputation propagation / genuine
+            # first-contact scoring -- computed from THIS cycle's real destinations
+            # only (not the whole windowed history), added to merged_v2 alone. See
+            # _inject_graph_derived_evidence()'s own docstring for why these must
+            # never reach fresh_v2 (the graph-write path).
+            fresh_destinations = {ev.destination_id for ev in fresh_v2}
+            merged_v2 = merged_v2 + _inject_graph_derived_evidence(device_id, fresh_destinations, ts)
 
         decision = _v13_engine.evaluate(
             merged_v2, rep_vector, device_type=device_type,

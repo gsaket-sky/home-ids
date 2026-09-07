@@ -30,7 +30,8 @@ from v13.evidence.model import Evidence  # noqa: E402
 from v13.hypotheses.engine import (  # noqa: E402
     HypothesisEngine, DNSTunnelingHypothesis, NetworkIntrusionHypothesis,
     ConnectionAbuseHypothesis, DNSEvasionHypothesis, DeviceProfileBenignHypothesis,
-    DGAHypothesis, compute_freshness, score_evidence,
+    DGAHypothesis, ExfiltrationHypothesis, BeaconingHypothesis, DNSTunnelingV2Hypothesis,
+    CoordinatedTargetingHypothesis, compute_freshness, score_evidence,
 )
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 
@@ -179,6 +180,107 @@ score_wrong_category = h3.evaluate(
 )
 check("a device category NOT in the expected-high-volume set does not get this benign pass",
       score_wrong_category == 0.0)
+
+# --- Phase 1a: first_contact bump (Exfiltration/Beaconing/DNSTunnelingV2) ---
+h = ExfiltrationHypothesis()
+score_moderate_alone = h.evaluate(
+    score_evidence([ev("zeek_exfiltration", 1, confidence=0.7)], now=NOW), rep(3),
+)
+check("a moderate-confidence exfiltration hit alone (effective_weight 0.7, below the "
+      "old dead strong_score path) reaches SUSPICIOUS via the best>=0.6 gate",
+      score_moderate_alone == 3.0)
+
+h = ExfiltrationHypothesis()
+score_weak_plus_first_contact = h.evaluate(
+    score_evidence([ev("zeek_exfiltration", 1, confidence=0.4), ev("first_contact", 1.0)], now=NOW), rep(3),
+)
+check("Phase 1a REGRESSION FIX: a WEAK exfiltration hit (effective_weight 0.4, below "
+      "the best>=0.6 gate) still reaches SUSPICIOUS when paired with a genuine "
+      "first-contact signal -- strong_score used to be computed but never consulted "
+      "for this hypothesis, making first_contact a dead checklist-only field before "
+      "this fix", score_weak_plus_first_contact == 3.0)
+
+h = ExfiltrationHypothesis()
+score_weak_alone = h.evaluate(
+    score_evidence([ev("zeek_exfiltration", 1, confidence=0.4)], now=NOW), rep(3),
+)
+check("REGRESSION GUARD: that same weak hit WITHOUT first_contact stays at base "
+      "SUSPICIOUS-floor (2.0), confirming the fix only ADDS a path, never lowers "
+      "the bar unconditionally", score_weak_alone == 2.0)
+
+# confidence=0.5 (below the 0.85 best-effective_weight gate) isolates the
+# strong_score-only SUSPICIOUS path from the separate best>=0.85 HIGH path below --
+# both hypotheses' HIGH tier requires strong_score AND best>=0.85 together, so a
+# high-confidence hit would trip BOTH gates at once and not isolate anything.
+h = BeaconingHypothesis()
+score_beacon_plain = h.evaluate(score_evidence([ev("zeek_beaconing", 1, confidence=0.5)], now=NOW), rep(3))
+score_before = score_beacon_plain
+h2 = BeaconingHypothesis()
+score_beacon_first_contact = h2.evaluate(
+    score_evidence([ev("zeek_beaconing", 1, confidence=0.5), ev("first_contact", 1.0)], now=NOW), rep(3),
+)
+check("BeaconingHypothesis: a beacon hit alone (below the best>=0.85 HIGH gate, no "
+      "other corroboration) stays at the base floor", score_beacon_plain == 2.0)
+check("BeaconingHypothesis: adding first_contact raises that same hit to SUSPICIOUS "
+      "via the existing strong_score gate (strong_score already gated this "
+      "hypothesis's own threshold, so first_contact was already functional here, "
+      "not dead)", score_beacon_first_contact > score_before and score_beacon_first_contact == 3.0)
+
+h = DNSTunnelingV2Hypothesis()
+score_tunnel_plain = h.evaluate(
+    score_evidence([ev("dns_tunnel_v2", 1, confidence=0.5,
+                        provenance="detector:threat_signals:dns_tunnel_v2:sub1:note")], now=NOW),
+    rep(3),
+)
+h2 = DNSTunnelingV2Hypothesis()
+score_tunnel_first_contact = h2.evaluate(
+    score_evidence([
+        ev("dns_tunnel_v2", 1, confidence=0.5, provenance="detector:threat_signals:dns_tunnel_v2:sub1:note"),
+        ev("first_contact", 1.0),
+    ], now=NOW), rep(3),
+)
+check("DNSTunnelingV2Hypothesis: a single-signal tunnel hit alone stays at the base floor",
+      score_tunnel_plain == 2.0)
+check("DNSTunnelingV2Hypothesis: adding first_contact raises a single-signal tunnel "
+      "hit to SUSPICIOUS via the existing strong_score gate",
+      score_tunnel_first_contact == 3.0)
+
+# --- Phase 1a: CoordinatedTargetingHypothesis -- a genuinely new capability, no v1 equivalent ---
+h = CoordinatedTargetingHypothesis()
+score_no_evidence = h.evaluate(score_evidence([ev("dns_rate", 10)], now=NOW), rep(3))
+check("CoordinatedTargetingHypothesis requires its own coordinated_targeting evidence "
+      "-- unrelated evidence types never satisfy it", score_no_evidence == 0.0 and not h.required_satisfied)
+
+h = CoordinatedTargetingHypothesis()
+score_two_devices = h.evaluate(
+    score_evidence([ev("coordinated_targeting", 2.0)], now=NOW), rep(3),
+)
+check("2 total devices (this one + 1 other) satisfies the hypothesis and reaches "
+      "SUSPICIOUS (3.0) via the best-effective_weight gate, but NOT HIGH -- the "
+      ">=3-devices strong_score bump correctly hasn't fired yet at only 2",
+      h.required_satisfied and score_two_devices == 3.0)
+
+h = CoordinatedTargetingHypothesis()
+score_many_devices_confident = h.evaluate(
+    score_evidence([ev("coordinated_targeting", 5.0, confidence=0.95)], now=NOW), rep(3),
+)
+check("3+ total devices with high confidence reaches HIGH (4.0) -- the strong_score "
+      "bump for >=3 devices plus a high effective_weight",
+      score_many_devices_confident == 4.0)
+
+h = CoordinatedTargetingHypothesis()
+score_contradicted = h.evaluate(
+    score_evidence([ev("coordinated_targeting", 5.0, confidence=0.95)], now=NOW), rep(1),  # trusted destination
+)
+check("a trusted-tier destination (tier 1) contradicts even a many-device coordinated "
+      "hit, same contradicting-evidence pattern every other hypothesis uses",
+      score_contradicted == 2.0)
+
+engine_ct = HypothesisEngine()
+result_ct = engine_ct.evaluate_all([ev("coordinated_targeting", 3.0)], rep(3), now=NOW)
+check("HypothesisEngine.evaluate_all() surfaces COORDINATED_TARGETING as the winning "
+      "attack hypothesis when it's the only evidence present",
+      result_ct["attack"]["name"] == "COORDINATED_TARGETING")
 
 # --- HypothesisEngine.evaluate_all(): winner selection ---
 engine = HypothesisEngine()

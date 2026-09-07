@@ -121,6 +121,18 @@ check("the written-back evidence is timestamped at discovery time (now), not the
 check("dev3 (clean domain) gets NO retro_hunter evidence written back",
       not any(e.source == "retro_hunter" for e in store.get_evidence_for_device("dev3")))
 
+# --- Phase 1a: network-wide reputation propagation -- destination-scoped, not
+# device-scoped, written once per confirmed destination regardless of how many
+# devices touched it ---
+confirmed_rep = store.get_destination_reputation("evil-later.example.com")
+check("a confirmed destination gets its reputation cache set to tier 5 "
+      "('corroborated', per ReputationVector's own tier docstring)",
+      confirmed_rep is not None and confirmed_rep["tier"] == 5)
+check("the reputation cache is timestamped at discovery time (now)",
+      confirmed_rep is not None and confirmed_rep["cached_at"] == NOW)
+check("the CLEAN destination never gets a reputation cache entry at all",
+      store.get_destination_reputation("always-clean.example.com") is None)
+
 # --- confidence-sorted output ---
 store.insert_evidence(Evidence(device_id="dev5", destination_id="less-bad.example.com",
                                  evidence_type="dns_entropy", independence_family="dns_behavior",

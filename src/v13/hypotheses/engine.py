@@ -254,7 +254,9 @@ class DGAHypothesis(Hypothesis):
 
 
 class ExfiltrationHypothesis(Hypothesis):
-    RELEVANT_EVIDENCE_TYPES = frozenset({"zeek_exfiltration", "zeek_beaconing", "reputation"})
+    # "first_contact" (Phase 1a) added to what this hypothesis reads -- see its
+    # own strong_score bump below.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"zeek_exfiltration", "zeek_beaconing", "reputation", "first_contact"})
 
     def __init__(self):
         super().__init__("DATA_EXFILTRATION")
@@ -271,18 +273,36 @@ class ExfiltrationHypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_beaconing", "reputation") for e in ev_store):
             self.strong_score += 1.0
+        # Phase 1a: genuine first-contact-ever (graph/window.py's domain_seen_before(),
+        # richer than baseline_familiarity's dict approximation) is a real corroborating
+        # signal for exfiltration specifically -- data leaving to a destination this
+        # device has NEVER talked to before is more suspicious than unusual-timing
+        # traffic to an already-familiar one, which today score identically.
+        if any(e.evidence_type == "first_contact" for e in ev_store):
+            self.strong_score += 1.0
 
         score = 2.0
         if best >= 0.6 and self.contradicting_score == 0:
             score = 3.0
         if best >= 0.85 and self.contradicting_score == 0:
             score = 4.0
+        # BUGFIX (Phase 1a): the two `best`-gated bumps above were this hypothesis's
+        # ONLY path to SUSPICIOUS/HIGH -- strong_score was computed (beaconing/
+        # reputation/first_contact) but never actually consulted, making it dead
+        # weight in the checklist only. Purely additive floor: a real corroborating
+        # signal can raise a moderate-effective_weight exfiltration hit to at least
+        # SUSPICIOUS even when `best` alone wouldn't clear 0.6 -- can only raise
+        # score relative to the two branches above, never lower it, so no existing
+        # high-`best` case is affected.
+        if self.strong_score > 0 and self.contradicting_score == 0:
+            score = max(score, 3.0)
         return score
 
 
 class BeaconingHypothesis(Hypothesis):
     RELEVANT_EVIDENCE_TYPES = frozenset({
         "zeek_beaconing", "zeek_exfiltration", "reputation", "malicious_ja3", "malicious_ja4",
+        "first_contact",
     })
 
     def __init__(self):
@@ -300,6 +320,10 @@ class BeaconingHypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_exfiltration", "reputation", "malicious_ja3", "malicious_ja4") for e in ev_store):
             self.strong_score += 1.0
+        # Phase 1a: a beacon to a destination this device has never contacted before
+        # is more suspicious than a beacon-shaped pattern to a long-familiar one.
+        if any(e.evidence_type == "first_contact" for e in ev_store):
+            self.strong_score += 1.0
 
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
@@ -310,7 +334,7 @@ class BeaconingHypothesis(Hypothesis):
 
 
 class DNSTunnelingV2Hypothesis(Hypothesis):
-    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_tunnel_v2"})
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_tunnel_v2", "first_contact"})
 
     def __init__(self):
         super().__init__("DNS_COVERT_TUNNELING")
@@ -334,11 +358,56 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if distinct_signals >= 2:
             self.strong_score += 1.0
+        # Phase 1a: a covert-tunnel-shaped pattern to a destination never seen
+        # before this device's own history is a real corroborating signal, same
+        # reasoning as Exfiltration/Beaconing above.
+        if any(e.evidence_type == "first_contact" for e in ev_store):
+            self.strong_score += 1.0
 
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
             score = 3.0
         if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0 and rep_vector.tier in (3, 4):
+            score = 4.0
+        return score
+
+
+class CoordinatedTargetingHypothesis(Hypothesis):
+    """v13 full-architecture plan, Phase 1a -- a genuinely new detection
+    capability, not a port (no v-current equivalent exists: v-current's
+    per-device, in-memory-only RollingWindow has no cross-device view at all).
+    Scores up when 2+ distinct devices independently reach the same destination
+    within a short window -- a real signal for a compromised fleet, a coordinated
+    scan, or several devices independently reaching a shared C2 destination.
+    `coordinated_targeting` evidence is synthesized per-cycle by
+    v13/ops/live_engine.py from graph/window.py's devices_targeting() query, never
+    written back to the graph itself (it's derived context, not a sensor
+    observation) -- see that module's own docstring."""
+    RELEVANT_EVIDENCE_TYPES = frozenset({"coordinated_targeting"})
+
+    def __init__(self):
+        super().__init__("COORDINATED_TARGETING")
+
+    def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
+        self._reset_eval_state()
+        hits = [e for e in ev_store if e.evidence_type == "coordinated_targeting"]
+        self.required_satisfied = bool(hits)
+        if not self.required_satisfied:
+            return 0.0
+        best = max(e.effective_weight() for e in hits)
+        # .value carries the total number of devices (this one + the others) seen
+        # targeting the destination -- see live_engine.py's injection site.
+        total_devices = max((e.value or 0) for e in hits)
+
+        if rep_vector.tier in (1, 2):
+            self.contradicting_score += 1.0
+        if total_devices >= 3:
+            self.strong_score += 1.0
+
+        score = 2.0
+        if best >= 0.6 and self.contradicting_score == 0:
+            score = 3.0
+        if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0:
             score = 4.0
         return score
 
@@ -466,6 +535,7 @@ HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.update({
     DNSEvasionHypothesis._NAME_NO_DNS_HISTORY: DNSEvasionHypothesis.RELEVANT_EVIDENCE_TYPES,
     DNSEvasionHypothesis._NAME_PARTIAL_GAP: DNSEvasionHypothesis.RELEVANT_EVIDENCE_TYPES,
     "SIGNATURE_MATCHED_THREAT": SuricataSignatureHypothesis.RELEVANT_EVIDENCE_TYPES,
+    "COORDINATED_TARGETING": CoordinatedTargetingHypothesis.RELEVANT_EVIDENCE_TYPES,
 })
 
 
@@ -523,6 +593,7 @@ class HypothesisEngine:
             DGAHypothesis(), ExfiltrationHypothesis(), BeaconingHypothesis(),
             DNSTunnelingV2Hypothesis(), ConnectionAbuseHypothesis(),
             DNSEvasionHypothesis(), SuricataSignatureHypothesis(),
+            CoordinatedTargetingHypothesis(),
         ]
         self.benign_hypotheses: List[Hypothesis] = [
             AdvertisingBurstHypothesis(), LocalDeviceDiscoveryHypothesis(),

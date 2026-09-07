@@ -320,6 +320,59 @@ no_until = store.get_decisions_since(6_050_000.0)
 check("get_decisions_since with no `until` includes everything from `since` onward",
       any(d["raw_payload"].get("marker") == "after_until" for d in no_until))
 
+# --- get_devices_targeting (Phase 1a: cross-device correlation) ---
+store.insert_evidence(Evidence(device_id="p1a_dev_a", destination_id="shared.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=7_000_000.0, source="s"))
+store.insert_evidence(Evidence(device_id="p1a_dev_b", destination_id="shared.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=7_000_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="p1a_dev_c", destination_id="unrelated.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=7_000_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="p1a_dev_old", destination_id="shared.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=6_000_000.0, source="s"))  # well before `since` below
+
+targeting = store.get_devices_targeting("shared.example.com", since=6_999_000.0)
+check("get_devices_targeting finds both devices that touched the shared destination",
+      set(targeting) == {"p1a_dev_a", "p1a_dev_b"}, f"got {targeting}")
+check("get_devices_targeting excludes a device whose only touch is before `since`",
+      "p1a_dev_old" not in targeting)
+check("get_devices_targeting excludes a device that touched a DIFFERENT destination",
+      "p1a_dev_c" not in targeting)
+
+# canonicalization: an orphan merged into dev_a should resolve to dev_a, not appear
+# as a THIRD distinct device
+store.insert_evidence(Evidence(device_id="p1a_dev_a_orphan", destination_id="shared.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=7_000_020.0, source="s"))
+store.merge_device("p1a_dev_a_orphan", "p1a_dev_a", timestamp=7_000_021.0)
+targeting_after_merge = store.get_devices_targeting("shared.example.com", since=6_999_000.0)
+check("get_devices_targeting canonicalizes a merged orphan into its canonical id "
+      "(still just 2 distinct physical devices, not 3)",
+      set(targeting_after_merge) == {"p1a_dev_a", "p1a_dev_b"}, f"got {targeting_after_merge}")
+
+# --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
+check("get_destination_reputation returns None for a destination never cached",
+      store.get_destination_reputation("never-cached.example.com") is None)
+
+store.set_destination_reputation("evil.example.com", tier=5, timestamp=7_100_000.0)
+rep = store.get_destination_reputation("evil.example.com")
+check("set_destination_reputation is readable back with the tier that was written",
+      rep is not None and rep["tier"] == 5)
+check("set_destination_reputation is readable back with the timestamp that was written",
+      rep is not None and rep["cached_at"] == 7_100_000.0)
+check("set_destination_reputation auto-upserts a destination never seen via insert_evidence",
+      store._conn.execute(
+          "SELECT 1 FROM destinations WHERE destination_id = 'evil.example.com'"
+      ).fetchone() is not None)
+
+store.set_destination_reputation("evil.example.com", tier=3, timestamp=7_200_000.0)
+rep_overwritten = store.get_destination_reputation("evil.example.com")
+check("a second set_destination_reputation call OVERWRITES the cached tier/timestamp",
+      rep_overwritten["tier"] == 3 and rep_overwritten["cached_at"] == 7_200_000.0)
+
 store.close()
 
 print()

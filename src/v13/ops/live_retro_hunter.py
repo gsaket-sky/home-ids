@@ -28,14 +28,22 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
-from v13.graph.store import GraphStore  # noqa: E402
+from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from v13.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
 
 LOGGER = logging.getLogger("live_retro_hunter")
 
-# Matches RetroHunter.hunt()'s own default and scripts/retro_hunter.py's --days default --
-# no new config key introduced for this, consistent with the rest of Phase 4's narrow scope.
-DEFAULT_DAYS_BACK = 14
+# v13 full-architecture plan, Phase 1a's item 5: "retro-hunter against the FULL
+# retained history, not just recent days" -- now that live_prune.py actually enforces
+# GraphStore's 90-day evidence retention (Phase 1's own follow-up fix), a newly
+# confirmed-malicious destination can be checked against everything any device
+# touched in the WHOLE retained window, not an arbitrary shorter slice. Was 14
+# (matching RetroHunter.hunt()'s own default / scripts/retro_hunter.py's --days
+# default) when this file was first written in Phase 4, before retention was
+# actually being enforced on `.94` -- deliberately widened here, now that it is,
+# rather than leaving an artificially narrow lookback that ignores 76 days of
+# history the graph is already paying to retain.
+DEFAULT_DAYS_BACK = DEFAULT_EVIDENCE_RETENTION_DAYS
 
 
 def main() -> None:

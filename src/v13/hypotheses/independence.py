@@ -110,13 +110,30 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # SSDP local-device-discovery traffic must never count toward "N independent
     # attack sources," the same way it can't in v-current.
     "local_device_discovery": "local_context",
+
+    # v13 full-architecture plan, Phase 1a -- new capabilities the graph makes
+    # possible, not ported from v-current (no v1 equivalent exists). A genuinely
+    # distinct vantage point: "another device's own independent behavior," not a
+    # sensor reading on THIS device at all -- counts toward independent-source
+    # corroboration like any other family (2+ devices independently hitting the
+    # same destination is real corroborating signal, not a context modifier).
+    "coordinated_targeting": "cross_device_correlation",
+
+    # Also Phase 1a: "this destination has never been contacted before" is a fact
+    # ABOUT an existing observation (novelty), not itself an independent behavioral
+    # signal the way a genuinely separate sensor is -- deliberately placed in
+    # NON_ATTACK_FAMILIES below, the same treatment local_device_discovery gets,
+    # so it can inform specific hypotheses' scoring without inflating "N
+    # independent sources" on its own.
+    "first_contact": "novelty_context",
 }
 
 # Mirrors v-current's ATTACK_EVIDENCE_FAMILIES exclusion exactly -- decision/engine.py
 # excludes evidence in this family from independent-source counting toward an ATTACK
 # verdict (it's legitimate evidence for the LocalDeviceDiscoveryHypothesis benign
-# side, never for corroborating an attack).
-NON_ATTACK_FAMILIES = frozenset({"local_context"})
+# side, never for corroborating an attack). "novelty_context" (Phase 1a) gets the
+# same treatment for the same structural reason -- see its own comment above.
+NON_ATTACK_FAMILIES = frozenset({"local_context", "novelty_context"})
 
 UNKNOWN_FAMILY = "unregistered"  # visible fallback, see count_independent_families()'s own docstring
 

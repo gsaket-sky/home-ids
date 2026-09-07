@@ -71,3 +71,19 @@ class RollingWindowView:
                                now: Optional[float] = None) -> Dict[str, int]:
         evidence = self.evidence_in_window(device_id, window_seconds, now=now)
         return dict(Counter(ev.evidence_type for ev in evidence))
+
+    def devices_targeting(self, destination_id: str, window_seconds: float,
+                            now: Optional[float] = None,
+                            exclude_device_id: Optional[str] = None) -> List[str]:
+        """Answers "which OTHER devices have touched this destination in the last
+        N seconds" -- v13 full-architecture plan, Phase 1a: cross-device
+        correlation / coordinated-campaign detection, a real capability v-current's
+        per-device, in-memory-only RollingWindow structurally cannot answer (it has
+        no view across devices at all). exclude_device_id is typically the calling
+        device itself, since the point of this query is "who ELSE is touching this
+        destination right now," not a self-count."""
+        now = now if now is not None else time.time()
+        devices = self.store.get_devices_targeting(destination_id, since=now - window_seconds)
+        if exclude_device_id:
+            devices = [d for d in devices if d != exclude_device_id]
+        return devices

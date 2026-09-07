@@ -100,6 +100,29 @@ type_counts = window.evidence_type_counts("dev1", window_seconds=RollingWindowVi
 check("evidence_type_counts tallies dns_entropy correctly within the long window",
       type_counts.get("dns_entropy") == 2)
 
+# --- devices_targeting (Phase 1a: cross-device correlation) ---
+store.insert_evidence(Evidence(device_id="dev2", destination_id="shared.com", evidence_type="dns_entropy",
+                                 independence_family="dns_behavior", timestamp=NOW - 60, source="s"))
+store.insert_evidence(Evidence(device_id="dev3", destination_id="shared.com", evidence_type="dns_entropy",
+                                 independence_family="dns_behavior", timestamp=NOW - 4000, source="s"))  # outside short window
+store.insert_evidence(Evidence(device_id="dev1", destination_id="shared.com", evidence_type="dns_entropy",
+                                 independence_family="dns_behavior", timestamp=NOW - 60, source="s"))
+
+targeting_all = window.devices_targeting("shared.com", RollingWindowView.SHORT_WINDOW_SECONDS, now=NOW)
+check("devices_targeting includes dev1 and dev2 (both within the short window)",
+      set(targeting_all) == {"dev1", "dev2"}, f"got {targeting_all}")
+check("devices_targeting excludes dev3 (its only touch is outside the window)",
+      "dev3" not in targeting_all)
+
+targeting_excl_self = window.devices_targeting(
+    "shared.com", RollingWindowView.SHORT_WINDOW_SECONDS, now=NOW, exclude_device_id="dev1",
+)
+check("devices_targeting with exclude_device_id leaves out the calling device itself",
+      targeting_excl_self == ["dev2"], f"got {targeting_excl_self}")
+
+targeting_wide_window = window.devices_targeting("shared.com", window_seconds=10_000, now=NOW)
+check("a wide enough window does pick up dev3", "dev3" in targeting_wide_window)
+
 store.close()
 
 print()

@@ -318,6 +318,138 @@ check("E: omitting device_id entirely means the graph is never touched at all --
 live_engine._get_graph_store = _orig_get_store
 
 
+# --- F. Phase 1a: graph-derived synthetic evidence (cross-device correlation,
+# reputation propagation, genuine first-contact) -- own fresh store, since these
+# scenarios need clean cross-device/cross-destination state ---
+
+_f_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_phase1a_test_")
+_f_graph_db_path = str(_PathForSysPath(_f_tmpdir) / "f_graph.db")
+live_engine.configure(_f_graph_db_path)
+_ft0 = 3_000_000.0
+
+
+def _capture_merged(v1_evidence, rep, device_id, now, features=None):
+    """Runs evaluate() with a thin wrapper around _v13_engine.evaluate() (same
+    pattern as Section E's own _CapturingEngine) and returns the exact merged
+    evidence list the decision engine actually saw for this one call."""
+    captured = []
+    orig_engine = live_engine._v13_engine
+
+    class _Capture:
+        def evaluate(self, evidence_list, *a, **kw):
+            captured.append(list(evidence_list))
+            return orig_engine.evaluate(evidence_list, *a, **kw)
+
+    live_engine._v13_engine = _Capture()
+    try:
+        live_engine.evaluate(v1_evidence, rep, features=features or {}, device_id=device_id, now=now)
+    finally:
+        live_engine._v13_engine = orig_engine
+    return captured[-1]
+
+
+# --- F1: cross-device correlation ---
+devA_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0, device="p1a_devA",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="shared-target.example.com")]
+merged_A = _capture_merged(devA_ev, ReputationVector(domain="", tier=3), "p1a_devA", _ft0)
+check("F1: the FIRST device to touch a destination gets no coordinated_targeting "
+      "evidence -- nobody else has touched it yet",
+      not any(e.evidence_type == "coordinated_targeting" for e in merged_A))
+
+devB_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 10, device="p1a_devB",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="shared-target.example.com")]
+merged_B = _capture_merged(devB_ev, ReputationVector(domain="", tier=3), "p1a_devB", _ft0 + 10)
+coordinated_hits = [e for e in merged_B if e.evidence_type == "coordinated_targeting"]
+check("F1: the SECOND device to touch the SAME destination within the short window "
+      "DOES get coordinated_targeting evidence -- the actual cross-device correlation "
+      "capability, not achievable against v-current's per-device-only RollingWindow",
+      len(coordinated_hits) == 1)
+check("F1: the synthetic evidence's value is the TOTAL device count (this one + 1 other = 2)",
+      coordinated_hits and coordinated_hits[0].value == 2.0)
+check("F1: the synthetic evidence names the other device in its features for audit",
+      coordinated_hits and coordinated_hits[0].features.get("other_devices") == ["p1a_devA"])
+
+_f_store = live_engine._get_graph_store()
+check("F1: the synthetic coordinated_targeting evidence was NEVER written to the graph "
+      "itself (it's derived context, not a sensor observation -- writing it would "
+      "recreate the evidence-duplication bug Phase 1's own incident already fixed)",
+      not any(e.evidence_type == "coordinated_targeting"
+              for e in _f_store.get_evidence_for_device("p1a_devB")))
+
+# --- F2: reputation propagation ---
+_f_store.set_destination_reputation("evil-shared.example.com", tier=5, timestamp=_ft0)
+devC_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devC",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="evil-shared.example.com")]
+merged_C = _capture_merged(devC_ev, ReputationVector(domain="", tier=3), "p1a_devC", _ft0 + 20)
+rep_hits = [e for e in merged_C if e.evidence_type == "reputation"
+             and e.provenance == "v13_live_engine:reputation_propagation"]
+check("F2: a device touching a destination another device's evidence already confirmed "
+      "malicious (via set_destination_reputation, e.g. retro_hunter.py's own call site) "
+      "inherits a live reputation evidence item immediately",
+      len(rep_hits) == 1)
+check("F2: the propagated evidence carries the cached tier as its value",
+      rep_hits and rep_hits[0].value == 5.0)
+check("F2: the propagated evidence was NEVER written to the graph itself",
+      not any(e.provenance == "v13_live_engine:reputation_propagation"
+              for e in _f_store.get_evidence_for_device("p1a_devC")))
+
+devD_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devD",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="never-confirmed.example.com")]
+merged_D = _capture_merged(devD_ev, ReputationVector(domain="", tier=3), "p1a_devD", _ft0 + 20)
+check("F2: a device touching a DIFFERENT, never-confirmed destination gets no "
+      "propagated reputation evidence",
+      not any(e.provenance == "v13_live_engine:reputation_propagation" for e in merged_D))
+
+_f_store.set_destination_reputation("weak-tier.example.com", tier=4, timestamp=_ft0)
+devE_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devE",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="weak-tier.example.com")]
+merged_E = _capture_merged(devE_ev, ReputationVector(domain="", tier=3), "p1a_devE", _ft0 + 20)
+check("F2: a cached tier BELOW the corroborated threshold (4, not 5) does not propagate "
+      "-- only a fully corroborated verdict does, matching ReputationVector's own tier "
+      "semantics (tier 4 = 'one unconfirmed signal,' not auto-block-worthy)",
+      not any(e.provenance == "v13_live_engine:reputation_propagation" for e in merged_E))
+
+_f_store.set_destination_reputation("stale.example.com", tier=5,
+                                       timestamp=_ft0 - live_engine._REPUTATION_PROPAGATION_TTL_SECONDS - 1)
+devF_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devF",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="stale.example.com")]
+merged_F = _capture_merged(devF_ev, ReputationVector(domain="", tier=3), "p1a_devF", _ft0 + 20)
+check("F2: a cached reputation entry OLDER than the propagation TTL does not propagate "
+      "-- ages out on the same schedule a directly-observed reputation item would",
+      not any(e.provenance == "v13_live_engine:reputation_propagation" for e in merged_F))
+
+# --- F3: genuine first-contact scoring ---
+devG_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 30, device="p1a_devG",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="brand-new.example.com")]
+merged_G1 = _capture_merged(devG_ev, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 30)
+check("F3: a destination this device has NEVER contacted before gets a first_contact "
+      "signal on its very first observation",
+      any(e.evidence_type == "first_contact" for e in merged_G1))
+check("F3: the first_contact evidence was NEVER written to the graph itself",
+      not any(e.evidence_type == "first_contact" for e in _f_store.get_evidence_for_device("p1a_devG")))
+
+# Second cycle, well past the SHORT_WINDOW_SECONDS exclusion (300s) -- the first
+# cycle's own persisted evidence for this destination now falls OUTSIDE the excluded
+# "current incident" window, so domain_seen_before() correctly finds it familiar now.
+devG_ev2 = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 30 + 400, device="p1a_devG",
+                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="brand-new.example.com")]
+merged_G2 = _capture_merged(devG_ev2, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 30 + 400)
+check("F3: a SECOND cycle contacting the SAME destination, well after the current-"
+      "incident exclusion window, correctly stops getting first_contact -- the signal "
+      "self-corrects from the device's own now-persisted history, exactly the "
+      "'genuinely first contact, not every contact' semantics this exists to provide",
+      not any(e.evidence_type == "first_contact" for e in merged_G2))
+
+_f_store.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")
