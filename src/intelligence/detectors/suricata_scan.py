@@ -81,14 +81,19 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
     # (8 real cores) via journalctl: 151 timeouts / 0 successful scans in 48h straight,
     # every single reactive-capture burst (bursts run up to ~170MB per radio) exceeding
     # the 240s timeout on one core against a real, unturned 68,620-line ruleset.
-    # "workers" is Suricata's own recommended runmode for offline/batch pcap
-    # processing on a multi-core box (each worker thread independently processes a
-    # subset of flows) -- same detection logic/output shape, not a behavior change,
-    # just real parallelism this batch invocation was never using. Confirmed via
-    # `suricata --build-info` this box's real Suricata (8.0.3) supports it.
+    # CORRECTION (same day, caught live): --runmode=workers is NOT valid for `-r`
+    # (offline pcap / PCAP_FILE mode) -- Suricata rejects it outright ("custom type
+    # 'workers' doesn't exist for this runmode type 'PCAP_FILE'"), exiting 1
+    # immediately with zero findings, which is worse than the timeout it replaced
+    # (silent failure, no scan even attempted). "workers" only exists for
+    # live-capture runmode types (AF_PACKET/PF_RING/etc.), where each worker owns a
+    # NIC queue end-to-end. "autofp" is PCAP_FILE's actual multi-threaded option:
+    # one capture thread reads the file and auto-flow-pins packets across N
+    # detection worker threads, one output thread -- this is what uses the box's
+    # other 7 cores instead of just one.
     cmd = [
         suricata_bin, "-r", str(pcap_path), "-l", str(scratch_dir),
-        "-S", str(rules_path), "-k", "none", "--runmode=workers",
+        "-S", str(rules_path), "-k", "none", "--runmode=autofp",
     ]
     try:
         result = subprocess.run(

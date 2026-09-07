@@ -630,11 +630,17 @@ retrain since that split happened had been silently discarded; (2) Suricata
 batch scans had been timing out 100% of the time in production (151 timeouts
 / 0 successful scans over 48h, confirmed via `.94`'s real `journalctl`) —
 root-caused to `run_suricata_on_pcap()` hardcoding `--runmode=single`, pinning
-the entire scan to one CPU core on `.94`'s real 8-core box; fixed to
-`--runmode=workers`.
+the entire scan to one CPU core on `.94`'s real 8-core box. **Corrected twice,
+same day**: the first fix (`--runmode=workers`) was itself wrong — confirmed
+live via `.94`'s own journalctl after the restart, Suricata rejected it
+outright (`workers` isn't a valid runmode for `-r`/offline pcap mode, only for
+live-capture modes), exiting 1 immediately with zero findings, worse than the
+timeout it replaced. Fixed for real to `--runmode=autofp`, PCAP_FILE's actual
+multi-threaded runmode; regression tests updated to assert `autofp` and guard
+against both `single` and `workers` reappearing.
 
 **Deployment status**: all code committed/pushed (`fea2f21` through
-`504236e`). The 5-item `.94` config/file manual-action list (shadow_watcher
+`504236e`, plus the `autofp` correction after). The 5-item `.94` config/file manual-action list (shadow_watcher
 removal, model consolidation, dead-file cleanup, `cl_afpe_engine` +
 `cl_afpe_flip_monitor` config) was applied by the user directly and
 independently re-verified via read-only SSH — clean `soc.service` restart,

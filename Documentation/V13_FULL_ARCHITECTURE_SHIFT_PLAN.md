@@ -132,12 +132,19 @@ read-only SSH after the fact, not just taken on report:
   CEST) — journal since restart shows zero errors/tracebacks, only two routine,
   unrelated lines (an AbuseIPDB rate-limit warning; local-intel correctly
   refusing to record a multicast address as confirmed-malicious, a guard
-  working as intended, not a bug). A reactive-capture burst fired once already
-  under the new code (`trigger=wired_probe`, 21:50:59) — its Suricata scan
-  result (confirming the `--runmode=workers` fix under real load) hadn't logged
-  yet as of this check; **worth a follow-up `journalctl` check** for the first
-  real "scan complete, N alert(s)" line instead of a timeout, to close the loop
-  on Workstream 6's own fix.
+  working as intended, not a bug).
+- **Follow-up correction, same day**: the user's own live `journalctl -f`
+  caught the `--runmode=workers` fix failing for real — Suricata rejected it
+  outright (`custom type "workers" doesn't exist for this runmode type
+  "PCAP_FILE"`), exiting 1 immediately with zero findings on every burst
+  since the restart (one timeout, then two immediate exit-1 failures).
+  `workers` only exists for live-capture runmode types; `-r` (offline pcap)
+  only supports `single`/`autofp`. Re-fixed to `--runmode=autofp` (the actual
+  multi-threaded PCAP_FILE option), regression tests updated to guard against
+  both `single` and `workers` reappearing, all 30 checks in
+  `test_phase37_suricata_batch_scan.py` re-confirmed passing. **Still needs
+  one more live burst + journalctl check** to confirm `autofp` produces a
+  real "scan complete" line under actual load, not just a valid command.
 
 Original instructions (kept below for the historical record — all already applied):
 
@@ -524,13 +531,22 @@ ever scoped the larger migration.
   (`nproc`) sitting mostly idle during each scan, against a genuinely large,
   untrimmed 68,620-line ruleset and burst captures up to ~170MB per radio.
   Suricata has effectively never produced a real detection via reactive capture
-  in production, independent of this migration. **Fixed**: `--runmode=single` →
-  `--runmode=workers` (Suricata's own recommended runmode for multi-core
-  offline/batch pcap processing — same detection logic, real parallelism this
-  invocation was never using). 2 new regression-guard tests in
-  `tests/test_phase37_suricata_batch_scan.py` (asserts `--runmode=workers` is
-  used, `--runmode=single` never reappears) — full file (30 checks) re-confirmed
-  clean. **Deliberately not also done, flagged as a real follow-up**: the
+  in production, independent of this migration. **First fix attempt was itself
+  wrong, caught live**: `--runmode=single` → `--runmode=workers` was deployed
+  and confirmed-clean via a post-restart journal check, but the user's own
+  `journalctl -f` shortly after caught it actually failing — Suricata rejected
+  `workers` outright (`custom type "workers" doesn't exist for this runmode
+  type "PCAP_FILE"`), exiting 1 immediately with zero findings on every burst,
+  which is worse than the timeout it replaced (at least the timeout attempted a
+  real scan). `workers` only exists for live-capture runmode types
+  (AF_PACKET/PF_RING/etc.); `-r` (offline pcap) only supports `single`/`autofp`.
+  **Corrected for real**: `--runmode=autofp` — PCAP_FILE's actual
+  multi-threaded option (one capture thread, N auto-flow-pinned detection
+  worker threads, one output thread). Regression tests in
+  `tests/test_phase37_suricata_batch_scan.py` updated to assert `autofp` is
+  used and guard against *both* `single` and `workers` reappearing — full file
+  (30 checks) re-confirmed clean. Not yet re-verified against a real burst
+  under load on `.94` (needs another restart + journalctl check). **Deliberately not also done, flagged as a real follow-up**: the
   68,620-line ruleset is the full/untrimmed feed, not the "trimmed/security
   policy" this module's own docstring says was the intended design — pruning it
   is a real detection-coverage-vs-performance judgment call, left for a human

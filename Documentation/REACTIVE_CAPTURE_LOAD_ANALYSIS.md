@@ -62,8 +62,10 @@ zero bursts are normal.
   05:27–08:11 CEST) — snaplen-limited, 120s window, ordinary traffic mix.
 - `avm_pcap_to_standard()` (now streaming, `fritzbox_capture.py:227`): peak memory ~O(one
   record), negligible.
-- Zeek (`zeek -r`) and Suricata (`suricata -r ... --runmode=single`) each process a few MB and
-  exit in seconds; well inside the 240s Suricata timeout.
+- Zeek (`zeek -r`) and Suricata (`suricata -r ... --runmode=autofp`) each process a few MB and
+  exit in seconds; well inside the 240s Suricata timeout. (Runmode updated 2026-09-07 — see
+  `V13_FULL_ARCHITECTURE_SHIFT_PLAN.md` Workstream 6 for why `--runmode=single` was replaced,
+  and why the first attempted fix, `--runmode=workers`, was itself wrong for offline pcap mode.)
 - `_cleanup_burst_files()` deletes the raw/converted pcaps and Zeek scratch dir immediately after
   ingest (`reactive_capture_delete_after_ingest: true`), so disk never accumulates either.
 - The unit-file's own comment (`/etc/systemd/system/soc.service`): *"MemoryMax=512M is

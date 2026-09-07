@@ -78,19 +78,24 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
     # BUGFIX regression guard (2026-09-07, live incident: 151 timeouts / 0 successful
     # scans in 48h on `.94`, root-caused to --runmode=single pinning an 8-core box to
-    # one core against real burst sizes) -- the constructed command must use
-    # --runmode=workers, never silently regress back to single-threaded.
+    # one core against real burst sizes). CORRECTED same day: an initial fix to
+    # --runmode=workers was itself wrong -- "workers" isn't a valid PCAP_FILE
+    # (offline, `-r`) runmode, confirmed live via journalctl ("custom type 'workers'
+    # doesn't exist for this runmode type 'PCAP_FILE'"), exiting 1 immediately with
+    # zero findings. --runmode=autofp is PCAP_FILE's real multi-threaded option.
     from unittest.mock import patch as _patch, MagicMock as _MagicMock
     with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run:
         mock_run.return_value = _MagicMock(returncode=0, stderr="")
         run_suricata_on_pcap(fake_pcap, tmp / "scratch4", "/usr/bin/suricata", str(real_rules))
         called_cmd = mock_run.call_args.args[0]
-        check("REGRESSION GUARD: the real Suricata invocation uses --runmode=workers, "
-              "not --runmode=single -- the single-threaded mode is what caused every "
-              "real batch scan on `.94` to time out against real burst sizes",
-              "--runmode=workers" in called_cmd)
+        check("REGRESSION GUARD: the real Suricata invocation uses --runmode=autofp, "
+              "the actual valid multi-threaded runmode for offline pcap (-r) mode",
+              "--runmode=autofp" in called_cmd)
         check("REGRESSION GUARD: --runmode=single never reappears",
               "--runmode=single" not in called_cmd)
+        check("REGRESSION GUARD: --runmode=workers never reappears -- confirmed "
+              "invalid for PCAP_FILE mode by Suricata itself, live on `.94`",
+              "--runmode=workers" not in called_cmd)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
