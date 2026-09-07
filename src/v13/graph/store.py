@@ -443,6 +443,20 @@ class GraphStore:
             out.append(d)
         return out
 
+    def get_decision(self, decision_id: str) -> Optional[Dict[str, Any]]:
+        """Release 14, N1 (threat_hunt.py's decision-timeline lookup): one
+        decision by id, same raw_payload/mechanism_flags parsing as
+        get_decisions_since(). Returns None if no such decision exists (a
+        typo'd or already-archived id is a real, expected case for a manual
+        lookup tool, not an error)."""
+        row = self._conn.execute("SELECT * FROM decisions WHERE decision_id = ?", (decision_id,)).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["raw_payload"] = json.loads(d.pop("raw_payload_json") or "{}")
+        d["mechanism_flags"] = json.loads(d.pop("mechanism_flags_json") or "{}")
+        return d
+
     def get_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
                    src_id: Optional[str] = None, dst_kind: Optional[str] = None,
                    dst_id: Optional[str] = None) -> List[Dict[str, Any]]:

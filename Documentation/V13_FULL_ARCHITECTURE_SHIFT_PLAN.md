@@ -518,10 +518,17 @@ Pulled from the companion artifact's own "Potential" section — these aren't sc
 cuts (nothing pre-v13 ever had them), they're direct consequences of the graph
 existing that nobody has built yet.
 
-- [ ] **N1. Ad-hoc historical threat-hunting surface.** "Show every device that ever
-  touched X" / "trace the full evidence timeline behind decision Y" as a direct
-  query. The data's already indexed and relational — this is a query-surface/small
-  CLI-or-dashboard problem, not a storage problem.
+- [x] **N1. Ad-hoc historical threat-hunting surface.** DONE 2026-09-07. New
+  `src/v13/ops/threat_hunt.py`, a thin CLI (`devices --destination X`,
+  `timeline --decision-id X`, `device --device-id X`) over 3 small functions,
+  almost entirely reusing `GraphStore`'s already-built read methods — exactly
+  the "query-surface problem, not a storage problem" this item's own framing
+  predicted. One new `GraphStore.get_decision(decision_id)` method (a single-row
+  lookup, mirroring `get_decisions_since()`'s own parsing) was the only new
+  storage-layer code needed. 15 new tests (`test_v13_threat_hunt.py` + 3 in
+  `test_v13_graph_store.py`), including a merged-orphan-history check (looking
+  up either the orphan or canonical id transparently returns the same full
+  history).
 - [ ] **N2. Peer-cohort behavioral baselining.** Ongoing "does this device deviate
   from similar devices" comparison, generalizing the cross-device query mechanism
   Workstream 4/`CoordinatedTargetingHypothesis` already proves out.

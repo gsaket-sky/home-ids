@@ -367,6 +367,18 @@ no_until = store.get_decisions_since(6_050_000.0)
 check("get_decisions_since with no `until` includes everything from `since` onward",
       any(d["raw_payload"].get("marker") == "after_until" for d in no_until))
 
+# --- get_decision (Release 14, N1: threat_hunt.py's decision-timeline lookup) ---
+lookup_id = store.insert_decision(device_id="lookup_dev", timestamp=6_300_000.0, state="CRITICAL",
+                                     decision_path="hard_stop", confidence=1.0, risk_score=9.0,
+                                     raw_payload={"marker": "lookup_target"})
+fetched = store.get_decision(lookup_id)
+check("get_decision finds the real decision by id", fetched is not None and fetched["device_id"] == "lookup_dev")
+check("get_decision parses raw_payload_json back into a real dict",
+      fetched["raw_payload"].get("marker") == "lookup_target")
+check("get_decision returns None for a decision_id that doesn't exist -- a real, "
+      "expected case for a manual lookup tool, not an error",
+      store.get_decision("nonexistent-decision-id") is None)
+
 # --- get_devices_targeting (Phase 1a: cross-device correlation) ---
 store.insert_evidence(Evidence(device_id="p1a_dev_a", destination_id="shared.example.com",
                                  evidence_type="dns_entropy", independence_family="dns_behavior",
