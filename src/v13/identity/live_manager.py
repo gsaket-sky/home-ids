@@ -47,6 +47,23 @@ identity resolution at all): ARP-spoof-vs-benign-MAC-rotation disambiguation liv
 address-family display labeling lives in `pipeline.py`'s alert-payload construction --
 see that fix's own separate change.
 
+6. ORDINARY DEVICE MAC/IP HISTORY, DURABLE + QUERYABLE (Release 14, Workstream 3 --
+   Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md; an explicit architecture
+   decision, asked and answered by the user rather than defaulted, because the
+   identity subsystem has already had 3 real production incidents in this session
+   alone). `_refresh_identity_signals()` override: runs the real v1 update
+   unchanged via `super()`, then mirrors the MAC/IP just recorded into
+   `GraphStore.update_device_metadata()`'s `mac_history`/`known_ips_history`
+   dicts (`{value: last_seen_timestamp}`, each capped at a bounded size -- see
+   `_mirror_identity_signals()`'s own docstring for exactly why and how). This is
+   deliberately NOT wired into the hot `resolve_device_id()` lookup path at
+   all -- `state_manager.get_device_id_for_mac()` stays the sole, in-memory,
+   sub-millisecond source of truth there, unchanged. The graph side exists ONLY
+   so this history becomes durable (survives a restart) and SQL-queryable (a
+   real, answerable "show every IP this device has ever used" query), matching
+   the middle-ground option chosen over either leaving identity untouched or
+   routing the hot path itself through SQLite.
+
 5. GRAPH-AWARE DEVICE MERGE (added a continuation session after Phase 3's initial
    build, once a real audit found it missing): `_merge_orphan_if_fragmented()`
    override, folding the SAME live orphan-merge into the v13 graph via
@@ -67,6 +84,7 @@ see that fix's own separate change.
    the one that actually matters for the live pipeline right now.
 """
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from core.identity import DeviceIdentityManager, stable_device_id as v_current_stable_device_id
@@ -139,6 +157,72 @@ class LiveIdentityManager(DeviceIdentityManager):
             )
         except Exception as e:
             LOGGER.warning("Failed to persist learned MAC for anchor %r: %s", role, e)
+
+    # Bounded, not unbounded -- the standing Pi-8GB-target constraint applies to
+    # every new SQLite write path from day one, not added after an incident (see
+    # A14's 43,342-row evidence-duplication incident). A device with a genuinely
+    # unstable DHCP lease or a NIC swap history could otherwise grow this without
+    # limit; oldest-by-last-seen eviction keeps it a real, bounded improvement
+    # over StateManager's own in-memory BoundedSet(max_size=8) for known_ips
+    # (a real, documented gap this closes) without becoming its own growth risk.
+    _MAX_MAC_HISTORY = 20
+    _MAX_IP_HISTORY = 50
+
+    def _mirror_identity_signals(self, device_id: str, mac_addr: str, client_ip: str, now: float) -> None:
+        """Best-effort, durable, SQL-queryable mirror of ordinary device MAC/IP
+        history -- generalizes the same write-only pattern _learn_anchor_mac()
+        already uses for trust anchors, to every device. Deliberately NEVER read
+        from on the hot resolve_device_id() path (state_manager's own in-memory
+        index stays authoritative there, unchanged, sub-millisecond) -- this
+        exists purely so identity history becomes durable/queryable without
+        adding any SQLite read/write to the per-cycle identity-resolution hot
+        path. Only writes when something GENUINELY NEW is learned (a MAC/IP not
+        already recorded for this device) -- writing on every occurrence of an
+        already-known value would be pure write amplification for no
+        informational gain, and a new MAC/IP is a rare event for any real
+        device, so this stays naturally infrequent by construction, not by a
+        rate limiter. Known, accepted trade-off: this runs inside
+        `identity.py`'s own per-DEVICE lock (`state_manager.lock_device()`), so a
+        write here briefly holds that one device's lock -- never a global lock,
+        and only on the rare genuinely-new-value path, not the common case."""
+        if self._graph_store is None:
+            return
+        try:
+            meta = self._graph_store.get_device_metadata(device_id)
+            updates: Dict[str, Any] = {}
+
+            if mac_addr and mac_addr != "unknown":
+                mac_history = dict(meta.get("mac_history") or {})
+                if mac_addr not in mac_history:
+                    mac_history[mac_addr] = now
+                    if len(mac_history) > self._MAX_MAC_HISTORY:
+                        del mac_history[min(mac_history, key=mac_history.get)]
+                    updates["mac_history"] = mac_history
+
+            if client_ip and client_ip != "unknown":
+                ip_history = dict(meta.get("known_ips_history") or {})
+                if client_ip not in ip_history:
+                    ip_history[client_ip] = now
+                    if len(ip_history) > self._MAX_IP_HISTORY:
+                        del ip_history[min(ip_history, key=ip_history.get)]
+                    updates["known_ips_history"] = ip_history
+
+            if updates:
+                self._graph_store.update_device_metadata(device_id, updates, timestamp=now)
+        except Exception as e:
+            LOGGER.warning("Failed to mirror identity signals for %r into the graph: %s", device_id, e)
+
+    def _refresh_identity_signals(self, locked_state: Any, mac_addr: str, client_ip: str,
+                                    hostname: str, zeek_fx: Any, overwrite_hostname: bool = True) -> None:
+        """Runs the real v1 update unchanged via `super()`, then mirrors the
+        MAC/IP just recorded -- see `_mirror_identity_signals()`'s own docstring
+        for the full design rationale. A graph failure here never affects the
+        real (v1) state update, matching every other v13 graph write's own
+        fail-safe direction."""
+        super()._refresh_identity_signals(
+            locked_state, mac_addr, client_ip, hostname, zeek_fx, overwrite_hostname=overwrite_hostname,
+        )
+        self._mirror_identity_signals(locked_state.device_id, mac_addr, client_ip, time.time())
 
     def resolve_device_id(self, client_ip: str, mac_addr: Optional[str] = None,
                             hostname: Optional[str] = None) -> str:

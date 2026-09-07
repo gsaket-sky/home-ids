@@ -33,6 +33,12 @@ Sections:
      merge is unconditional/load-bearing and never gated on graph availability or
      a graph-side failure (graph_store=None and a graph write exception are both
      exercised as real fail-safe cases, not just no-crash smoke tests).
+  G. Release 14, Workstream 3 (item 6 in live_manager.py's own docstring):
+     _refresh_identity_signals() now ALSO mirrors ordinary device MAC/IP history
+     into the graph's bounded mac_history/known_ips_history -- write-only (never
+     read on the hot resolve_device_id() path), only on a genuinely NEW value
+     (no write amplification for an already-known MAC/IP), bounded eviction, and
+     the same fail-safe/None-graph-store guarantees as every other override here.
 """
 import sys
 import tempfile
@@ -91,6 +97,9 @@ check("A: _merge_orphan_if_fragmented IS ALSO overridden now (continuation-sessi
       "addition, item 5 in this module's own docstring) -- graph-aware merge "
       "mirroring, not the original Phase 3 scope",
       LiveIdentityManager._merge_orphan_if_fragmented is not DeviceIdentityManager._merge_orphan_if_fragmented)
+check("A: _refresh_identity_signals IS ALSO overridden now (Release 14 Workstream 3, "
+      "item 6) -- ordinary device MAC/IP history mirroring, not the original Phase 3 scope",
+      LiveIdentityManager._refresh_identity_signals is not DeviceIdentityManager._refresh_identity_signals)
 
 
 # --- B. Parity with v-current for the single-gateway-anchor case ---
@@ -283,6 +292,72 @@ check("F: FAIL-SAFE -- a graph_store.merge_device() failure never raises out to 
       "completely unaffected",
       result_f4 == "orphan_f4"
       and state_f4.get_device_id_for_ip("192.168.77.206") == "canonical_f4")
+
+
+# --- G. Release 14, Workstream 3: ordinary device MAC/IP history mirroring ---
+
+state_g = _fresh_state_manager("g")
+graph_g = _fresh_graph_store("g")
+live_mgr_g = LiveIdentityManager(state_g, {"gateway_ip": GATEWAY_IP}, graph_g, {})
+dev_g = state_g.get_or_create(device_id="dev_g", client_ip="192.168.77.50", hostname="host_g")
+
+live_mgr_g._refresh_identity_signals(dev_g, "aa:bb:cc:dd:ee:01", "192.168.77.50", "host_g", None)
+meta_g = graph_g.get_device_metadata("dev_g")
+check("G: a genuinely new MAC is mirrored into the graph's mac_history",
+      "aa:bb:cc:dd:ee:01" in meta_g.get("mac_history", {}))
+check("G: a genuinely new IP is mirrored into the graph's known_ips_history",
+      "192.168.77.50" in meta_g.get("known_ips_history", {}))
+check("G: the REAL v1-side state was also updated exactly as before (this is an "
+      "additive override, not a replacement)",
+      dev_g.mac_address == "aa:bb:cc:dd:ee:01" and "192.168.77.50" in dev_g.known_ips)
+
+# --- G: no write amplification -- the SAME MAC/IP again does not change the timestamp ---
+first_ts = meta_g["mac_history"]["aa:bb:cc:dd:ee:01"]
+live_mgr_g._refresh_identity_signals(dev_g, "aa:bb:cc:dd:ee:01", "192.168.77.50", "host_g", None)
+meta_g_again = graph_g.get_device_metadata("dev_g")
+check("G: calling again with the SAME already-known MAC/IP does not rewrite the "
+      "timestamp (no write amplification for an already-known value)",
+      meta_g_again["mac_history"]["aa:bb:cc:dd:ee:01"] == first_ts)
+
+# --- G: bounded eviction -- oldest entry evicted once the cap is exceeded ---
+state_g2 = _fresh_state_manager("g2")
+graph_g2 = _fresh_graph_store("g2")
+live_mgr_g2 = LiveIdentityManager(state_g2, {"gateway_ip": GATEWAY_IP}, graph_g2, {})
+dev_g2 = state_g2.get_or_create(device_id="dev_g2", client_ip="10.0.0.1", hostname="host_g2")
+for i in range(live_mgr_g2._MAX_MAC_HISTORY + 5):
+    live_mgr_g2._refresh_identity_signals(
+        dev_g2, f"aa:bb:cc:dd:ee:{i:02x}", "10.0.0.1", "host_g2", None,
+    )
+meta_g2 = graph_g2.get_device_metadata("dev_g2")
+check("G: mac_history never grows past its documented cap",
+      len(meta_g2["mac_history"]) == live_mgr_g2._MAX_MAC_HISTORY)
+check("G: the OLDEST mac was evicted, the most recent ones survive",
+      "aa:bb:cc:dd:ee:00" not in meta_g2["mac_history"]
+      and f"aa:bb:cc:dd:ee:{(live_mgr_g2._MAX_MAC_HISTORY + 4):02x}" in meta_g2["mac_history"])
+
+# --- G: graph_store=None -- no-op, real v1 update still happens ---
+state_g3 = _fresh_state_manager("g3")
+live_mgr_g3 = LiveIdentityManager(state_g3, {"gateway_ip": GATEWAY_IP}, None, {})
+dev_g3 = state_g3.get_or_create(device_id="dev_g3", client_ip="10.0.0.2", hostname="host_g3")
+live_mgr_g3._refresh_identity_signals(dev_g3, "aa:bb:cc:dd:ee:99", "10.0.0.2", "host_g3", None)
+check("G: with graph_store=None, the real v1 update still fully succeeds",
+      dev_g3.mac_address == "aa:bb:cc:dd:ee:99" and "10.0.0.2" in dev_g3.known_ips)
+
+# --- G: a graph-side failure never affects the real (v1) update -- fail-safe ---
+state_g4 = _fresh_state_manager("g4")
+
+
+class _ExplodingMetadataStore:
+    def get_device_metadata(self, device_id):
+        raise RuntimeError("simulated graph read failure")
+
+
+live_mgr_g4 = LiveIdentityManager(state_g4, {"gateway_ip": GATEWAY_IP}, _ExplodingMetadataStore(), {})
+dev_g4 = state_g4.get_or_create(device_id="dev_g4", client_ip="10.0.0.3", hostname="host_g4")
+live_mgr_g4._refresh_identity_signals(dev_g4, "aa:bb:cc:dd:ee:88", "10.0.0.3", "host_g4", None)
+check("G: FAIL-SAFE -- a graph read/write failure never raises out to the caller, "
+      "and the real v1 update is completely unaffected",
+      dev_g4.mac_address == "aa:bb:cc:dd:ee:88" and "10.0.0.3" in dev_g4.known_ips)
 
 
 print(f"\n{'='*60}")

@@ -353,21 +353,38 @@ but inert on `.94` — matching the exact same "built but not yet wired to
 production config" state A10's own shadow computation was in for a few hours
 after A9, per the dependency map's own precedent for this situation.
 
-### Workstream 3 — Identity/state fully on the graph
+### Workstream 3 — Identity/state fully on the graph — DONE 2026-09-07
 
 **Why this wasn't attempted**: A29 found `GraphStore.merge_device()` had zero
 callers *at all* before that session — the fix scope was "wire the one merge-mirror
 gap that broke," not "migrate identity off `StateManager` entirely." No prior session
 ever scoped the larger migration.
 
-- [ ] **W3-1.** Decide, explicitly with the user (real live-service risk, not a
-  unilateral call): does `GraphStore` become the primary MAC/IP-history store with
-  `StateManager` as an in-memory cache, or does `ids_state.json` stay authoritative
-  permanently because of the 2s-cycle latency requirement? This is an architecture
-  decision, not an implementation task — do this before W3-2.
-- [ ] **W3-2.** If migrating: make ordinary (non-trust-anchor) device MAC↔IP binding
-  route through the graph as the source of truth, with `StateManager` becoming the
-  fast-path cache it's synced from — not the other way around as today.
+- [x] **W3-1.** Decided explicitly with the user: **graph-backed durability,
+  `StateManager` stays the hot-path cache** — a middle ground chosen on its own
+  technical merits (identity resolution is the single most incident-prone
+  subsystem this project has hit — 3 real production bugs in Phase 3 alone —
+  and a Pi-class SQLite read on every device's every cycle is a genuinely
+  different resource profile than the evidence graph's own batched writes),
+  not because it's less work than a full migration.
+- [x] **W3-2.** Implemented: `LiveIdentityManager` gained a new
+  `_refresh_identity_signals()` override (item 6 in its own module docstring) —
+  runs the real v1 update unchanged via `super()`, then mirrors the MAC/IP into
+  `GraphStore.update_device_metadata()`'s new `mac_history`/`known_ips_history`
+  dicts (`{value: last_seen_timestamp}`). Deliberately write-only: the hot
+  `resolve_device_id()` lookup still reads `state_manager.get_device_id_for_mac()`
+  exclusively, unchanged — no SQLite on the hot path. Only writes on a
+  genuinely NEW MAC/IP (no write amplification), bounded eviction (20 MACs /
+  50 IPs per device — a real, bounded improvement over `StateManager`'s own
+  in-memory `BoundedSet(max_size=8)` for `known_ips`, honoring the standing
+  Pi-8GB no-unchecked-growth constraint), fail-safe (a graph read/write failure
+  never affects the real v1 update). 13 new checks in
+  `tests/test_v13_live_identity.py` (2 in Section A confirming this is a real,
+  isolated override that doesn't touch `process_dns_identities`/
+  `process_zeek_identities`; 8 in new Section G — new-value mirroring,
+  no-write-amplification on a repeat value, bounded/oldest-evicted,
+  `graph_store=None`, graph-failure fail-safe). Full v13 GraphStore suite
+  re-confirmed clean alongside this.
 
 ### Workstream 4 — LLM-review completeness (remaining Group D items)
 
