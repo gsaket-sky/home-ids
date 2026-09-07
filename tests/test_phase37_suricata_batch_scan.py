@@ -101,8 +101,12 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # 2026-09-07, second live incident same day: soc.service's own CPUQuota=40% cgroup
     # cap is inherited by any child it spawns, including a batch scan -- confirmed live
     # to cause 240s timeouts with 6+ of 8 real cores idle. cgroup_isolate=True should
-    # wrap the invocation in `sudo systemd-run --scope` into its own slice; default
+    # wrap the invocation in `systemd-run --user --scope` into its own slice; default
     # (False) and "systemd-run not on PATH" must both fall back to the plain command.
+    # CORRECTED 2026-09-08 (caught live): the first version used `sudo systemd-run`,
+    # which soc.service's own NoNewPrivileges=true hardening blocks at the kernel level
+    # regardless of sudoers policy -- switched to `--user`, which needs no privilege
+    # escalation at all (asks the calling user's own systemd instance, same uid).
     if not hasattr(os, "getuid"):
         print("[SKIP] cgroup_isolate wrapping checks -- os.getuid() is POSIX-only "
               "(this dev box is Windows); the feature is inert here by the same guard "
@@ -114,17 +118,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
             run_suricata_on_pcap(fake_pcap, tmp / "scratch5", "/usr/bin/suricata", str(real_rules),
                                   cgroup_isolate=True, cpu_quota_percent=250.0)
             called_cmd = mock_run.call_args.args[0]
-            check("cgroup_isolate=True + systemd-run/sudo present wraps with sudo systemd-run --scope",
-                  called_cmd[:2] == ["sudo", "systemd-run"])
+            called_env = mock_run.call_args.kwargs.get("env")
+            check("cgroup_isolate=True + systemd-run present wraps with systemd-run --user --scope, never sudo",
+                  called_cmd[:3] == ["systemd-run", "--user", "--scope"])
+            check("sudo never appears -- NoNewPrivileges=true blocks it at the kernel level regardless "
+                  "of sudoers policy, so --user must be used instead",
+                  "sudo" not in called_cmd)
             check("the transient scope is auto-collected on exit (never lingers)",
                   "--collect" in called_cmd)
             check("CPUQuota is threaded through to the transient slice",
                   "-p" in called_cmd and "CPUQuota=250%" in called_cmd)
             check("the real suricata invocation is still present, unmodified, after the wrapper",
                   "/usr/bin/suricata" in called_cmd and "--runmode=autofp" in called_cmd)
-            check("the wrapper preserves the caller's own uid/gid, never a hardcoded username",
-                  any(a == f"--uid={os.getuid()}" for a in called_cmd)
-                  and any(a == f"--gid={os.getgid()}" for a in called_cmd))
+            check("XDG_RUNTIME_DIR is set explicitly from the caller's own uid, since a boot-time "
+                  "system service doesn't inherit it the way an interactive shell would",
+                  called_env is not None and called_env.get("XDG_RUNTIME_DIR") == f"/run/user/{os.getuid()}")
 
     with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run:
         mock_run.return_value = _MagicMock(returncode=0, stderr="")
@@ -140,7 +148,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
         run_suricata_on_pcap(fake_pcap, tmp / "scratch7", "/usr/bin/suricata", str(real_rules),
                               cgroup_isolate=True)
         called_cmd = mock_run.call_args.args[0]
-        check("cgroup_isolate=True but systemd-run/sudo missing (e.g. this dev box, most "
+        check("cgroup_isolate=True but systemd-run missing (e.g. this dev box, most "
               "test environments) falls back to the plain invocation, never raises",
               called_cmd[0] == "/usr/bin/suricata")
 

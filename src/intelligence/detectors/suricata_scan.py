@@ -81,11 +81,18 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
     computing) while 6+ of 8 real cores sat idle (load average never exceeded ~1.8) --
     a scan that completed in 90s standalone took 166s in-pipeline against a SMALLER
     file. Fixing --runmode alone could never have fixed this; the ceiling was external
-    to Suricata entirely. When enabled, wraps the invocation in `sudo systemd-run
+    to Suricata entirely. When enabled, wraps the invocation in `systemd-run --user
     --scope` into its own transient, uncapped-relative-to-soc.service slice, so the
     main decision loop's own tight quota is untouched -- only the occasional batch scan
-    gets room to actually use idle cores. Silently falls back to the unwrapped
-    invocation if `systemd-run` isn't on PATH (this dev box, most test environments)."""
+    gets room to actually use idle cores. Deliberately `--user`, not `sudo systemd-run`:
+    soc.service's own NoNewPrivileges=true hardening (worth keeping, not worked around)
+    makes the kernel refuse ANY new-privilege exec including sudo, so `--user` asks the
+    calling user's own systemd instance instead -- no privilege change requested at all.
+    Needs `loginctl enable-linger` for the deploying user so that instance exists at
+    boot independent of any login; XDG_RUNTIME_DIR is set explicitly since a boot-time
+    system service doesn't inherit it the way an interactive shell would. Silently
+    falls back to the unwrapped invocation if `systemd-run` isn't on PATH (this dev box,
+    most test environments)."""
     if not suricata_bin:
         return []
     if not rules_path or not Path(rules_path).exists():
@@ -112,14 +119,27 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
         suricata_bin, "-r", str(pcap_path), "-l", str(scratch_dir),
         "-S", str(rules_path), "-k", "none", "--runmode=autofp",
     ]
-    if (cgroup_isolate and hasattr(os, "getuid") and shutil.which("systemd-run")
-            and shutil.which("sudo")):
-        # Own uid/gid, never a hardcoded username -- the target process must keep
-        # running as whoever invoked us, only the cgroup/quota setup needs root.
+    env = None
+    if cgroup_isolate and hasattr(os, "getuid") and shutil.which("systemd-run"):
+        # CORRECTION (2026-09-08, caught live): the first version of this wrapped with
+        # `sudo systemd-run --scope`, which is fundamentally incompatible with
+        # soc.service's own (deliberate, worth keeping) NoNewPrivileges=true hardening --
+        # the kernel refuses ANY new-privilege exec from a NoNewPrivileges process,
+        # including sudo, regardless of sudoers policy. `--user` avoids the problem
+        # entirely instead of fighting it: it asks the CALLING user's own systemd
+        # instance (same uid, no privilege change at all) to create the scope, so no
+        # new privilege is ever requested. Requires `loginctl enable-linger` for the
+        # deploying user so that instance exists at boot, independent of any login --
+        # done once, out of band, not something this code can set up for itself.
+        # XDG_RUNTIME_DIR isn't inherited by a boot-time system service the way it
+        # would be in an interactive shell, so it's set explicitly from the caller's
+        # own uid rather than assumed present in the environment.
+        env = dict(os.environ)
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
         cmd = [
-            "sudo", "systemd-run", "--scope", "--collect",
+            "systemd-run", "--user", "--scope", "--collect",
             "--slice=reactive-capture.slice", "-p", f"CPUQuota={cpu_quota_percent:.0f}%",
-            f"--uid={os.getuid()}", f"--gid={os.getgid()}", "--",
+            "--",
         ] + suricata_cmd
     else:
         cmd = suricata_cmd
@@ -127,6 +147,7 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False,
             preexec_fn=memory_limited_preexec_fn(int(memory_limit_mb * 1024 * 1024)),
+            env=env,
         )
         if result.returncode != 0:
             LOGGER.warning(

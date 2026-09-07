@@ -734,12 +734,17 @@ reactive_capture:
   # multi-threaded batch job. Confirmed live: scans timed out at 240s with 6+ of 8
   # real cores sitting idle; the same file processed outside the cgroup finished in
   # well under half that time. When enabled, wraps the invocation in
-  # `sudo systemd-run --scope` into its own transient slice (auto-collected on exit,
+  # `systemd-run --user --scope` into its own transient slice (auto-collected on exit,
   # never lingers) so the main loop's own tight quota stays untouched -- only the
-  # occasional batch scan gets room to actually use idle cores. Requires passwordless
-  # sudo for systemd-run on the deployment host; silently falls back to the unwrapped
-  # invocation if `systemd-run` isn't on PATH (true of most test environments and
-  # this dev box). Disabled by default -- opt in once passwordless sudo is confirmed.
+  # occasional batch scan gets room to actually use idle cores. Deliberately `--user`,
+  # not `sudo systemd-run`: if soc.service has NoNewPrivileges=true set (worth keeping
+  # as real hardening, not working around), the kernel refuses sudo outright regardless
+  # of sudoers policy -- `--user` asks the deploying user's own systemd instance
+  # instead, which needs no new privilege at all. Requires `loginctl enable-linger
+  # <user>` on the deployment host (one-time, so that instance exists at boot
+  # independent of any login) and falls back to the unwrapped invocation if
+  # `systemd-run` isn't on PATH (true of most test environments and this dev box).
+  # Disabled by default -- opt in once linger is confirmed enabled.
   reactive_capture_suricata_cgroup_isolate: false
   # CPUQuota (percent, "300" = 3 full cores) for that transient slice. Generous on
   # purpose: this only applies while a batch scan is actually running (a few minutes,

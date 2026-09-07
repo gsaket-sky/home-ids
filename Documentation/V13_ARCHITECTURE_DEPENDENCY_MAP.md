@@ -673,24 +673,33 @@ this way, both fixed:
    host a multi-threaded batch job. No `--runmode` choice could fix an
    external OS-level throttle. Fixed with a new opt-in
    `reactive_capture_suricata_cgroup_isolate` config key: when enabled, wraps
-   the invocation in `sudo systemd-run --scope` into its own transient
-   `reactive-capture.slice` (auto-collected on exit) with its own configurable
-   `reactive_capture_suricata_cpu_quota_percent` (default 300%) — leaves the
-   main loop's own tight quota completely untouched. Preserves the caller's
-   own `uid`/`gid` (never a hardcoded username) so scratch files stay owned
-   by the unprivileged deploy user, not root. `.94`'s deploy user has
-   passwordless `sudo` (`NOPASSWD: ALL`), confirmed before relying on it.
-   Silently falls back to the unwrapped invocation when `systemd-run`/`sudo`
-   aren't on PATH (this dev box, most test environments) — disabled by
-   default until enabled on `.94`. 5 new regression tests, full file (35
-   checks) re-confirmed clean.
+   the invocation in its own transient `reactive-capture.slice` (auto-collected
+   on exit) with its own configurable `reactive_capture_suricata_cpu_quota_percent`
+   (default 300%) — leaves the main loop's own tight quota completely untouched.
 
-**Deployment status**: code committed/pushed. **Not yet enabled or verified
-under real load on `.94`** — needs `reactive_capture_suricata_cgroup_isolate:
-true` added to config, a restart, and one more live-burst journalctl check
-for an actual "scan complete" line. This is now the real remaining item for
-Suricata evidence, not the `autofp`/`suricata.service` fixes above (both
-independently confirmed necessary but insufficient on their own).
+   **First deploy attempt failed immediately, caught live**: the initial version
+   used `sudo systemd-run --scope`, deployed and enabled — every scan then failed
+   with `sudo: The "no new privileges" flag is set, which prevents sudo from
+   running as root`. `soc.service`'s own unit has `NoNewPrivileges=true` (real,
+   deliberate hardening, correctly left alone rather than weakened) — the kernel
+   refuses ANY new-privilege exec from such a process, sudo included, regardless
+   of sudoers policy (`.94`'s deploy user having `NOPASSWD: ALL` doesn't matter;
+   this is enforced below the policy layer). **Re-fixed** to `systemd-run --user
+   --scope`: asks the calling user's own systemd instance to create the scope
+   instead of the system manager, so no new privilege is ever requested at all —
+   fully compatible with `NoNewPrivileges=true`. Requires `loginctl
+   enable-linger <user>` (one-time, done on `.94`) so that instance exists at
+   boot independent of any login; `XDG_RUNTIME_DIR` is set explicitly in the
+   subprocess environment since a boot-time system service doesn't inherit it
+   the way an interactive shell would. No more `--uid`/`--gid` flags needed
+   either — `--user` inherently runs as the calling user. Regression tests
+   updated to assert `--user` is used and `sudo` never reappears.
+
+**Deployment status**: code committed/pushed, deployed to `.94`, linger enabled,
+config key on. **Verification in progress** — the first post-deploy bursts
+under the corrected `--user` mechanism haven't been observed yet as of this
+note; needs one more live-burst journalctl check for an actual "scan complete"
+line before this can be marked done.
 
 **Only remaining open item in the entire plan otherwise**: the CL-AFPE live
 flip itself (W2-3), correctly gated on real production data accumulating

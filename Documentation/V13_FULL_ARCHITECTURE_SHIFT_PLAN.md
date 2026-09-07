@@ -145,11 +145,19 @@ read-only SSH after the fact, not just taken on report:
   `suricata.service` daemon crash-looping 25,922+ times (disabled), AND
   Suricata being throttled to a shared ~40%-of-one-core cgroup budget because
   it's spawned as a child of `soc.service` (fixed via a new opt-in
-  `sudo systemd-run --scope` wrapper into its own slice,
-  `reactive_capture_suricata_cgroup_isolate` config key). **Still needs the
-  new config key enabled + one more live burst + journalctl check** to
-  confirm a real "scan complete" line under actual load — not yet done as of
-  this note.
+  `reactive_capture_suricata_cgroup_isolate` config key).
+- **Follow-up correction #3, next day (2026-09-08)**: enabling the config key
+  and deploying immediately broke every scan a different way — `sudo: The "no
+  new privileges" flag is set, which prevents sudo from running as root`.
+  `soc.service` has `NoNewPrivileges=true` set (real, deliberate hardening,
+  correctly left in place rather than weakened) — the kernel blocks sudo
+  outright for such a process regardless of sudoers policy, so `.94`'s
+  passwordless `sudo` never mattered. Re-fixed to `systemd-run --user --scope`
+  (asks the calling user's own systemd instance, no new privilege requested
+  at all — compatible with `NoNewPrivileges=true` instead of fighting it);
+  needs `loginctl enable-linger <user>` done once so that instance exists at
+  boot. **Verification of THIS version is still pending** — not yet observed
+  under a real post-fix burst as of this note.
 
 Original instructions (kept below for the historical record — all already applied):
 
@@ -568,19 +576,30 @@ ever scoped the larger migration.
   manually outside the cgroup, at ~100% CPU. No `--runmode` choice could ever
   have fixed this — the ceiling was external to Suricata entirely. **Fixed**:
   new opt-in `reactive_capture_suricata_cgroup_isolate` config key wraps the
-  invocation in `sudo systemd-run --scope` into its own transient
-  `reactive-capture.slice` (auto-collected on exit, own configurable
-  `reactive_capture_suricata_cpu_quota_percent`, default 300%) — the main
-  loop's own tight quota stays untouched; only the batch scan gets room to use
-  idle cores. Preserves the caller's own uid/gid (never a hardcoded username)
-  so scratch-dir files stay owned by the same unprivileged user as before, not
-  root. Confirmed the deploy user has passwordless `sudo` on `.94`
-  (`NOPASSWD: ALL`), so no interactive-password blocker. Silently falls back
-  to the unwrapped invocation if `systemd-run`/`sudo` aren't on PATH (this dev
-  box, most test environments) — disabled by default until enabled on `.94`.
-  5 new regression tests in `test_phase37_suricata_batch_scan.py` (wrapped
-  command shape, CPUQuota threading, uid/gid preservation, both fallback
-  paths) — full file (35 checks) re-confirmed clean.
+  invocation into its own transient `reactive-capture.slice` (auto-collected
+  on exit, own configurable `reactive_capture_suricata_cpu_quota_percent`,
+  default 300%) — the main loop's own tight quota stays untouched; only the
+  batch scan gets room to use idle cores.
+
+  **First deploy attempt failed immediately, caught live (2026-09-08)**: the
+  initial version wrapped with `sudo systemd-run --scope`. Enabled and
+  deployed, every scan then failed with `sudo: The "no new privileges" flag is
+  set, which prevents sudo from running as root`. `soc.service`'s own unit has
+  `NoNewPrivileges=true` (real, deliberate hardening — "Restrict what the IDS
+  process can do if compromised" — correctly left in place, not weakened to
+  make this work) which makes the kernel refuse ANY new-privilege exec
+  including sudo, regardless of sudoers policy; `.94`'s deploy user having
+  `NOPASSWD: ALL` never mattered. **Re-fixed for real**: `systemd-run --user
+  --scope` instead — asks the calling user's own systemd instance to create
+  the scope, requesting no new privilege at all, fully compatible with
+  `NoNewPrivileges=true` rather than fighting it. Requires `loginctl
+  enable-linger <user>` (done once on `.94`) so that instance exists at boot
+  independent of any login; `XDG_RUNTIME_DIR` is set explicitly in the
+  subprocess environment since a boot-time system service doesn't inherit it
+  the way an interactive shell would. No `--uid`/`--gid` flags needed anymore
+  either — `--user` inherently runs as the calling user. Regression tests
+  updated to assert `--user` is used and guard against `sudo` reappearing —
+  full file (35 checks) re-confirmed clean.
 
   **Also found and fixed along the way, unrelated to any of the above**: a
   separate, pre-existing `suricata.service` systemd unit (installed by the OS
@@ -591,12 +610,11 @@ ever scoped the larger migration.
   deliberately batch-only) and never fed the pipeline. Disabled
   (`systemctl disable --now`) — confirmed stopped, no process remains.
 
-  **Still not confirmed under real load**: the `cgroup_isolate` fix is
-  implemented and tested but not yet enabled on `.94` (needs the config key
-  flipped + restart, then a live burst + journalctl check to confirm a real
-  "scan complete" line instead of another timeout) — flagged as the actual
-  remaining follow-up, not the `autofp`/`suricata.service` fixes above, both
-  of which are already confirmed necessary-but-insufficient on their own.
+  **Still not confirmed under real load**: the corrected `--user`-based
+  `cgroup_isolate` fix is deployed and enabled on `.94` with linger active,
+  but hasn't yet been observed against a real post-fix burst as of this note
+  — needs one more live-burst journalctl check for an actual "scan complete"
+  line before this can be marked done.
   **Deliberately not also done, flagged as a real follow-up**: the
   68,620-line ruleset is the full/untrimmed feed, not the "trimmed/security
   policy" this module's own docstring says was the intended design — pruning it
