@@ -410,6 +410,20 @@ class LiveConfig:
             if self._notify_cb:
                 self._notify_cb(applied)
 
+    def revert_override(self, key: str, value) -> None:
+        """Pushes `key` back to its config.yaml baseline value immediately, in-memory,
+        without waiting for a restart. Needed because _load_overrides() above only ever
+        APPLIES entries present in state/config_overrides.json -- it has no way to notice
+        an entry was just REMOVED and undo its effect, since config.yaml itself never
+        changed (so the mtime-driven _load() re-read never fires). Callers (the config
+        API's DELETE endpoint) are expected to pass the removed override entry's own
+        "baseline" field as `value`. Never touches _STATIC_KEYS -- same restriction as
+        _load_overrides(), enforced by the caller not exposing static keys as revertible
+        in the first place, not re-checked here.
+        """
+        with self._lock:
+            self._config[key] = value
+
     def start_watcher(self, interval: float = 5.0) -> None:
         if self._watcher_active:
             return
