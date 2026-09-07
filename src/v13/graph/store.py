@@ -21,19 +21,43 @@ from v13.evidence.model import Evidence, NO_DESTINATION
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
-# Matches schema.sql's own documented policy (comment at the bottom of that file) --
-# not yet configurable per hardware_profile; Phase 0's config draft names this as
-# a future hardware_profile-driven knob, not built yet.
+# Matches schema.sql's own documented policy (comment at the bottom of that file).
+# v13 full-architecture plan, Phase 10b: evidence retention itself is now
+# hardware_profile-driven too -- see live_prune.py's own _RETENTION_DAYS_BY_PROFILE
+# (this constant stays the fallback for the "custom"/unrecognized-profile case and
+# for any caller that doesn't go through that wiring, e.g. direct GraphStore use in
+# tests).
 DEFAULT_EVIDENCE_RETENTION_DAYS = 90
+
+# v13 full-architecture plan, Phase 10b: SQLite PRAGMA cache_size (negative = KB,
+# per SQLite's own docs), sized against config/trust_anchors.py's own
+# VALID_HARDWARE_PROFILES. A first-pass judgment call (this project's own
+# established convention for a not-yet-empirically-tuned number, matching
+# INDEPENDENCE_FAMILY_MAP's own "honest status" framing) -- SQLite's own default is
+# -2000 (2MB); pi_8gb gets a modest bump given this box also runs Zeek/Suricata/
+# Ollama concurrently (see this file's own "Hardware topology" section in
+# V13_ARCHITECTURE_DEPENDENCY_MAP.md), x86_16gb/custom get more headroom to spend on
+# graph query performance since nothing else on that box is as resource-constrained.
+_HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
+    "pi_8gb": 4_000,
+    "x86_16gb": 16_000,
+    "custom": 16_000,
+}
 
 
 class GraphStore:
-    def __init__(self, db_path: str):
+    def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
         self.db_path = db_path
         is_new = not Path(db_path).exists()
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # Phase 10b: optional -- omitting hardware_profile (every pre-existing
+        # caller, including every test) leaves SQLite's own default cache_size
+        # untouched, identical to this class's behavior before this param existed.
+        cache_kb = _HARDWARE_PROFILE_CACHE_SIZE_KB.get(hardware_profile or "")
+        if cache_kb is not None:
+            self._conn.execute(f"PRAGMA cache_size = -{cache_kb}")
         self._in_transaction = False
         if is_new:
             self._apply_schema()
@@ -432,6 +456,48 @@ class GraphStore:
             "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
             ")",
             (cutoff, cutoff),
+        )
+        self._maybe_commit()
+        return cur.rowcount
+
+    # --- decision archival (v13 full-architecture plan, Phase 10a) -------------
+
+    def get_decisions_older_than(self, days: float, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """Read-only: decisions older than the cutoff, same parsed shape as
+        get_decisions_since(). Matches schema.sql's own documented policy
+        ("decisions: kept 1 year, then archived (exported, not deleted)").
+        Deliberately kept as a SEPARATE step from delete_decisions() below
+        (not one atomic archive-and-delete method) -- live_decision_archive.py's
+        own export-then-delete ordering means nothing is ever removed from the
+        live graph until the export write to disk has actually succeeded, so a
+        failed export can never silently lose a decision."""
+        cutoff = (now if now is not None else time.time()) - days * 86400
+        rows = self._conn.execute(
+            "SELECT * FROM decisions WHERE timestamp < ? ORDER BY timestamp", (cutoff,)
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["raw_payload"] = json.loads(d.pop("raw_payload_json") or "{}")
+            d["mechanism_flags"] = json.loads(d.pop("mechanism_flags_json") or "{}")
+            out.append(d)
+        return out
+
+    def delete_decisions(self, decision_ids: List[str]) -> int:
+        """Deletes the given decisions AND their own 'supports' edges (so
+        nothing is left dangling at a decision_id that no longer exists).
+        Callers MUST have already durably exported these rows first -- this
+        method has no knowledge of whether that happened, by design; the
+        export-then-delete ordering is the caller's own responsibility (see
+        get_decisions_older_than()'s own docstring)."""
+        if not decision_ids:
+            return 0
+        placeholders = ",".join("?" * len(decision_ids))
+        self._conn.execute(
+            f"DELETE FROM edges WHERE dst_kind = 'decision' AND dst_id IN ({placeholders})", decision_ids,
+        )
+        cur = self._conn.execute(
+            f"DELETE FROM decisions WHERE decision_id IN ({placeholders})", decision_ids,
         )
         self._maybe_commit()
         return cur.rowcount

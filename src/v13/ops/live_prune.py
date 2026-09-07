@@ -14,6 +14,14 @@ runaway growth potential, and nothing on .94 was enforcing schema.sql's own docu
 90-day evidence retention policy at all until this file existed. Uses the SAME
 `state/v13_graph.db` path `src/v13/ops/live_engine.py` writes to (configured the same
 way, via config.yaml's state_path).
+
+v13 full-architecture plan, Phase 10b: retention itself is now hardware_profile-driven
+-- a pi_8gb deployment prunes sooner (30 days) than the schema-documented 90-day
+default, given that box's own tighter, shared resource budget (see
+V13_ARCHITECTURE_DEPENDENCY_MAP.md's "Hardware topology" section); x86_16gb/custom
+keep the original 90-day default unchanged. A first-pass judgment call, not
+empirically tuned (same honesty framing this project's own INDEPENDENCE_FAMILY_MAP
+uses for a similar not-yet-validated number).
 """
 import logging
 import time
@@ -24,9 +32,16 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
+from v13.config.trust_anchors import load_hardware_profile  # noqa: E402
 from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 
 LOGGER = logging.getLogger("live_prune")
+
+_RETENTION_DAYS_BY_PROFILE = {
+    "pi_8gb": 30.0,
+    "x86_16gb": DEFAULT_EVIDENCE_RETENTION_DAYS,
+    "custom": DEFAULT_EVIDENCE_RETENTION_DAYS,
+}
 
 
 def main() -> None:
@@ -41,12 +56,15 @@ def main() -> None:
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"deleted": 0, "skipped": "no_db_yet"})
         return
 
+    retention_days = _RETENTION_DAYS_BY_PROFILE.get(
+        load_hardware_profile(CONFIG), DEFAULT_EVIDENCE_RETENTION_DAYS)
+
     try:
         store = GraphStore(str(db_path))
-        deleted = store.prune_evidence(older_than_days=DEFAULT_EVIDENCE_RETENTION_DAYS)
+        deleted = store.prune_evidence(older_than_days=retention_days)
         store.close()
-        LOGGER.info("Pruned %d evidence row(s) older than %d days from %s", deleted, DEFAULT_EVIDENCE_RETENTION_DAYS, db_path)
-        write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"deleted": deleted})
+        LOGGER.info("Pruned %d evidence row(s) older than %d days from %s", deleted, retention_days, db_path)
+        write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"deleted": deleted, "retention_days": retention_days})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})

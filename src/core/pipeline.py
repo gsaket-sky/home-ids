@@ -46,7 +46,7 @@ from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 from v13.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
 from v13.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
-from v13.config.trust_anchors import load_trust_anchors_from_config  # v13 full-architecture plan, Phase 3
+from v13.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
 
 
 def _ip_family(ip: str) -> str:
@@ -400,7 +400,11 @@ class EnginePipeline:
         # self.identity_manager below) specifically so Phase 3's LiveIdentityManager
         # can call v13_live_engine.get_graph_store() and get the CORRECTLY-configured
         # singleton, not one lazily initialized against the wrong default path.
-        v13_live_engine.configure(str(state_dir / "v13_graph.db"))
+        # v13 full-architecture plan, Phase 10b: hardware_profile-driven SQLite
+        # cache_size tuning for the live graph store singleton (GraphStore's own
+        # PRAGMA cache_size, see graph/store.py's _HARDWARE_PROFILE_CACHE_SIZE_KB).
+        v13_live_engine.configure(str(state_dir / "v13_graph.db"),
+                                    hardware_profile=load_hardware_profile(self.config))
 
         self.state_manager = state_manager or StateManager(state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)))
         if state_manager is None:

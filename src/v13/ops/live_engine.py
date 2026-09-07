@@ -136,21 +136,34 @@ def _content_key(ev) -> tuple:
     return (device, etype, ev.source, ev.timestamp)
 
 
-def configure(graph_db_path: str) -> None:
+_GRAPH_HARDWARE_PROFILE: Optional[str] = None
+
+
+def configure(graph_db_path: str, hardware_profile: Optional[str] = None) -> None:
     """Optional: call once at startup to point the live graph store somewhere other
     than the default 'state/v13_graph.db' (relative to the process's CWD, matching
     every other v13 ops file's own state_dir convention). Safe to call before any
     real evaluate() call; if never called, the default path is opened lazily on
-    first use with a device_id."""
-    global _GRAPH_DB_PATH, _graph_store
+    first use with a device_id.
+
+    hardware_profile (v13 full-architecture plan, Phase 10b, optional): passed
+    straight through to GraphStore's own PRAGMA cache_size tuning -- this is the
+    ONE long-lived GraphStore singleton actually serving the live per-cycle path,
+    so it's the one place hardware-driven query-performance tuning actually
+    matters (every other v13 ops job's own GraphStore is a short-lived,
+    once-per-run construction where cache_size has far less to work with).
+    Omitting it (the default) leaves SQLite's own default cache_size untouched,
+    identical to this function's behavior before this param existed."""
+    global _GRAPH_DB_PATH, _GRAPH_HARDWARE_PROFILE, _graph_store
     _GRAPH_DB_PATH = graph_db_path
-    _graph_store = None  # force re-init against the new path on next use
+    _GRAPH_HARDWARE_PROFILE = hardware_profile
+    _graph_store = None  # force re-init against the new path/profile on next use
 
 
 def _get_graph_store() -> GraphStore:
     global _graph_store
     if _graph_store is None:
-        _graph_store = GraphStore(_GRAPH_DB_PATH)
+        _graph_store = GraphStore(_GRAPH_DB_PATH, hardware_profile=_GRAPH_HARDWARE_PROFILE)
     return _graph_store
 
 

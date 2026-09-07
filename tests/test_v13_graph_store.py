@@ -375,6 +375,70 @@ check("a second set_destination_reputation call OVERWRITES the cached tier/times
 
 store.close()
 
+# --- Phase 10b: hardware_profile-driven PRAGMA cache_size ---
+tmpdir2 = tempfile.mkdtemp(prefix="v13_graph_test_hwprofile_")
+
+store_pi = GraphStore(str(_PathForSysPath(tmpdir2) / "pi.db"), hardware_profile="pi_8gb")
+check("pi_8gb gets a modest cache_size bump from SQLite's own -2000 default",
+      store_pi._conn.execute("PRAGMA cache_size").fetchone()[0] == -4000)
+store_pi.close()
+
+store_x86 = GraphStore(str(_PathForSysPath(tmpdir2) / "x86.db"), hardware_profile="x86_16gb")
+check("x86_16gb gets more headroom than pi_8gb",
+      store_x86._conn.execute("PRAGMA cache_size").fetchone()[0] == -16000)
+store_x86.close()
+
+store_custom = GraphStore(str(_PathForSysPath(tmpdir2) / "custom.db"), hardware_profile="custom")
+check("'custom' is treated like the more-capable default, not a conservative guess",
+      store_custom._conn.execute("PRAGMA cache_size").fetchone()[0] == -16000)
+store_custom.close()
+
+store_none = GraphStore(str(_PathForSysPath(tmpdir2) / "none.db"))
+check("omitting hardware_profile entirely leaves SQLite's own default cache_size "
+      "untouched -- identical to this class's behavior before this param existed",
+      store_none._conn.execute("PRAGMA cache_size").fetchone()[0] == -2000)
+store_none.close()
+
+store_unrecognized = GraphStore(str(_PathForSysPath(tmpdir2) / "unrecognized.db"), hardware_profile="totally-unrecognized")
+check("an unrecognized hardware_profile string is a safe no-op, not a crash",
+      store_unrecognized._conn.execute("PRAGMA cache_size").fetchone()[0] == -2000)
+store_unrecognized.close()
+
+
+# --- Phase 10a: decision archival (get_decisions_older_than / delete_decisions) ---
+archive_store = GraphStore(str(_PathForSysPath(tmpdir2) / "archive.db"))
+NOW_ARCHIVE = 2_000_000_000.0
+archive_store.upsert_device("archive_dev", timestamp=NOW_ARCHIVE)
+old_decision_id = archive_store.insert_decision(
+    device_id="archive_dev", timestamp=NOW_ARCHIVE - 400 * 86400, state="HIGH",
+    decision_path="hypothesis_high", confidence=0.8, risk_score=8.0, raw_payload={"note": "old"},
+)
+recent_decision_id = archive_store.insert_decision(
+    device_id="archive_dev", timestamp=NOW_ARCHIVE - 10 * 86400, state="BENIGN",
+    decision_path="benign", confidence=0.0, risk_score=0.0, raw_payload={"note": "recent"},
+)
+
+old_rows = archive_store.get_decisions_older_than(365.0, now=NOW_ARCHIVE)
+check("get_decisions_older_than finds exactly the decision past the cutoff",
+      len(old_rows) == 1 and old_rows[0]["decision_id"] == old_decision_id)
+check("get_decisions_older_than returns the real parsed raw_payload, same shape as get_decisions_since",
+      old_rows[0]["raw_payload"] == {"note": "old"})
+check("get_decisions_older_than is READ-ONLY -- the decision is still in the db after calling it",
+      archive_store._conn.execute(
+          "SELECT 1 FROM decisions WHERE decision_id=?", (old_decision_id,)).fetchone() is not None)
+
+deleted_count = archive_store.delete_decisions([r["decision_id"] for r in old_rows])
+check("delete_decisions reports the real deleted count", deleted_count == 1)
+check("delete_decisions actually removed the old decision",
+      archive_store._conn.execute(
+          "SELECT 1 FROM decisions WHERE decision_id=?", (old_decision_id,)).fetchone() is None)
+check("delete_decisions left the recent decision untouched",
+      archive_store._conn.execute(
+          "SELECT 1 FROM decisions WHERE decision_id=?", (recent_decision_id,)).fetchone() is not None)
+check("delete_decisions with an empty list is a safe no-op", archive_store.delete_decisions([]) == 0)
+
+archive_store.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")
