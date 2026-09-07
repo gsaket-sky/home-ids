@@ -44,19 +44,27 @@ from v13.graph.store import GraphStore  # noqa: E402
 
 def get_decision_evidence(store: GraphStore, decision: Dict[str, Any]) -> List[Evidence]:
     """The decision's own real supporting evidence, resolved via its 'supports'
-    edges. Reuses get_evidence_for_device() (no new GraphStore method needed)
-    filtered down to just the evidence_ids the edges actually name -- a decision
-    made before A14's evidence_ids wiring (or one whose evidence has since aged
-    past its own 90-day retention, correctly exempted while a NEWER decision
-    references it, but this one might be older) legitimately has zero supports
-    edges; callers must treat that as "no evidence available to replay", not a
-    trivial all-BENIGN comparison."""
+    edges. a decision made before A14's evidence_ids wiring (or one whose evidence
+    has since aged past its own 90-day retention, correctly exempted while a NEWER
+    decision references it, but this one might be older) legitimately has zero
+    supports edges; callers must treat that as "no evidence available to replay",
+    not a trivial all-BENIGN comparison.
+
+    PERFORMANCE FIX (found via direct measurement against a real 2GB production
+    graph, Release 14 console-API work): this used to fetch get_evidence_for_device()
+    (EVERY evidence row for the decision's device) and filter down to supporting_ids
+    in Python. One real device had 75,464 total evidence rows -- that full-device
+    scan made this call take 18-19s in practice (confirmed live), unusable from an
+    interactive console. get_evidence_by_ids() (graph/store.py) does the equivalent
+    filter as an indexed evidence_id lookup instead -- same resulting set (every
+    'supports' edge only ever names evidence belonging to the decision's own device,
+    per insert_decision()'s own wiring), sub-second regardless of how much evidence
+    that device has accumulated."""
     edges = store.get_edges(relation="supports", dst_kind="decision", dst_id=decision["decision_id"])
-    supporting_ids = {e["src_id"] for e in edges}
+    supporting_ids = list({e["src_id"] for e in edges})
     if not supporting_ids:
         return []
-    all_evidence = store.get_evidence_for_device(decision["device_id"], resolve_merges=False)
-    return [e for e in all_evidence if e.evidence_id in supporting_ids]
+    return store.get_evidence_by_ids(supporting_ids)
 
 
 def _rep_from_evidence(evidence_list: List[Evidence]) -> Any:

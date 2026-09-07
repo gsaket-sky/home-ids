@@ -57,6 +57,25 @@ def setup_logging():
     )
     LOGGER.debug("Logging subsystem initialized at level: %s", log_level_str)
 
+    # BUGFIX: log_level is documented [LIVE] in config.yaml, but logging.basicConfig()
+    # above only ever runs once, at boot -- nothing previously re-applied a later
+    # config.yaml/config_overrides.json change to the actual logging subsystem, so
+    # editing log_level via the console API silently had no effect on a running
+    # process. CONFIG.set_notify() already fires with the set of changed keys on every
+    # live reload (including from an override write) -- use it to make this genuinely
+    # live instead of restart-only.
+    def _on_config_changed(changed: dict) -> None:
+        if "log_level" in changed:
+            new_level_str = str(changed["log_level"]).upper()
+            new_level = getattr(logging, new_level_str, None)
+            if new_level is None:
+                LOGGER.warning("Ignoring invalid live log_level '%s'", changed["log_level"])
+                return
+            logging.getLogger().setLevel(new_level)
+            LOGGER.warning("Log level changed live to %s", new_level_str)
+
+    CONFIG.set_notify(_on_config_changed)
+
 
 def main():
     """

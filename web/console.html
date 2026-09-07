@@ -51,7 +51,6 @@
   .view-sub{font-size:12.5px;color:var(--text-dim);margin-top:3px;max-width:640px;line-height:1.5;}
   .content{flex:1;overflow-y:auto;padding:20px 28px 40px;}
 
-  .sample-badge{display:inline-flex;align-items:center;font-family:var(--font-mono);font-size:10px;font-weight:600;letter-spacing:.03em;padding:2px 6px;border-radius:3px;border:1px solid rgba(224,178,63,.35);background:rgba(224,178,63,.08);color:var(--sev-suspicious);margin-left:8px;vertical-align:middle;}
 
   .input, .select{background:var(--bg-elevated);border:1px solid var(--border);color:var(--text);font-size:12.5px;border-radius:var(--radius);padding:7px 10px;outline:none;}
   .input:focus,.select:focus{border-color:var(--accent);}
@@ -183,153 +182,11 @@ function sevPill(state){
 
 var FALLBACK_DEVICE_TYPES = ['laptop','desktop','phone','tablet','smart_tv','gaming_console','printer','nas','iot','camera','server','unknown','dns_server','router','gateway'];
 
-var NOW_REF = new Date('2026-09-07T21:20:00');
-function withinDays(ts, days){
-  var t = new Date(ts.replace(' ', 'T') + ':00');
-  return (NOW_REF - t) <= (Number(days) || 0) * 86400000;
-}
-
-var DOMAIN_POOL = [
-  ['time.ntp-pool.example.org','known-safe'],
-  ['updates.os-vendor.example.com','known-safe'],
-  ['cdn.static-assets.example.net','known-safe'],
-  ['api.streaming-service.example.tv','known-safe'],
-  ['telemetry.smarthome-vendor.example.io','known-safe'],
-  ['ads.tracker-network.example.net','unknown'],
-  ['sync.cloud-backup.example.com','known-safe'],
-  ['push.notification-gateway.example.com','known-safe'],
-  ['pool.mirror.example.org','known-safe'],
-  ['maps.tiles.example.com','known-safe']
-];
-var LAST_SEEN_SAMPLE = ['2026-09-07 21:1','2026-09-07 18:4','2026-09-06 23:0','2026-09-06 09:2','2026-09-05 20:1'];
-function buildTopDomains(dIdx, risky){
-  var risk = risky ? [['203.0.113.44','malicious'],['beacon.suspicious-dyndns.example.net','suspicious']] : [];
-  var list = risk.concat(DOMAIN_POOL).slice(0,10);
-  var count = 4200 - dIdx*137;
-  return list.map(function(item, i){
-    count = Math.max(9, count - (i*97 + dIdx*11));
-    return { rank:i+1, domain:item[0], count:count, lastSeen: LAST_SEEN_SAMPLE[i % LAST_SEEN_SAMPLE.length] + (2+i)+'', tier:item[1], tierColor: tierColor(item[1]) };
-  });
-}
-
-var DEVICES = [
-  { id:'dev_4f2a19c7e6b1', hostname:'workstation-07', ip:'192.168.77.101', mac:'3C:5A:B4:11:9F:02', type:'laptop', typeOverride:false,
-    firstSeen:'2026-05-02', lastSeen:'2026-09-07 21:14', state:'BENIGN', riskScore:1.2,
-    knownIps:['192.168.77.101'], ja4:['t13d1516h2_8daaf6152771_02713d6af862'],
-    dhcp:'vendor_class=MSFT 5.0; params=1,3,6,15,31,33,43,44,46,47,121,249,252', merges:[] },
-  { id:'dev_9b81c0e2a5f4', hostname:'livingroom-tv', ip:'192.168.77.108', mac:'A4:83:E7:22:6C:19', type:'smart_tv', typeOverride:true,
-    firstSeen:'2026-04-18', lastSeen:'2026-09-07 20:58', state:'ANOMALOUS', riskScore:4.6,
-    knownIps:['192.168.77.108','192.168.77.109'], ja4:['t13d1715h2_5b57614c22b0_3d5424be91a7','t12d190900_8e6a3c110bcd_a190efc2551b'],
-    dhcp:'vendor_class=android-dhcp-14',
-    merges:[{ priorId:'dev_11c2f9a08e46', date:'2026-08-30', confidence:'0.86', via:'DHCP fingerprint + JA4 overlap' }] },
-  { id:'dev_0d7e5c3f9a12', hostname:'nas-archive', ip:'192.168.77.120', mac:'00:11:32:8A:4D:6E', type:'nas', typeOverride:true,
-    firstSeen:'2026-03-11', lastSeen:'2026-09-07 21:15', state:'BENIGN', riskScore:0.4,
-    knownIps:['192.168.77.120'], ja4:[], dhcp:'vendor_class=(none — static lease)', merges:[] },
-  { id:'dev_7a12e9c4b3d0', hostname:'cam-driveway', ip:'192.168.77.142', mac:'B8:27:EB:5F:11:0A', type:'camera', typeOverride:false,
-    firstSeen:'2026-06-25', lastSeen:'2026-09-07 21:02', state:'SUSPICIOUS', riskScore:6.8,
-    knownIps:['192.168.77.142'], ja4:['t13d1516h2_9c2a04e8bb31_f7211ac6e903'], dhcp:'vendor_class=IP Camera / RTSP client', merges:[] },
-  { id:'dev_2e6f8a1d9c47', hostname:'kitchen-hub', ip:'192.168.77.150', mac:'CC:50:E3:9B:02:44', type:'iot', typeOverride:false,
-    firstSeen:'2026-02-14', lastSeen:'2026-09-07 20:40', state:'BENIGN', riskScore:0.9,
-    knownIps:['192.168.77.150'], ja4:['t13d1516h2_1144ee7a2b90_5c8a02fd6e11'], dhcp:'vendor_class=SmartSpeaker/2.1', merges:[] },
-  { id:'dev_c1f4a9302b7e', hostname:'gateway-router', ip:'192.168.77.1', mac:'multiple — LAN/WLAN/WAN interfaces', type:'gateway', typeOverride:true,
-    firstSeen:'2026-01-01', lastSeen:'2026-09-07 21:15', state:'BENIGN', riskScore:0.1,
-    knownIps:['192.168.77.1'], ja4:[], dhcp:'n/a — pinned via device_identity.gateway_ip', merges:[] },
-  { id:'dev_5a9d3e7f1c02', hostname:'game-console-01', ip:'192.168.77.133', mac:'7C:BB:8A:44:0F:91', type:'gaming_console', typeOverride:false,
-    firstSeen:'2026-05-30', lastSeen:'2026-09-06 23:47', state:'BENIGN', riskScore:1.8,
-    knownIps:['192.168.77.133'], ja4:['t13d1516h2_2fbb31ac0e77_9a406c1eddf2'], dhcp:'vendor_class=ConsoleOS/9', merges:[] },
-  { id:'dev_8f3c1a7e2d90', hostname:'dns-resolver', ip:'192.168.77.175', mac:'DC:A6:32:11:8B:00', type:'dns_server', typeOverride:true,
-    firstSeen:'2026-01-05', lastSeen:'2026-09-07 21:15', state:'BENIGN', riskScore:0.2,
-    knownIps:['192.168.77.175'], ja4:[], dhcp:'vendor_class=(none — static lease)', merges:[] },
-  { id:'dev_1b6e9f0a3c58', hostname:'guest-phone-a2', ip:'192.168.77.162', mac:'9C:2D:44:0B:6F:31', type:'phone', typeOverride:false,
-    firstSeen:'2026-09-05', lastSeen:'2026-09-07 19:22', state:'BENIGN', riskScore:2.1,
-    knownIps:['192.168.77.162'], ja4:['t13d1715h2_88c2ee31af06_1d904bfc22ea'], dhcp:'vendor_class=android-dhcp-14', merges:[] },
-  { id:'dev_e94a2c710bd3', hostname:'unidentified-3f91', ip:'192.168.77.188', mac:'F2:11:9C:7A:03:5E (rotated)', type:'unknown', typeOverride:false,
-    firstSeen:'2026-09-06', lastSeen:'2026-09-07 21:11', state:'HIGH', riskScore:8.3,
-    knownIps:['192.168.77.188','192.168.77.191'], ja4:['t13d1516h2_04e9bb2c7a10_6ef130ad9c82'], dhcp:'vendor_class=(unclassified)',
-    merges:[{ priorId:'dev_44a9c210f883', date:'2026-09-06', confidence:'0.68', via:'DHCP fingerprint only — below the 0.75 auto-merge bar' }] }
-];
-
-var DESTINATIONS = [
-  { id:'dest_1', kind:'domain', label:'telemetry.smarthome-vendor.example.io' },
-  { id:'dest_2', kind:'ip', label:'203.0.113.44' },
-  { id:'dest_3', kind:'domain', label:'beacon.suspicious-dyndns.example.net' },
-  { id:'dest_4', kind:'domain', label:'cdn.static-assets.example.net' },
-  { id:'dest_5', kind:'ip', label:'198.51.100.23' }
-];
-
-var EVIDENCE = [
-  { id:'ev_1', deviceId:'dev_7a12e9c4b3d0', destId:'dest_2', decisionId:'dec_1', relation:'supports', type:'reputation_hit', family:'network_intel', value:'AbuseIPDB score 92 — reported C2 relay', confidence:'0.91', timestamp:'2026-09-07 20:47', source:'AbuseIPDB' },
-  { id:'ev_2', deviceId:'dev_7a12e9c4b3d0', destId:'dest_2', decisionId:'dec_1', relation:'supports', type:'beacon_interval', family:'connection_timing', value:'periodic 300s ± 4s beacon over 6 cycles', confidence:'0.77', timestamp:'2026-09-07 20:52', source:'zeek_conn' },
-  { id:'ev_3', deviceId:'dev_7a12e9c4b3d0', destId:'dest_3', decisionId:'dec_1', relation:'supports', type:'dns_tunneling_signal', family:'dns_shape', value:'high-entropy subdomain labels, 0.94 entropy score', confidence:'0.68', timestamp:'2026-09-07 20:58', source:'dns_evasion.py' },
-  { id:'ev_4', deviceId:'dev_e94a2c710bd3', destId:'dest_2', decisionId:'dec_2', relation:'supports', type:'honeypot_contact', family:'deception', value:'contacted a configured honeypot_ips entry', confidence:'0.99', timestamp:'2026-09-07 21:05', source:'threat_signals.py' },
-  { id:'ev_5', deviceId:'dev_e94a2c710bd3', destId:'dest_2', decisionId:'dec_2', relation:'supports', type:'arp_sweep', family:'discovery', value:'11 distinct ARP targets in one 300s window', confidence:'0.82', timestamp:'2026-09-07 21:08', source:'zeek_arp' },
-  { id:'ev_6', deviceId:'dev_9b81c0e2a5f4', destId:'dest_1', decisionId:'dec_3', relation:'supports', type:'volume_anomaly', family:'behavioral_baseline', value:'DNS query rate 6.2σ above EWMA baseline', confidence:'0.58', timestamp:'2026-09-07 19:40', source:'baseline model' },
-  { id:'ev_7', deviceId:'dev_5a9d3e7f1c02', destId:'dest_4', decisionId:'dec_4', relation:'contradicts', type:'reputation_hit', family:'network_intel', value:'known CDN, Tranco top 500', confidence:'0.95', timestamp:'2026-09-06 23:10', source:'ti_engine' }
-];
-
-var DECISIONS = [
-  { id:'dec_1', deviceId:'dev_7a12e9c4b3d0', timestamp:'2026-09-07 20:58', state:'SUSPICIOUS', hypothesis:'attack', confidence:'0.71', riskScore:'6.8',
-    path:'Stage-1 hard-stop: no → LightGBM P(fp)=0.31 → embed-sim 0.44 → combined 0.52 (below suppress 0.8) → SUSPICIOUS' },
-  { id:'dec_2', deviceId:'dev_e94a2c710bd3', timestamp:'2026-09-07 21:08', state:'HIGH', hypothesis:'attack', confidence:'0.93', riskScore:'8.3',
-    path:'honeypot_contact hard-stop → lateral_threat gate bypasses risk≥9.0 floor → arp_sweep corroborates → HIGH' },
-  { id:'dec_3', deviceId:'dev_9b81c0e2a5f4', timestamp:'2026-09-07 19:40', state:'ANOMALOUS', hypothesis:'benign', confidence:'0.44', riskScore:'4.6',
-    path:'single independence family (behavioral_baseline) only → below multi-signal corroboration bar → ANOMALOUS, not escalated' },
-  { id:'dec_4', deviceId:'dev_5a9d3e7f1c02', timestamp:'2026-09-06 23:10', state:'BENIGN', hypothesis:'benign', confidence:'0.97', riskScore:'0.3',
-    path:'reputation contradicts attack hypothesis → auto-suppressed, combined 0.91 ≥ 0.8' }
-];
-
-var REPLAY_OUTCOMES = {
-  dec_1: { newState:'SUSPICIOUS', outcome:'unchanged', note:'Same evidence, same thresholds — no drift detected since this decision was made.' },
-  dec_2: { newState:'CRITICAL', outcome:'changed', note:'arp_sweep_unique_targets_threshold has tightened since this decision — the same evidence now also trips the sweep hard-stop, escalating HIGH → CRITICAL.' },
-  dec_3: { newState:'ANOMALOUS', outcome:'unchanged', note:'Re-evaluated against the current engine version — identical result.' },
-  dec_4: { newState:'BENIGN', outcome:'unchanged', note:'Re-evaluated against the current engine version — identical result.' }
-};
-
-var GRAPH_NODES = (function(){
-  var nodes = [];
-  var usedDeviceIds = ['dev_7a12e9c4b3d0','dev_e94a2c710bd3','dev_9b81c0e2a5f4','dev_5a9d3e7f1c02'];
-  usedDeviceIds.forEach(function(id, i){
-    var d = DEVICES.filter(function(x){ return x.id===id; })[0];
-    nodes.push({ id:d.id, kind:'device', label:d.hostname, sub:d.type, x:90, y:70+i*110, r:12, fill:hexA(sevColor(d.state),0.85), stroke:sevColor(d.state) });
-  });
-  nodes.push({ id:'dev_11c2f9a08e46', kind:'device', label:'(prior identity)', sub:'merged away', x:90, y:70+4*110, r:8, fill:'rgba(107,114,128,.5)', stroke:'#6b7280' });
-  EVIDENCE.forEach(function(e,i){
-    nodes.push({ id:e.id, kind:'evidence', label:e.type, sub:e.family, x:330, y:60+i*78, r:8, fill:'rgba(226,229,235,.18)', stroke:'#8b93a3' });
-  });
-  DESTINATIONS.forEach(function(dst,i){
-    nodes.push({ id:dst.id, kind:'destination', label:dst.label.length>26? dst.label.slice(0,24)+'…' : dst.label, sub:dst.kind, x:640, y:70+i*100, r:10, fill:'rgba(155,110,224,.25)', stroke:'#9e6ee0' });
-  });
-  DECISIONS.forEach(function(dec,i){
-    nodes.push({ id:dec.id, kind:'decision', label:dec.state, sub:dec.id, x:870, y:70+i*105, r:11, fill:hexA(sevColor(dec.state),0.85), stroke:sevColor(dec.state) });
-  });
-  nodes.push({ id:'hyp_attack', kind:'hypothesis', label:'attack', sub:'hypothesis', x:1030, y:130, r:10, fill:'rgba(224,82,63,.25)', stroke:'#e0523f' });
-  nodes.push({ id:'hyp_benign', kind:'hypothesis', label:'benign', sub:'hypothesis', x:1030, y:340, r:10, fill:'rgba(63,191,127,.25)', stroke:'#3fbf7f' });
-  return nodes;
-})();
-var GRAPH_NODE_BY_ID = {}; GRAPH_NODES.forEach(function(n){ GRAPH_NODE_BY_ID[n.id]=n; });
-
-var GRAPH_EDGES = (function(){
-  var edges = [];
-  EVIDENCE.forEach(function(e){
-    edges.push({ from:e.deviceId, to:e.id, relation:'observed', stroke:'#4a5568', dash:'' });
-    edges.push({ from:e.id, to:e.destId, relation:'targets', stroke:'#5a6478', dash:'' });
-    edges.push({ from:e.id, to:e.decisionId, relation:e.relation, stroke: e.relation==='contradicts' ? '#e0523f' : '#22c7e0', dash: e.relation==='contradicts' ? '4,3' : '' });
-  });
-  DECISIONS.forEach(function(dec){
-    edges.push({ from:dec.id, to:'hyp_'+dec.hypothesis, relation:'winning_hypothesis', stroke:'#8b93a3', dash:'2,3' });
-  });
-  edges.push({ from:'dev_11c2f9a08e46', to:'dev_9b81c0e2a5f4', relation:'merged_into', stroke:'#6b7280', dash:'5,3' });
-  edges.push({ from:'ev_1', to:'ev_2', relation:'corroborates', stroke:'#e0b23f', dash:'2,2' });
-  edges.push({ from:'dev_5a9d3e7f1c02', to:'dest_4', relation:'trusts', stroke:'#3fbf7f', dash:'' });
-  return edges;
-})();
-
 var GRAPH_LEGEND_DEFS = [
   { kind:'device', label:'Device', color:'#5aa7f0', bg:'rgba(90,167,240,.3)' },
   { kind:'evidence', label:'Evidence', color:'#8b93a3', bg:'rgba(139,147,163,.25)' },
   { kind:'destination', label:'Destination', color:'#9e6ee0', bg:'rgba(158,110,224,.3)' },
-  { kind:'decision', label:'Decision', color:'#e0b23f', bg:'rgba(224,178,63,.3)' },
-  { kind:'hypothesis', label:'Hypothesis', color:'#e0523f', bg:'rgba(224,82,63,.3)' }
+  { kind:'decision', label:'Decision', color:'#e0b23f', bg:'rgba(224,178,63,.3)' }
 ];
 
 var ICONS = {
@@ -347,16 +204,24 @@ var state = {
   activeView: 'devices',
   selectedDeviceId: null,
   deviceSearch: '',
-  sortField: 'lastSeen',
+  sortField: 'last_seen',
   sortDir: 'desc',
+
+  devicesLoading: false, devicesLoaded: false, devicesLoadError: null, devices: [],
+  deviceDetailLoading: false, deviceDetailError: null, deviceDetail: null,
+
   huntMode: 'touching',
-  huntDest: '203.0.113.44',
-  huntDecisionId: 'dec_1',
-  huntDeviceId: 'dev_7a12e9c4b3d0',
-  huntSinceDays: '90',
+  huntDest: '',
+  huntDecisionId: '',
+  huntDeviceId: '',
+  huntSinceDays: '',
   huntRan: false,
+  huntLoading: false, huntError: null, huntResult: null,
+
+  graphLoading: false, graphLoaded: false, graphLoadError: null,
+  graphNodes: [], graphEdges: [],
   graphSelected: null,
-  graphShow: { device:true, evidence:true, destination:true, decision:true, hypothesis:true },
+  graphShow: { device:true, evidence:true, destination:true, decision:true },
 
   // --- real, server-backed config state ---
   configSection: null,        // set once rows load, to the first section
@@ -396,6 +261,96 @@ async function apiFetch(path, options){
     throw new Error('HTTP ' + resp.status + ': ' + detail);
   }
   return resp.json();
+}
+
+async function loadDevices(){
+  state.devicesLoading = true; state.devicesLoadError = null; render();
+  try {
+    var data = await apiFetch('/api/devices');
+    state.devices = data.devices;
+    state.devicesLoaded = true;
+  } catch (err) {
+    state.devicesLoadError = err.message || String(err);
+  } finally {
+    state.devicesLoading = false; render();
+  }
+}
+
+async function loadDeviceDetail(deviceId){
+  state.deviceDetailLoading = true; state.deviceDetailError = null; state.deviceDetail = null; render();
+  try {
+    state.deviceDetail = await apiFetch('/api/devices/' + encodeURIComponent(deviceId));
+  } catch (err) {
+    state.deviceDetailError = err.message || String(err);
+  } finally {
+    state.deviceDetailLoading = false; render();
+  }
+}
+
+async function runHuntQuery(){
+  state.huntLoading = true; state.huntError = null; state.huntResult = null; render();
+  try {
+    var mode = state.huntMode;
+    if (mode === 'touching') {
+      var qs = '?destination=' + encodeURIComponent(state.huntDest) + (state.huntSinceDays ? '&since_days=' + encodeURIComponent(state.huntSinceDays) : '');
+      state.huntResult = await apiFetch('/api/hunt/devices_touching' + qs);
+    } else if (mode === 'timeline') {
+      state.huntResult = await apiFetch('/api/hunt/decision_timeline/' + encodeURIComponent(state.huntDecisionId));
+    } else if (mode === 'history') {
+      var qs2 = state.huntSinceDays ? '?since_days=' + encodeURIComponent(state.huntSinceDays) : '';
+      state.huntResult = await apiFetch('/api/hunt/device_history/' + encodeURIComponent(state.huntDeviceId) + qs2);
+    } else {
+      state.huntResult = await apiFetch('/api/hunt/replay/' + encodeURIComponent(state.huntDecisionId), { method: 'POST' });
+    }
+  } catch (err) {
+    state.huntError = err.message || String(err);
+  } finally {
+    state.huntLoading = false; state.huntRan = true; render();
+  }
+}
+
+function computeGraphLayout(nodes, edges){
+  var order = ['device', 'evidence', 'destination', 'decision'];
+  var colX = { device: 90, evidence: 340, destination: 660, decision: 900 };
+  var counters = { device: 0, evidence: 0, destination: 0, decision: 0 };
+  var byId = {};
+  var laidOut = nodes.map(function(n){
+    var i = counters[n.kind] || 0;
+    counters[n.kind] = i + 1;
+    var spacing = n.kind === 'evidence' ? 34 : 70;
+    var out = Object.assign({}, n, {
+      x: colX[n.kind] != null ? colX[n.kind] : 500,
+      y: 50 + i * spacing,
+      r: n.kind === 'decision' ? 11 : (n.kind === 'device' ? 12 : (n.kind === 'destination' ? 10 : 7)),
+    });
+    if (n.kind === 'decision') { out.fill = hexA(sevColor(n.label), 0.85); out.stroke = sevColor(n.label); }
+    else if (n.kind === 'device') { out.fill = 'rgba(90,167,240,.3)'; out.stroke = '#5aa7f0'; }
+    else if (n.kind === 'destination') { out.fill = 'rgba(155,110,224,.25)'; out.stroke = '#9e6ee0'; }
+    else { out.fill = 'rgba(226,229,235,.18)'; out.stroke = '#8b93a3'; }
+    byId[n.id] = out;
+    return out;
+  });
+  var laidOutEdges = edges.map(function(e){
+    var relColor = { observed:'#4a5568', targets:'#5a6478', supports:'#22c7e0', contradicts:'#e0523f' };
+    return Object.assign({}, e, { stroke: relColor[e.relation] || '#6b7280', dash: e.relation==='contradicts' ? '4,3' : '' });
+  });
+  return { nodes: laidOut, edges: laidOutEdges, byId: byId };
+}
+
+async function loadGraph(){
+  state.graphLoading = true; state.graphLoadError = null; render();
+  try {
+    var data = await apiFetch('/api/graph?limit=25');
+    var laid = computeGraphLayout(data.nodes, data.edges);
+    state.graphNodes = laid.nodes;
+    state.graphEdges = laid.edges;
+    state.graphNodeById = laid.byId;
+    state.graphLoaded = true;
+  } catch (err) {
+    state.graphLoadError = err.message || String(err);
+  } finally {
+    state.graphLoading = false; render();
+  }
 }
 
 async function loadConfig(){
@@ -438,86 +393,108 @@ function renderSidebar(){
     + '</div>';
 }
 
+function fmtTime(ts){
+  if (ts == null) return '—';
+  var d = new Date(ts * 1000);
+  return d.toISOString().slice(0,19).replace('T',' ');
+}
+
 function renderDevicesView(){
-  var list = DEVICES.map(function(d){ return Object.assign({}, d, { macShort: d.mac.length>19 ? d.mac.slice(0,17)+'…' : d.mac }); });
+  var topbarHead = '<div class="topbar"><div class="topbar-row">'
+    + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the v13 evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
+    + '<div class="search-wrap">'+ICONS.search+'<input id="deviceSearchInput" class="input search-input" placeholder="Search hostname, IP, MAC…" value="'+esc(state.deviceSearch)+'" oninput="app.onDeviceSearch(this.value)"></div>'
+    + '</div></div>';
+
+  if (state.devicesLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not reach the devices API: '+esc(state.devicesLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadDevices()">Retry</button></div></div>';
+  }
+  if (state.devicesLoading && !state.devicesLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Loading devices from the server…</div></div>';
+  }
+
+  var list = state.devices.slice();
   if (state.deviceSearch) {
     var q = state.deviceSearch.toLowerCase();
-    list = list.filter(function(d){ return d.hostname.toLowerCase().indexOf(q)>=0 || d.ip.indexOf(q)>=0 || d.mac.toLowerCase().indexOf(q)>=0; });
+    list = list.filter(function(d){
+      return (d.hostname||'').toLowerCase().indexOf(q)>=0 || (d.ip||'').indexOf(q)>=0 || (d.mac||'').toLowerCase().indexOf(q)>=0;
+    });
   }
   list.sort(function(a,b){
     var f = state.sortField, dir = state.sortDir==='asc'?1:-1;
-    if (a[f] < b[f]) return -1*dir; if (a[f] > b[f]) return 1*dir; return 0;
+    var av = a[f], bv = b[f];
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1; if (bv == null) return -1;
+    if (av < bv) return -1*dir; if (av > bv) return 1*dir; return 0;
   });
   function arrow(f){ return state.sortField===f ? (state.sortDir==='asc'?' ▲':' ▼') : ''; }
   var rows = list.map(function(d){
-    return '<tr class="row-clickable" onclick="app.selectDevice(\''+d.id+'\')">'
-      + '<td><div class="cell-title">'+esc(d.hostname)+'</div><div class="cell-mono">'+d.id+'</div></td>'
-      + '<td><span class="tag">'+d.type+'</span></td>'
-      + '<td class="cell-mono">'+d.ip+'</td>'
-      + '<td class="cell-mono">'+esc(d.macShort)+'</td>'
-      + '<td>'+sevPill(d.state)+'</td>'
-      + '<td class="cell-mono">'+d.lastSeen+'</td>'
-      + '<td class="cell-mono">'+d.riskScore+'</td>'
-      + '<td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();app.selectDevice(\''+d.id+'\')">Open →</button></td>'
+    var macShort = (d.mac && d.mac.length > 19) ? d.mac.slice(0,17)+'…' : (d.mac || 'unknown');
+    return '<tr class="row-clickable" onclick="app.selectDevice(\''+d.device_id+'\')">'
+      + '<td><div class="cell-title">'+esc(d.hostname)+'</div><div class="cell-mono">'+d.device_id+'</div></td>'
+      + '<td><span class="tag">'+esc(d.device_type)+'</span></td>'
+      + '<td class="cell-mono">'+esc(d.ip||'—')+'</td>'
+      + '<td class="cell-mono">'+esc(macShort)+'</td>'
+      + '<td>'+(d.state ? sevPill(d.state) : '<span class="tag">not yet evaluated</span>')+'</td>'
+      + '<td class="cell-mono">'+fmtTime(d.last_seen)+'</td>'
+      + '<td class="cell-mono">'+(d.risk_score != null ? d.risk_score : '—')+'</td>'
+      + '<td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();app.selectDevice(\''+d.device_id+'\')">Open →</button></td>'
       + '</tr>';
   }).join('');
   if (!rows) rows = '<tr><td colspan="8"><div class="empty-state">No devices match “'+esc(state.deviceSearch)+'”.</div></td></tr>';
-  return ''
-    + '<div class="topbar"><div class="topbar-row">'
-    + '<div><div class="view-title">Devices<span class="sample-badge">SAMPLE DATA</span></div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN. Click a row to inspect identity, classification and domain history. Only the Config tab is wired to the real server so far.</div></div>'
-    + '<div class="search-wrap">'+ICONS.search+'<input id="deviceSearchInput" class="input search-input" placeholder="Search hostname, IP, MAC…" value="'+esc(state.deviceSearch)+'" oninput="app.onDeviceSearch(this.value)"></div>'
-    + '</div></div>'
+  return topbarHead
     + '<div class="content"><div class="panel"><div class="table-wrap"><table><thead><tr>'
     + '<th onclick="app.toggleSort(\'hostname\')">Device'+arrow('hostname')+'</th><th>Type</th><th>IP</th><th class="cell-mono">MAC</th><th>State</th>'
-    + '<th onclick="app.toggleSort(\'lastSeen\')">Last seen'+arrow('lastSeen')+'</th><th onclick="app.toggleSort(\'riskScore\')">Risk'+arrow('riskScore')+'</th><th></th>'
+    + '<th onclick="app.toggleSort(\'last_seen\')">Last seen'+arrow('last_seen')+'</th><th onclick="app.toggleSort(\'risk_score\')">Risk'+arrow('risk_score')+'</th><th></th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
 }
 
 function renderDeviceDetailView(){
-  var d = DEVICES.filter(function(x){ return x.id===state.selectedDeviceId; })[0] || DEVICES[0];
-  var liveOverride = state.deviceTypeOverrides.filter(function(o){ return o.pattern.toLowerCase()===d.hostname.toLowerCase(); })[0];
-  var effType = liveOverride ? liveOverride.type : d.type;
+  var topbarBack = '<button class="btn btn-ghost btn-sm" onclick="app.backToDevices()" style="margin-bottom:8px;padding-left:2px;">← Back to devices</button>';
 
-  var sourceBadge = liveOverride
-    ? '<span class="badge badge-live">saved to device_type_overrides (real, via Config API)</span>'
-    : (d.typeOverride ? '<span class="badge">sample override (not yet saved for real)</span>' : '<span class="badge">auto-inferred (infer_device_type)</span>');
+  if (state.deviceDetailError) {
+    return '<div class="topbar">'+topbarBack+'<div class="error-banner">Could not load this device: '+esc(state.deviceDetailError)+'.</div></div>';
+  }
+  if (state.deviceDetailLoading || !state.deviceDetail) {
+    return '<div class="topbar">'+topbarBack+'<div class="empty-state">Loading device…</div></div>';
+  }
 
-  var knownIps = d.knownIps.map(function(ip){ return '<span class="chip">'+ip+'</span>'; }).join('');
-  var ja4 = d.ja4.length ? d.ja4.map(function(j){ return '<div class="cell-mono" style="font-size:11px;">'+j+'</div>'; }).join('') : '<span style="color:var(--text-faint);font-size:11.5px;">none captured</span>';
-  var merges = d.merges.length
+  var d = state.deviceDetail;
+  var sourceBadge = d.device_type_is_override
+    ? '<span class="badge badge-live">saved to device_type_overrides</span>'
+    : '<span class="badge">auto-inferred (infer_device_type)</span>';
+
+  var knownIps = (d.known_ips||[]).map(function(ip){ return '<span class="chip">'+esc(ip)+'</span>'; }).join('') || '<span style="color:var(--text-faint);font-size:11.5px;">none recorded</span>';
+  var ja4 = (d.ja4_seen||[]).length ? d.ja4_seen.map(function(j){ return '<div class="cell-mono" style="font-size:11px;">'+esc(j)+'</div>'; }).join('') : '<span style="color:var(--text-faint);font-size:11.5px;">none captured</span>';
+  var merges = (d.merges||[]).length
     ? d.merges.map(function(m){
         return '<div style="font-size:11.5px;color:var(--text-dim);border-left:2px solid var(--accent);padding-left:9px;margin-bottom:8px;">'
-          + 'Merged from <span class="cell-mono">'+m.priorId+'</span> on '+m.date+' — confidence '+m.confidence+'<br>matched via '+m.via+'</div>';
+          + 'Merged from <span class="cell-mono">'+esc(m.prior_device_id)+'</span> on '+fmtTime(m.timestamp)+'</div>';
       }).join('')
     : '<span style="color:var(--text-faint);font-size:11.5px;">No MAC-rotation merges on record for this identity.</span>';
 
-  var topDomains = buildTopDomains(DEVICES.indexOf(d), d.riskScore>5).map(function(dm){
-    return '<tr><td class="cell-mono">'+dm.rank+'</td><td class="cell-mono">'+esc(dm.domain)+'</td><td class="cell-mono">'+dm.count+'</td><td class="cell-mono">'+dm.lastSeen+'</td>'
-      + '<td><span class="tag" style="color:'+dm.tierColor+';border-color:'+dm.tierColor+';">'+dm.tier+'</span></td></tr>';
-  }).join('');
-
   return ''
     + '<div class="topbar"><div class="topbar-row"><div>'
-    + '<button class="btn btn-ghost btn-sm" onclick="app.backToDevices()" style="margin-bottom:8px;padding-left:2px;">← Back to devices</button>'
-    + '<div class="view-title">'+esc(d.hostname)+' <span class="tag" style="margin-left:8px;">'+d.id+'</span><span class="sample-badge">SAMPLE DEVICE</span></div>'
-    + '<div class="view-sub">First seen '+d.firstSeen+' · last seen '+d.lastSeen+' · '+sevPill(d.state)+'</div>'
+    + topbarBack
+    + '<div class="view-title">'+esc(d.hostname)+' <span class="tag" style="margin-left:8px;">'+esc(d.device_id)+'</span></div>'
+    + '<div class="view-sub">First seen '+(d.first_seen ? fmtTime(d.first_seen) : '—')+' · last seen '+fmtTime(d.last_seen)+' · '+(d.state ? sevPill(d.state) : '<span class="tag">not yet evaluated</span>')+'</div>'
     + '</div><button class="btn" onclick="app.traceThisDevice()">Trace evidence timeline →</button></div></div>'
     + '<div class="content"><div class="grid2">'
-    + '<div class="panel"><div class="panel-header"><div class="panel-title">Classification — device_type_overrides (real, writes to the server)</div></div><div class="panel-body">'
-    + '<div class="kv-row"><div class="kv-key">device_type</div><div class="kv-val"><select class="select mono" style="width:100%;" onchange="app.assignDeviceType(\''+esc(d.hostname)+'\', this.value)">'+typeOptionsHtml(effType)+'</select></div></div>'
+    + '<div class="panel"><div class="panel-header"><div class="panel-title">Classification — device_type_overrides</div></div><div class="panel-body">'
+    + '<div class="kv-row"><div class="kv-key">device_type</div><div class="kv-val"><select class="select mono" style="width:100%;" onchange="app.assignDeviceType(\''+esc(d.hostname)+'\', this.value)">'+typeOptionsHtml(d.device_type)+'</select></div></div>'
     + '<div class="kv-row"><div class="kv-key">source</div><div class="kv-val">'+sourceBadge+'</div></div>'
     + '<div class="kv-row"><div class="kv-key">matches by</div><div class="kv-val" style="color:var(--text-dim);">hostname substring, first match in file order -- see Config → network_and_devices, saved as pattern "'+esc(d.hostname)+'"</div></div>'
     + '</div></div>'
-    + '<div class="panel"><div class="panel-header"><div class="panel-title">Identity fingerprint — all known identities<span class="sample-badge">SAMPLE</span></div></div><div class="panel-body">'
-    + '<div class="kv-row"><div class="kv-key">MAC address</div><div class="kv-val cell-mono">'+esc(d.mac)+'</div></div>'
-    + '<div class="kv-row"><div class="kv-key">known_ips ('+d.knownIps.length+'/8)</div><div class="kv-val" style="display:flex;flex-wrap:wrap;gap:6px;">'+knownIps+'</div></div>'
-    + '<div class="kv-row"><div class="kv-key">ja4_seen ('+d.ja4.length+'/50)</div><div class="kv-val stack" style="display:flex;flex-direction:column;gap:4px;">'+ja4+'</div></div>'
-    + '<div class="kv-row"><div class="kv-key">dhcp_fingerprint</div><div class="kv-val cell-mono" style="font-size:11px;color:var(--text-dim);">'+esc(d.dhcp)+'</div></div>'
+    + '<div class="panel"><div class="panel-header"><div class="panel-title">Identity fingerprint — all known identities</div></div><div class="panel-body">'
+    + '<div class="kv-row"><div class="kv-key">MAC address</div><div class="kv-val cell-mono">'+esc(d.mac_address)+'</div></div>'
+    + '<div class="kv-row"><div class="kv-key">known_ips ('+(d.known_ips||[]).length+'/8)</div><div class="kv-val" style="display:flex;flex-wrap:wrap;gap:6px;">'+knownIps+'</div></div>'
+    + '<div class="kv-row"><div class="kv-key">ja4_seen ('+(d.ja4_seen||[]).length+'/50)</div><div class="kv-val stack" style="display:flex;flex-direction:column;gap:4px;max-height:160px;overflow-y:auto;">'+ja4+'</div></div>'
+    + '<div class="kv-row"><div class="kv-key">dhcp_fingerprint</div><div class="kv-val cell-mono" style="font-size:11px;color:var(--text-dim);">'+(d.dhcp_fingerprint ? esc(JSON.stringify(d.dhcp_fingerprint)) : '—')+'</div></div>'
     + '<div class="kv-row"><div class="kv-key">re-identification</div><div class="kv-val">'+merges+'</div></div>'
+    + '<div class="kv-row"><div class="kv-key">confirmed_threat_count</div><div class="kv-val cell-mono">'+d.confirmed_threat_count+'</div></div>'
     + '</div></div>'
     + '</div>'
-    + '<div class="panel" style="margin-top:14px;"><div class="panel-header"><div class="panel-title">Top 10 domains — since '+d.firstSeen+' (all-time)<span class="sample-badge">SAMPLE</span></div></div>'
-    + '<div class="table-wrap"><table><thead><tr><th>#</th><th>Domain</th><th>Queries (all-time)</th><th>Last seen</th><th>Threat tier</th></tr></thead><tbody>'+topDomains+'</tbody></table></div>'
+    + '<div class="panel" style="margin-top:14px;"><div class="panel-header"><div class="panel-title">Top 10 domains (all-time)</div></div>'
+    + '<div class="panel-body"><div class="empty-state" style="padding:20px;">'+esc(d.top_domains_note)+'</div></div>'
     + '</div></div>';
 }
 
@@ -527,129 +504,132 @@ function renderHuntView(){
     return '<div class="mode-tab'+(state.huntMode===m[0]?' active':'')+'" onclick="app.goHuntMode(\''+m[0]+'\')">'+m[1]+'</div>';
   }).join('');
 
-  var decisionOpts = DECISIONS.map(function(d){
-    var dev = DEVICES.filter(function(x){ return x.id===d.deviceId; })[0] || {hostname:'?'};
-    return '<option value="'+d.id+'"'+(d.id===state.huntDecisionId?' selected':'')+'>'+d.id+' — '+dev.hostname+' · '+d.state+'</option>';
+  var deviceOpts = '<option value="">— select a device —</option>' + state.devices.map(function(d){
+    return '<option value="'+d.device_id+'"'+(d.device_id===state.huntDeviceId?' selected':'')+'>'+esc(d.hostname)+'</option>';
   }).join('');
-  var deviceOpts = DEVICES.map(function(d){ return '<option value="'+d.id+'"'+(d.id===state.huntDeviceId?' selected':'')+'>'+d.hostname+'</option>'; }).join('');
 
   var formHtml = '';
   if (state.huntMode==='touching') {
     formHtml = '<div class="row" style="gap:10px;"><span style="font-size:12px;color:var(--text-dim);">devices_touching(</span>'
-      + '<input class="input mono" style="flex:1;" placeholder="destination — domain or IP, e.g. 203.0.113.44" value="'+esc(state.huntDest)+'" onchange="app.onHuntDest(this.value)">'
-      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHunt()">Run</button></div>';
+      + '<input class="input mono" style="flex:1;" placeholder="destination — domain or IP substring, e.g. 203.0.113" value="'+esc(state.huntDest)+'" onchange="app.onHuntDest(this.value)">'
+      + '<span style="font-size:12px;color:var(--text-dim);">, since_days=</span>'
+      + '<input class="input mono" style="width:70px;" placeholder="all" value="'+esc(state.huntSinceDays)+'" onchange="app.onHuntSinceDays(this.value)">'
+      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHuntQuery()">Run</button></div>';
   } else if (state.huntMode==='timeline') {
     formHtml = '<div class="row" style="gap:10px;"><span style="font-size:12px;color:var(--text-dim);">decision_timeline(</span>'
-      + '<select class="select mono" style="flex:1;" onchange="app.onHuntDecision(this.value)">'+decisionOpts+'</select>'
-      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHunt()">Run</button></div>';
+      + '<input class="input mono" style="flex:1;" placeholder="decision_id — from the Evidence Graph tab or a device\'s history" value="'+esc(state.huntDecisionId)+'" onchange="app.onHuntDecisionInput(this.value)">'
+      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHuntQuery()">Run</button></div>';
   } else if (state.huntMode==='history') {
     formHtml = '<div class="row" style="gap:10px;"><span style="font-size:12px;color:var(--text-dim);">device_history(</span>'
       + '<select class="select mono" style="flex:1;" onchange="app.onHuntDevice(this.value)">'+deviceOpts+'</select>'
       + '<span style="font-size:12px;color:var(--text-dim);">, since_days=</span>'
-      + '<input class="input mono" style="width:70px;" value="'+esc(state.huntSinceDays)+'" onchange="app.onHuntSinceDays(this.value)">'
-      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHunt()">Run</button></div>';
+      + '<input class="input mono" style="width:70px;" placeholder="all" value="'+esc(state.huntSinceDays)+'" onchange="app.onHuntSinceDays(this.value)">'
+      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHuntQuery()">Run</button></div>';
   } else {
     formHtml = '<div class="row" style="gap:10px;"><span style="font-size:12px;color:var(--text-dim);">replay_decision(</span>'
-      + '<select class="select mono" style="flex:1;" onchange="app.onHuntDecision(this.value)">'+decisionOpts+'</select>'
-      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHunt()">Replay against current engine</button></div>';
+      + '<input class="input mono" style="flex:1;" placeholder="decision_id" value="'+esc(state.huntDecisionId)+'" onchange="app.onHuntDecisionInput(this.value)">'
+      + '<span style="font-size:12px;color:var(--text-dim);">)</span><button class="btn btn-primary" onclick="app.runHuntQuery()">Replay against current engine</button></div>';
   }
 
   var resultsHtml = '';
-  if (state.huntRan) {
-    var titleMap = {
-      touching: 'devices_touching("'+esc(state.huntDest)+'")',
-      timeline: 'decision_timeline("'+state.huntDecisionId+'")',
-      history: 'device_history("'+state.huntDeviceId+'", since_days='+esc(state.huntSinceDays)+')',
-      replay: 'replay_decision("'+state.huntDecisionId+'")'
-    };
+  if (state.huntError) {
+    resultsHtml = '<div class="error-banner">'+esc(state.huntError)+'</div>';
+  } else if (state.huntLoading) {
+    resultsHtml = '<div class="panel"><div class="panel-body"><div class="empty-state">Running query…</div></div></div>';
+  } else if (state.huntRan && state.huntResult) {
+    var r = state.huntResult;
     var body = '';
     if (state.huntMode==='touching') {
-      var qd = state.huntDest.toLowerCase();
-      var matchedDestIds = DESTINATIONS.filter(function(dst){ return dst.label.toLowerCase().indexOf(qd)>=0; }).map(function(x){ return x.id; });
-      var byDevice = {};
-      EVIDENCE.filter(function(e){ return matchedDestIds.indexOf(e.destId)>=0; }).forEach(function(e){
-        if (!byDevice[e.deviceId]) byDevice[e.deviceId] = { first:e.timestamp, last:e.timestamp, count:0 };
-        byDevice[e.deviceId].count++;
-        if (e.timestamp < byDevice[e.deviceId].first) byDevice[e.deviceId].first = e.timestamp;
-        if (e.timestamp > byDevice[e.deviceId].last) byDevice[e.deviceId].last = e.timestamp;
-      });
-      var ids = Object.keys(byDevice);
-      if (!ids.length) {
-        body = '<div class="empty-state">No device evidence references this destination.</div>';
+      if (!r.devices.length) {
+        body = '<div class="empty-state">No device evidence references "'+esc(r.destination_query)+'"'+(r.matched_destinations.length ? '' : ' — no destination in the graph matches that text at all.')+'</div>';
       } else {
-        var trs = ids.map(function(id){
-          var dv = DEVICES.filter(function(x){ return x.id===id; })[0];
-          return '<tr><td><div class="cell-title">'+esc(dv.hostname)+'</div><div class="cell-mono">'+dv.id+'</div></td>'
-            + '<td class="cell-mono">'+byDevice[id].first+'</td><td class="cell-mono">'+byDevice[id].last+'</td><td class="cell-mono">'+byDevice[id].count+'</td>'
-            + '<td>'+sevPill(dv.state)+'</td><td><button class="btn btn-ghost btn-sm" onclick="app.selectDevice(\''+dv.id+'\')">Open device →</button></td></tr>';
+        var trs = r.devices.map(function(dv){
+          return '<tr><td><div class="cell-title">'+esc(dv.hostname)+'</div><div class="cell-mono">'+dv.device_id+'</div></td>'
+            + '<td><button class="btn btn-ghost btn-sm" onclick="app.selectDevice(\''+dv.device_id+'\')">Open device →</button></td></tr>';
         }).join('');
-        body = '<div class="table-wrap"><table><thead><tr><th>Device</th><th>First touch</th><th>Last touch</th><th>Evidence count</th><th>Current state</th><th></th></tr></thead><tbody>'+trs+'</tbody></table></div>';
+        body = '<div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">Matched destination(s): '+r.matched_destinations.map(function(x){ return '<span class="tag">'+esc(x)+'</span>'; }).join(' ')+'</div>'
+          + '<div class="table-wrap"><table><thead><tr><th>Device</th><th></th></tr></thead><tbody>'+trs+'</tbody></table></div>';
       }
     } else if (state.huntMode==='timeline') {
-      var dec = DECISIONS.filter(function(x){ return x.id===state.huntDecisionId; })[0];
-      var evs = EVIDENCE.filter(function(e){ return e.decisionId===dec.id; }).sort(function(a,b){ return a.timestamp<b.timestamp?-1:1; });
-      var items = evs.map(function(e){
-        var col = e.relation==='contradicts' ? SEV_HEX.CRITICAL : '#22c7e0';
-        return '<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type" style="color:'+col+'">'+e.type+'</span><span class="tl-time">'+e.timestamp+'</span></div>'
-          + '<div class="tl-body">'+esc(e.value)+' · confidence '+e.confidence+' · source '+e.source+' · family '+e.family+'</div></div></div>';
+      var dec = r.decision;
+      var items = r.evidence.map(function(e){
+        return '<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type">'+esc(e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
+          + '<div class="tl-body">'+ (e.destination_id !== '(none)' ? 'target: '+esc(e.destination_id)+' · ' : '') +'confidence '+e.confidence+' · source '+esc(e.source)+' · family '+esc(e.independence_family)+'</div></div></div>';
       }).join('');
-      items += '<div class="tl-item"><div class="tl-card" style="border-color:'+sevColor(dec.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(dec.state)+'">DECISION — '+dec.state+'</span><span class="tl-time">'+dec.timestamp+'</span></div>'
-        + '<div class="tl-body">winning hypothesis: <b>'+dec.hypothesis+'</b> · confidence '+dec.confidence+' · risk '+dec.riskScore+'<br>decision_path: '+esc(dec.path)+'</div></div></div>';
+      items += '<div class="tl-item"><div class="tl-card" style="border-color:'+sevColor(dec.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(dec.state)+'">DECISION — '+dec.state+'</span><span class="tl-time">'+fmtTime(dec.timestamp)+'</span></div>'
+        + '<div class="tl-body">explanation: <b>'+esc(dec.raw_payload && dec.raw_payload.explanation || '—')+'</b> · confidence '+dec.confidence+' · risk '+dec.risk_score+'<br>decision_path: '+esc(dec.decision_path)+'</div></div></div>';
       body = '<div class="timeline">'+items+'</div>';
     } else if (state.huntMode==='history') {
-      var decItems = DECISIONS.filter(function(d){ return d.deviceId===state.huntDeviceId && withinDays(d.timestamp, state.huntSinceDays); })
-        .map(function(d){ return { t:d.timestamp, html:'<div class="tl-item"><div class="tl-card" style="border-color:'+sevBorder(d.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(d.state)+'">DECISION — '+d.state+'</span><span class="tl-time">'+d.timestamp+'</span></div>'
-          + '<div class="tl-body">winning hypothesis: '+d.hypothesis+' · confidence '+d.confidence+' · risk '+d.riskScore+'</div></div></div>' }; });
-      var evItems = EVIDENCE.filter(function(e){ return e.deviceId===state.huntDeviceId && withinDays(e.timestamp, state.huntSinceDays); })
-        .map(function(e){ return { t:e.timestamp, html:'<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type">'+e.type+'</span><span class="tl-time">'+e.timestamp+'</span></div>'
-          + '<div class="tl-body">'+esc(e.value)+' · confidence '+e.confidence+' · source '+e.source+'</div></div></div>' }; });
+      var decItems = r.decisions.map(function(d){ return { t:d.timestamp, html:'<div class="tl-item"><div class="tl-card" style="border-color:'+sevBorder(d.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(d.state)+'">DECISION — '+d.state+'</span><span class="tl-time">'+fmtTime(d.timestamp)+'</span></div>'
+        + '<div class="tl-body">confidence '+d.confidence+' · risk '+d.risk_score+' · '+esc(d.decision_path)+'</div></div></div>' }; });
+      var evItems = r.evidence.map(function(e){ return { t:e.timestamp, html:'<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type">'+esc(e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
+        + '<div class="tl-body">'+(e.destination_id !== '(none)' ? 'target: '+esc(e.destination_id)+' · ' : '')+'confidence '+e.confidence+' · source '+esc(e.source)+'</div></div></div>' }; });
       var all = decItems.concat(evItems).sort(function(a,b){ return a.t>b.t?-1:1; }).map(function(x){ return x.html; }).join('');
       body = all ? '<div class="timeline">'+all+'</div>' : '<div class="empty-state">No decisions or evidence for this device in the selected window.</div>';
     } else {
-      var rdec = DECISIONS.filter(function(x){ return x.id===state.huntDecisionId; })[0];
-      var info = REPLAY_OUTCOMES[rdec.id];
-      var newPath = info.outcome==='changed' ? info.note : 'Identical decision_path — re-run produced the same evaluation.';
-      var outcomeColor = info.outcome==='changed' ? SEV_HEX.HIGH : SEV_HEX.BENIGN;
-      body = '<div class="grid2" style="grid-template-columns:1fr auto 1fr;align-items:center;">'
-        + '<div class="panel" style="background:var(--bg-elevated);"><div class="panel-body">'
-        + '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:6px;">ORIGINAL — at decision time</div>'
-        + '<div class="pill" style="color:'+sevColor(rdec.state)+';border-color:'+sevBorder(rdec.state)+';background:'+sevBg(rdec.state)+';font-size:14px;padding:6px 12px;">'+rdec.state+'</div>'
-        + '<div style="font-size:11.5px;color:var(--text-dim);margin-top:8px;">'+esc(rdec.path)+'</div></div></div>'
-        + '<div style="font-size:18px;color:var(--text-faint);">→</div>'
-        + '<div class="panel" style="background:var(--bg-elevated);"><div class="panel-body">'
-        + '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:6px;">REPLAYED — against current engine</div>'
-        + '<div class="pill" style="color:'+sevColor(info.newState)+';border-color:'+sevBorder(info.newState)+';background:'+sevBg(info.newState)+';font-size:14px;padding:6px 12px;">'+info.newState+'</div>'
-        + '<div style="font-size:11.5px;color:var(--text-dim);margin-top:8px;">'+esc(newPath)+'</div></div></div></div>'
-        + '<div style="margin-top:14px;padding:10px 13px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;font-size:12px;">'
-        + 'outcome: <b style="color:'+outcomeColor+'">'+info.outcome+'</b> — '+esc(info.note)+'</div>';
+      if (r.outcome === 'no_evidence_available') {
+        body = '<div class="empty-state">No supporting evidence available to replay this decision (it predates evidence_ids wiring, or its evidence has aged past retention).</div>';
+      } else if (r.outcome === 'replay_error') {
+        body = '<div class="error-banner">Replay failed: '+esc(r.error)+'</div>';
+      } else {
+        var outcomeColor = r.outcome==='changed' ? SEV_HEX.HIGH : SEV_HEX.BENIGN;
+        body = '<div class="grid2" style="grid-template-columns:1fr auto 1fr;align-items:center;">'
+          + '<div class="panel" style="background:var(--bg-elevated);"><div class="panel-body">'
+          + '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:6px;">ORIGINAL — at decision time</div>'
+          + '<div class="pill" style="color:'+sevColor(r.old_state)+';border-color:'+sevBorder(r.old_state)+';background:'+sevBg(r.old_state)+';font-size:14px;padding:6px 12px;">'+r.old_state+'</div>'
+          + '<div style="font-size:11.5px;color:var(--text-dim);margin-top:8px;">'+esc(r.old_decision_path)+'</div></div></div>'
+          + '<div style="font-size:18px;color:var(--text-faint);">→</div>'
+          + '<div class="panel" style="background:var(--bg-elevated);"><div class="panel-body">'
+          + '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:6px;">REPLAYED — against current engine</div>'
+          + '<div class="pill" style="color:'+sevColor(r.new_state)+';border-color:'+sevBorder(r.new_state)+';background:'+sevBg(r.new_state)+';font-size:14px;padding:6px 12px;">'+r.new_state+'</div>'
+          + '<div style="font-size:11.5px;color:var(--text-dim);margin-top:8px;">'+esc(r.new_decision_path)+'</div></div></div></div>'
+          + '<div style="margin-top:14px;padding:10px 13px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:6px;font-size:12px;">'
+          + 'outcome: <b style="color:'+outcomeColor+'">'+r.outcome+'</b> — evaluated against '+r.evidence_count+' real evidence item(s)</div>';
+      }
     }
-    resultsHtml = '<div class="panel"><div class="panel-header"><div class="panel-title">'+titleMap[state.huntMode]+'</div></div><div class="panel-body">'+body+'</div></div>';
+    resultsHtml = '<div class="panel"><div class="panel-body">'+body+'</div></div>';
   }
 
   return ''
-    + '<div class="topbar"><div class="view-title">Ad-hoc threat hunt<span class="sample-badge">SAMPLE DATA</span></div><div class="view-sub">Direct structured queries over the evidence graph — not a log grep. Backed by ops/threat_hunt.py and ops/decision_replay.py (not yet wired to this UI).</div></div>'
+    + '<div class="topbar"><div class="view-title">Ad-hoc threat hunt</div><div class="view-sub">Direct structured queries over the evidence graph — not a log grep. Backed by ops/threat_hunt.py and ops/decision_replay.py.</div></div>'
     + '<div class="content"><div class="mode-tabs">'+tabs+'</div><div class="panel" style="margin-bottom:16px;"><div class="panel-body">'+formHtml+'</div></div>'+resultsHtml+'</div>';
 }
 
 function renderGraphView(){
-  var visibleNodes = GRAPH_NODES.filter(function(n){ return state.graphShow[n.kind]; });
+  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Click any node to inspect it; toggle kinds off to declutter. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
+
+  if (state.graphLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
+  }
+  if (state.graphLoading && !state.graphLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Loading the evidence graph…</div></div>';
+  }
+  if (state.graphLoaded && !state.graphNodes.length) {
+    return topbarHead + '<div class="content"><div class="empty-state">No decisions in the graph yet.</div></div>';
+  }
+
+  var visibleNodes = state.graphNodes.filter(function(n){ return state.graphShow[n.kind]; });
   var visibleIds = {}; visibleNodes.forEach(function(n){ visibleIds[n.id]=true; });
-  var visibleEdges = GRAPH_EDGES.filter(function(e){ return visibleIds[e.from] && visibleIds[e.to]; });
+  var visibleEdges = state.graphEdges.filter(function(e){ return visibleIds[e.from] && visibleIds[e.to]; });
+  var byId = state.graphNodeById || {};
 
   var edgesSvg = visibleEdges.map(function(e){
-    var a = GRAPH_NODE_BY_ID[e.from], b = GRAPH_NODE_BY_ID[e.to];
+    var a = byId[e.from], b = byId[e.to];
+    if (!a || !b) return '';
     var touches = !state.graphSelected || e.from===state.graphSelected || e.to===state.graphSelected;
     return '<line x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'" stroke="'+e.stroke+'" stroke-width="'+(touches?1.6:1)+'" opacity="'+(touches?0.9:0.12)+'" stroke-dasharray="'+(e.dash||'')+'"></line>';
   }).join('');
+  var maxY = Math.max(300, visibleNodes.reduce(function(m,n){ return Math.max(m, n.y); }, 0) + 60);
   var nodesSvg = visibleNodes.map(function(n){
-    var connected = !state.graphSelected || n.id===state.graphSelected || GRAPH_EDGES.some(function(e){
+    var connected = !state.graphSelected || n.id===state.graphSelected || state.graphEdges.some(function(e){
       return (e.from===state.graphSelected && e.to===n.id) || (e.to===state.graphSelected && e.from===n.id);
     });
     var sw = n.id===state.graphSelected ? 3 : 1;
+    var label = n.kind === 'evidence' ? n.label : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
     return '<g onclick="app.selectGraphNode(\''+n.id+'\')" style="cursor:pointer;opacity:'+(connected?1:0.22)+';">'
       + '<circle cx="'+n.x+'" cy="'+n.y+'" r="'+n.r+'" fill="'+n.fill+'" stroke="'+n.stroke+'" stroke-width="'+sw+'"></circle>'
-      + '<text class="node-label" x="'+(n.x+n.r+6)+'" y="'+(n.y+3)+'">'+esc(n.label)+'</text>'
-      + '<text class="node-sub" x="'+(n.x+n.r+6)+'" y="'+(n.y+14)+'">'+esc(n.sub)+'</text></g>';
+      + '<text class="node-label" x="'+(n.x+n.r+6)+'" y="'+(n.y+3)+'">'+esc(label)+'</text>'
+      + '<text class="node-sub" x="'+(n.x+n.r+6)+'" y="'+(n.y+14)+'">'+esc(n.sub||'')+'</text></g>';
   }).join('');
 
   var legend = GRAPH_LEGEND_DEFS.map(function(l){
@@ -658,23 +638,19 @@ function renderGraphView(){
   }).join('');
 
   var drawer;
-  if (state.graphSelected && GRAPH_NODE_BY_ID[state.graphSelected]) {
-    var n = GRAPH_NODE_BY_ID[state.graphSelected];
+  if (state.graphSelected && byId[state.graphSelected]) {
+    var n = byId[state.graphSelected];
     var fields = [];
     if (n.kind==='device') {
-      var dv = DEVICES.filter(function(d){ return d.id===n.id; })[0];
-      fields = dv ? [['device_id',dv.id],['type',dv.type],['state',dv.state],['last_seen',dv.lastSeen]] : [['device_id',n.id],['status','merged_into current identity']];
+      fields = [['device_id', n.sub], ['hostname', n.label]];
     } else if (n.kind==='evidence') {
-      var ev = EVIDENCE.filter(function(e){ return e.id===n.id; })[0];
-      fields = [['type',ev.type],['value',ev.value],['confidence',ev.confidence],['source',ev.source],['timestamp',ev.timestamp]];
+      fields = [['type',n.label],['family',n.sub],['confidence',n.confidence],['source',n.source],['timestamp', fmtTime(n.timestamp)]];
     } else if (n.kind==='destination') {
-      var dst = DESTINATIONS.filter(function(x){ return x.id===n.id; })[0];
-      fields = [['kind',dst.kind],['label',dst.label]];
-    } else if (n.kind==='decision') {
-      var dec = DECISIONS.filter(function(x){ return x.id===n.id; })[0];
-      fields = [['state',dec.state],['hypothesis',dec.hypothesis],['confidence',dec.confidence],['risk_score',dec.riskScore]];
+      fields = [['kind',n.sub],['label',n.label]];
     } else {
-      fields = [['kind','hypothesis'],['label',n.label]];
+      fields = [['state',n.label],['decision_id',n.sub],['risk_score',n.risk_score],['confidence',n.confidence],
+                ['timestamp', fmtTime(n.timestamp)],['explanation', n.winning_hypothesis || '—'],
+                ['evidence shown', n.evidence_truncated ? ('capped — showing recent subset of ' + n.evidence_total) : (n.evidence_total || 0)]];
     }
     var kvRows = fields.map(function(f){ return '<div class="kv-row"><div class="kv-key">'+f[0]+'</div><div class="kv-val cell-mono">'+esc(String(f[1]))+'</div></div>'; }).join('');
     drawer = '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:2px;">'+n.kind.toUpperCase()+'</div><div style="font-size:14px;font-weight:600;margin-bottom:12px;">'+esc(n.label)+'</div>'+kvRows;
@@ -682,10 +658,9 @@ function renderGraphView(){
     drawer = '<div class="empty-state">Click a node to inspect its fields.</div>';
   }
 
-  return ''
-    + '<div class="topbar"><div class="view-title">Evidence graph<span class="sample-badge">SAMPLE DATA</span></div><div class="view-sub">devices → evidence → destinations, and evidence → decisions → hypotheses. Click any node to inspect it; toggle kinds off to declutter.</div></div>'
+  return topbarHead
     + '<div class="content"><div class="graph-wrap"><div class="graph-canvas"><div class="graph-legend">'+legend+'</div>'
-    + '<svg width="1080" height="650" style="display:block;">'+edgesSvg+nodesSvg+'</svg></div>'
+    + '<svg width="1080" height="'+maxY+'" style="display:block;">'+edgesSvg+nodesSvg+'</svg></div>'
     + '<div class="graph-drawer">'+drawer+'</div></div></div>';
 }
 
@@ -812,17 +787,26 @@ var app = {
     state.activeView = v;
     render();
     if (v === 'config' && !state.configLoading) loadConfig();
+    if (v === 'devices' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
+    if (v === 'hunt' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
+    if (v === 'graph' && !state.graphLoading && !state.graphLoaded) loadGraph();
   },
-  selectDevice: function(id){ state.activeView='deviceDetail'; state.selectedDeviceId=id; render(); },
+  selectDevice: function(id){ state.activeView='deviceDetail'; state.selectedDeviceId=id; render(); loadDeviceDetail(id); },
   backToDevices: function(){ state.activeView='devices'; render(); },
-  traceThisDevice: function(){ state.activeView='hunt'; state.huntMode='history'; state.huntDeviceId=state.selectedDeviceId; state.huntRan=true; render(); },
+  traceThisDevice: function(){
+    state.activeView='hunt'; state.huntMode='history'; state.huntDeviceId=state.selectedDeviceId;
+    state.huntSinceDays=''; state.huntRan=false; render();
+    runHuntQuery();
+  },
   toggleSort: function(f){ state.sortDir = (state.sortField===f && state.sortDir==='asc') ? 'desc' : 'asc'; state.sortField=f; render(); },
   onDeviceSearch: function(v){ state.deviceSearch=v; render(); },
+  reloadDevices: function(){ state.devicesLoaded=false; loadDevices(); },
+  reloadGraph: function(){ state.graphLoaded=false; loadGraph(); },
 
-  goHuntMode: function(m){ state.huntMode=m; state.huntRan=false; render(); },
-  runHunt: function(){ state.huntRan=true; render(); },
+  goHuntMode: function(m){ state.huntMode=m; state.huntRan=false; state.huntResult=null; state.huntError=null; render(); },
+  runHuntQuery: function(){ runHuntQuery(); },
   onHuntDest: function(v){ state.huntDest=v; render(); },
-  onHuntDecision: function(v){ state.huntDecisionId=v; render(); },
+  onHuntDecisionInput: function(v){ state.huntDecisionId=v; render(); },
   onHuntDevice: function(v){ state.huntDeviceId=v; render(); },
   onHuntSinceDays: function(v){ state.huntSinceDays=v; render(); },
 
@@ -867,7 +851,8 @@ var app = {
       await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(pattern), { method: 'PATCH', body: JSON.stringify({ type: type }) });
       var data = await apiFetch('/api/config');
       state.deviceTypeOverrides = data.device_type_overrides;
-      render();
+      if (state.deviceDetail) await loadDeviceDetail(state.deviceDetail.device_id);
+      else render();
     } catch (err) { window.alert('Save failed: ' + err.message); render(); }
   },
   setOverrideType: function(pattern, type){ app.assignDeviceType(pattern, type); },
@@ -889,6 +874,8 @@ var app = {
 
 render();
 if (state.activeView === 'config') loadConfig();
+if (state.activeView === 'devices') loadDevices();
+if (state.activeView === 'graph') loadGraph();
 </script>
 </body>
 </html>

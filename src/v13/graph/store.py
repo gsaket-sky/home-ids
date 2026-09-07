@@ -301,6 +301,18 @@ class GraphStore:
         rows = self._conn.execute(query, params).fetchall()
         return [Evidence.from_row(dict(r)) for r in rows]
 
+    def get_evidence_by_ids(self, evidence_ids: List[str]) -> List[Evidence]:
+        """Batch fetch by evidence_id -- added for the console API's graph-view
+        endpoint, which resolves the evidence linked to several decisions at once via
+        get_edges() and would otherwise pay one query per evidence_id (N+1)."""
+        if not evidence_ids:
+            return []
+        placeholders = ",".join("?" * len(evidence_ids))
+        rows = self._conn.execute(
+            f"SELECT * FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
+        ).fetchall()
+        return [Evidence.from_row(dict(r)) for r in rows]
+
     def _all_ids_resolving_to(self, canonical_id: str) -> List[str]:
         ids = [canonical_id]
         rows = self._conn.execute(
@@ -432,6 +444,27 @@ class GraphStore:
         )
         self._maybe_commit()
 
+    def get_destination(self, destination_id: str) -> Optional[Dict[str, Any]]:
+        """One row from `destinations` (kind/first_seen/last_seen/reputation fields),
+        or None if it doesn't exist. Added for the console API's graph-view endpoint,
+        which needs a destination's own kind/label rather than just its reputation
+        cache (get_destination_reputation() below only returns the latter)."""
+        row = self._conn.execute(
+            "SELECT * FROM destinations WHERE destination_id = ?", (destination_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_destinations_matching(self, query: str) -> List[str]:
+        """destination_ids containing `query` as a case-insensitive substring --
+        get_devices_targeting() itself needs an EXACT destination_id, so a free-text
+        search UI (the console's "devices touching X" hunt query) composes this first
+        to resolve what the user typed into the exact id(s) to then look up."""
+        rows = self._conn.execute(
+            "SELECT destination_id FROM destinations WHERE destination_id LIKE ? ESCAPE '\\'",
+            ("%" + query.replace("%", "\\%").replace("_", "\\_") + "%",),
+        ).fetchall()
+        return [r["destination_id"] for r in rows]
+
     def get_destination_reputation(self, destination_id: str) -> Optional[Dict[str, Any]]:
         """Returns {"tier": int, "cached_at": float} if this destination has a live
         reputation cache, or None if it was never set (including a destination
@@ -494,13 +527,53 @@ class GraphStore:
         d["mechanism_flags"] = json.loads(d.pop("mechanism_flags_json") or "{}")
         return d
 
+    def get_devices_with_latest_decision(self) -> List[Dict[str, Any]]:
+        """Every non-merged-away device, LEFT JOINed to its own most recent decision
+        (by MAX(timestamp) per device_id) -- added for the console API's device-list
+        endpoint. There is no per-device "current state/risk" persisted anywhere
+        (DeviceState/ids_state.json has none -- confirmed by direct inspection); the
+        latest decision IS that value, matching how the existing Grafana "Master
+        Threat Ledger" panel already sources it (home_ids_decision_state /
+        home_ids_threat_confidence gauges, themselves populated from this same
+        per-cycle decision). Devices with no decision yet return NULL for every
+        decision_* column -- a real, expected case (a device seen by the pipeline but
+        never yet evaluated), not an error.
+
+        Excludes merged_into_device_id IS NOT NULL rows -- an orphaned identity that
+        was merged into a canonical device_id shouldn't double-list alongside it."""
+        rows = self._conn.execute(
+            """
+            SELECT d.device_id, d.display_label, d.device_type, d.first_seen, d.last_seen,
+                   dec.decision_id, dec.state, dec.risk_score, dec.confidence,
+                   dec.timestamp AS decision_timestamp
+            FROM devices d
+            LEFT JOIN decisions dec ON dec.decision_id = (
+                SELECT decision_id FROM decisions WHERE device_id = d.device_id
+                ORDER BY timestamp DESC LIMIT 1
+            )
+            WHERE d.merged_into_device_id IS NULL
+            ORDER BY dec.timestamp DESC
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def get_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
                    src_id: Optional[str] = None, dst_kind: Optional[str] = None,
-                   dst_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                   dst_id: Optional[str] = None, limit_most_recent: Optional[int] = None) -> List[Dict[str, Any]]:
         """Generic edge query -- kept here (not a relation-specific method) so
         GraphStore stays a plain graph CRUD layer; relation-specific semantics (e.g.
         CL-AFPE's 'trusts' edge TTL/scoping rules, Phase 4) live in their own module,
-        not here."""
+        not here.
+
+        limit_most_recent (added for the console API's graph-view endpoint): pushes
+        `ORDER BY timestamp DESC LIMIT N` down into SQL instead of the caller fetching
+        every matching row and truncating in Python. Real, not hypothetical: one
+        production decision has 56,073 edges pointing at it (one device alone accounts
+        for ~79% of all evidence in the whole database) -- fetching all of those into
+        Python just to keep the newest 15 cost ~3s per call; with idx_edges_dst already
+        covering (dst_kind, dst_id), SQLite can satisfy ORDER BY ... LIMIT without
+        scanning past what it needs. Returned order is DESC (newest first) when this is
+        set, ASC otherwise -- unchanged default behavior for every existing caller."""
         import json
         clauses, params = [], []
         for col, val in (("relation", relation), ("src_kind", src_kind), ("src_id", src_id),
@@ -509,7 +582,12 @@ class GraphStore:
                 clauses.append(f"{col} = ?")
                 params.append(val)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self._conn.execute(f"SELECT * FROM edges {where} ORDER BY timestamp ASC", params).fetchall()
+        if limit_most_recent is not None:
+            query = f"SELECT * FROM edges {where} ORDER BY timestamp DESC LIMIT ?"
+            params = params + [limit_most_recent]
+        else:
+            query = f"SELECT * FROM edges {where} ORDER BY timestamp ASC"
+        rows = self._conn.execute(query, params).fetchall()
         out = []
         for r in rows:
             d = dict(r)
@@ -519,6 +597,23 @@ class GraphStore:
                 d["metadata"] = {}
             out.append(d)
         return out
+
+    def count_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
+                      src_id: Optional[str] = None, dst_kind: Optional[str] = None,
+                      dst_id: Optional[str] = None) -> int:
+        """COUNT(*) counterpart to get_edges(), same filter columns -- lets a caller
+        using limit_most_recent still report "N of TOTAL" without fetching TOTAL rows
+        just to len() them (the console API's graph-view endpoint's own
+        evidence_total/evidence_truncated fields)."""
+        clauses, params = [], []
+        for col, val in (("relation", relation), ("src_kind", src_kind), ("src_id", src_id),
+                          ("dst_kind", dst_kind), ("dst_id", dst_id)):
+            if val is not None:
+                clauses.append(f"{col} = ?")
+                params.append(val)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        row = self._conn.execute(f"SELECT COUNT(*) c FROM edges {where}", params).fetchone()
+        return int(row["c"])
 
     def delete_edge(self, edge_id: int) -> None:
         self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))

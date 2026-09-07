@@ -420,9 +420,17 @@ class LiveConfig:
         "baseline" field as `value`. Never touches _STATIC_KEYS -- same restriction as
         _load_overrides(), enforced by the caller not exposing static keys as revertible
         in the first place, not re-checked here.
+
+        Fires _notify_cb the same way _load_overrides() does -- a revert is as much a
+        "this key's effective value just changed" event as an apply is (e.g. main.py's
+        log_level live-reload hook needs to hear about a revert-to-baseline too, not
+        just a PATCH).
         """
         with self._lock:
+            changed = self._config.get(key) != value
             self._config[key] = value
+        if changed and self._notify_cb:
+            self._notify_cb({key: value})
 
     def start_watcher(self, interval: float = 5.0) -> None:
         if self._watcher_active:
