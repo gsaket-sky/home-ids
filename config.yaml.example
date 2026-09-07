@@ -810,13 +810,12 @@ scheduled_jobs:
       enabled: true
       cron: "0 6 * * *"
 
-    # Shadow-mode divergence watcher (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md) --
-    # fires a Telegram alert the moment state/shadow_decisions.jsonl gets a new entry.
-    # Temporary: remove this job once the evidence-taxonomy fix is either flipped live or
-    # abandoned -- it has nothing to watch once shadow_decisions.jsonl stops being written.
-    shadow_watcher:
-      enabled: true
-      cron: "*/5 * * * *"
+    # REMOVED (2026-09-07, Workstream 1 of V13_FULL_ARCHITECTURE_SHIFT_PLAN.md):
+    # shadow_watcher was a Telegram alert on new state/shadow_decisions.jsonl entries
+    # (Gap 1/2/3's own shadow experiment, DECISION_LOGIC_DEPENDENCY_MAP.md) -- that
+    # experiment's own computation was removed from core/decision_engine.py the same
+    # day (permanently dead once v13 became the live default engine), so there is
+    # nothing left for this job to ever watch again.
 
     # v13 GraphStore retention enforcement (v13 full-architecture plan, Phase 1
     # follow-up) -- deletes evidence older than GraphStore.DEFAULT_EVIDENCE_RETENTION_

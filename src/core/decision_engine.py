@@ -1,24 +1,7 @@
-import time
 from typing import List, Dict, Any, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
 from intelligence.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
-
-# Gap 3, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md: how long a hard-stop type
-# (arp_spoofing/geofencing_violation/suricata_signature_match) is trusted as "this cycle's
-# own event" rather than a stale EvidenceStore replay. Deliberately far shorter than
-# EvidenceStore's own 600s general TTL (evidence.py) -- a hard-stop is meant to represent "this
-# verifiable fact just happened," not "this fact happened at some point in the last 10
-# minutes." honeypot_access uses features["zeek_honeypot_hits"] directly instead (the exact
-# same raw signal pipeline.py itself uses to decide whether to create the evidence at all,
-# sidestepping the timing question entirely) -- this constant is for the other three, which
-# don't have as direct a raw-feature equivalent readily available here yet, and (as of
-# PHASE 64) remain SHADOW-ONLY: fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit have
-# never produced a single live divergence in state/shadow_decisions.jsonl since 2026-08-26
-# (checked directly, not assumed), unlike honeypot's 58 confirmed stale-echo cases -- there's
-# no live evidence yet that this 120s proxy is calibrated correctly for the other three, so
-# only honeypot's freshness check (fresh_honeypot below) was flipped live.
-_HARD_STOP_FRESHNESS_SECONDS = 120
 
 def _safe_float(val: Any) -> float:
     try:
@@ -361,128 +344,17 @@ class DecisionEngine:
 
         trail.append(f"Verdict: {state} / {action} — {explanation} (confidence={threat_confidence:.2f})")
 
-        # SHADOW MODE (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): computed alongside
-        # the real verdict above, never substituted for it here -- state/action/explanation
-        # returned below are UNCHANGED by any of this. Combines the remaining still-shadow
-        # fixes found via a third-party review + live verification:
-        #   Gap 1 (rep.verified_ioc) and Gap 3's honeypot freshness (fresh_honeypot, computed
-        #   above alongside has_honeypot) are both LIVE now, not shadow -- this block still
-        #   reuses their live values/branches so the shadow comparison stays apples-to-apples
-        #   with what actually ran, it just no longer needs its own copies of that logic.
-        #   Gap 2 (shadow_attack_score/name, from HypothesisEngine.evaluate_all()):
-        #   NetworkIntrusionHypothesis.evaluate() currently weighs a generic Zeek `weird`
-        #   notice identically to a real malicious JA3/JA4 TLS fingerprint match under one
-        #   `has_malicious_tls` boolean -- evaluate_shadow() splits them. Only relevant when
-        #   NETWORK_INTRUSION was (or would become) the winning attack hypothesis.
-        #   [STALE COMMENT, PHASE 64] this block used to also compute Gap 2 (NetworkIntrusion
-        #   ja3/notice split) as shadow-only -- that flipped live too (hypotheses/engine.py,
-        #   NetworkIntrusionHypothesis.evaluate() now calls use_gap2_fix=True directly), so
-        #   shadow_attack/hyp_results["attack"] are identical for that hypothesis now; kept
-        #   here only because decision_engine.py's shadow computation still needs SOME
-        #   attack-score source and shadow_attack degrades to hyp_results["attack"] cleanly.
-        #   Gap 3, remaining shadow-only (fresh_arp_spoof/fresh_geofence/fresh_confirmed_exploit):
-        #   same PRESENCE-vs-freshness problem honeypot had (has_arp_spoof/has_geofence/
-        #   has_confirmed_exploit above check only ev_store presence, up to EvidenceStore's
-        #   600s TTL) -- but unlike honeypot, these three have never produced a single live
-        #   divergence in state/shadow_decisions.jsonl (checked directly), so there's no live
-        #   evidence yet that _HARD_STOP_FRESHNESS_SECONDS=120 is correctly calibrated for
-        #   them the way honeypot's own raw-feature check was confirmed to be. Stay
-        #   shadow-only pending that same live confirmation.
-        shadow_attack = hyp_results.get("shadow_attack", hyp_results["attack"])
-        shadow_attack_name = shadow_attack["name"]
-        shadow_attack_score = shadow_attack["score"]
-
-        now_ts = time.time()
-        fresh_arp_spoof = any(
-            e.type == "arp_spoofing" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
-        )
-        fresh_geofence = any(
-            e.type == "geofencing_violation" and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS for e in ev_store
-        )
-        fresh_confirmed_exploit = any(
-            e.type == "suricata_signature_match" and e.confidence >= 0.9
-            and (now_ts - e.timestamp) <= _HARD_STOP_FRESHNESS_SECONDS
-            for e in ev_store
-        )
-
-        if fresh_honeypot:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.CRITICAL, "Internal Honeypot Accessed", "hard_stop"
-            )
-        elif fresh_arp_spoof:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.CRITICAL, "Layer-2 ARP Spoofing Detected", "hard_stop"
-            )
-        elif fresh_geofence:
-            # VERSION 12 (G6): mirrors the live branch's corroboration split exactly --
-            # this shadow computation exists to isolate Gap 3's freshness question alone
-            # (see this block's own module comment), so it must NOT diverge from live for
-            # a completely different, unrelated reason (G6's corroboration requirement).
-            if num_independent_sources >= 1 and attack_score > benign_score:
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.CRITICAL, "Geofencing Policy Violation", "hard_stop"
-                )
-            else:
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.HIGH, "Geofencing Policy Violation (Uncorroborated)", "geofence_uncorroborated"
-                )
-        elif fresh_confirmed_exploit:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.CRITICAL, "Confirmed Exploit/Malware Signature (Suricata)", "hard_stop"
-            )
-        elif rep.tier == 5:
-            # BUGFIX (2026-08-29, found alongside the live Gap-1 flip above): this used
-            # `rep.verified_ioc` bare -- duck-typed test rep objects (e.g.
-            # regression_tester.py's MockRep, which only sets .tier) crash here with
-            # AttributeError. Same getattr(..., False) fix as the live branch.
-            if getattr(rep, "verified_ioc", False):
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.CRITICAL, "Confirmed Malicious IOC", "tier5_confirmed"
-                )
-            elif num_independent_sources >= 1 and shadow_attack_score > benign_score:
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.CRITICAL, "Corroborated Reputation Signal", "tier5_corroborated"
-                )
-            else:
-                # BUGFIX (2026-08-27, user catch): this used to land at HIGH, which
-                # contradicted its own label -- "Uncorroborated" describing a HIGH-severity
-                # verdict makes no sense next to the tier==4 branch below, which already
-                # treats "one unconfirmed reputation signal" (a WEAKER raw score, 1.5-4.0)
-                # as SUSPICIOUS/monitor, not HIGH/alert. An aggregate score that crossed the
-                # confirmed_ioc bar (>=4.0) but found no genuine corroborating evidence for
-                # an attack conclusion is the SAME underlying situation as tier 4 -- a bigger
-                # raw number doesn't earn it a stronger verdict when the thing that's
-                # supposed to justify HIGH (real corroboration) is exactly what's missing.
-                # Confirmed live: example_pc_fritz_box vs. 35.186.224.24 (Google LLC),
-                # abuse_score=4.0 alone, benign hypothesis (LOCAL_DEVICE_DISCOVERY, 2.5)
-                # outscoring the attack one (NETWORK_INTRUSION, 2.0) -- there is no
-                # behavioral corroboration here at all, just a single crowd-sourced number.
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)", "tier5_uncorroborated"
-                )
-        elif shadow_attack_score > benign_score and shadow_attack_score >= 2.0:
-            if num_independent_sources >= 2 and shadow_attack_score >= 3.0:
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.HIGH, shadow_attack_name, "hypothesis_high"
-                )
-            else:
-                shadow_state, shadow_explanation, shadow_decision_path = (
-                    DecisionState.SUSPICIOUS, shadow_attack_name, "hypothesis_suspicious"
-                )
-        elif rep.tier == 4 and max(rep_vt, rep_ti, rep_abuse) >= 1.5:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.SUSPICIOUS, "Elevated Reputation Signal (Unconfirmed)", "tier4_unconfirmed"
-            )
-        elif any(e.type == "ml_anomaly" and e.value > 0.90 for e in ev_store):
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.ANOMALOUS, "ML Anomaly Only", "ml_anomaly"
-            )
-        else:
-            shadow_state, shadow_explanation, shadow_decision_path = (
-                DecisionState.BENIGN, hyp_results["benign"]["name"], "benign"
-            )
-        shadow_changed = shadow_decision_path != decision_path or shadow_explanation != explanation
-
+        # REMOVED (2026-09-07, Workstream 1 of Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md):
+        # this used to also compute a Gap-1/2/3 shadow verdict here (fresh_arp_spoof/
+        # fresh_geofence/fresh_confirmed_exploit + shadow_state/shadow_changed, logged to
+        # state/shadow_decisions.jsonl by pipeline.py's _log_shadow_divergence()) -- a
+        # pre-v13 experiment to prove those three freshness/corroboration fixes safe to
+        # flip live in v-current. It's permanently dead weight now: this evaluate() only
+        # runs at all under the engine: v_current rollback path (v13's own decision engine
+        # is the live default and already implements freshness-aware hard-stops for all
+        # four types, not just honeypot -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md's A13),
+        # so v-current has no live path left to ever flip this shadow finding into. See
+        # git history for the removed computation if it's ever needed for reference.
         return {
             "state": state,
             "action": action,
@@ -494,8 +366,4 @@ class DecisionEngine:
             "hypothesis_weight": hypothesis_weight,
             "reasoning_trail": trail,
             "decision_path": decision_path,
-            "shadow_state": shadow_state,
-            "shadow_explanation": shadow_explanation,
-            "shadow_decision_path": shadow_decision_path,
-            "shadow_changed": shadow_changed,
         }

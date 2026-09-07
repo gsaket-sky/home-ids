@@ -2512,6 +2512,17 @@ class AutonomousFPEngine:
                 return y0 + frac * (y1 - y0)
         return ys[-1]
 
+    def _model_dir(self) -> Path:
+        """Single source of truth for where the ONNX classifier + its calibration
+        file live -- derived from config's model_path. BUGFIX (2026-09-07): this
+        used to be computed independently (and inconsistently -- one copy defaulted
+        to "state/ids_model.pkl", the other to state_dir/"models" entirely) in both
+        _load_lgbm_model() (the reader) and the weekly retrain loop (the writer),
+        which is exactly how a retrained model ended up silently never loaded on
+        .94. Both now call this one method so there is only one place this can
+        drift."""
+        return Path(self.config.get("model_path", "models/ids_model.pkl")).parent
+
     def _load_lgbm_model(self):
         """
         Background thread: loads the LightGBM ONNX model from the models/ directory.
@@ -2529,7 +2540,7 @@ class AutonomousFPEngine:
         time.sleep(2.0)
         LOGGER.info("[FP ENGINE » Stage 2 Loader] Starting LightGBM ONNX model loader thread...")
 
-        model_dir = Path(self.config.get("model_path", "state/ids_model.pkl")).parent
+        model_dir = self._model_dir()
         onnx_path = model_dir / "fp_classifier.onnx"
         self._load_calibration(model_dir)
 
@@ -2667,10 +2678,7 @@ class AutonomousFPEngine:
             from fastembed import TextEmbedding
             import numpy as np
 
-            cache_dir = str(
-                Path(self.config.get("model_path", "state/ids_model.pkl")).parent
-                / "fastembed_cache"
-            )
+            cache_dir = str(self._model_dir() / "fastembed_cache")
 
             LOGGER.info("[FP ENGINE » Stage 3] Loading BAAI/bge-small-en-v1.5 from cache: %s", cache_dir)
 
@@ -2825,7 +2833,12 @@ class AutonomousFPEngine:
                 if (now - last_ts) >= 7 * 24 * 3600:
                     LOGGER.info("📅 [FP ENGINE] Scheduled 7-day model retraining interval reached. Launching trainer...")
                     from scripts.train_fp_classifier import train_and_export_onnx, run_threshold_calibration
-                    success = train_and_export_onnx(self._state_dir)
+                    # BUGFIX (2026-09-07): must write to the SAME directory _load_lgbm_model()
+                    # reads from (self._model_dir(), the single source of truth) or a
+                    # freshly-trained model is silently never picked up -- found live:
+                    # this used to write to state/models/ while the loader reads from
+                    # config's model_path directory, so every weekly retrain was discarded.
+                    success = train_and_export_onnx(self._state_dir, model_dir=self._model_dir())
                     if success:
                         last_retrain_file.parent.mkdir(parents=True, exist_ok=True)
                         last_retrain_file.write_text(str(now))

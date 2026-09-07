@@ -927,8 +927,13 @@ def load_dataset(state_dir: Path) -> tuple:
     return X, y, stats
 
 
-def train_and_export_onnx(state_dir: Path) -> bool:
-    """Trains GradientBoostingClassifier on 11 features and exports to state/models/fp_classifier.onnx."""
+def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
+    """Trains GradientBoostingClassifier on 11 features and exports fp_classifier.onnx +
+    fp_calibration.json to model_dir (default: derived from config.yaml's model_path,
+    the SAME directory fp_engine.py's own loader reads from -- must stay the same
+    directory on both sides or a retrained model is silently never picked up)."""
+    if model_dir is None:
+        model_dir = Path(CONFIG.get("model_path", "models/ids_model.pkl")).parent
     X, y, stats = load_dataset(state_dir)
     LOGGER.info(
         "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d "
@@ -987,7 +992,6 @@ def train_and_export_onnx(state_dir: Path) -> bool:
         # path can apply it via plain linear interpolation -- no sklearn import
         # needed at inference time, matching this project's existing train-with-
         # sklearn / infer-with-ONNX split.
-        model_dir = state_dir / "models"
         model_dir.mkdir(parents=True, exist_ok=True)
         calibrator_path = model_dir / "fp_calibration.json"
         calibration_reliable = can_split and len(X_calib) >= 20 and len(set(y_calib)) >= 2

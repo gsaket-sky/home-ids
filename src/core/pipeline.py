@@ -1291,13 +1291,16 @@ class EnginePipeline:
                 # rollback switch (config edit + restart, no redeploy) if anything looks
                 # wrong -- kept from the superseded plan since it costs nothing.
                 #
-                # Known, deliberate consequence: Gap 1/2/3's OWN shadow experiment
-                # (shadow_changed/_log_shadow_divergence, DECISION_LOGIC_DEPENDENCY_MAP.md)
-                # was computed INSIDE core/decision_engine.py's evaluate() -- since that's
-                # no longer the primary engine, it stops producing new shadow_decisions.jsonl
-                # entries while engine="v13". Not preserved artificially (comparing against
-                # v-current's own internal experiment stops being meaningful once v-current
-                # itself isn't primary) -- see the dependency map entry for the full record.
+                # Cleanup (2026-09-07, Workstream 1 of V13_FULL_ARCHITECTURE_SHIFT_PLAN.md):
+                # Gap 1/2/3's OWN shadow experiment (shadow_changed/_log_shadow_divergence,
+                # DECISION_LOGIC_DEPENDENCY_MAP.md) used to be computed INSIDE
+                # core/decision_engine.py's evaluate() and logged here on divergence -- since
+                # v-current stopped being the primary engine it had already stopped producing
+                # new state/shadow_decisions.jsonl entries under the live default, so both the
+                # computation and this call site were removed outright rather than kept as
+                # permanently-dead code with no live path left to ever flip into (see the
+                # dependency map's A13 entry for the full cutover record; git history has the
+                # removed code if it's ever needed for reference).
                 if self.config.get("engine", "v13") == "v13":
                     decision = v13_live_engine.evaluate(
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
@@ -1310,8 +1313,6 @@ class EnginePipeline:
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
                         features=features, is_safe=is_safe,
                     )
-                    if decision.get("shadow_changed"):
-                        self._log_shadow_divergence(decision, dev_id, hostname, client_ip)
 
                 # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                 # Deliberately gated on the HEE's OWN verdict for THIS cycle being
@@ -2718,28 +2719,6 @@ class EnginePipeline:
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
         if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models()
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
-
-    def _log_shadow_divergence(self, decision: dict, dev_id: str, hostname: str, client_ip: str) -> None:
-        """SHADOW MODE (Gap 1, Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): append-only,
-        best-effort log of every cycle where decision_engine.py's shadow computation would
-        have produced a different verdict than the live one. Never raises -- a logging
-        failure here must not affect real detection/containment in any way. Read
-        state/shadow_decisions.jsonl after a few days' observation to decide whether Gap 1's
-        fix is safe to make live (see the dependency map's acceptance criteria)."""
-        try:
-            path = Path(getattr(self, "state_dir", None) or Path(self.config.get("state_path", "state/ids_state.json")).parent) / "shadow_decisions.jsonl"
-            entry = {
-                "ts": time.time(), "device_id": dev_id, "hostname": hostname, "client_ip": client_ip,
-                "old_state": decision.get("state"), "old_explanation": decision.get("explanation"),
-                "old_decision_path": decision.get("decision_path"),
-                "new_state": decision.get("shadow_state"), "new_explanation": decision.get("shadow_explanation"),
-                "new_decision_path": decision.get("shadow_decision_path"),
-                "independent_sources": decision.get("independent_sources"),
-            }
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception as e:
-            LOGGER.debug("Failed to write shadow_decisions.jsonl: %s", e)
 
     def _select_target_domain(self, state, ti_engine) -> str:
         """

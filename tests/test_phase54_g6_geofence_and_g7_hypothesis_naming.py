@@ -118,16 +118,13 @@ check("REGRESSION GUARD: fp_engine.py's _HARD_STOP_SIGNATURES still contains the
       '"Geofencing Policy Violation",' in _fp_src)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section C: G6 -- shadow computation agrees with live (no spurious Gap-3 divergence)
-# ═══════════════════════════════════════════════════════════════════════════════════
-check("REGRESSION GUARD: shadow_changed is False for the uncorroborated geofence case -- "
-      "G6 is a LIVE change, both live and shadow must agree, or Gap 3's freshness-only "
-      "shadow comparison would get polluted by this unrelated change",
-      result_alone.get("shadow_changed") is False, f"got shadow={result_alone.get('shadow_state')}/{result_alone.get('shadow_explanation')}")
-check("REGRESSION GUARD: shadow_changed is False for the corroborated geofence case too",
-      result_corroborated.get("shadow_changed") is False,
-      f"got shadow={result_corroborated.get('shadow_state')}/{result_corroborated.get('shadow_explanation')}")
-
+# Section C: G6 -- REMOVED (2026-09-07, Workstream 1 of
+# V13_FULL_ARCHITECTURE_SHIFT_PLAN.md). This used to assert the Gap-1/2/3 shadow
+# computation (decision_engine.py's shadow_state/shadow_changed) agreed with the live
+# G6 change, so it wouldn't pollute Gap 3's own freshness-only shadow comparison. That
+# shadow computation itself was removed outright (permanently dead once v13 became the
+# live default engine, with no live v-current path left to ever flip it into) -- there
+# is no longer a second computation to check for agreement against.
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section D: G7 -- ConnectionAbuseHypothesis's three dynamic names
 # ═══════════════════════════════════════════════════════════════════════════════════

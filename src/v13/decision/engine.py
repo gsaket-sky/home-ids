@@ -35,7 +35,8 @@ from v13.evidence.model import Evidence, NO_DESTINATION
 from v13.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, ScoredEvidence
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
 
-# Matches decision_engine.py's _HARD_STOP_FRESHNESS_SECONDS exactly.
+# Same 120s value core/decision_engine.py's own (now-removed, 2026-09-07 cleanup)
+# shadow-only freshness constant used -- this is v13's real, LIVE equivalent.
 _HARD_STOP_FRESHNESS_SECONDS = 120
 
 # Matches decision_engine.py's partial_support family set -- adapted for v13's finer
