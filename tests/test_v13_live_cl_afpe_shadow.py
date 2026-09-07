@@ -1,7 +1,9 @@
 """
 Standalone runtime test for v13's CL-AFPE shadow-mode wiring (v13 full-architecture
 plan, Phase 6e -- src/v13/ops/live_engine.py's evaluate_cl_afpe_shadow(), the pipeline.py
-call site added alongside the real self.fp_engine.evaluate() call).
+call site added alongside the real self.fp_engine.evaluate() call) AND the Workstream 2
+live-flip adapter (evaluate_cl_afpe_live(), the call site pipeline.py switches to once
+config.yaml's cl_afpe_engine is flipped to "v13").
 
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_v13_live_cl_afpe_shadow.py`
@@ -16,6 +18,11 @@ Sections:
   C. The v13-only LocalConfirmedIntel store used for shadow local-intel poisoning
      protection is deliberately SEPARATE from v-current's real
      state/local_confirmed_intel.json -- confirmed by path, not just by docstring claim.
+  D. evaluate_cl_afpe_live() (Workstream 2): returns v13's real verdict directly (its
+     return value IS what pipeline.py acts on, unlike shadow mode); a raising engine
+     falls back to fallback_evaluate with the exact params a real AutonomousFPEngine.
+     evaluate() call needs; no fallback provided re-raises rather than silently
+     returning nothing pipeline.py could mistake for a real verdict.
 """
 import json
 import sys
@@ -156,6 +163,79 @@ check("C: CL-AFPE shadow local-intel is configured to a v13-ONLY directory, neve
 check("C: the shadow engine singleton was actually constructed with a real "
       "LocalConfirmedIntel wired in (not left at the None default)",
       live_engine._get_cl_afpe_engine().local_intel is not None)
+
+
+# --- D. evaluate_cl_afpe_live() (Workstream 2 live-flip adapter) ---
+
+alert_d = _alert(device_id="shadow_pipeline_dev", features={"zeek_honeypot_hits": 1})
+live_result = live_engine.evaluate_cl_afpe_live(
+    alert_payload=alert_d, features=alert_d["features"],
+    decision={"state": "CRITICAL", "explanation": "Internal Honeypot Accessed"},
+    now=NOW + 10,
+)
+check("D: evaluate_cl_afpe_live() returns v13's OWN real computed verdict directly "
+      "(this IS the real suppression decision once flipped, not a comparison)",
+      live_result.get("verdict") == "CONFIRMED_THREAT" and live_result.get("stage") == "STAGE_1_HARD_STOP")
+check("D: the returned shape matches AutonomousFPEngine.evaluate()'s real shape exactly "
+      "(verdict/confidence/calibrated_confidence/stage/reasons/suppress) -- a genuine "
+      "drop-in replacement, not an approximation pipeline.py would need adapting for",
+      set(live_result.keys()) >= {"verdict", "confidence", "calibrated_confidence", "stage", "reasons", "suppress"})
+
+# Fail-safe: a raising CL-AFPE engine falls back to fallback_evaluate, with the exact
+# params a real AutonomousFPEngine.evaluate() call needs (risk_score/ti_engine included,
+# even though ClAfpeEngine.evaluate() itself never uses them -- they only matter for
+# the fallback call pipeline.py's real fp_engine.evaluate() would need).
+fallback_calls = []
+
+
+def _fake_fallback(alert_payload, features, risk_score, ti_engine, decision, asn_owner):
+    fallback_calls.append({
+        "alert_payload": alert_payload, "features": features, "risk_score": risk_score,
+        "ti_engine": ti_engine, "decision": decision, "asn_owner": asn_owner,
+    })
+    return {"verdict": "UNCERTAIN", "confidence": 0.5, "calibrated_confidence": None,
+            "stage": "FALLBACK", "reasons": ["v13 raised, fell back to v1"], "suppress": False}
+
+
+live_engine._get_cl_afpe_engine = lambda: _ExplodingEngine()
+try:
+    fallback_result = live_engine.evaluate_cl_afpe_live(
+        alert_payload=alert_d, features=alert_d["features"], risk_score=7.5,
+        ti_engine="sentinel_ti_engine", decision={"state": "CRITICAL"}, asn_owner="Google LLC",
+        fallback_evaluate=_fake_fallback, now=NOW + 11,
+    )
+finally:
+    live_engine._get_cl_afpe_engine = _real_get_engine
+
+check("D: a raising CL-AFPE engine falls back to fallback_evaluate() instead of "
+      "propagating -- pipeline.py's real alert publish must never crash because v13's "
+      "CL-AFPE had a bug, exactly the same safety property the main decision-engine "
+      "adapter (evaluate()) already has",
+      len(fallback_calls) == 1 and fallback_result.get("stage") == "FALLBACK")
+check("D: the fallback call received the REAL risk_score/ti_engine/asn_owner this cycle "
+      "had -- a fallback that silently dropped them would call v1's real fp_engine.evaluate() "
+      "with wrong context",
+      fallback_calls[0]["risk_score"] == 7.5
+      and fallback_calls[0]["ti_engine"] == "sentinel_ti_engine"
+      and fallback_calls[0]["asn_owner"] == "Google LLC")
+
+# No fallback provided -- must re-raise, never silently return None/{} that pipeline.py
+# could mistake for a real (falsy-suppress) verdict.
+live_engine._get_cl_afpe_engine = lambda: _ExplodingEngine()
+raised_no_fallback = False
+try:
+    live_engine.evaluate_cl_afpe_live(
+        alert_payload=alert_d, features=alert_d["features"], now=NOW + 12,
+    )
+except RuntimeError:
+    raised_no_fallback = True
+finally:
+    live_engine._get_cl_afpe_engine = _real_get_engine
+
+check("D: REGRESSION GUARD -- with no fallback_evaluate supplied, a raising engine "
+      "re-raises rather than returning a fabricated verdict pipeline.py could act on "
+      "by mistake",
+      raised_no_fallback is True)
 
 
 print()

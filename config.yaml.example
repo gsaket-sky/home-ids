@@ -858,6 +858,18 @@ scheduled_jobs:
       cron: "0 4 1 * *"
       script: "../v13/ops/live_decision_archive.py"
 
+    # v13 full-architecture plan, Workstream 2 -- checks state/cl_afpe_divergence_v13.jsonl
+    # (Phase 6e's shadow comparison, already accumulating real data) against a fixed bar
+    # (see cl_afpe_flip_monitor.py's own module docstring for the exact numbers and the
+    # asymmetric-risk false-negative check) and, if cleared, flips cl_afpe_engine (above)
+    # from v_current to v13 automatically -- never restarts soc.service. 15-minute cadence,
+    # matching the retired A10-era gap_monitor.py's own cron shape. Lives in src/v13/ops/,
+    # not scripts/, hence the "script" override below.
+    cl_afpe_flip_monitor:
+      enabled: true
+      cron: "*/15 * * * *"
+      script: "../v13/ops/cl_afpe_flip_monitor.py"
+
 
 # =============================================================================
 # engine — v13 fast-cutover rollback switch (Documentation/
@@ -872,6 +884,23 @@ scheduled_jobs:
 # "v_current" = instant rollback to core/decision_engine.py's original engine, a config
 # edit + restart, no redeploy, if anything about v13's live behavior looks wrong.
 engine: v13
+
+# =============================================================================
+# cl_afpe_engine — CL-AFPE (autonomous false-positive suppression) live/rollback
+# switch (v13 full-architecture plan, Workstream 2, Documentation/
+# V13_FULL_ARCHITECTURE_SHIFT_PLAN.md)
+# =============================================================================
+# "v_current" (default) = pipeline.py's real suppression decision comes from
+# intelligence/fp_engine.py's AutonomousFPEngine, unchanged. v13's own ClAfpeEngine
+# keeps running in SHADOW alongside it (compute + log to
+# state/cl_afpe_divergence_v13.jsonl), never affecting real suppression.
+# "v13" = pipeline.py's real suppression decision comes from v13's own ClAfpeEngine
+# (src/v13/cl_afpe/engine.py) instead -- a genuine engine swap, same shape as the
+# top-level `engine:` switch above, not a per-mechanism flag. Flipped automatically
+# by the scheduled cl_afpe_flip_monitor job (below) once its own documented bar
+# clears (state/cl_afpe_flip_monitor_state.json / job_health.json record when/why) --
+# never restarts soc.service itself; that stays a separate, explicit human action.
+cl_afpe_engine: v_current
 
 
 # =============================================================================

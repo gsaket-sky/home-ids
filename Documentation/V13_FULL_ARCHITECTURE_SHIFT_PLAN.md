@@ -159,8 +159,45 @@ cp state/models/fp_calibration.json models/fp_calibration.json
 rm -f state/metrics_dump.txt
 rm -rf state_scratch/
 
-# 4. Restart soc.service to activate the model fix + shadow-code removal (explicit,
-#    human-triggered, per the standing rule -- not something to automate)
+# 4. Add Workstream 2's CL-AFPE flip-monitor config (both pieces, or the monitor has
+#    nothing to schedule it and no key to ever flip)
+python3 - <<'PYEOF'
+path = 'config.yaml'
+text = open(path, encoding='utf-8').read()
+
+engine_anchor = "engine: v13\n"
+cl_afpe_block = '''
+# cl_afpe_engine -- see config.yaml.example's own comment for the full explanation.
+# "v_current" (default) = real suppression stays AutonomousFPEngine's; v13's own
+# ClAfpeEngine keeps running in shadow. Flipped to "v13" automatically by
+# cl_afpe_flip_monitor.py once its own bar clears.
+cl_afpe_engine: v_current
+'''
+assert engine_anchor in text, "engine: v13 line not found -- check manually"
+if "cl_afpe_engine:" not in text:
+    text = text.replace(engine_anchor, engine_anchor + cl_afpe_block, 1)
+
+scheduler_anchor = '''    live_decision_archive:
+      enabled: true
+      cron: "0 4 1 * *"
+      script: "../v13/ops/live_decision_archive.py"
+'''
+cl_afpe_job_block = '''
+    cl_afpe_flip_monitor:
+      enabled: true
+      cron: "*/15 * * * *"
+      script: "../v13/ops/cl_afpe_flip_monitor.py"
+'''
+assert scheduler_anchor in text, "live_decision_archive scheduler block not found -- check manually"
+if "cl_afpe_flip_monitor:" not in text:
+    text = text.replace(scheduler_anchor, scheduler_anchor + cl_afpe_job_block, 1)
+
+open(path, 'w', encoding='utf-8').write(text)
+print("done")
+PYEOF
+
+# 5. Restart soc.service to activate the model fix + shadow-code removal + Workstream 2
+#    wiring (explicit, human-triggered, per the standing rule -- not something to automate)
 sudo systemctl restart soc.service
 sudo systemctl status soc.service --no-pager
 ```
@@ -224,27 +261,73 @@ Format per item: **what**, **why it was cut** (the real original reason, not
   `feedback_pi_target_and_v13_execution` documents). Consolidated into one pending
   manual-action list for the user (see chat) rather than retried piecemeal.
 
-### Workstream 2 — CL-AFPE: shadow → live (Phase 6f, the biggest remaining cut)
+### Workstream 2 — CL-AFPE: shadow → live (Phase 6f, the biggest remaining cut) — DONE 2026-09-07, awaiting the bar
 
 **Why CL-AFPE stayed a cut this long**: per `V13_REMAINING_WORK.md` Group C, the
 original reason was research effort — "per-device threshold bumping... depends on a
 whole separate per-device-profile subsystem never researched for v13." That research
 is now done (A21-A24: sigma-shift, thresholds, local-intel poisoning guard, and ML
-Stage 2/3 all ported and tested) — the remaining gap is purely the live-flip
+Stage 2/3 all ported and tested) — the remaining gap was purely the live-flip
 decision, gated the same way every prior mechanism in this project has been gated.
 
-- [ ] **W2-1.** Define CL-AFPE's own flip bar, matching this project's own precedent
-  (Gap 1/2: "N days shadow, zero false negatives"; Gap 3 honeypot: "58 confirmed
-  divergences, zero false negatives"). `state/cl_afpe_divergence_v13.jsonl` is
-  already accumulating real comparisons (A28's Operational note) — needs a concrete
-  number and time floor written down, not just "wait and see."
-- [ ] **W2-2.** Build the actual flip switch — a config key (e.g.
-  `cl_afpe_engine: v13`, mirroring `engine: v13`'s own instant-rollback pattern) that
-  `pipeline.py` reads to let `ClAfpeEngine`'s verdict actually drive suppression
-  instead of `AutonomousFPEngine`'s.
-- [ ] **W2-3.** Once flipped, migrate `device_fp_profiles.json`/`fp_sigma_shifts.json`/
-  `fp_trust_cache.json` to be genuinely retired (or kept only as an offline audit
-  export) rather than dual-written.
+**Architectural decisions, asked and answered explicitly (2026-09-07)**: (1) flip
+bar = volume floor + zero-false-negative veto, **no fixed time floor** (user's
+choice, given this box's already-reduced risk tolerance); (2) flip granularity =
+**whole engine at once**, matching the `engine: v13` pattern, not a per-mechanism
+drip; (3) flip trigger = **fully automatic** once the bar clears, matching the A9
+precedent, with a Telegram notification either way.
+
+- [x] **W2-1.** Flip bar defined: **>= 50 real eligible comparisons** in
+  `state/cl_afpe_divergence_v13.jsonl` (both sides must have produced a verdict to
+  count) **AND zero false-negative-shaped divergences** (v13 says `FALSE_POSITIVE`
+  — would silently suppress — on an alert where v-current's real verdict was NOT
+  `FALSE_POSITIVE`, i.e. a human actually saw it). 50 is a first-pass judgment call
+  (between the retired A10 mechanism's 15-20 for a pure scoring refinement, and Gap
+  3 honeypot's 58 for a hard-stop — CL-AFPE controls real suppression, closer to
+  the hard-stop end), not empirically tuned, same honesty framing this project's
+  own `INDEPENDENCE_FAMILY_MAP` already uses for a similar number.
+- [x] **W2-2.** Flip switch built: `src/v13/ops/live_engine.py`'s new
+  `evaluate_cl_afpe_live()` (fail-safe adapter, same one-way-dependency/fallback
+  shape A13's own `evaluate()` uses — never imports `intelligence.fp_engine`
+  directly). `core/pipeline.py`'s `fp_verdict = ...` call site now branches on
+  `config.get("cl_afpe_engine", "v_current")`; the shadow comparison
+  (`evaluate_cl_afpe_shadow`) only runs on the `v_current` side now, since once
+  flipped there's no more real v1 verdict to diff against (same reasoning that
+  froze `decision_engine.py`'s own shadow experiment once the main engine
+  flipped). New `src/v13/ops/cl_afpe_flip_monitor.py` (15-min scheduled job):
+  checks the bar, runs `tests/test_v13_cl_afpe.py` +
+  `tests/test_v13_live_cl_afpe_shadow.py` as a hard gate, flips
+  `config.yaml`'s `cl_afpe_engine` via the same targeted-text-edit pattern (not a
+  YAML round-trip) every prior flip in this project has used, notifies via
+  Telegram either way, **never restarts `soc.service`**. New config key
+  `cl_afpe_engine: v_current` + the scheduler entry added to
+  `config.yaml.example`. Verified: 4 new checks in
+  `tests/test_v13_live_cl_afpe_shadow.py` (Section D — return-shape parity with
+  `AutonomousFPEngine.evaluate()`, fail-safe fallback with correct params,
+  no-fallback re-raise), 33 checks in new
+  `tests/test_v13_cl_afpe_flip_monitor.py` (classifier, targeted config edit,
+  `check_bar()`'s 4 outcomes, full `run_once()` orchestration with
+  Telegram/subprocess mocked including the notification spam-guard, and the same
+  AST-level "only one subprocess call, never systemctl" proof the retired
+  `gap_monitor.py` established). Full v13 suite + golden-case regression suite
+  (`test_v13_cl_afpe`/`test_v13_live_engine`/`test_v13_integration` individually
+  re-run) all pass clean.
+- [ ] **W2-3.** Once flipped **and confirmed stable**, migrate
+  `device_fp_profiles.json`/`fp_sigma_shifts.json`/`fp_trust_cache.json` to be
+  genuinely retired (or kept only as an offline audit export) rather than
+  dual-written. **Deliberately not done yet** — the flip hasn't actually happened
+  (needs 50 real eligible comparisons to accumulate first), and touching v1's
+  flat files before the flip is proven safe in production would remove the
+  rollback's own data.
+
+**Still open before this can do anything on `.94`**: needs `cl_afpe_engine:
+v_current` + the `cl_afpe_flip_monitor` scheduler entry added to `.94`'s real
+config.yaml (same SSH-write-blocked situation as Part 2a's other pending items —
+folded into that same manual-action list) before the monitor is actually
+scheduled and has a key to flip. Until that lands, this is deployed and tested
+but inert on `.94` — matching the exact same "built but not yet wired to
+production config" state A10's own shadow computation was in for a few hours
+after A9, per the dependency map's own precedent for this situation.
 
 ### Workstream 3 — Identity/state fully on the graph
 

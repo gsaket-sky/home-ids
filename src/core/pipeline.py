@@ -1814,31 +1814,55 @@ class EnginePipeline:
                         # IOC) directly instead of independently re-deriving the same
                         # signal from raw features with its own, separately-drifting
                         # thresholds -- see fp_engine.evaluate()'s docstring.
-                        fp_verdict = self.fp_engine.evaluate(
-                            alert_payload=alert_payload,
-                            features=features,
-                            risk_score=risk,
-                            ti_engine=self.ti_engine,
-                            decision=decision,
-                            asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                        )
+                        # V13 FULL-ARCHITECTURE PLAN, WORKSTREAM 2: cl_afpe_engine mirrors
+                        # the top-level `engine:` switch's exact shape -- default
+                        # "v_current" keeps AutonomousFPEngine as the real suppression
+                        # decision (with v13's ClAfpeEngine still shadow-computed
+                        # alongside for comparison, below); "v13" (set automatically by
+                        # cl_afpe_flip_monitor.py once its own bar clears, see that file's
+                        # docstring) makes ClAfpeEngine's verdict the real one instead --
+                        # a whole-engine swap, not a per-mechanism flag, matching this
+                        # project's own precedent for the main decision engine (A13).
+                        if self.config.get("cl_afpe_engine", "v_current") == "v13":
+                            fp_verdict = v13_live_engine.evaluate_cl_afpe_live(
+                                alert_payload=alert_payload,
+                                features=features,
+                                risk_score=risk,
+                                ti_engine=self.ti_engine,
+                                decision=decision,
+                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                                fallback_evaluate=self.fp_engine.evaluate,
+                                now=now,
+                            )
+                        else:
+                            fp_verdict = self.fp_engine.evaluate(
+                                alert_payload=alert_payload,
+                                features=features,
+                                risk_score=risk,
+                                ti_engine=self.ti_engine,
+                                decision=decision,
+                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                            )
 
-                        # V13 FULL-ARCHITECTURE PLAN, PHASE 6E: CL-AFPE shadow-mode
-                        # comparison, compute-only -- never affects fp_verdict above or
-                        # anything derived from it. See v13/ops/live_engine.py's own
-                        # evaluate_cl_afpe_shadow() docstring for why this needs its own
-                        # call site here rather than living inside the decision-path
-                        # v13_live_engine.evaluate() call further up this function.
-                        # Best-effort: never raises (caught internally), so a shadow
-                        # failure can never affect the real alert this cycle publishes.
-                        v13_live_engine.evaluate_cl_afpe_shadow(
-                            alert_payload=alert_payload,
-                            features=features,
-                            decision=decision,
-                            asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                            fp_verdict_v1=fp_verdict,
-                            now=now,
-                        )
+                            # V13 FULL-ARCHITECTURE PLAN, PHASE 6E: CL-AFPE shadow-mode
+                            # comparison, compute-only -- never affects fp_verdict above
+                            # or anything derived from it. Only runs while v1 is still
+                            # the real decision-maker -- once cl_afpe_engine="v13" above,
+                            # there's no more real v1 verdict left to diff against (same
+                            # reasoning that froze decision_engine.py's own shadow
+                            # experiment once the main engine flipped, A13), and calling
+                            # fp_engine.evaluate() here anyway would keep writing to its
+                            # now-unread flat files for no purpose. Best-effort: never
+                            # raises (caught internally), so a shadow failure can never
+                            # affect the real alert this cycle publishes.
+                            v13_live_engine.evaluate_cl_afpe_shadow(
+                                alert_payload=alert_payload,
+                                features=features,
+                                decision=decision,
+                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                                fp_verdict_v1=fp_verdict,
+                                now=now,
+                            )
 
                         # PHASE 12: persist CL-AFPE's own combined confidence into the alert
                         # record. Previously this number existed only in memory for the

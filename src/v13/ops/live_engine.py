@@ -510,6 +510,46 @@ def _log_cl_afpe_divergence(alert_payload: dict, v13_verdict: dict,
         LOGGER_CL_AFPE.error("Failed to write CL-AFPE divergence log entry: %s", e, exc_info=True)
 
 
+def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float = 0.0,
+                            ti_engine=None, decision: Optional[dict] = None, asn_owner: str = "",
+                            fallback_evaluate=None, now: Optional[float] = None) -> Dict[str, Any]:
+    """v13 full-architecture plan, Workstream 2 -- the pipeline.py call site once
+    config.yaml's `cl_afpe_engine` is flipped from "v_current" to "v13" (see
+    cl_afpe_flip_monitor.py for how/when that flip happens). Unlike
+    evaluate_cl_afpe_shadow() above, this function's RETURN VALUE is what pipeline.py
+    actually acts on -- suppress/publish, ML-registry learn/reject, alerts.json's
+    fp_verdict field -- exactly the same "one new call site, fail-safe fallback" shape
+    A13's own decision-path evaluate() above already established for the main engine
+    cutover. `risk_score`/`ti_engine` are accepted ONLY to pass through to
+    fallback_evaluate on failure (ClAfpeEngine.evaluate() itself needs neither) --
+    kept as real parameters rather than **kwargs so a caller passing the wrong shape
+    fails loudly at the call site, not inside the except block.
+
+    Once flipped, v-current's own fp_engine.evaluate() is no longer called at all for
+    this cycle -- its flat-file state (device_fp_profiles.json/fp_sigma_shifts.json/
+    fp_trust_cache.json/local_confirmed_intel.json) stops being updated, matching
+    exactly how the main engine cutover (A13) made decision_engine.py's own shadow
+    experiment permanently frozen. This is the intended, one-way consequence of a
+    whole-engine swap (the granularity explicitly chosen over a per-mechanism flip),
+    not a bug."""
+    ts = now if now is not None else time.time()
+    try:
+        engine = _get_cl_afpe_engine()
+        return engine.evaluate(alert_payload, features, decision=decision, asn_owner=asn_owner, now=ts)
+    except Exception as e:
+        LOGGER_CL_AFPE.error(
+            "CL-AFPE LIVE evaluation raised %s -- falling back to v-current's real "
+            "AutonomousFPEngine for this cycle. This should never happen in normal "
+            "operation; investigate.", e, exc_info=True,
+        )
+        if fallback_evaluate is not None:
+            return fallback_evaluate(
+                alert_payload=alert_payload, features=features, risk_score=risk_score,
+                ti_engine=ti_engine, decision=decision, asn_owner=asn_owner,
+            )
+        raise
+
+
 def evaluate_cl_afpe_shadow(alert_payload: dict, features: dict, decision: Optional[dict] = None,
                               asn_owner: str = "", fp_verdict_v1: Optional[dict] = None,
                               now: Optional[float] = None) -> None:
