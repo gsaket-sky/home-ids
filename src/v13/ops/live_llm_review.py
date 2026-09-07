@@ -50,12 +50,35 @@ data analysis, not LLM review), not this file's job.
 NOT PORTED from ollama_soc.py, consistent with the plan's own scope cut (each a
 real, separately-scoped follow-up once this basic wiring is confirmed working):
 local-model triage pre-filtering (OllamaClient.query_triage() exists and is usable,
-but its own docstring says specificity isn't validated yet), cross-device campaign
-correlation (explicitly deferred by the plan itself -- needs Phase 6's cross-device
-work to inform it, and is the least-validated of ollama_soc.py's own features to
-begin with), GeoIP-enriched reporting, job-health per-device breakdown.
+but its own docstring says specificity isn't validated yet -- deliberately gated on
+Group B2's own open validation question), job-health per-device breakdown.
+
+Release 14, Workstream 4 (2026-09-07): cross-device campaign correlation and
+GeoIP-enriched reporting are now both wired in.
+- Cross-device correlation: a structural gap, not a missing feature -- this script
+  reviews a decision's PERSISTED graph evidence (window.evidence_in_window()), but
+  v13's own live decision path (live_engine.py's _inject_graph_derived_evidence())
+  deliberately NEVER persists its synthetic coordinated_targeting/first_contact/
+  reputation-propagation evidence (writing it would recreate the exact
+  evidence-duplication bug Phase 1's own incident already fixed). So a decision
+  that WAS informed by "another device touched this destination recently" left no
+  trace of that fact anywhere the reviewer could see it. Fixed by RE-DERIVING
+  coordinated_targeting fresh at review time (_inject_coordinated_targeting()),
+  reusing the exact same graph/window.py query live_engine.py's own live path
+  uses, anchored to the DECISION's own original timestamp (not "now") so the
+  re-derived signal reflects what the original decision actually saw -- the same
+  "re-derive, don't assume persistence" precedent independence_family_report.py
+  (Phase 8c) already established. Scoped to coordinated_targeting only (the item
+  named in the plan) -- first_contact/reputation-propagation are the same
+  structural gap but a separate, not-yet-scoped follow-up.
+- GeoIP: a `_geo_note()` copy (matching live_retro_hunter.py's/retro_hunter.py's
+  own established "small per-script copy" convention) enriches the Telegram
+  digest's per-rejection detail lines with a representative destination's
+  Org/Country -- human-facing reporting only, never sent to the LLM itself,
+  matching exactly how ollama_soc.py/live_retro_hunter.py already use it.
 """
 import hashlib
+import ipaddress
 import json
 import logging
 import time
@@ -67,6 +90,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
+from intelligence.geoip import GeoIPEngine  # noqa: E402
+from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
 from v13.graph.window import RollingWindowView  # noqa: E402
 from v13.hypotheses.independence import family_for, NON_ATTACK_FAMILIES  # noqa: E402
@@ -103,6 +128,12 @@ LOOKBACK_SECONDS = 24 * 3600
 _REVIEWABLE_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})
 
 _OUTPUT_FILENAME = "ollama_analysis_v13.jsonl"
+
+# Matches live_engine.py's own constants exactly -- same signal, same thresholds,
+# just re-derived at review time instead of read from live_engine.py's in-process
+# state (see this module's own docstring for why re-deriving is necessary at all).
+_COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
+_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 1  # "2+ distinct devices" total = 1+ OTHER device
 
 
 def _load_already_reviewed(output_path: Path) -> Set[str]:
@@ -144,6 +175,78 @@ def _rep_tier_for(evidence_list) -> Optional[int]:
         return int(best.value) if best.value is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _inject_coordinated_targeting(store: GraphStore, window: RollingWindowView, device_id: str,
+                                     evidence_list: List[Evidence], now: float) -> List[Evidence]:
+    """Re-derives live_engine.py's own coordinated_targeting signal at REVIEW time,
+    anchored to the decision's own original timestamp (`now` here IS
+    decision["timestamp"], never the review's own current time -- a different
+    anchor would ask "who else is targeting this destination right now", a
+    different question than what the original decision actually saw). Returns a
+    NEW list (never mutates the input) with any synthetic items appended; the
+    original graph is never written to, matching the same "derived context, not a
+    sensor observation" principle live_engine.py's own version documents. Best-
+    effort: any failure degrades to the original evidence_list unchanged, never
+    blocks the review."""
+    try:
+        destinations = {e.destination_id for e in evidence_list if e.destination_id and e.destination_id != NO_DESTINATION}
+        if not destinations:
+            return evidence_list
+        synthetic: List[Evidence] = []
+        for dest in destinations:
+            others = window.devices_targeting(
+                dest, _COORDINATED_TARGETING_WINDOW_SECONDS, now=now, exclude_device_id=device_id,
+            )
+            if len(others) >= _COORDINATED_TARGETING_MIN_OTHER_DEVICES:
+                synthetic.append(Evidence(
+                    device_id=device_id, destination_id=dest, evidence_type="coordinated_targeting",
+                    independence_family="cross_device_correlation", timestamp=now,
+                    source="live_llm_review", confidence=1.0, value=float(len(others) + 1),
+                    provenance="live_llm_review:coordinated_targeting",
+                    features={"other_devices": others},
+                ))
+        return evidence_list + synthetic if synthetic else evidence_list
+    except Exception as e:
+        LOGGER.warning("Failed to re-derive coordinated_targeting for device %r: %s", device_id, e)
+        return evidence_list
+
+
+def _representative_destination(evidence_list: List[Evidence]) -> str:
+    """Best-effort pick of the one destination most worth naming in a human-facing
+    report -- the highest-confidence real (non-NO_DESTINATION) destination among
+    the evidence actually reviewed. v13 decisions are per-DEVICE, not per-
+    destination the way v-current's alert_payload carries a single canonical
+    target, so this is a first-pass heuristic, not a claim of a single "the"
+    target -- documented as such rather than silently presented as authoritative."""
+    real_items = [e for e in evidence_list if e.destination_id and e.destination_id != NO_DESTINATION]
+    if not real_items:
+        return ""
+    return max(real_items, key=lambda e: e.confidence or 0.0).destination_id
+
+
+def _geo_note(geoip_engine: Optional[GeoIPEngine], ip: str) -> str:
+    """Matches scripts/retro_hunter.py's/v13/ops/live_retro_hunter.py's own
+    _geo_note() exactly: ' (Org, Country)' for a raw IP via local mmdb lookups, or
+    '' if unavailable/not an IP (e.g. a domain name, which this has no lookup
+    path for). A small local copy, matching that script's own established
+    convention of not importing another script's private helper across module
+    boundaries."""
+    if not ip or ip == "unknown" or not geoip_engine:
+        return ""
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return ""
+    try:
+        asn_res = geoip_engine.lookup_asn(ip)
+        city_res = geoip_engine.lookup(ip)
+        geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+        geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+        geo_parts = [p for p in (geo_org, geo_country) if p]
+        return f" ({', '.join(geo_parts)})" if geo_parts else ""
+    except Exception:
+        return ""
 
 
 def _evidence_fingerprint(evidence_list) -> str:
@@ -237,7 +340,8 @@ def _load_persistent_cache(output_path: Path, now: float,
 # validator accepted vs. rejected, and the full detail for every REJECTION specifically
 # (the single most actionable signal in this digest -- the LLM's own verdict disagreed
 # with ground truth).
-def build_llm_review_digest_message(entries: List[Dict[str, Any]]) -> Optional[str]:
+def build_llm_review_digest_message(entries: List[Dict[str, Any]],
+                                       geoip_engine: Optional[GeoIPEngine] = None) -> Optional[str]:
     if not entries:
         return None
 
@@ -265,9 +369,11 @@ def build_llm_review_digest_message(entries: List[Dict[str, Any]]) -> Optional[s
     running_len = len("\n".join(lines))
     for e in detail_worthy:
         rec = e.get("recommendation", {}) or {}
+        geo_note = _geo_note(geoip_engine, e.get("destination", ""))
+        dest_suffix = f" → <code>{e['destination']}</code>{geo_note}" if e.get("destination") else ""
         entry_lines = [
-            f"• <code>{e.get('device_id', 'unknown')}</code> [{e.get('decision_path', 'unknown')}] "
-            f"→ LLM said '{rec.get('classification', 'unknown')}'",
+            f"• <code>{e.get('device_id', 'unknown')}</code> [{e.get('decision_path', 'unknown')}]"
+            f"{dest_suffix} → LLM said '{rec.get('classification', 'unknown')}'",
         ]
         reason = rec.get("reason")
         if reason:
@@ -312,6 +418,14 @@ def main() -> None:
         window = RollingWindowView(store)
         client = OllamaClient(remote_url=ollama_url, remote_model=ollama_model)
         validator = DeterministicValidator()
+        # Release 14, Workstream 4: human-facing digest enrichment only, never sent
+        # to the LLM. GeoIPEngine fails safe internally (missing/unreadable mmdb ->
+        # reader=None, every lookup then no-ops) -- matches ollama_soc.py's own
+        # direct-construction convention, no extra try/except needed here.
+        geoip_engine = GeoIPEngine(
+            db_path=CONFIG.get("geoip_db", "models/GeoLite2-City.mmdb"),
+            asn_db_path=CONFIG.get("geoip_asn_db", "models/GeoLite2-ASN.mmdb"),
+        )
 
         now = time.time()
         already_reviewed = _load_already_reviewed(output_path)
@@ -335,6 +449,14 @@ def main() -> None:
                 evidence_list = window.evidence_in_window(
                     device_id, RollingWindowView.LONG_WINDOW_SECONDS, now=decision["timestamp"],
                 )
+                # Release 14, Workstream 4: re-derive the cross-device correlation
+                # signal live_engine.py's own live decision path computed but never
+                # persisted -- see this module's own docstring for why. Anchored to
+                # the decision's own timestamp, not "now". Injected BEFORE the cache
+                # key/ground-truth/prompt below so all three consistently see it.
+                evidence_list = _inject_coordinated_targeting(
+                    store, window, device_id, evidence_list, decision["timestamp"],
+                )
                 # Phase 8a: pattern-level persistent cache -- checked BEFORE the
                 # query cap below, so a cache hit (nearly free: a local graph
                 # read + a dict lookup, no Ollama call) is never deferred just
@@ -352,6 +474,12 @@ def main() -> None:
                     "decision_path": decision["decision_path"],
                     "reviewed_at": time.time(),
                     "persistent_cache_key": cache_key,
+                    # Release 14, Workstream 4: a representative destination, purely
+                    # for GeoIP-enriched human-facing reporting (see
+                    # _representative_destination()'s own docstring for the "not
+                    # THE target, a first-pass heuristic" caveat) -- never sent to
+                    # the LLM itself.
+                    "destination": _representative_destination(evidence_list),
                 }
 
                 if cached is not None:
@@ -404,7 +532,7 @@ def main() -> None:
             "errors": errors, "deferred": max(0, len(candidates) - reviewed),
         })
 
-        digest = build_llm_review_digest_message(new_entries)
+        digest = build_llm_review_digest_message(new_entries, geoip_engine=geoip_engine)
         if digest:
             send_telegram(CONFIG, digest)
     except Exception as e:

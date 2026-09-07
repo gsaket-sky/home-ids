@@ -388,16 +388,36 @@ ever scoped the larger migration.
 
 ### Workstream 4 — LLM-review completeness (remaining Group D items)
 
-- [ ] **W4-1. Cross-device campaign correlation (`_is_campaign_corroborated`
-  equivalent).** Why cut: explicitly deferred pending Phase 6/1a's cross-device work
-  landing first (Group D3). That work (A19, `CoordinatedTargetingHypothesis`) is now
-  live — this is unblocked, not permanently deferred. Requires: reuse
-  `get_devices_targeting()`'s already-proven query pattern from the LLM-review
-  script's own read side.
-- [ ] **W4-2. GeoIP enrichment for v13's LLM-review report** (flagged as missing by
-  the capability-ledger artifact; not yet independently verified against source —
-  verify first, then port `ollama_soc.py`'s own `_geo_note()`-equivalent, which
-  Phase 7 (A25) already factored out for retro-hunter's use).
+- [x] **W4-1. Cross-device campaign correlation.** DONE 2026-09-07. Real
+  investigation found this wasn't quite `_is_campaign_corroborated()` (that's a
+  v1-specific auto-suppress-withhold guard `live_llm_review.py` has no equivalent
+  action for) — the actual gap was structural: `live_llm_review.py` reads
+  PERSISTED graph evidence, but `live_engine.py`'s own live decision path
+  deliberately never persists its synthetic `coordinated_targeting` evidence
+  (writing it would recreate the Phase 1 evidence-duplication incident), so a
+  decision informed by "another device just touched this destination" left the
+  reviewer with no way to see that fact. Fixed by re-deriving
+  `coordinated_targeting` fresh at review time (`_inject_coordinated_targeting()`),
+  anchored to the decision's own original timestamp — reuses the exact same
+  `graph/window.py` query `live_engine.py` uses, matching
+  `independence_family_report.py`'s own "re-derive, don't assume persistence"
+  precedent. Scoped to `coordinated_targeting` only (the item named here);
+  `first_contact`/reputation-propagation have the identical structural gap but
+  are a separate, not-yet-scoped follow-up.
+- [x] **W4-2. GeoIP enrichment for v13's LLM-review report.** DONE 2026-09-07.
+  Verified as a real gap (confirmed via grep: `live_llm_review.py` had zero GeoIP
+  references while `ollama_soc.py` uses it for both digest text and campaign
+  correlation). Ported `_geo_note()` as a small local copy (matching
+  `live_retro_hunter.py`'s own established "small per-script copy" convention),
+  wired into the Telegram digest's per-rejection detail lines via a new
+  `_representative_destination()` heuristic (highest-confidence real destination
+  among the evidence reviewed — documented as a first-pass heuristic, not a
+  claim of a single canonical "target" the way v1's alert_payload has one).
+  Human-facing reporting only, never sent to the LLM. 12 new tests in
+  `tests/test_v13_live_llm_review.py` including an end-to-end check that the
+  real prompt sent to the (fake) LLM for a two-device shared-destination
+  scenario actually contains `coordinated_targeting` — proving the fix closes
+  the structural gap, not just that the helper function works in isolation.
 - [ ] **W4-3. In-cycle LLM review** (net-new, not a cut — see Part 4).
 - [ ] **W4-4. LLM-review local-triage default.** Why cut: `query_triage()`'s own
   accuracy is unvalidated (Group B2, still open) — wiring a `hardware_profile`

@@ -412,6 +412,120 @@ check("a run that reviews nothing new sends NO Telegram digest",
       mock_send_telegram_noop.call_count == 0)
 
 
+# --- Release 14, Workstream 4: cross-device correlation + GeoIP enrichment ---
+
+from v13.graph.window import RollingWindowView  # noqa: E402
+
+# _inject_coordinated_targeting: a second device touching the SAME destination
+# within the window gets a synthetic coordinated_targeting item; a lone device does not
+ct_store = GraphStore(str((TMPDIR / "ct_inject").with_suffix(".db")))
+ct_window = RollingWindowView(ct_store)
+ct_store.insert_evidence(Evidence(device_id="ct_dev1", destination_id="shared.example.com",
+                                    evidence_type="dns_rate", independence_family="dns_behavior",
+                                    timestamp=NOW - 60, source="s", value=5.0))
+evidence_alone = ct_window.evidence_in_window("ct_dev1", RollingWindowView.LONG_WINDOW_SECONDS, now=NOW)
+result_alone = live_llm_review._inject_coordinated_targeting(ct_store, ct_window, "ct_dev1", evidence_alone, NOW)
+check("_inject_coordinated_targeting: no OTHER device touching the destination -> unchanged list",
+      result_alone == evidence_alone
+      and not any(e.evidence_type == "coordinated_targeting" for e in result_alone))
+
+ct_store.insert_evidence(Evidence(device_id="ct_dev2", destination_id="shared.example.com",
+                                    evidence_type="dns_rate", independence_family="dns_behavior",
+                                    timestamp=NOW - 30, source="s", value=5.0))
+result_shared = live_llm_review._inject_coordinated_targeting(ct_store, ct_window, "ct_dev1", evidence_alone, NOW)
+ct_items = [e for e in result_shared if e.evidence_type == "coordinated_targeting"]
+check("_inject_coordinated_targeting: a SECOND device touching the same destination "
+      "-> a synthetic coordinated_targeting item is added (the real gap this closes: "
+      "live_engine.py computes this at decision time but never persists it)",
+      len(ct_items) == 1 and ct_items[0].value == 2.0)
+check("_inject_coordinated_targeting: the ORIGINAL list is never mutated in place",
+      len(evidence_alone) == 1 and not any(e.evidence_type == "coordinated_targeting" for e in evidence_alone))
+
+# fail-safe: a raising window never blocks the review
+class _ExplodingWindow:
+    def devices_targeting(self, *a, **kw):
+        raise RuntimeError("simulated graph failure")
+
+
+result_failsafe = live_llm_review._inject_coordinated_targeting(
+    ct_store, _ExplodingWindow(), "ct_dev1", evidence_alone, NOW,
+)
+check("_inject_coordinated_targeting: FAIL-SAFE -- a raising window degrades to the "
+      "original evidence_list unchanged, never raises",
+      result_failsafe == evidence_alone)
+ct_store.close()
+
+# _representative_destination
+rep_dest = live_llm_review._representative_destination([
+    Evidence(device_id="d", destination_id="low.example.com", evidence_type="x",
+             independence_family="f", timestamp=NOW, source="s", value=1.0, confidence=0.3),
+    Evidence(device_id="d", destination_id="high.example.com", evidence_type="x",
+             independence_family="f", timestamp=NOW, source="s", value=1.0, confidence=0.9),
+])
+check("_representative_destination picks the HIGHEST-confidence real destination",
+      rep_dest == "high.example.com")
+check("_representative_destination returns '' when no real destination is present",
+      live_llm_review._representative_destination([]) == "")
+
+# _geo_note: matches the established convention -- '' for a non-IP/missing engine,
+# never raises even against a malformed value
+check("_geo_note returns '' for a domain name (not an IP) -- no lookup path for it",
+      live_llm_review._geo_note(None, "example.com") == "")
+check("_geo_note returns '' when geoip_engine is None", live_llm_review._geo_note(None, "8.8.8.8") == "")
+check("_geo_note returns '' for an empty/unknown ip", live_llm_review._geo_note(None, "unknown") == "")
+
+# digest: a destination on a rejected entry is surfaced in the detail line (geoip_engine
+# omitted -- degrades to no geo annotation, never crashes)
+digest_with_dest = live_llm_review.build_llm_review_digest_message([
+    {"device_id": "d5", "decision_path": "hypothesis_high", "validator_accepted": False,
+     "destination": "evil.example.com", "recommendation": {"classification": "benign", "reason": "test"}},
+])
+check("the digest surfaces a rejected entry's destination in its detail line",
+      "evil.example.com" in digest_with_dest)
+
+# end-to-end: a decision reviewed while another device recently shares its destination
+# actually gets coordinated_targeting evidence in the real prompt sent to the LLM --
+# proves the fix closes the structural gap, not just the helper function in isolation
+_e2e_dir = TMPDIR / "ct_e2e"
+_e2e_dir.mkdir()
+e2e_store = GraphStore(str(_e2e_dir / "v13_graph.db"))
+e2e_store.insert_evidence(Evidence(device_id="e2e_dev1", destination_id="campaign.example.com",
+                                     evidence_type="zeek_lateral_scan", independence_family="network_behavior",
+                                     timestamp=NOW - 60, source="s", value=1.0))
+e2e_store.insert_evidence(Evidence(device_id="e2e_dev2", destination_id="campaign.example.com",
+                                     evidence_type="dns_rate", independence_family="dns_behavior",
+                                     timestamp=NOW - 30, source="s", value=1.0))
+e2e_decision_id = e2e_store.insert_decision(
+    device_id="e2e_dev1", timestamp=NOW - 10, state="SUSPICIOUS", decision_path="hypothesis_suspicious",
+    confidence=0.4, risk_score=2.0, raw_payload={"hypotheses": {"attack": {"name": "NETWORK_INTRUSION"}}},
+)
+e2e_store.close()
+
+captured_prompts = []
+
+
+class _PromptCapturingClient(_FakeClient):
+    def query_full_analysis(self, prompt_text, timeout=None):
+        captured_prompts.append(prompt_text)
+        return super().query_full_analysis(prompt_text, timeout=timeout)
+
+
+live_llm_review.CONFIG = _config_for(_e2e_dir)
+_reset_fake_client([{"classification": "malicious", "confidence": 0.8, "reason": "shared campaign infra",
+                      "supporting_evidence": ["x"], "contradicting_evidence": [], "recommended_action": "block"}])
+with patch.object(live_llm_review, "OllamaClient", _PromptCapturingClient):
+    live_llm_review.main()
+check("END-TO-END: the real prompt sent to the LLM for e2e_dev1's decision includes "
+      "coordinated_targeting -- the actual structural gap this workstream closes "
+      "(this evidence was NEVER written to the graph by the live decision path; it "
+      "only exists because this review re-derived it)",
+      len(captured_prompts) == 1 and "coordinated_targeting" in captured_prompts[0])
+e2e_lines = [json.loads(l) for l in (_e2e_dir / "ollama_analysis_v13.jsonl").read_text().splitlines() if l.strip()]
+check("END-TO-END: the written entry carries the representative destination for "
+      "GeoIP-enriched reporting",
+      e2e_lines and e2e_lines[0].get("destination") == "campaign.example.com")
+
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")
