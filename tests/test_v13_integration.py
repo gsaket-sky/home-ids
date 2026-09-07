@@ -110,18 +110,23 @@ check("Step 6: FULL_ANALYSIS_SCHEMA is a well-formed schema ready to pair with t
       "classification" in FULL_ANALYSIS_SCHEMA["properties"])
 
 # --- Step 7: CL-AFPE immunization + trust-cache check round-trips through the SAME store ---
+# Domain is its own eTLD+1 base (single label + .com) so the assertions below can
+# compare directly -- mark_false_positive() immunizes the BASE domain (v13 full-
+# architecture plan, Phase 6e bugfix: matches fp_engine.py's real
+# _extract_base_domain()-then-immunize() behavior exactly, which evaluate()'s own
+# trust-cache lookup already assumed but this method didn't actually do until now).
 alert_payload = {"signature": decision_result["hypotheses"]["attack"]["name"],
                   "device": {"id": device_id},
-                  "network_context": {"queried_domain": "c2-server.example.com"}}
+                  "network_context": {"queried_domain": "c2-server-example.com"}}
 mfp_result = cl_afpe.mark_false_positive(alert_payload, now=NOW)
 check("Step 7: CL-AFPE's device-identity refusal check correctly sees the device as known "
       "(it was upserted by insert_evidence in Step 2, on the SAME GraphStore instance) "
       "-- proves the identity/evidence/CL-AFPE modules share consistent device-id semantics",
       not mfp_result.refused)
 check("Step 7: the correction immunizes the real destination this alert was actually about",
-      mfp_result.immunized_destination == "c2-server.example.com")
+      mfp_result.immunized_destination == "c2-server-example.com")
 check("Step 7: the trust cache correctly reflects this immunization immediately afterward",
-      cl_afpe.is_trust_cached("c2-server.example.com",
+      cl_afpe.is_trust_cached("c2-server-example.com",
                                 hypothesis=decision_result["hypotheses"]["attack"]["name"], now=NOW))
 
 # --- Step 8: retro-hunter operates on the SAME store, finding the SAME device/destination ---

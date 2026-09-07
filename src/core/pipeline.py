@@ -1818,6 +1818,23 @@ class EnginePipeline:
                             asn_owner=asn_owner if asn_owner != "Unknown" else "",
                         )
 
+                        # V13 FULL-ARCHITECTURE PLAN, PHASE 6E: CL-AFPE shadow-mode
+                        # comparison, compute-only -- never affects fp_verdict above or
+                        # anything derived from it. See v13/ops/live_engine.py's own
+                        # evaluate_cl_afpe_shadow() docstring for why this needs its own
+                        # call site here rather than living inside the decision-path
+                        # v13_live_engine.evaluate() call further up this function.
+                        # Best-effort: never raises (caught internally), so a shadow
+                        # failure can never affect the real alert this cycle publishes.
+                        v13_live_engine.evaluate_cl_afpe_shadow(
+                            alert_payload=alert_payload,
+                            features=features,
+                            decision=decision,
+                            asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                            fp_verdict_v1=fp_verdict,
+                            now=now,
+                        )
+
                         # PHASE 12: persist CL-AFPE's own combined confidence into the alert
                         # record. Previously this number existed only in memory for the
                         # duration of this evaluation — alerts.json never carried it, so

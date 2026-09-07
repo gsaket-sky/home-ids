@@ -135,13 +135,19 @@ for hard_stop_sig in ("Internal Honeypot Accessed", "Layer-2 ARP Spoofing Detect
           r.refused and hard_stop_sig in r.refused_reason)
 
 # --- mark_false_positive: default domain vs IP routing ---
+# BUGFIX (Phase 6e): immunizes the eTLD+1 BASE domain, matching v1 exactly and
+# matching evaluate()'s own trust-cache lookup (see mark_false_positive()'s own
+# comment on this branch for the full explanation) -- a THREE-label input
+# ("sub.domain-route-example.com") would immunize as its base
+# ("domain-route-example.com"), so this test uses a domain that IS its own base
+# to keep the assertion a direct string match.
 domain_route = cl_afpe.mark_false_positive(
     {"signature": "NETWORK_INTRUSION", "device": {"id": "known_device"},
-     "network_context": {"queried_domain": "domain-route.example.com"}},
+     "network_context": {"queried_domain": "domain-route-example.com"}},
     now=NOW,
 )
-check("a correction with a real queried_domain immunizes that domain",
-      domain_route.immunized_destination == "domain-route.example.com")
+check("a correction with a real queried_domain immunizes that domain's eTLD+1 base",
+      domain_route.immunized_destination == "domain-route-example.com")
 
 ip_route = cl_afpe.mark_false_positive(
     {"signature": "NETWORK_INTRUSION", "device": {"id": "known_device"},
@@ -343,6 +349,176 @@ check("check_local_intel_hard_stop re-applies the telemetry guard on the READ si
       "independently of the write guard -- an entry that got in some other way "
       "still doesn't match",
       cl_afpe_intel.check_local_intel_hard_stop("sentry.io", None) is None)
+
+# --- Phase 6e: composed evaluate() -------------------------------------------
+# Uses `cl_afpe` (module-level, no local_intel/ml_scorer -- ml_scorer=None means
+# Stage 2 is always the neutral 0.50 sentinel and Stage 3 always uses the static
+# rule fallback, both deterministic, matching v1's own real "model not ready yet"
+# behavior rather than requiring a real ONNX/FastEmbed model for this test file).
+store.upsert_device("shadow_dev", timestamp=NOW)
+
+
+def _alert(device_id="shadow_dev", hostname="shadow-host", signature="NETWORK_INTRUSION",
+           domain="", dest_ip="", features=None):
+    return {
+        "signature": signature,
+        "device": {"id": device_id, "hostname": hostname},
+        "network_context": {"queried_domain": domain, "destination_ip": dest_ip},
+        "features": features or {},
+    }
+
+
+def _evaluate(engine, alert_payload, decision=None, asn_owner="", now=NOW):
+    # Matches fp_engine.py's real evaluate(alert_payload, features, ...) shape:
+    # `features` is its OWN top-level parameter (Stage 1/2/3 all read from it),
+    # separate from alert_payload["features"] (which ONLY mark_false_positive()'s
+    # CONNECTION_ABUSE branch reads, via its own alert_payload.get("features", {})
+    # lookup) -- both must carry the SAME dict for a realistic test.
+    return engine.evaluate(alert_payload, alert_payload["features"], decision=decision,
+                             asn_owner=asn_owner, now=now)
+
+
+# Check 0: v13's own decision state reused as a hard-stop trigger.
+v = _evaluate(cl_afpe, _alert(domain="unknown"), decision={"state": "CRITICAL", "explanation": "honeypot"})
+check("evaluate() Check 0 hard-stops on v13's own decision state == CRITICAL",
+      v["verdict"] == "CONFIRMED_THREAT" and v["stage"] == "STAGE_1_HARD_STOP"
+      and any("HEE hard-stop verdict" in r for r in v["reasons"]))
+
+# Check 1: ThreatIntel IOC (ti_risk > 2.0).
+v = _evaluate(cl_afpe, _alert(features={"ti_risk": 3.0}))
+check("evaluate() Check 1 hard-stops on ti_risk > 2.0",
+      v["verdict"] == "CONFIRMED_THREAT" and any("ThreatIntel IOC" in r for r in v["reasons"]))
+v = _evaluate(cl_afpe, _alert(features={"ti_risk": 1.5}))
+check("...but NOT at ti_risk <= 2.0 (falls through toward Stage 2/3)",
+      v["stage"] != "STAGE_1_HARD_STOP")
+
+# Check 2: lateral movement, gated on DISTINCT targets, not raw connection count.
+v = _evaluate(cl_afpe, _alert(features={"zeek_lateral_moves": 1, "zeek_lateral_unique_targets": 1}))
+check("evaluate() Check 2 does NOT hard-stop on a single connection to ONE target "
+      "(the real v1 bugfix: a lone SMB/SSH/RDP connection is not 'movement')",
+      v["stage"] != "STAGE_1_HARD_STOP")
+v = _evaluate(cl_afpe, _alert(features={"zeek_lateral_moves": 3, "zeek_lateral_unique_targets": 2}))
+check("evaluate() Check 2 DOES hard-stop once the distinct-target threshold is met",
+      v["verdict"] == "CONFIRMED_THREAT" and any("lateral movement" in r for r in v["reasons"]))
+
+# Check 3: malicious JA3/JA4 TLS fingerprint.
+v = _evaluate(cl_afpe, _alert(features={"zeek_ja4_malicious": 1}))
+check("evaluate() Check 3 hard-stops on a malicious JA4+ fingerprint",
+      v["verdict"] == "CONFIRMED_THREAT" and any("TLS fingerprint" in r for r in v["reasons"]))
+
+# Check 4: honeypot.
+v = _evaluate(cl_afpe, _alert(features={"zeek_honeypot_hits": 1}))
+check("evaluate() Check 4 hard-stops on any honeypot hit",
+      v["verdict"] == "CONFIRMED_THREAT" and any("honeypot" in r for r in v["reasons"]))
+
+# Check 5: AbuseIPDB.
+v = _evaluate(cl_afpe, _alert(features={"abuseipdb_risk": 4.0}))
+check("evaluate() Check 5 hard-stops at abuseipdb_risk >= 4.0",
+      v["verdict"] == "CONFIRMED_THREAT" and any("AbuseIPDB" in r for r in v["reasons"]))
+
+# Check 6: exfiltration burst -- absolute-byte floor AND telemetry/CDN exemption.
+v = _evaluate(cl_afpe, _alert(domain="random-nonvendor-xyz.example.net",
+                                features={"outbound_bytes_z": 9.0, "zeek_outbound_bytes": 5_000_000}))
+check("evaluate() Check 6 hard-stops on a genuine exfiltration burst (real destination)",
+      v["verdict"] == "CONFIRMED_THREAT" and any("Exfiltration" in r for r in v["reasons"]))
+# Deliberately a signature OTHER than "sentry.io"'s later tests' default
+# ("NETWORK_INTRUSION") -- this exemption check reaches Stage 2/3 (Check 6 doesn't
+# hard-stop) and, at combined=0.92, DOES suppress+immunize sentry.io as a real side
+# effect; a different hypothesis here means that immunization can never satisfy
+# is_trust_cached()'s hypothesis-match for the dedicated Stage 2/3 tests below,
+# which need to reach Stage 2/3 fresh, not short-circuit via an already-warm cache.
+v = _evaluate(cl_afpe, _alert(signature="EXFIL_EXEMPTION_CHECK", domain="sentry.io",
+                                features={"outbound_bytes_z": 9.0, "zeek_outbound_bytes": 5_000_000}))
+check("...but the SAME burst on a known telemetry domain is exempt (real v1 bugfix "
+      "this port preserves -- an AWS IoT/MQTT-shaped connection must not hard-stop "
+      "purely off a z-score)",
+      v["stage"] != "STAGE_1_HARD_STOP")
+
+# --- trust-cache fast path, wired through the composed evaluate() ---
+cl_afpe.immunize("trusted-vendor-example.com", device_id="shadow_dev", hypothesis="NETWORK_INTRUSION", now=NOW)
+v = _evaluate(cl_afpe, _alert(domain="trusted-vendor-example.com"))
+check("evaluate() suppresses immediately on a trust-cache hit (TRUST_CACHE, no ML stages run)",
+      v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "TRUST_CACHE")
+
+sigma_before = cl_afpe.get_sigma_shift("shadow_dev")
+v = _evaluate(cl_afpe, _alert(domain="trusted-vendor-example.com", features={"zeek_honeypot_hits": 1}))
+check("evaluate() RE-RUNS Stage 1 even on a trust-cache hit and overrides it on a "
+      "genuine hard-stop signal (the non-negotiable Phase-3 fix this port preserves)",
+      v["verdict"] == "CONFIRMED_THREAT" and v["stage"] == "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP")
+check("...and tunes sensitivity UP as a side effect of the override, same as a "
+      "fresh (non-cached) hard-stop would",
+      cl_afpe.get_sigma_shift("shadow_dev") < sigma_before)
+
+# --- Stage 2/3 final verdict branches (no real ML model -- deterministic rule fallback) ---
+v = _evaluate(cl_afpe, _alert(domain="sentry.io"))
+check("evaluate() suppresses via Stage 2/3 when Stage 3's rule fallback alone clears "
+      "the embed-similarity threshold for a known telemetry vendor domain",
+      v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "STAGE_3_COMBINED"
+      and cl_afpe.is_trust_cached("sentry.io", hypothesis="NETWORK_INTRUSION", now=NOW))
+
+v = _evaluate(cl_afpe, _alert(domain="totally-unrecognized-xyz123.example"))
+check("evaluate() reaches CONFIRMED_THREAT via Stage 2/3 when neither stage finds "
+      "anything vendor-like (low combined confidence)",
+      v["verdict"] == "CONFIRMED_THREAT" and v["stage"] == "STAGE_3_COMBINED")
+
+# per-device suppress threshold (Phase 6e's own new getter) actually changes the
+# Stage 2/3 branch outcome for the SAME evidence.
+store.upsert_device("thresh_dev5", timestamp=NOW)
+cl_afpe.apply_device_fp_profile(
+    "thresh_dev5", "fp_combined_suppress_threshold", 0.95, baseline=0.80,
+    set_by="test", reason="raise this device's own bar above the telemetry rule-fallback score", now=NOW,
+)
+check("get_device_suppress_threshold reflects the newly-written per-device value",
+      cl_afpe.get_device_suppress_threshold("thresh_dev5") == 0.95)
+# A signature distinct from the sentry.io suppression test just above -- that test
+# already immunized sentry.io for hypothesis "NETWORK_INTRUSION" (not device-
+# scoped) as a real side effect of its own suppression; this test needs to reach
+# Stage 2/3 fresh, not short-circuit via that already-warm trust-cache entry.
+v = _evaluate(cl_afpe, _alert(device_id="thresh_dev5", hostname="thresh5",
+                                signature="THRESH_SUPPRESS_TEST", domain="sentry.io"))
+check("...and a combined score that WOULD suppress against the global default "
+      "(0.80) now correctly falls to UNCERTAIN against this device's own raised bar",
+      v["verdict"] == "UNCERTAIN" and v["stage"] == "STAGE_3_COMBINED")
+
+# CONNECTION_ABUSE signature suppressing via Stage 2/3 routes through
+# mark_false_positive()'s threshold-bump branch, not domain immunization -- same
+# mutual-exclusivity guarantee as Phase 6a, now proven reachable via evaluate() too.
+store.upsert_device("shadow_dev2", timestamp=NOW)
+v = _evaluate(cl_afpe, _alert(device_id="shadow_dev2", hostname="shadow2", signature="CONNECTION_ABUSE",
+                                domain="sentry.io", features={"zeek_arp_sweep_count": 5}))
+check("evaluate()'s FALSE_POSITIVE branch for a CONNECTION_ABUSE signature bumps "
+      "this device's own threshold instead of immunizing the domain, and carries "
+      "no 'action' (immunize_domain) payload",
+      v["verdict"] == "FALSE_POSITIVE"
+      and cl_afpe.get_device_arp_sweep_threshold("shadow_dev2") > 8.0
+      and v.get("action") is None)
+
+# --- local-intel Check 7, wired through the composed evaluate() end-to-end ---
+real_local_intel_dir2 = _PathForSysPath(tempfile.mkdtemp(prefix="v13_clafpe_shadow_intel_"))
+real_local_intel2 = LocalConfirmedIntel(str(real_local_intel_dir2))
+cl_afpe_with_intel = ClAfpeEngine(store, local_intel=real_local_intel2)
+store.upsert_device("shadow_confirmer", timestamp=NOW)
+store.upsert_device("shadow_victim", timestamp=NOW)
+
+# Uses a ThreatIntel IOC match (Check 1) specifically -- _is_domain_causal_hard_stop()
+# only treats THAT check as causally linked to `domain` (every other check records
+# dest_ip only, never the domain), same real v1 distinction Phase 6b's own tests
+# already cover for the write guard in isolation -- this proves it end-to-end
+# through the composed evaluate().
+confirm_verdict = _evaluate(cl_afpe_with_intel, _alert(
+    device_id="shadow_confirmer", hostname="confirmer", features={"ti_risk": 3.0},
+    domain="evil-shadow-example.com", dest_ip="203.0.113.9"))
+check("a genuine Stage-1 hard-stop with local_intel wired in records the confirmation "
+      "(setup step for the cross-device propagation check below)",
+      confirm_verdict["verdict"] == "CONFIRMED_THREAT")
+
+later_verdict = _evaluate(cl_afpe_with_intel, _alert(
+    device_id="shadow_victim", hostname="victim", domain="evil-shadow-example.com"), now=NOW + 5)
+check("evaluate()'s Check 7 gives a DIFFERENT device an immediate hard-stop on the "
+      "same confirmed-malicious domain -- the network-wide propagation point of "
+      "this whole mechanism, now proven reachable through the composed evaluate()",
+      later_verdict["verdict"] == "CONFIRMED_THREAT"
+      and any("Local confirmed-threat match" in r for r in later_verdict["reasons"]))
 
 store.close()
 
