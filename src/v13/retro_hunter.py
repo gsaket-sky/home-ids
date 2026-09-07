@@ -24,15 +24,12 @@ with Phases 4/5's own honest cuts, not accidents:
    it up through the exact same HypothesisEngine/DecisionEngine path any other
    reputation evidence goes through, rather than a separate mechanism.
 
-NOT PORTED (tracked as real, separate future work, consistent with Phase 4's
-local_intel deferral): check_local_intel_history()'s cross-device "device B also
-touched this IOC before it was confirmed by device A" cross-reference -- it
-depends on the LocalConfirmedIntel store, which v13 doesn't have yet (deliberately
-deferred in Phase 4 alongside the rest of local-intel poisoning protection). Also
-not ported: Telegram notification (an orchestration concern, kept out of this
-module for testability -- callers get the finding list back and decide how to
-notify, the same "hand data back, let the caller act" shape CL-AFPE's
-MarkFalsePositiveResult already uses) and job-health/GeoIP-enrichment reporting.
+NOT PORTED HERE (a deliberate module-boundary choice, not a scope cut): Telegram
+notification and GeoIP-enriched reporting stay OUT of this module -- an
+orchestration concern, kept out for testability. Callers (v13/ops/live_retro_hunter.py)
+get the finding/match lists back and decide how to notify, the same "hand data
+back, let the caller act" shape CL-AFPE's MarkFalsePositiveResult already uses.
+See that ops module for Phase 7's Telegram/GeoIP wiring.
 
 3. NETWORK-WIDE REPUTATION PROPAGATION (v13 full-architecture plan, Phase 1a,
    added after this module's initial Phase 6 build): every confirmed destination
@@ -44,14 +41,40 @@ MarkFalsePositiveResult already uses) and job-health/GeoIP-enrichment reporting.
    (a per-device Evidence write-back) -- this one is destination-scoped, not
    device-scoped, closing the gap check_local_intel_history() addresses for
    v-current's own separate LocalConfirmedIntel store.
+
+4. LOCAL-INTEL CROSS-DEVICE CORRELATION (v13 full-architecture plan, Phase 7):
+   check_local_intel_history() below is the "not yet ported" item #1 named at the
+   top of this docstring, now built. Graph-native port of
+   scripts/retro_hunter.py's own check_local_intel_history() (lines 197-258) --
+   same exclusion rule (a device already among an IOC's own confirmed `sources`
+   is not a new finding), same {device_id, matched_kind, matched_value,
+   confirmed_by, first_confirmed, count, reason} shape -- but reads v13's OWN
+   graph-derived destination history (get_device_destinations_since(), the SAME
+   query hunt() itself already uses) instead of v1's flat alerts.json log, and
+   classifies each destination_id as "ip"/"domain" via the same _looks_like_ip()
+   GraphStore's own insert_evidence() already uses (v13 Evidence has one
+   destination_id field, not v1's separate queried_domain/destination_ip pair).
+
+   DELIBERATELY checked against the SAME v13-only LocalConfirmedIntel instance
+   CL-AFPE's own shadow mode writes into (v13/ops/live_engine.py's
+   _CL_AFPE_LOCAL_INTEL_DIR, Phase 6e), never v1's real
+   state/local_confirmed_intel.json -- a self-contained v13 feature: as CL-AFPE's
+   shadow Stage 1 hard-stop confirms a threat via one device (Phase 6b/6e's
+   record_confirmed_threat()), this finds every OTHER device that touched the
+   SAME IOC earlier, the actual "device B also touched this before it was
+   confirmed by device A" point of the mechanism -- entirely inside v13's own
+   state, matching this whole session's "v13 never writes into v1's real
+   confirmed-intel store" principle (see live_engine.py's own Phase 6e docstring
+   for why that separation matters).
 """
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from v13.graph.store import GraphStore
+from v13.graph.store import GraphStore, _looks_like_ip
 from v13.evidence.model import Evidence
+from intelligence.local_intel import LocalConfirmedIntel
 
 
 def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
@@ -156,3 +179,31 @@ class RetroHunter:
 
         findings.sort(key=lambda f: f.confidence, reverse=True)
         return findings
+
+    def check_local_intel_history(self, local_intel: LocalConfirmedIntel, days_back: float = 14,
+                                     now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """v13 full-architecture plan, Phase 7 -- see this module's own top-of-file
+        docstring item #4 for the full design rationale. Matches
+        scripts/retro_hunter.py's real check_local_intel_history() exclusion rule
+        exactly: a device already among an IOC's own confirmed `sources` is not a
+        new finding (it already triggered its own confirmation at the time)."""
+        now = now if now is not None else time.time()
+        since = now - days_back * 86400
+        pairs = self.store.get_device_destinations_since(since)
+
+        matches: List[Dict[str, Any]] = []
+        for device_id, dest in pairs:
+            kind = "ip" if _looks_like_ip(dest) else "domain"
+            entry = local_intel.check(kind, dest)
+            if not entry:
+                continue
+            if device_id in entry.get("sources", []):
+                continue
+            matches.append({
+                "device_id": device_id, "matched_kind": kind, "matched_value": dest,
+                "confirmed_by": list(entry.get("sources", []) or []),
+                "first_confirmed": entry.get("first_confirmed"),
+                "count": entry.get("count"),
+                "reason": entry.get("reason", "unknown"),
+            })
+        return matches

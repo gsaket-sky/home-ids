@@ -25,8 +25,16 @@ def check(name, cond, detail=""):
 import v13.ops.live_retro_hunter as live_retro_hunter  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
 from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
+from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 
 TMPDIR = _PathForSysPath(tempfile.mkdtemp(prefix="live_retro_hunter_test_"))
+
+# Phase 7: redirect CL-AFPE's own v13-only local-intel store to an isolated temp
+# dir for every test in this file -- the real default (v13/ops/live_engine.py's
+# _CL_AFPE_LOCAL_INTEL_DIR, "state/v13_cl_afpe") is a relative path that would
+# otherwise create real files under this repo's own working directory during a
+# test run.
+live_retro_hunter._CL_AFPE_LOCAL_INTEL_DIR = str(TMPDIR / "cl_afpe_local_intel_shared")
 
 
 # --- no db yet: a clean no-op, not an error (matches live_prune.py's own convention) ---
@@ -131,6 +139,71 @@ error_health = json.loads((_error_dir / "job_health.json").read_text())
 check("a threat-intel factory failure is recorded in job_health.json rather than "
       "crashing the scheduled job process",
       "error" in error_health["live_retro_hunter"])
+
+
+# --- Phase 7: local-intel cross-reference + Telegram notification wiring ---
+_li_dir = TMPDIR / "local_intel_phase7"
+_li_dir.mkdir()
+li_db_path = _li_dir / "v13_graph.db"
+li_store = GraphStore(str(li_db_path))
+li_store.insert_evidence(Evidence(
+    device_id="li_confirmer", destination_id="already-bad.example.com", evidence_type="dns_query",
+    independence_family="dns", timestamp=now - 1 * 86400, source="zeek",
+))
+li_store.insert_evidence(Evidence(
+    device_id="li_victim", destination_id="already-bad.example.com", evidence_type="dns_query",
+    independence_family="dns", timestamp=now - 2 * 86400, source="zeek",
+))
+li_store.close()
+
+_li_intel_dir = TMPDIR / "cl_afpe_local_intel_phase7"
+LocalConfirmedIntel(str(_li_intel_dir)).record(
+    "domain", "already-bad.example.com", "li_confirmer", reason="STAGE_1_HARD_STOP")
+
+live_retro_hunter.CONFIG = {"state_path": str(_li_dir / "ids_state.json"),
+                              "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
+with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(_li_intel_dir)), \
+     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+     patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram:
+    live_retro_hunter.main()
+
+check("main() finds the cross-device local-intel match (li_victim touched a domain "
+      "already confirmed by li_confirmer) via the SAME v13-only LocalConfirmedIntel "
+      "store CL-AFPE's own shadow mode writes into",
+      json.loads((_li_dir / "job_health.json").read_text())["live_retro_hunter"]["local_intel_matches_count"] == 1)
+check("main() sends exactly one Telegram notification for the local-intel match "
+      "(no external-TI matches this run -- fake_lookup_factory only recognizes "
+      "'evil.example.com')",
+      mock_send_telegram.call_count == 1)
+sent_msg = mock_send_telegram.call_args.args[1] if mock_send_telegram.call_count else ""
+check("the Telegram message names the victim device and the matched domain",
+      "li_victim" in sent_msg and "already-bad.example.com" in sent_msg)
+check("the Telegram message correctly attributes the confirmation to li_confirmer",
+      "li_confirmer" in sent_msg)
+
+
+# --- Phase 7: zero matches of either kind sends NO Telegram notification ---
+_quiet_dir = TMPDIR / "quiet_phase7"
+_quiet_dir.mkdir()
+quiet_db_path = _quiet_dir / "v13_graph.db"
+quiet_store = GraphStore(str(quiet_db_path))
+quiet_store.insert_evidence(Evidence(
+    device_id="quiet_dev", destination_id="perfectly-fine.example.com", evidence_type="dns_query",
+    independence_family="dns", timestamp=now - 1 * 86400, source="zeek",
+))
+quiet_store.close()
+
+live_retro_hunter.CONFIG = {"state_path": str(_quiet_dir / "ids_state.json"),
+                              "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
+with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(TMPDIR / "cl_afpe_local_intel_empty")), \
+     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+     patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_quiet:
+    live_retro_hunter.main()
+
+check("main() sends NO Telegram notification when neither external-TI nor "
+      "local-intel finds anything -- send_telegram itself is never called on a "
+      "genuinely quiet run",
+      mock_send_telegram_quiet.call_count == 0)
 
 
 print(f"\n{'='*60}")

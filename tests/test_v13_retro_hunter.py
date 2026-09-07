@@ -164,6 +164,59 @@ check("hunting against a store with zero evidence at all produces an empty list,
       hunter_empty.hunt(days_back=14, now=NOW) == [])
 empty_store.close()
 
+# --- Phase 7: check_local_intel_history() -- cross-device local-intel correlation ---
+from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
+
+li_dir = tempfile.mkdtemp(prefix="v13_retro_test_local_intel_")
+local_intel = LocalConfirmedIntel(li_dir)
+
+intel_store = GraphStore(str(_PathForSysPath(tmpdir) / "intel_test.db"))
+intel_store.insert_evidence(Evidence(device_id="li_dev_a", destination_id="already-confirmed.example.com",
+                                       evidence_type="dns_query", independence_family="dns_behavior",
+                                       timestamp=NOW - 3600, source="test", confidence=0.5, value=1.0))
+intel_store.insert_evidence(Evidence(device_id="li_dev_b", destination_id="already-confirmed.example.com",
+                                       evidence_type="dns_query", independence_family="dns_behavior",
+                                       timestamp=NOW - 3600, source="test", confidence=0.5, value=1.0))
+intel_store.insert_evidence(Evidence(device_id="li_dev_c", destination_id="203.0.113.44",
+                                       evidence_type="dns_query", independence_family="dns_behavior",
+                                       timestamp=NOW - 3600, source="test", confidence=0.5, value=1.0))
+intel_store.insert_evidence(Evidence(device_id="li_dev_d", destination_id="never-flagged.example.com",
+                                       evidence_type="dns_query", independence_family="dns_behavior",
+                                       timestamp=NOW - 3600, source="test", confidence=0.5, value=1.0))
+
+# li_dev_a is the confirming device itself -- its OWN prior touch is not a new finding.
+local_intel.record("domain", "already-confirmed.example.com", "li_dev_a", reason="STAGE_1_HARD_STOP")
+local_intel.record("ip", "203.0.113.44", "li_dev_z", reason="STAGE_1_HARD_STOP")
+
+intel_hunter = RetroHunter(intel_store, threat_intel_lookup=lambda d: None)
+li_matches = intel_hunter.check_local_intel_history(local_intel, days_back=14, now=NOW)
+li_matches_by_device = {m["device_id"]: m for m in li_matches}
+
+check("check_local_intel_history finds the OTHER device (li_dev_b) that touched an "
+      "already-confirmed domain -- the actual cross-device correlation point",
+      "li_dev_b" in li_matches_by_device
+      and li_matches_by_device["li_dev_b"]["matched_kind"] == "domain"
+      and li_matches_by_device["li_dev_b"]["confirmed_by"] == ["li_dev_a"])
+check("...but does NOT flag the confirming device itself (li_dev_a) -- it already "
+      "triggered its own confirmation at the time, matching v1's exact exclusion rule",
+      "li_dev_a" not in li_matches_by_device)
+check("check_local_intel_history correctly classifies an IP-shaped destination as "
+      "'ip', not 'domain', via the same _looks_like_ip() GraphStore's own "
+      "insert_evidence() already uses",
+      "li_dev_c" in li_matches_by_device and li_matches_by_device["li_dev_c"]["matched_kind"] == "ip")
+check("a device that never touched anything in the local-intel store produces no match",
+      "li_dev_d" not in li_matches_by_device)
+check("the finding shape carries first_confirmed/count/reason through from the real "
+      "LocalConfirmedIntel entry, not just a bare match flag",
+      li_matches_by_device["li_dev_b"]["reason"] == "STAGE_1_HARD_STOP"
+      and li_matches_by_device["li_dev_b"]["count"] == 1
+      and li_matches_by_device["li_dev_b"]["first_confirmed"] is not None)
+
+no_intel_matches = intel_hunter.check_local_intel_history(LocalConfirmedIntel(tempfile.mkdtemp()), days_back=14, now=NOW)
+check("an empty (freshly-created) local-intel store produces zero matches, no crash",
+      no_intel_matches == [])
+
+intel_store.close()
 store.close()
 
 print()
