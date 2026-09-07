@@ -133,18 +133,23 @@ read-only SSH after the fact, not just taken on report:
   unrelated lines (an AbuseIPDB rate-limit warning; local-intel correctly
   refusing to record a multicast address as confirmed-malicious, a guard
   working as intended, not a bug).
-- **Follow-up correction, same day**: the user's own live `journalctl -f`
+- **Follow-up correction #1, same day**: the user's own live `journalctl -f`
   caught the `--runmode=workers` fix failing for real — Suricata rejected it
   outright (`custom type "workers" doesn't exist for this runmode type
   "PCAP_FILE"`), exiting 1 immediately with zero findings on every burst
-  since the restart (one timeout, then two immediate exit-1 failures).
-  `workers` only exists for live-capture runmode types; `-r` (offline pcap)
-  only supports `single`/`autofp`. Re-fixed to `--runmode=autofp` (the actual
-  multi-threaded PCAP_FILE option), regression tests updated to guard against
-  both `single` and `workers` reappearing, all 30 checks in
-  `test_phase37_suricata_batch_scan.py` re-confirmed passing. **Still needs
-  one more live burst + journalctl check** to confirm `autofp` produces a
-  real "scan complete" line under actual load, not just a valid command.
+  since the restart. Re-fixed to `--runmode=autofp` (the actual multi-threaded
+  PCAP_FILE option).
+- **Follow-up correction #2, same day**: `autofp` alone *still* didn't fix it
+  — real bursts kept timing out. A live CPU-sampling watcher (see Workstream 6
+  below for full detail) found the real cause: a separate, pre-existing
+  `suricata.service` daemon crash-looping 25,922+ times (disabled), AND
+  Suricata being throttled to a shared ~40%-of-one-core cgroup budget because
+  it's spawned as a child of `soc.service` (fixed via a new opt-in
+  `sudo systemd-run --scope` wrapper into its own slice,
+  `reactive_capture_suricata_cgroup_isolate` config key). **Still needs the
+  new config key enabled + one more live burst + journalctl check** to
+  confirm a real "scan complete" line under actual load — not yet done as of
+  this note.
 
 Original instructions (kept below for the historical record — all already applied):
 
@@ -545,8 +550,54 @@ ever scoped the larger migration.
   worker threads, one output thread). Regression tests in
   `tests/test_phase37_suricata_batch_scan.py` updated to assert `autofp` is
   used and guard against *both* `single` and `workers` reappearing — full file
-  (30 checks) re-confirmed clean. Not yet re-verified against a real burst
-  under load on `.94` (needs another restart + journalctl check). **Deliberately not also done, flagged as a real follow-up**: the
+  (30 checks) re-confirmed clean.
+
+  **A third, deeper root cause, found the same day by re-verifying under real
+  load instead of trusting the `autofp` fix on its own**: even with `autofp`
+  and with the (separately-found — see below) crash-looping `suricata.service`
+  disabled, real bursts *still* timed out. A CPU-sampling watcher run against a
+  live scan showed Suricata using only ~19% of one core, wall-clock time spent
+  waiting rather than computing, with 6+ of 8 real cores sitting completely
+  idle (load average never exceeded ~1.8) — the opposite of a CPU-bound
+  problem. Root cause: `run_suricata_on_pcap()` spawns Suricata as a **child of
+  `soc.service`**, which inherits the whole cgroup, including
+  `soc.service`'s own `CPUQuota=40%` — sized for the always-on 2s decision
+  loop (whose own steady ~25% usage was already eating most of that budget),
+  never for an occasional multi-threaded batch job. Confirmed directly: the
+  exact same pcap that timed out in-pipeline finished in 90-99s when run
+  manually outside the cgroup, at ~100% CPU. No `--runmode` choice could ever
+  have fixed this — the ceiling was external to Suricata entirely. **Fixed**:
+  new opt-in `reactive_capture_suricata_cgroup_isolate` config key wraps the
+  invocation in `sudo systemd-run --scope` into its own transient
+  `reactive-capture.slice` (auto-collected on exit, own configurable
+  `reactive_capture_suricata_cpu_quota_percent`, default 300%) — the main
+  loop's own tight quota stays untouched; only the batch scan gets room to use
+  idle cores. Preserves the caller's own uid/gid (never a hardcoded username)
+  so scratch-dir files stay owned by the same unprivileged user as before, not
+  root. Confirmed the deploy user has passwordless `sudo` on `.94`
+  (`NOPASSWD: ALL`), so no interactive-password blocker. Silently falls back
+  to the unwrapped invocation if `systemd-run`/`sudo` aren't on PATH (this dev
+  box, most test environments) — disabled by default until enabled on `.94`.
+  5 new regression tests in `test_phase37_suricata_batch_scan.py` (wrapped
+  command shape, CPUQuota threading, uid/gid preservation, both fallback
+  paths) — full file (35 checks) re-confirmed clean.
+
+  **Also found and fixed along the way, unrelated to any of the above**: a
+  separate, pre-existing `suricata.service` systemd unit (installed by the OS
+  package, live AF_PACKET mode) was crash-looping — **25,922+ restarts**,
+  configured for an interface (`eth0`) that doesn't exist on this box, burning
+  a full CPU core every ~35-40s cycle recompiling the ruleset before failing.
+  Not part of this codebase's design at all (the documented architecture is
+  deliberately batch-only) and never fed the pipeline. Disabled
+  (`systemctl disable --now`) — confirmed stopped, no process remains.
+
+  **Still not confirmed under real load**: the `cgroup_isolate` fix is
+  implemented and tested but not yet enabled on `.94` (needs the config key
+  flipped + restart, then a live burst + journalctl check to confirm a real
+  "scan complete" line instead of another timeout) — flagged as the actual
+  remaining follow-up, not the `autofp`/`suricata.service` fixes above, both
+  of which are already confirmed necessary-but-insufficient on their own.
+  **Deliberately not also done, flagged as a real follow-up**: the
   68,620-line ruleset is the full/untrimmed feed, not the "trimmed/security
   policy" this module's own docstring says was the intended design — pruning it
   is a real detection-coverage-vs-performance judgment call, left for a human

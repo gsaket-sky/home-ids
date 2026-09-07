@@ -644,11 +644,58 @@ against both `single` and `workers` reappearing.
 removal, model consolidation, dead-file cleanup, `cl_afpe_engine` +
 `cl_afpe_flip_monitor` config) was applied by the user directly and
 independently re-verified via read-only SSH — clean `soc.service` restart,
-zero errors in the post-restart journal. **Only remaining open item in the
-entire plan**: the CL-AFPE live flip itself (W2-3), correctly gated on real
-production data accumulating (≥50 eligible comparisons, zero false-negative-
-shaped divergences) via the new `cl_afpe_flip_monitor.py`, not on more
-building.
+zero errors in the post-restart journal.
+
+### A31. Suricata timeouts, take three: the real root cause was CPU throttling, not the runmode flag (2026-09-07, same day)
+
+`--runmode=autofp` (A30) still didn't fix real production timeouts. Rather
+than guess a fourth flag, ran a live diagnostic: temporarily disabled
+`reactive_capture_delete_after_ingest` so a real burst's pcap would survive,
+then manually re-ran `suricata -r` against the *exact same file* outside the
+app — it finished in 90-99s at ~100% CPU. The in-pipeline scan of the same
+kind of file timed out at 240s. A CPU-sampling watcher (`pgrep` + periodic
+`ps`/`uptime` snapshots) run against a live scan found the real signature: Suricata
+using only ~19% of one core, load average never exceeding ~1.8 out of 8 real
+cores — the opposite of CPU starvation. Two independent causes, both found
+this way, both fixed:
+
+1. **A separate, pre-existing `suricata.service` systemd unit** (installed by
+   the OS package, live AF_PACKET mode — not part of this codebase's design,
+   which is deliberately batch-only) was crash-looping: **25,922+ restarts**,
+   `journalctl` showing `af-packet: eth0: failed to find interface: No such
+   device` on every cycle, burning a full core every ~35-40s recompiling the
+   ruleset before dying. Never fed the pipeline (separate log directory).
+   Disabled (`systemctl disable --now`), confirmed stopped.
+2. **The real fix**: `run_suricata_on_pcap()` spawns Suricata as a child of
+   `soc.service`, inheriting its cgroup — including `soc.service`'s own
+   `CPUQuota=40%`, sized for the always-on 2s decision loop (whose own steady
+   ~25% usage already ate most of that budget) and never intended to also
+   host a multi-threaded batch job. No `--runmode` choice could fix an
+   external OS-level throttle. Fixed with a new opt-in
+   `reactive_capture_suricata_cgroup_isolate` config key: when enabled, wraps
+   the invocation in `sudo systemd-run --scope` into its own transient
+   `reactive-capture.slice` (auto-collected on exit) with its own configurable
+   `reactive_capture_suricata_cpu_quota_percent` (default 300%) — leaves the
+   main loop's own tight quota completely untouched. Preserves the caller's
+   own `uid`/`gid` (never a hardcoded username) so scratch files stay owned
+   by the unprivileged deploy user, not root. `.94`'s deploy user has
+   passwordless `sudo` (`NOPASSWD: ALL`), confirmed before relying on it.
+   Silently falls back to the unwrapped invocation when `systemd-run`/`sudo`
+   aren't on PATH (this dev box, most test environments) — disabled by
+   default until enabled on `.94`. 5 new regression tests, full file (35
+   checks) re-confirmed clean.
+
+**Deployment status**: code committed/pushed. **Not yet enabled or verified
+under real load on `.94`** — needs `reactive_capture_suricata_cgroup_isolate:
+true` added to config, a restart, and one more live-burst journalctl check
+for an actual "scan complete" line. This is now the real remaining item for
+Suricata evidence, not the `autofp`/`suricata.service` fixes above (both
+independently confirmed necessary but insufficient on their own).
+
+**Only remaining open item in the entire plan otherwise**: the CL-AFPE live
+flip itself (W2-3), correctly gated on real production data accumulating
+(≥50 eligible comparisons, zero false-negative-shaped divergences) via the
+new `cl_afpe_flip_monitor.py`, not on more building.
 
 ## Open items carried from the plan
 

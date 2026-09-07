@@ -728,6 +728,25 @@ reactive_capture:
   reactive_capture_zeek_memory_limit_mb: 0
   reactive_capture_suricata_memory_limit_mb: 0
 
+  # 2026-09-07 live incident: a Suricata batch scan is spawned as a CHILD of
+  # soc.service, which inherits soc.service's own systemd CPUQuota -- sized for the
+  # always-on 2s decision loop (a fraction of one core), not an occasional
+  # multi-threaded batch job. Confirmed live: scans timed out at 240s with 6+ of 8
+  # real cores sitting idle; the same file processed outside the cgroup finished in
+  # well under half that time. When enabled, wraps the invocation in
+  # `sudo systemd-run --scope` into its own transient slice (auto-collected on exit,
+  # never lingers) so the main loop's own tight quota stays untouched -- only the
+  # occasional batch scan gets room to actually use idle cores. Requires passwordless
+  # sudo for systemd-run on the deployment host; silently falls back to the unwrapped
+  # invocation if `systemd-run` isn't on PATH (true of most test environments and
+  # this dev box). Disabled by default -- opt in once passwordless sudo is confirmed.
+  reactive_capture_suricata_cgroup_isolate: false
+  # CPUQuota (percent, "300" = 3 full cores) for that transient slice. Generous on
+  # purpose: this only applies while a batch scan is actually running (a few minutes,
+  # a handful of times per hour), not continuously -- tune down on a busier host or
+  # a Raspberry Pi with fewer real cores to spare.
+  reactive_capture_suricata_cpu_quota_percent: 300.0
+
   # reactive_capture_zeek_bin moved to the "external_system_paths" section at the
   # very bottom of this file, alongside pihole_db/zeek_log_dir -- same reasoning
   # (describes YOUR Zeek installation's layout, not this app's own data).

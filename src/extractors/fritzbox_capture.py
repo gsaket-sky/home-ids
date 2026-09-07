@@ -574,6 +574,14 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     suricata_bin = config.get("reactive_capture_suricata_bin", "/usr/bin/suricata")
     suricata_rules_path = config.get("reactive_capture_suricata_rules_path", "")
     suricata_timeout = float(config.get("reactive_capture_suricata_timeout_seconds", 60.0))
+    # 2026-09-07 live incident (see suricata_scan.py's own docstring): a batch scan
+    # spawned as a child of soc.service inherits its CPUQuota=40% cgroup cap, sized for
+    # the always-on decision loop, not an occasional multi-threaded batch job -- caused
+    # scans to time out with 6+ of 8 real cores sitting idle. Disabled by default:
+    # needs passwordless sudo for systemd-run on the deployment host before this does
+    # anything (falls back to the unwrapped invocation otherwise).
+    suricata_cgroup_isolate = bool(config.get("reactive_capture_suricata_cgroup_isolate", False))
+    suricata_cpu_quota_percent = float(config.get("reactive_capture_suricata_cpu_quota_percent", 300.0))
 
     summary: Dict[str, object] = {
         "trigger_reason": trigger_reason,
@@ -637,6 +645,8 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
                         std_path, suricata_scratch, suricata_bin, suricata_rules_path,
                         state_manager, capture_ts, timeout=suricata_timeout,
                         memory_limit_mb=suricata_memory_limit_mb,
+                        cgroup_isolate=suricata_cgroup_isolate,
+                        cpu_quota_percent=suricata_cpu_quota_percent,
                     )
                     for dev_id, ev_list in iface_findings.items():
                         suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)

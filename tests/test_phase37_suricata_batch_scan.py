@@ -27,6 +27,7 @@ Covers:
      "suricata" in EVIDENCE_FAMILIES/ATTACK_EVIDENCE_FAMILIES.
 """
 import json
+import os
 import sys
 import tempfile
 import time
@@ -96,6 +97,52 @@ with tempfile.TemporaryDirectory() as tmpdir:
         check("REGRESSION GUARD: --runmode=workers never reappears -- confirmed "
               "invalid for PCAP_FILE mode by Suricata itself, live on `.94`",
               "--runmode=workers" not in called_cmd)
+
+    # 2026-09-07, second live incident same day: soc.service's own CPUQuota=40% cgroup
+    # cap is inherited by any child it spawns, including a batch scan -- confirmed live
+    # to cause 240s timeouts with 6+ of 8 real cores idle. cgroup_isolate=True should
+    # wrap the invocation in `sudo systemd-run --scope` into its own slice; default
+    # (False) and "systemd-run not on PATH" must both fall back to the plain command.
+    if not hasattr(os, "getuid"):
+        print("[SKIP] cgroup_isolate wrapping checks -- os.getuid() is POSIX-only "
+              "(this dev box is Windows); the feature is inert here by the same guard "
+              "that makes it inert, so there's nothing real to assert against.")
+    else:
+        with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run, \
+             _patch("intelligence.detectors.suricata_scan.shutil.which", return_value="/usr/bin/x"):
+            mock_run.return_value = _MagicMock(returncode=0, stderr="")
+            run_suricata_on_pcap(fake_pcap, tmp / "scratch5", "/usr/bin/suricata", str(real_rules),
+                                  cgroup_isolate=True, cpu_quota_percent=250.0)
+            called_cmd = mock_run.call_args.args[0]
+            check("cgroup_isolate=True + systemd-run/sudo present wraps with sudo systemd-run --scope",
+                  called_cmd[:2] == ["sudo", "systemd-run"])
+            check("the transient scope is auto-collected on exit (never lingers)",
+                  "--collect" in called_cmd)
+            check("CPUQuota is threaded through to the transient slice",
+                  "-p" in called_cmd and "CPUQuota=250%" in called_cmd)
+            check("the real suricata invocation is still present, unmodified, after the wrapper",
+                  "/usr/bin/suricata" in called_cmd and "--runmode=autofp" in called_cmd)
+            check("the wrapper preserves the caller's own uid/gid, never a hardcoded username",
+                  any(a == f"--uid={os.getuid()}" for a in called_cmd)
+                  and any(a == f"--gid={os.getgid()}" for a in called_cmd))
+
+    with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run:
+        mock_run.return_value = _MagicMock(returncode=0, stderr="")
+        run_suricata_on_pcap(fake_pcap, tmp / "scratch6", "/usr/bin/suricata", str(real_rules),
+                              cgroup_isolate=False)
+        called_cmd = mock_run.call_args.args[0]
+        check("cgroup_isolate=False (the default) never wraps the command",
+              called_cmd[0] == "/usr/bin/suricata")
+
+    with _patch("intelligence.detectors.suricata_scan.subprocess.run") as mock_run, \
+         _patch("intelligence.detectors.suricata_scan.shutil.which", return_value=None):
+        mock_run.return_value = _MagicMock(returncode=0, stderr="")
+        run_suricata_on_pcap(fake_pcap, tmp / "scratch7", "/usr/bin/suricata", str(real_rules),
+                              cgroup_isolate=True)
+        called_cmd = mock_run.call_args.args[0]
+        check("cgroup_isolate=True but systemd-run/sudo missing (e.g. this dev box, most "
+              "test environments) falls back to the plain invocation, never raises",
+              called_cmd[0] == "/usr/bin/suricata")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

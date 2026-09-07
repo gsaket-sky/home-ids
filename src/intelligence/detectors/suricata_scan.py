@@ -36,6 +36,7 @@ detector here can produce.
 import json
 import logging
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -56,7 +57,8 @@ _DEFAULT_CONFIDENCE = 0.5
 
 def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
                           rules_path: Optional[str], timeout: float = 60.0,
-                          memory_limit_mb: float = 0) -> List[dict]:
+                          memory_limit_mb: float = 0, cgroup_isolate: bool = False,
+                          cpu_quota_percent: float = 300.0) -> List[dict]:
     """Runs `suricata -r <pcap> -l <scratch_dir> -S <rules_path>` (batch/offline mode
     -- reads a file, exits, does not touch a live interface) and returns the parsed
     `event_type: alert` records from the resulting eve.json. Never raises -- a
@@ -68,7 +70,22 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
     caps Suricata's own virtual address space via RLIMIT_AS -- 0 (default) applies no
     limit, matching pre-fix behavior. A child that hits the ceiling exits non-zero,
     which the branch above already treats as "no findings, logged" -- no new failure
-    handling needed here."""
+    handling needed here.
+
+    cgroup_isolate/cpu_quota_percent (2026-09-07, second live incident, same day as
+    the runmode fix above): a batch scan is spawned as a CHILD of soc.service, which
+    inherits soc.service's own systemd cgroup -- including its CPUQuota=40% cap, sized
+    for the always-on 2s decision loop, not for an occasional multi-threaded batch job.
+    Confirmed live on `.94` via a CPU-sampling watcher during a real scan: Suricata sat
+    at ~19% CPU (most of its wall-clock time spent waiting for scheduler time, not
+    computing) while 6+ of 8 real cores sat idle (load average never exceeded ~1.8) --
+    a scan that completed in 90s standalone took 166s in-pipeline against a SMALLER
+    file. Fixing --runmode alone could never have fixed this; the ceiling was external
+    to Suricata entirely. When enabled, wraps the invocation in `sudo systemd-run
+    --scope` into its own transient, uncapped-relative-to-soc.service slice, so the
+    main decision loop's own tight quota is untouched -- only the occasional batch scan
+    gets room to actually use idle cores. Silently falls back to the unwrapped
+    invocation if `systemd-run` isn't on PATH (this dev box, most test environments)."""
     if not suricata_bin:
         return []
     if not rules_path or not Path(rules_path).exists():
@@ -91,10 +108,21 @@ def run_suricata_on_pcap(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
     # one capture thread reads the file and auto-flow-pins packets across N
     # detection worker threads, one output thread -- this is what uses the box's
     # other 7 cores instead of just one.
-    cmd = [
+    suricata_cmd = [
         suricata_bin, "-r", str(pcap_path), "-l", str(scratch_dir),
         "-S", str(rules_path), "-k", "none", "--runmode=autofp",
     ]
+    if (cgroup_isolate and hasattr(os, "getuid") and shutil.which("systemd-run")
+            and shutil.which("sudo")):
+        # Own uid/gid, never a hardcoded username -- the target process must keep
+        # running as whoever invoked us, only the cgroup/quota setup needs root.
+        cmd = [
+            "sudo", "systemd-run", "--scope", "--collect",
+            "--slice=reactive-capture.slice", "-p", f"CPUQuota={cpu_quota_percent:.0f}%",
+            f"--uid={os.getuid()}", f"--gid={os.getgid()}", "--",
+        ] + suricata_cmd
+    else:
+        cmd = suricata_cmd
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False,
@@ -248,12 +276,15 @@ def suricata_alerts_to_evidence(alerts: List[dict], ip_to_device: Dict[str, str]
 
 def run_and_attribute(pcap_path: Path, scratch_dir: Path, suricata_bin: str,
                        rules_path: Optional[str], state_manager, capture_ts: float,
-                       timeout: float = 60.0, memory_limit_mb: float = 0) -> Dict[str, List[Evidence]]:
+                       timeout: float = 60.0, memory_limit_mb: float = 0,
+                       cgroup_isolate: bool = False,
+                       cpu_quota_percent: float = 300.0) -> Dict[str, List[Evidence]]:
     """Convenience wrapper: run_suricata_on_pcap() + build_ip_to_device_map() +
     suricata_alerts_to_evidence() in one call -- what fritzbox_capture.py's
     capture_and_ingest() actually calls per burst."""
     alerts = run_suricata_on_pcap(pcap_path, scratch_dir, suricata_bin, rules_path, timeout=timeout,
-                                   memory_limit_mb=memory_limit_mb)
+                                   memory_limit_mb=memory_limit_mb, cgroup_isolate=cgroup_isolate,
+                                   cpu_quota_percent=cpu_quota_percent)
     if not alerts:
         return {}
     ip_map = build_ip_to_device_map(state_manager)
