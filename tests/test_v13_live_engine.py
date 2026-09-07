@@ -110,6 +110,27 @@ check("C: a type with NO destination gap (zeek_notice) never gets the fallback_c
       "misapplied to it, even when last_dest_ip is present in the same call",
       "state" in r_no_gap)
 
+# v13 full-architecture plan, Phase 9: threat_signals.py's own zeek_exfiltration/
+# zeek_beaconing add() calls now attach a real .domain at the SOURCE (see
+# intelligence/detectors/threat_signals.py's own Phase 9 comment) -- confirms
+# the fallback_context split above becomes a pure safety net once that's true,
+# never overriding a domain the v1 Evidence item already carries, via
+# evidence/ingest.py's own convert() directly (checked at the conversion layer,
+# not just "the call didn't crash" like the checks above).
+from v13.evidence.ingest import convert as _v2_convert  # noqa: E402
+
+exfil_ev_with_real_domain = V1Evidence(
+    type="zeek_exfiltration", source="zeek", timestamp=now, device="d2",
+    value=5.0, confidence=0.8, independence_group="zeek_network", domain="93.184.216.34",
+)
+converted = _v2_convert(exfil_ev_with_real_domain, "data_transfer_pattern",
+                          fallback_context={"dest_ip": "104.16.132.229"})
+check("C: once threat_signals.py's own Phase 9 fix attaches a real .domain at the "
+      "source, convert() never overrides it with fallback_context -- the fallback "
+      "is correctly a safety net for the case it's no longer needed, not a "
+      "second, competing source of truth",
+      converted.destination_id == "93.184.216.34")
+
 
 # --- D. Fail-safe: v13 raising falls back to v-current's own evaluate(), loudly ---
 

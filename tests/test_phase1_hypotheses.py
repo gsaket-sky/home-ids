@@ -109,6 +109,20 @@ check("curated vendor-cloud-API domain with the IDENTICAL burst profile is dampe
       "confidence (0.35), not excluded outright and not full-confidence",
       vendor_conf == 0.35, f"got confidence={vendor_conf}")
 
+# BUGFIX (v13 full-architecture plan, Phase 9): zeek_exfiltration's add() calls never
+# passed domain= before, unlike dns_tunnel_v2's own add() calls a few lines above in
+# the same file -- last_dest_ip is already computed and already used for this same
+# evidence's own _is_local_dest() gate, so this is a real destination the Evidence
+# item can now carry at the source, not a new computation.
+exfil_features_with_dest = {"outbound_bytes_z": 6.0, "zeek_outbound_bytes": 3_000_000.0,
+                              "last_dest_ip": "93.184.216.34"}
+ev_exfil_dest = detector.detect("dev_exfil_dest", exfil_features_with_dest, top_domain="random-exfil-drop.io")
+exfil_ev = next((e for e in ev_exfil_dest if e.type == "zeek_exfiltration"), None)
+check("a zeek_exfiltration Evidence item now carries the real destination in .domain "
+      "(previously always None, forcing v13's own live_engine.py fallback_context "
+      "workaround to fire for every single instance of this evidence type)",
+      exfil_ev is not None and exfil_ev.domain == "93.184.216.34")
+
 
 # ── Test 3: C2 beaconing -> BeaconingHypothesis ─────────────────────────────────────
 beacon_features = {"beaconing_c2_1h": 5.0}
@@ -117,6 +131,14 @@ check("ThreatSignalDetector emits zeek_beaconing evidence for low-and-slow C2 pe
       any(e.type == "zeek_beaconing" for e in ev))
 check("BeaconingHypothesis becomes the winning attack hypothesis",
       result["attack"]["name"] == "C2_BEACONING", f"got={result['attack']}")
+
+# Same Phase 9 bugfix as zeek_exfiltration above, for zeek_beaconing's own three add()
+# call sites.
+beacon_features_with_dest = {"beaconing_c2_1h": 5.0, "last_dest_ip": "104.16.132.229"}
+ev_beacon_dest = detector.detect("dev_beacon_dest", beacon_features_with_dest)
+beacon_ev = next((e for e in ev_beacon_dest if e.type == "zeek_beaconing"), None)
+check("a zeek_beaconing Evidence item now carries the real destination in .domain",
+      beacon_ev is not None and beacon_ev.domain == "104.16.132.229")
 
 
 # ── Test 4: DNS covert tunneling (TXT/NULL abuse) -> DNSTunnelingV2Hypothesis ───────

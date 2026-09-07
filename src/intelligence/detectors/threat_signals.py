@@ -244,15 +244,27 @@ class ThreatSignalDetector:
         if is_local_exfil_dest:
             pass
         elif outbound_z > 5.0 and outbound_bytes > 2500000 and not is_vendor_cloud_api:
+            # BUGFIX (v13 full-architecture plan, Phase 9): domain= was never passed
+            # here, unlike the dns_tunnel_v2 blocks above -- exfil_dest_ip is already
+            # computed and already used for the _is_local_dest() gate just above, so
+            # this is a real destination this Evidence item can carry, not a new
+            # computation. Benefits v-current's own alert display directly (the same
+            # class of fix dns_tunnel_v2 already got) and lets v13's evidence ingest
+            # receive a real .domain at the source instead of needing
+            # live_engine.py's fallback_context workaround (which stays in place as
+            # a safety net regardless, not removed by this fix).
             add("zeek_exfiltration", outbound_z, 0.9, "zeek_network",
-                f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}")
+                f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
+                domain=exfil_dest_ip)
         elif outbound_z > 3.5 and outbound_bytes > 250000 and not is_telemetry:
             conf = 0.35 if is_vendor_cloud_api else 0.6
             add("zeek_exfiltration", outbound_z, conf, "zeek_network",
-                f"elevated Z={outbound_z:.2f} bytes={int(outbound_bytes)}")
+                f"elevated Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
+                domain=exfil_dest_ip)
         elif outbound_bytes > 50000000 and not is_telemetry and not is_vendor_cloud_api:
             add("zeek_exfiltration", outbound_bytes, 0.55, "zeek_network",
-                f"absolute volume bytes={int(outbound_bytes)}")
+                f"absolute volume bytes={int(outbound_bytes)}",
+                domain=exfil_dest_ip)
 
         # ── C2 beaconing periodicity ──────────────────────────────────────────────────
         beacon_c2_1h = float(features.get("beaconing_c2_1h", 0.0) or 0.0)
@@ -261,18 +273,30 @@ class ThreatSignalDetector:
         c2_jitter = float(features.get("beaconing_c2_count", 0.0) or 0.0)
         last_dest_ip = str(features.get("last_dest_ip", "unknown") or "unknown")
 
+        # BUGFIX (v13 full-architecture plan, Phase 9): domain= added to all three
+        # branches below, same reasoning as zeek_exfiltration above -- last_dest_ip
+        # is already computed and already used by the third branch's own
+        # _is_local_dest() gate. NOTE (deliberately not "fixed" beyond this phase's
+        # actual scope): the first two branches don't gate on _is_local_dest() before
+        # firing, unlike the third -- so domain=last_dest_ip here could occasionally
+        # attach a private/local IP as the destination. This is no worse than today's
+        # fallback_context workaround (which already does the same thing
+        # unconditionally for these two evidence types), so not a regression.
         if beacon_c2_1h > 0 and not is_telemetry:
             add("zeek_beaconing", beacon_c2_1h, 0.7, "zeek_network",
-                f"low-and-slow c2 periodicity {int(beacon_c2_1h)} sequences")
+                f"low-and-slow c2 periodicity {int(beacon_c2_1h)} sequences",
+                domain=last_dest_ip)
         elif beacon_tdr > 0.75 and beacon_total >= 15:
             conf = min(1.0, beacon_tdr) * (0.1 if is_telemetry else 1.0)
             if conf > 0:
                 add("zeek_beaconing", beacon_tdr, conf, "zeek_network",
-                    f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}")
+                    f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}",
+                    domain=last_dest_ip)
         elif c2_jitter > 0 and not is_telemetry and not _is_local_dest(last_dest_ip):
             conf = 0.3 if outbound_bytes == 0 else 0.55
             add("zeek_beaconing", c2_jitter, conf, "zeek_network",
-                f"uniform check-in jitter {int(c2_jitter)} hits")
+                f"uniform check-in jitter {int(c2_jitter)} hits",
+                domain=last_dest_ip)
 
         # ── TCP connection abuse / port scan ─────────────────────────────────────────
         # BUGFIX (live audit): this only ever looked at raw counts -- 165 rejected
