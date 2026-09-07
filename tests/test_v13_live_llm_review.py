@@ -247,6 +247,171 @@ check("job_health.json counts the failed query as an error, still reviewed=1 "
       err_health["live_llm_review"]["errors"] == 1 and err_health["live_llm_review"]["reviewed"] == 1)
 
 
+# --- Phase 8a: pattern-level persistent cache -- SAME run, two decisions sharing
+# a pattern (device|attack-hypothesis|decision_path + evidence fingerprint) ---
+_cache_dir = TMPDIR / "persistent_cache"
+_cache_dir.mkdir()
+cache_store = GraphStore(str(_cache_dir / "v13_graph.db"))
+# Two SEPARATE decision rows, same device/hypothesis/decision_path/evidence shape
+# (a recurring pattern), just different timestamps -- this is exactly the
+# "multiple decisions describing the same underlying recurring pattern" case
+# Phase 8a/8b exist to collapse into one real Ollama call.
+for i in range(2):
+    cache_store.insert_evidence(Evidence(
+        device_id="pattern_dev", destination_id="recurring.example.com",
+        evidence_type="dns_dga_burst", independence_family="dns_behavior",
+        timestamp=NOW - 300 + i, source="s", value=1.0, confidence=0.8))
+pattern_decision_ids = []
+for i in range(2):
+    did = cache_store.insert_decision(
+        device_id="pattern_dev", timestamp=NOW - 300 + i, state="SUSPICIOUS",
+        decision_path="hypothesis_suspicious", confidence=0.4, risk_score=2.0,
+        raw_payload={"hypotheses": {"attack": {"name": "DGA_BOTNET_C2"}}},
+        evidence_ids=[],
+    )
+    pattern_decision_ids.append(did)
+cache_store.close()
+
+live_llm_review.CONFIG = _config_for(_cache_dir)
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient):
+    live_llm_review.main()
+check("Phase 8a: two decisions sharing the SAME pattern key make only ONE real "
+      "Ollama call in a single run -- the second is served from the in-memory "
+      "cache populated by the first, satisfying Phase 8b's grouping goal too",
+      _FakeClient.calls == 1)
+pattern_lines = [json.loads(l) for l in (_cache_dir / "ollama_analysis_v13.jsonl").read_text().splitlines() if l.strip()]
+check("both decisions were still written as their own entries (2 total)",
+      len(pattern_lines) == 2)
+by_did = {l["decision_id"]: l for l in pattern_lines}
+served_from_cache = [l for l in pattern_lines if l.get("served_from_persistent_cache")]
+check("exactly one of the two entries is marked served_from_persistent_cache",
+      len(served_from_cache) == 1)
+check("the cache-served entry carries the SAME recommendation as the one that "
+      "made the real call, not a fabricated/empty one",
+      served_from_cache[0]["recommendation"] ==
+      [l for l in pattern_lines if not l.get("served_from_persistent_cache")][0]["recommendation"])
+cache_health = json.loads((_cache_dir / "job_health.json").read_text())
+check("job_health.json's new cache_hits/queries_made keys reflect the real split",
+      cache_health["live_llm_review"]["cache_hits"] == 1
+      and cache_health["live_llm_review"]["queries_made"] == 1)
+
+
+# --- Phase 8a: CROSS-RUN persistence -- a brand-new decision matching an
+# already-cached pattern from a PRIOR run is served from cache too, not just
+# within the same run's in-memory dict ---
+cache_store2 = GraphStore(str(_cache_dir / "v13_graph.db"))
+# Deliberately NO new evidence inserted here -- evidence_in_window() has no
+# upper timestamp bound (RollingWindowView.evidence_in_window(), confirmed via
+# direct read), so a NEW evidence item for this device would change every
+# fingerprint going forward, including the two already-cached entries' own
+# recomputed one. This decision reuses the SAME evidence already in the graph
+# from the two decisions above -- a genuinely identical pattern, the real case
+# this test means to prove.
+new_pattern_decision_id = cache_store2.insert_decision(
+    device_id="pattern_dev", timestamp=NOW - 100, state="SUSPICIOUS",
+    decision_path="hypothesis_suspicious", confidence=0.4, risk_score=2.0,
+    raw_payload={"hypotheses": {"attack": {"name": "DGA_BOTNET_C2"}}},
+)
+cache_store2.close()
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient):
+    live_llm_review.main()
+check("Phase 8a: a NEW decision_id matching an already-cached pattern from a "
+      "PRIOR run makes ZERO new Ollama calls -- the persistent (on-disk) cache, "
+      "not just the in-memory one, actually works across runs",
+      _FakeClient.calls == 0)
+cross_run_lines = [json.loads(l) for l in (_cache_dir / "ollama_analysis_v13.jsonl").read_text().splitlines() if l.strip()]
+new_entry = next((l for l in cross_run_lines if l["decision_id"] == new_pattern_decision_id), None)
+check("the new decision's own entry was written and correctly marked cache-served",
+      new_entry is not None and new_entry.get("served_from_persistent_cache") is True)
+
+
+# --- Phase 8a: a genuinely DIFFERENT evidence fingerprint does NOT cache-hit,
+# even with the same device/hypothesis/decision_path ---
+fp_store = GraphStore(str(_cache_dir / "v13_graph.db"))
+fp_store.insert_evidence(Evidence(
+    device_id="pattern_dev", destination_id="recurring.example.com",
+    evidence_type="dns_dga_burst", independence_family="dns_behavior",
+    timestamp=NOW - 50, source="s", value=1.0, confidence=0.8))
+# A genuinely NEW evidence type appearing (arp_sweep) -- the fingerprint must change.
+fp_store.insert_evidence(Evidence(
+    device_id="pattern_dev", destination_id="recurring.example.com",
+    evidence_type="arp_sweep", independence_family="network_recon",
+    timestamp=NOW - 50, source="s", value=1.0, confidence=0.9))
+fp_decision_id = fp_store.insert_decision(
+    device_id="pattern_dev", timestamp=NOW - 50, state="SUSPICIOUS",
+    decision_path="hypothesis_suspicious", confidence=0.4, risk_score=2.0,
+    raw_payload={"hypotheses": {"attack": {"name": "DGA_BOTNET_C2"}}},
+)
+fp_store.close()
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient):
+    live_llm_review.main()
+check("Phase 8a: a NEW piece of evidence (arp_sweep newly present) on an "
+      "otherwise-identical pattern invalidates the cache -- a real Ollama call "
+      "is made, not silently served a stale verdict",
+      _FakeClient.calls == 1)
+
+
+# --- Phase 8d: Telegram digest ---
+digest_none = live_llm_review.build_llm_review_digest_message([])
+check("build_llm_review_digest_message returns None for an empty run (nothing to report)",
+      digest_none is None)
+
+digest_msg = live_llm_review.build_llm_review_digest_message([
+    {"device_id": "d1", "decision_path": "hypothesis_high", "validator_accepted": True,
+     "recommendation": {"classification": "malicious"}},
+    {"device_id": "d2", "decision_path": "hypothesis_high", "validator_accepted": False,
+     "recommendation": {"classification": "benign", "reason": "looked like telemetry"}},
+    {"device_id": "d3", "decision_path": "hypothesis_high", "served_from_persistent_cache": True,
+     "validator_accepted": True, "recommendation": {"classification": "malicious"}},
+    {"device_id": "d4", "decision_path": "hypothesis_high", "llm_error": "no_response_or_unparseable"},
+])
+check("the digest counts reviewed/cache-hit/accepted/rejected/error correctly",
+      "4 decision(s) reviewed" in digest_msg and "1 served from the persistent pattern cache" in digest_msg
+      and "2 LLM verdict(s) accepted" in digest_msg and "1 LLM verdict(s) REJECTED" in digest_msg
+      and "1 error(s)" in digest_msg)
+check("the digest includes the rejected entry's own device/reason detail",
+      "d2" in digest_msg and "looked like telemetry" in digest_msg)
+check("the digest never exceeds Telegram's real 4096-char hard limit",
+      len(digest_msg) <= 4096)
+
+# end-to-end: main() actually sends the digest when telegram IS configured
+_digest_dir = TMPDIR / "digest_e2e"
+_digest_dir.mkdir()
+digest_store = GraphStore(str(_digest_dir / "v13_graph.db"))
+digest_store.insert_evidence(Evidence(device_id="digest_dev", destination_id="z.example.com",
+                                        evidence_type="dns_rate", independence_family="dns_behavior",
+                                        timestamp=NOW - 50, source="s", value=10.0))
+digest_store.insert_decision(
+    device_id="digest_dev", timestamp=NOW - 40, state="SUSPICIOUS", decision_path="hypothesis_suspicious",
+    confidence=0.4, risk_score=2.0, raw_payload={"hypotheses": {"attack": {"name": "DGA_BOTNET_C2"}}},
+)
+digest_store.close()
+live_llm_review.CONFIG = dict(_config_for(_digest_dir), telegram_token="fake", telegram_chat_id="fake")
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient), \
+     patch.object(live_llm_review, "send_telegram") as mock_send_telegram:
+    live_llm_review.main()
+check("main() sends exactly one Telegram digest for a run with real reviews",
+      mock_send_telegram.call_count == 1)
+check("the sent digest message reports the real reviewed count (device-name detail "
+      "only appears for REJECTED entries -- this one was accepted, matching the "
+      "digest's own 'most actionable signal first' design)",
+      mock_send_telegram.call_count == 1
+      and "1 decision(s) reviewed" in mock_send_telegram.call_args.args[1]
+      and "1 LLM verdict(s) accepted" in mock_send_telegram.call_args.args[1])
+
+# no-op run (everything already reviewed) sends NO digest -- nothing new to report
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient), \
+     patch.object(live_llm_review, "send_telegram") as mock_send_telegram_noop:
+    live_llm_review.main()
+check("a run that reviews nothing new sends NO Telegram digest",
+      mock_send_telegram_noop.call_count == 0)
+
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")

@@ -36,19 +36,31 @@ time in a plain sequential loop -- never threaded/async -- respecting the standi
 construction, not by an explicit lock (nothing in this process ever issues a second
 request before the first returns).
 
-NOT PORTED from ollama_soc.py in this pass, consistent with the plan's own scope cut
-(each a real, separately-scoped follow-up once this basic wiring is confirmed
-working): local-model triage pre-filtering (OllamaClient.query_triage() exists and is
-usable, but its own docstring says specificity isn't validated yet -- skipping it
-avoids risking a real miss for a filter that wouldn't reduce call volume much anyway),
-persistent cross-run alert dedup/grouping, campaign correlation, Telegram
-notification, job-health per-device breakdown.
+v13 full-architecture plan, Phase 8 (added after this module's initial Phase 5
+build): 8a pattern-level persistent caching (a recurring pattern across SEPARATE
+decision rows is now served from cache, not re-queried -- see _persistent_cache_key()
+below) and 8d a Telegram digest per run (build_llm_review_digest_message()), both
+now wired in. 8b (alert dedup/grouping) is deliberately NOT a separate mechanism --
+see _persistent_cache_key()'s own docstring for why 8a's design already provides it
+for free, as a direct consequence rather than a second implementation of the same
+idea. 8c (INDEPENDENCE_FAMILY_MAP validation) lives in its own module,
+v13/ops/independence_family_report.py -- a genuinely separate concern (divergence-
+data analysis, not LLM review), not this file's job.
+
+NOT PORTED from ollama_soc.py, consistent with the plan's own scope cut (each a
+real, separately-scoped follow-up once this basic wiring is confirmed working):
+local-model triage pre-filtering (OllamaClient.query_triage() exists and is usable,
+but its own docstring says specificity isn't validated yet), cross-device campaign
+correlation (explicitly deferred by the plan itself -- needs Phase 6's cross-device
+work to inform it, and is the least-validated of ollama_soc.py's own features to
+begin with), GeoIP-enriched reporting, job-health per-device breakdown.
 """
+import hashlib
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
@@ -57,15 +69,27 @@ from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
 from v13.graph.window import RollingWindowView  # noqa: E402
+from v13.hypotheses.independence import family_for, NON_ATTACK_FAMILIES  # noqa: E402
 from v13.llm_review.ollama_client import OllamaClient, build_evidence_prompt  # noqa: E402
-from v13.llm_review.validator import DeterministicValidator, build_ground_truth  # noqa: E402
+from v13.llm_review.validator import DeterministicValidator, build_ground_truth, VALIDATOR_SCHEMA_VERSION  # noqa: E402
+from v13.ops.telegram import send_telegram  # noqa: E402
 
 LOGGER = logging.getLogger("live_llm_review")
 
 # Matches scripts/ollama_soc.py's own DEFAULT_MAX_QUERIES_PER_RUN exactly -- same
 # reasoning (bounds one run to a sane worst-case wall-clock time regardless of how
-# many decisions are pending).
+# many decisions are pending). Phase 8a: this now caps REAL Ollama calls only -- a
+# persistent-cache hit is nearly free (a local graph read + a dict lookup), so it
+# no longer consumes the same budget a real 900s-worst-case call does.
 DEFAULT_MAX_QUERIES_PER_RUN = 5
+
+# Matches scripts/ollama_soc.py's own DEFAULT_CACHE_TTL_SECONDS exactly (7 days --
+# "matches this codebase's other weekly cadence, fp_engine's own retrain loop").
+PERSISTENT_CACHE_TTL_SECONDS = 7 * 24 * 3600
+
+# Same character-budget discipline as ollama_soc.py's own _TELEGRAM_MSG_BUDGET
+# (headroom under Telegram's real 4096-char hard limit).
+_TELEGRAM_MSG_BUDGET = 3800
 
 # How far back to look for SUSPICIOUS+ decisions worth reviewing -- wider than the
 # 4-hour run cadence on purpose, so a run that hit the query cap last time still
@@ -122,6 +146,146 @@ def _rep_tier_for(evidence_list) -> Optional[int]:
         return None
 
 
+def _evidence_fingerprint(evidence_list) -> str:
+    """v13-native analogue of ollama_soc.py's own _evidence_fingerprint(): a
+    content hash of the ATTACK-shaped evidence actually present for this
+    decision (family_for(...) not in NON_ATTACK_FAMILIES, matching
+    decision/engine.py's own attack_evidence filter), so a genuinely NEW piece
+    of evidence -- a fresh evidence_type appearing, or an existing one's
+    confidence moving to a materially different bucket -- invalidates the
+    persistent cache even when the pattern key below stayed the same. Presence
+    (which evidence_types are present) plus confidence rounded to 1 decimal
+    place (bucketed, so minor fluctuation doesn't invalidate the cache on
+    every run) -- same two-part shape as v1's own real fingerprint, adapted to
+    v13's Evidence model rather than v1's raw features dict."""
+    attack_items = [e for e in evidence_list if family_for(e.evidence_type) not in NON_ATTACK_FAMILIES]
+    presence = sorted({e.evidence_type for e in attack_items})
+    bucketed = sorted(round(float(e.confidence or 0.0), 1) for e in attack_items)
+    raw = json.dumps({"presence": presence, "bucketed": bucketed}, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _persistent_cache_key(decision: Dict[str, Any], device_id: str, evidence_list) -> str:
+    """v13-native port of ollama_soc.py's own _persistent_cache_key() shape:
+    a coarse "same pattern" key (device | winning attack hypothesis | decision
+    path -- v13's analogue of v1's device|target|signature incident_key) plus
+    the evidence fingerprint above plus VALIDATOR_SCHEMA_VERSION, so upgrading
+    DeterministicValidator.validate()'s own logic makes every previously-cached
+    verdict unreachable by lookup immediately rather than silently trusting a
+    validator_accepted boolean computed under superseded rules. Deliberately
+    ALSO serves Phase 8b's own goal ("multiple decisions describing the same
+    recurring pattern get reviewed together, not once per decision row") --
+    not as a second mechanism, but as a direct consequence of this key: the
+    first decision matching a pattern in a run makes the real Ollama call and
+    populates the in-memory cache immediately (see main()'s own loop below),
+    so every LATER decision in the SAME run with the same key is already a
+    cache hit by the time it's considered. A separate pre-grouping pass would
+    reach the identical outcome through more code, not a different one."""
+    payload = decision.get("raw_payload", {}) or {}
+    attack_name = payload.get("hypotheses", {}).get("attack", {}).get("name", "unknown")
+    pattern = f"{device_id}|{attack_name}|{decision.get('decision_path', 'unknown')}"
+    return f"{pattern}|{_evidence_fingerprint(evidence_list)}|v{VALIDATOR_SCHEMA_VERSION}"
+
+
+def _load_persistent_cache(output_path: Path, now: float,
+                             ttl_seconds: float = PERSISTENT_CACHE_TTL_SECONDS) -> Dict[str, Dict[str, Any]]:
+    """Builds {persistent_cache_key: most_recent_entry} from every past run's
+    own output file -- the file IS the persistent cache, same "no separate
+    cache store needed" design _load_already_reviewed() already uses for the
+    decision_id-level dedup. Only entries that actually carry BOTH a
+    persistent_cache_key (only written by this phase onward -- an entry from
+    before this phase existed is gracefully skipped, not an error) and a real
+    `recommendation` (an error entry never caches) are eligible; an entry
+    older than ttl_seconds is excluded, matching v1's own TTL discipline.
+    Iterates the file in its own natural (chronological, append-only) order
+    and lets a later entry overwrite an earlier one sharing the same key, so
+    the result is always the MOST RECENT still-valid verdict per pattern."""
+    cache: Dict[str, Dict[str, Any]] = {}
+    if not output_path.exists():
+        return cache
+    try:
+        with open(output_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                key = entry.get("persistent_cache_key")
+                if not key or "recommendation" not in entry:
+                    continue
+                reviewed_at = float(entry.get("reviewed_at", 0) or 0)
+                if (now - reviewed_at) > ttl_seconds:
+                    continue
+                cache[key] = entry
+    except Exception as e:
+        LOGGER.warning("Failed to read %s for the persistent pattern cache: %s", output_path, e)
+    return cache
+
+
+# Phase 8d: v13-native adaptation of ollama_soc.py's own build_ollama_digest_message()
+# shape (character-budgeted detail entries, never truncated mid-sentence -- entries
+# that don't fit fold into a "...and N more" counter instead of a hard [:4000] slice
+# cutting mid-entry, the exact live bug that function's own docstring documents fixing).
+# NOT a line-for-line port: v1's version summarizes AutonomousFPEngine's own
+# immunized/confirmed_threat/withheld/skipped auto-ACTION outcomes, which v13's
+# reviewer doesn't have (it validates a verdict, it doesn't autonomously act on one) --
+# this summarizes what v13's reviewer itself actually found: how many reviews were
+# served from the persistent cache vs. a real Ollama call, how many the deterministic
+# validator accepted vs. rejected, and the full detail for every REJECTION specifically
+# (the single most actionable signal in this digest -- the LLM's own verdict disagreed
+# with ground truth).
+def build_llm_review_digest_message(entries: List[Dict[str, Any]]) -> Optional[str]:
+    if not entries:
+        return None
+
+    reviewed = len(entries)
+    cache_hits = sum(1 for e in entries if e.get("served_from_persistent_cache"))
+    errors = sum(1 for e in entries if "llm_error" in e)
+    accepted = sum(1 for e in entries if e.get("validator_accepted") is True)
+    rejected = [e for e in entries if e.get("validator_accepted") is False]
+
+    lines = [f"\U0001f916 <b>v13 LLM review run: {reviewed} decision(s) reviewed</b>", ""]
+    if cache_hits:
+        lines.append(f"⚡ {cache_hits} served from the persistent pattern cache (no Ollama call)")
+    if accepted:
+        lines.append(f"✅ {accepted} LLM verdict(s) accepted by the deterministic validator")
+    if rejected:
+        lines.append(f"\U0001f6a8 {len(rejected)} LLM verdict(s) REJECTED by the validator "
+                      f"(LLM disagreed with ground truth)")
+    if errors:
+        lines.append(f"⚠️ {errors} error(s) (no usable LLM response)")
+    lines.append("")
+
+    detail_budget = 10
+    detail_worthy = rejected[:detail_budget]
+    included = 0
+    running_len = len("\n".join(lines))
+    for e in detail_worthy:
+        rec = e.get("recommendation", {}) or {}
+        entry_lines = [
+            f"• <code>{e.get('device_id', 'unknown')}</code> [{e.get('decision_path', 'unknown')}] "
+            f"→ LLM said '{rec.get('classification', 'unknown')}'",
+        ]
+        reason = rec.get("reason")
+        if reason:
+            entry_lines.append(f"  \"{reason}\"")
+        entry_lines.append("")
+        entry_text = "\n".join(entry_lines)
+        if running_len + len(entry_text) > _TELEGRAM_MSG_BUDGET:
+            break
+        lines.extend(entry_lines)
+        running_len += len(entry_text) + 1
+        included += 1
+    remaining = len(rejected) - included
+    if remaining > 0:
+        lines.append(f"...and {remaining} more rejection(s) (see {_OUTPUT_FILENAME})")
+
+    return "\n".join(lines)[:4096]
+
+
 def main() -> None:
     run_start = time.time()
     state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
@@ -151,6 +315,7 @@ def main() -> None:
 
         now = time.time()
         already_reviewed = _load_already_reviewed(output_path)
+        persistent_cache = _load_persistent_cache(output_path, now)
         candidates = [
             d for d in store.get_decisions_since(now - LOOKBACK_SECONDS)
             if d["state"] in _REVIEWABLE_STATES and d["decision_id"] not in already_reviewed
@@ -161,20 +326,24 @@ def main() -> None:
 
         reviewed = 0
         errors = 0
+        cache_hits = 0
+        queries_made = 0
+        new_entries: List[Dict[str, Any]] = []
         with open(output_path, "a", encoding="utf-8") as out_f:
-            for decision in candidates[:max_queries]:
+            for decision in candidates:
                 device_id = decision["device_id"]
                 evidence_list = window.evidence_in_window(
                     device_id, RollingWindowView.LONG_WINDOW_SECONDS, now=decision["timestamp"],
                 )
-                rep_tier = _rep_tier_for(evidence_list)
-                ground_truth = build_ground_truth(decision["raw_payload"], evidence_list, rep_tier=rep_tier)
-                prompt_text = build_evidence_prompt(
-                    device_id, evidence_list,
-                    candidate_hypotheses=ground_truth.get("candidate_hypotheses"),
-                )
+                # Phase 8a: pattern-level persistent cache -- checked BEFORE the
+                # query cap below, so a cache hit (nearly free: a local graph
+                # read + a dict lookup, no Ollama call) is never deferred just
+                # because earlier candidates already used up this run's real-call
+                # budget. See _persistent_cache_key()'s own docstring for why
+                # this single mechanism also satisfies Phase 8b's grouping goal.
+                cache_key = _persistent_cache_key(decision, device_id, evidence_list)
+                cached = persistent_cache.get(cache_key)
 
-                recommendation = client.query_full_analysis(prompt_text)
                 entry: Dict[str, Any] = {
                     "decision_id": decision["decision_id"],
                     "device_id": device_id,
@@ -182,29 +351,62 @@ def main() -> None:
                     "state": decision["state"],
                     "decision_path": decision["decision_path"],
                     "reviewed_at": time.time(),
+                    "persistent_cache_key": cache_key,
                 }
-                if recommendation is None:
-                    entry["llm_error"] = "no_response_or_unparseable"
-                    errors += 1
+
+                if cached is not None:
+                    entry["recommendation"] = cached["recommendation"]
+                    entry["validator_accepted"] = cached.get("validator_accepted")
+                    entry["served_from_persistent_cache"] = True
+                    cache_hits += 1
+                elif queries_made >= max_queries:
+                    # Query budget exhausted this run and no cache hit available --
+                    # deferred to next run, matching v1's own FIFO-fairness
+                    # discipline (still a candidate next time, since nothing is
+                    # written for it here).
+                    continue
                 else:
-                    entry["recommendation"] = recommendation
-                    entry["validator_accepted"] = validator.validate(
-                        recommendation, evidence_list,
-                        original_risk=decision.get("risk_score"),
-                        ground_truth=ground_truth,
+                    rep_tier = _rep_tier_for(evidence_list)
+                    ground_truth = build_ground_truth(decision["raw_payload"], evidence_list, rep_tier=rep_tier)
+                    prompt_text = build_evidence_prompt(
+                        device_id, evidence_list,
+                        candidate_hypotheses=ground_truth.get("candidate_hypotheses"),
                     )
+                    recommendation = client.query_full_analysis(prompt_text)
+                    queries_made += 1
+                    if recommendation is None:
+                        entry["llm_error"] = "no_response_or_unparseable"
+                        errors += 1
+                    else:
+                        entry["recommendation"] = recommendation
+                        entry["validator_accepted"] = validator.validate(
+                            recommendation, evidence_list,
+                            original_risk=decision.get("risk_score"),
+                            ground_truth=ground_truth,
+                        )
+                        # Populate the in-memory cache immediately -- a LATER
+                        # candidate in this SAME run sharing this key is already
+                        # a cache hit by the time it's considered.
+                        persistent_cache[cache_key] = entry
+
                 out_f.write(json.dumps(entry) + "\n")
                 reviewed += 1
+                new_entries.append(entry)
 
         store.close()
         LOGGER.info(
-            "LLM review complete: %d reviewed (%d error(s)), %d deferred to next run "
-            "(query cap %d).", reviewed, errors, max(0, len(candidates) - reviewed), max_queries,
+            "LLM review complete: %d reviewed (%d from cache, %d real quer%s, %d error(s)), "
+            "%d deferred to next run.", reviewed, cache_hits, queries_made,
+            "y" if queries_made == 1 else "ies", errors, max(0, len(candidates) - reviewed),
         )
         write_job_health(state_dir, "live_llm_review", time.time() - run_start, extra={
-            "reviewed": reviewed, "errors": errors,
-            "deferred": max(0, len(candidates) - reviewed),
+            "reviewed": reviewed, "cache_hits": cache_hits, "queries_made": queries_made,
+            "errors": errors, "deferred": max(0, len(candidates) - reviewed),
         })
+
+        digest = build_llm_review_digest_message(new_entries)
+        if digest:
+            send_telegram(CONFIG, digest)
     except Exception as e:
         LOGGER.error("live_llm_review failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_llm_review", time.time() - run_start, extra={"error": str(e)})
