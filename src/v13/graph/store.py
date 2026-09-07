@@ -448,17 +448,46 @@ class GraphStore:
         """Deletes evidence older than the cutoff UNLESS referenced by a decision
         newer than the cutoff (decisions are the audit trail; keep what they point
         to) -- matches schema.sql's documented policy exactly, not a simplified
-        version of it. Returns the number of rows deleted."""
+        version of it. Returns the number of rows deleted.
+
+        BUGFIX (2026-09-07, live audit): this used to delete ONLY from the
+        `evidence` table -- every evidence row's own 'observed' edge (device->
+        evidence) and 'targets' edge (evidence->destination), plus any 'supports'
+        edge from a decision OLDER than this cutoff but still inside the
+        separate, much longer 1-year decision-retention window (schema.sql's own
+        two DIFFERENT retention windows for evidence vs. decisions -- a decision
+        can and does legitimately outlive its own supporting evidence by design),
+        were left behind pointing at an evidence_id that no longer existed --
+        genuinely dangling, not just stale. Left unbounded, this also meant the
+        `edges` table itself never shrank even as `evidence` did, undermining the
+        actual reason retention/pruning exists at all (A14's real runaway-growth
+        incident). Now selects the evidence_ids being deleted FIRST, deletes
+        every edge referencing any of them (either direction), then deletes the
+        evidence rows themselves -- all inside one transaction, so a mid-failure
+        can never leave edges half-cleaned relative to what evidence survived."""
         cutoff = (now if now is not None else time.time()) - older_than_days * 86400
-        cur = self._conn.execute(
-            "DELETE FROM evidence WHERE timestamp < ? AND evidence_id NOT IN ("
-            "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
-            "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
-            ")",
-            (cutoff, cutoff),
-        )
-        self._maybe_commit()
-        return cur.rowcount
+        with self.transaction():
+            rows = self._conn.execute(
+                "SELECT evidence_id FROM evidence WHERE timestamp < ? AND evidence_id NOT IN ("
+                "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
+                "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
+                ")",
+                (cutoff, cutoff),
+            ).fetchall()
+            evidence_ids = [r["evidence_id"] for r in rows]
+            if not evidence_ids:
+                return 0
+            placeholders = ",".join("?" * len(evidence_ids))
+            self._conn.execute(
+                f"DELETE FROM edges WHERE "
+                f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
+                f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
+                evidence_ids + evidence_ids,
+            )
+            cur = self._conn.execute(
+                f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
+            )
+            return cur.rowcount
 
     # --- decision archival (v13 full-architecture plan, Phase 10a) -------------
 

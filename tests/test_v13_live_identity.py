@@ -27,6 +27,12 @@ Sections:
      bit does not mean a MAC is rotating right now; modern iOS/Android "private
      Wi-Fi address" MACs are stable per-network). See the dependency map's
      incident writeup and live_manager.py's own corrected docstring.
+  F. Graph-aware device merge (continuation session): _merge_orphan_if_fragmented()
+     now mirrors a live orphan-merge into the v13 graph (GraphStore.merge_device(),
+     audit-preserving) in addition to v1's own state/ids_state.json -- the real v1
+     merge is unconditional/load-bearing and never gated on graph availability or
+     a graph-side failure (graph_store=None and a graph write exception are both
+     exercised as real fail-safe cases, not just no-crash smoke tests).
 """
 import sys
 import tempfile
@@ -77,11 +83,14 @@ check("A: process_zeek_identities is inherited unchanged",
       LiveIdentityManager.process_zeek_identities is DeviceIdentityManager.process_zeek_identities)
 check("A: apply_device_type is inherited unchanged",
       LiveIdentityManager.apply_device_type is DeviceIdentityManager.apply_device_type)
-check("A: the orphan-merge cleanup helpers are inherited unchanged",
-      LiveIdentityManager._merge_orphan_if_fragmented is DeviceIdentityManager._merge_orphan_if_fragmented
-      and LiveIdentityManager._release_stale_isolation_if_merged is DeviceIdentityManager._release_stale_isolation_if_merged)
-check("A: resolve_device_id IS overridden (the one deliberate change)",
+check("A: _release_stale_isolation_if_merged is inherited unchanged",
+      LiveIdentityManager._release_stale_isolation_if_merged is DeviceIdentityManager._release_stale_isolation_if_merged)
+check("A: resolve_device_id IS overridden (Phase 3's original deliberate change)",
       LiveIdentityManager.resolve_device_id is not DeviceIdentityManager.resolve_device_id)
+check("A: _merge_orphan_if_fragmented IS ALSO overridden now (continuation-session "
+      "addition, item 5 in this module's own docstring) -- graph-aware merge "
+      "mirroring, not the original Phase 3 scope",
+      LiveIdentityManager._merge_orphan_if_fragmented is not DeviceIdentityManager._merge_orphan_if_fragmented)
 
 
 # --- B. Parity with v-current for the single-gateway-anchor case ---
@@ -190,6 +199,90 @@ check("E: the anchor's IP match still resolves correctly even when the observed 
 check("E: a locally-administered-looking MAC observed at the anchor's IP is NOT "
       "learned as the anchor's canonical MAC",
       live_mgr_e3._get_learned_anchor_macs().get("gateway") is None)
+
+
+# --- F. Graph-aware device merge (continuation session, item 5 in live_manager.py's
+# own docstring): _merge_orphan_if_fragmented() now ALSO mirrors the merge into the
+# v13 graph, not just v1's state/ids_state.json ---
+
+state_f = _fresh_state_manager("f")
+graph_f = _fresh_graph_store("f")
+live_mgr_f = LiveIdentityManager(state_f, {"gateway_ip": GATEWAY_IP}, graph_f, {})
+
+# Simulates the real fragmentation scenario process_dns_identities() hits: an IP was
+# already tracked under one device_id (the orphan), before a later cycle resolves
+# a DIFFERENT, richer canonical device_id for that same IP.
+state_f.get_or_create(device_id="orphan_f", client_ip="192.168.77.201", hostname="unknown")
+state_f.get_or_create(device_id="canonical_f", client_ip="192.168.77.202", hostname="realhost")
+
+returned_orphan_id = live_mgr_f._merge_orphan_if_fragmented(
+    "192.168.77.201", "canonical_f", ml_registry=None, fp_engine=None,
+    ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+)
+check("F: _merge_orphan_if_fragmented returns the orphan_id that was actually "
+      "merged (previously returned None always, discarded by every caller)",
+      returned_orphan_id == "orphan_f")
+check("F: the REAL v1-side merge still happened exactly as before (orphan_f no "
+      "longer resolves to itself, the IP now resolves to canonical_f)",
+      state_f.get_device_id_for_ip("192.168.77.201") == "canonical_f")
+check("F: the SAME merge was mirrored into the v13 graph -- resolve_canonical_device_id "
+      "now redirects the orphan to the canonical id, audit-preservingly (never deleted)",
+      graph_f.resolve_canonical_device_id("orphan_f") == "canonical_f")
+check("F: the graph 'merged_into' edge was actually created, not just the devices "
+      "table column (the audit trail schema.sql's own design calls for)",
+      len(graph_f.get_edges(relation="merged_into", src_kind="device", src_id="orphan_f",
+                              dst_kind="device", dst_id="canonical_f")) == 1)
+
+# --- F: no orphan to merge -- a clean no-op, graph never touched ---
+state_f2 = _fresh_state_manager("f2")
+graph_f2 = _fresh_graph_store("f2")
+live_mgr_f2 = LiveIdentityManager(state_f2, {"gateway_ip": GATEWAY_IP}, graph_f2, {})
+state_f2.get_or_create(device_id="only_device_f2", client_ip="192.168.77.203", hostname="unknown")
+result_f2 = live_mgr_f2._merge_orphan_if_fragmented(
+    "192.168.77.203", "only_device_f2", ml_registry=None, fp_engine=None,
+    ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+)
+check("F: no merge needed (dev_id already matches the tracked orphan_id) returns "
+      "None, same as v1's own no-op case", result_f2 is None)
+check("F: the graph gets zero 'merged_into' edges when nothing actually merged",
+      len(graph_f2.get_edges(relation="merged_into")) == 0)
+
+# --- F: graph_store=None (matches every other v13 graph consumer's own optional/
+# graceful-degradation convention) -- the real v1 merge still happens ---
+state_f3 = _fresh_state_manager("f3")
+live_mgr_f3 = LiveIdentityManager(state_f3, {"gateway_ip": GATEWAY_IP}, None, {})
+state_f3.get_or_create(device_id="orphan_f3", client_ip="192.168.77.204", hostname="unknown")
+state_f3.get_or_create(device_id="canonical_f3", client_ip="192.168.77.205", hostname="realhost")
+result_f3 = live_mgr_f3._merge_orphan_if_fragmented(
+    "192.168.77.204", "canonical_f3", ml_registry=None, fp_engine=None,
+    ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+)
+check("F: with graph_store=None, the v1-side merge still fully succeeds (the "
+      "real, load-bearing merge is never gated on graph availability)",
+      result_f3 == "orphan_f3"
+      and state_f3.get_device_id_for_ip("192.168.77.204") == "canonical_f3")
+
+# --- F: a graph-side failure never affects the real (v1) merge -- fail-safe ---
+state_f4 = _fresh_state_manager("f4")
+
+
+class _ExplodingGraphStore:
+    def merge_device(self, orphan_id, canonical_id):
+        raise RuntimeError("simulated graph write failure")
+
+
+live_mgr_f4 = LiveIdentityManager(state_f4, {"gateway_ip": GATEWAY_IP}, _ExplodingGraphStore(), {})
+state_f4.get_or_create(device_id="orphan_f4", client_ip="192.168.77.206", hostname="unknown")
+state_f4.get_or_create(device_id="canonical_f4", client_ip="192.168.77.207", hostname="realhost")
+result_f4 = live_mgr_f4._merge_orphan_if_fragmented(
+    "192.168.77.206", "canonical_f4", ml_registry=None, fp_engine=None,
+    ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+)
+check("F: FAIL-SAFE -- a graph_store.merge_device() failure never raises out to "
+      "the caller, and the real v1 merge (already committed by this point) is "
+      "completely unaffected",
+      result_f4 == "orphan_f4"
+      and state_f4.get_device_id_for_ip("192.168.77.206") == "canonical_f4")
 
 
 print(f"\n{'='*60}")

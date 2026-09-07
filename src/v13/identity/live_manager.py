@@ -46,6 +46,25 @@ identity resolution at all): ARP-spoof-vs-benign-MAC-rotation disambiguation liv
 `ZeekFeatureExtractor.layer2_spoofs`) -- see that fix's own separate module. IPv6
 address-family display labeling lives in `pipeline.py`'s alert-payload construction --
 see that fix's own separate change.
+
+5. GRAPH-AWARE DEVICE MERGE (added a continuation session after Phase 3's initial
+   build, once a real audit found it missing): `_merge_orphan_if_fragmented()`
+   override, folding the SAME live orphan-merge into the v13 graph via
+   `GraphStore.merge_device()` -- audit-preserving (tombstone, never delete,
+   `resolve_canonical_device_id()` transparently redirects every later read),
+   unlike v1's own `merge_into_canonical()` which DISCARDS the orphan's
+   accumulated state entirely. Confirmed via direct investigation this was a
+   real, live gap: `GraphStore.merge_device()`/`resolve_canonical_device_id()`
+   were fully built (matching schema.sql's own explicitly-stated design goal,
+   "a deliberate improvement" over v1's discard-on-merge) but had ZERO callers
+   anywhere in the codebase -- every live orphan-merge event updated v1's
+   `state/ids_state.json` while the v13 graph stayed completely unaware, so an
+   orphan's own evidence/decisions kept accumulating in the graph as a
+   permanently separate, never-reunited device forever. Best-effort: a graph
+   failure here degrades to "the v1-side merge still happened correctly, only
+   the graph-side mirroring didn't," matching every other v13 graph write's own
+   fail-safe direction -- never blocks or reverts the real (v1) merge, which is
+   the one that actually matters for the live pipeline right now.
 """
 import logging
 from typing import Any, Dict, Optional
@@ -179,3 +198,25 @@ class LiveIdentityManager(DeviceIdentityManager):
         return v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
         )
+
+    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
+                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
+        """Runs the real v1 merge unchanged (every side effect -- ml_registry/
+        fp_engine/ips_mitigator/evidence_store/metrics_exporter cleanup -- still
+        happens exactly as before), then mirrors the SAME merge into the v13
+        graph if it actually happened. See this module's own top-of-file item 5
+        for the full design rationale."""
+        orphan_id = super()._merge_orphan_if_fragmented(
+            client_ip, dev_id, ml_registry, fp_engine, ips_mitigator, evidence_store, metrics_exporter,
+        )
+        if orphan_id is None or self._graph_store is None:
+            return orphan_id
+        try:
+            self._graph_store.merge_device(orphan_id, dev_id)
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to mirror identity merge (orphan=%s -> canonical=%s) into the v13 "
+                "graph -- the real (v1) merge above already succeeded and is unaffected: %s",
+                orphan_id, dev_id, e,
+            )
+        return orphan_id

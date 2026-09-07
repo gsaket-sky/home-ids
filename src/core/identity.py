@@ -310,7 +310,7 @@ class DeviceIdentityManager:
         ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
-                                     ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> None:
+                                     ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
         """DEVICE-IDENTITY FRAGMENTATION FIX: resolve_device_id() can return a DIFFERENT
         device_id for client_ip than whatever it was already tracked under -- most
         commonly because this IP's MAC just became known and resolves (via the MAC-first
@@ -327,13 +327,28 @@ class DeviceIdentityManager:
         identical to today's behavior when nothing is actually orphaned.
 
         Called BEFORE bind_mac()/get_or_create() run for this row, so dev_id is already
-        the final canonical id by the time either of those touch it."""
+        the final canonical id by the time either of those touch it.
+
+        Returns the orphan_id that was actually merged, or None if nothing
+        merged (v13 full-architecture plan, continuation session:
+        LiveIdentityManager overrides this method to ALSO fold the same merge
+        into the v13 graph via GraphStore.merge_device(orphan_id, dev_id) --
+        it needs the SPECIFIC orphan_id captured here, not just a bool,
+        because get_device_id_for_ip(client_ip) would return the UPDATED
+        (post-merge) value if re-queried after merge_into_canonical() runs, not
+        the orphan's original id. merge_into_canonical() itself can still
+        no-op (e.g. dev_id isn't tracked yet -- this runs BEFORE
+        get_or_create() creates it, on a genuinely first sighting), which is
+        exactly why the real return value is needed rather than inferring
+        success from the trigger condition alone. Every pre-existing caller
+        ignores the return value, so this is purely additive, not a behavior
+        change for v-current."""
         orphan_id = self.state_manager.get_device_id_for_ip(client_ip)
         if not orphan_id or orphan_id == dev_id:
-            return
+            return None
         merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, fp_engine=fp_engine)
         if not merged:
-            return
+            return None
         LOGGER.warning(
             "🔗 RETROACTIVE IDENTITY MERGE: orphan %s folded into canonical %s (ip=%s) -- "
             "its own accumulated state was discarded per merge policy, not blended.",
@@ -341,6 +356,7 @@ class DeviceIdentityManager:
         )
         self._release_stale_isolation_if_merged(ips_mitigator)
         self._cleanup_merged_orphan(evidence_store, metrics_exporter)
+        return orphan_id
 
     def _cleanup_merged_orphan(self, evidence_store: Any, metrics_exporter: Any) -> None:
         """Consumes the orphan-merge cleanup side channel set by merge_into_canonical()

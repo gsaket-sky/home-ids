@@ -170,6 +170,53 @@ check("REGRESSION GUARD: evidence with no supporting decision is still pruned no
       store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?",
                             (unreferenced_old_ev.evidence_id,)).fetchone() is None)
 
+
+def _dangling_evidence_edge_count(s):
+    return s._conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE "
+        "(src_kind='evidence' AND src_id NOT IN (SELECT evidence_id FROM evidence)) OR "
+        "(dst_kind='evidence' AND dst_id NOT IN (SELECT evidence_id FROM evidence))"
+    ).fetchone()[0]
+
+
+# --- BUGFIX (2026-09-07, live audit): prune_evidence() used to delete ONLY from
+# the evidence table, leaving every deleted row's own 'observed'/'targets'/
+# 'supports' edges dangling (pointing at an evidence_id that no longer exists) --
+# confirmed here directly, not just "no crash". ---
+check("BUGFIX: after all the pruning above, NO edge anywhere in the store "
+      "references a deleted evidence_id -- the actual dangling-edges bug this "
+      "fix closes, checked directly rather than inferred from evidence alone",
+      _dangling_evidence_edge_count(store) == 0)
+
+# The real gap case: a decision OLDER than the 90-day evidence cutoff (so it no
+# longer protects its own evidence) but still within decisions' own separate,
+# much longer 1-year retention -- before this fix, the decision's 'supports'
+# edge to its now-pruned evidence would dangle for however long the decision
+# itself survived past that point.
+gap_ev = Evidence(device_id="devgap", destination_id=NO_DESTINATION, evidence_type="x",
+                    independence_family="f", timestamp=now - 200 * 86400, source="s")
+store.insert_evidence(gap_ev)
+gap_decision_id = store.insert_decision(
+    device_id="devgap", timestamp=now - 150 * 86400,  # older than the 90-day evidence cutoff...
+    state="HIGH", decision_path="hypothesis_high", confidence=0.8, risk_score=8.0,
+    raw_payload={}, evidence_ids=[gap_ev.evidence_id],
+)
+store.prune_evidence(older_than_days=90, now=now)
+check("the gap-case evidence (protected by a decision too old to protect it) "
+      "IS pruned -- confirms this fix didn't change WHAT gets pruned, only "
+      "whether pruning leaves dangling edges behind",
+      store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?",
+                            (gap_ev.evidence_id,)).fetchone() is None)
+check("BUGFIX: the decision's own 'supports' edge to the now-pruned evidence is "
+      "gone too, not left dangling for the ~215 remaining days until the "
+      "decision itself gets archived (Phase 10a, 365 days)",
+      len(store.get_edges(relation="supports", dst_kind="decision", dst_id=gap_decision_id)) == 0)
+check("...but the decision ROW ITSELF (a separate, longer-retention concern) "
+      "is untouched by prune_evidence() -- still there, on its own schedule",
+      store._conn.execute("SELECT 1 FROM decisions WHERE decision_id=?",
+                            (gap_decision_id,)).fetchone() is not None)
+
+
 # --- transaction(): batches multiple writes into one commit ---
 # sqlite3.Connection.commit is a C-level method and can't be monkeypatched to
 # literally count calls -- instead test the two things that actually matter:

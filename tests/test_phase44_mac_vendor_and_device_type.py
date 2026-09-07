@@ -95,8 +95,16 @@ check("REGRESSION GUARD: a randomized-MAC device with no hostname still correctl
 # ═══════════════════════════════════════════════════════════════════════════════════
 check("a real, resolved hostname still classifies correctly (hostname layer takes "
       "priority over mac_vendor, unaffected by this fix)",
-      infer_device_type("home-router", mac_vendor=espressif_vendor) == "router",
-      f"got {infer_device_type('home-router', mac_vendor=espressif_vendor)!r}")
+      # BUGFIX (2026-09-07, live audit): this used "home-router" as its own example
+      # here, asserting device_type=="router" -- but that's exactly the bug a later
+      # fix found and closed: ".fritz.box" is a FritzBox's own default local-DNS
+      # domain suffix, appended to nearly EVERY device's DHCP-reported hostname on
+      # this kind of network regardless of what the device actually is, so this
+      # assertion was unknowingly encoding the misclassification bug as "correct."
+      # "fritzbox_router" (the box itself, not the generic domain suffix) is what
+      # this test actually needs to prove hostname-layer priority.
+      infer_device_type("fritzbox_router", mac_vendor=espressif_vendor) == "router",
+      f"got {infer_device_type('fritzbox_router', mac_vendor=espressif_vendor)!r}")
 check("REGRESSION GUARD: iphone-shaped hostname still types 'phone'",
       # "iphone" kept literally here (unlike the generic device-name examples
       # elsewhere in this repo) -- infer_device_type()'s own pattern table (utils.py)
@@ -106,6 +114,23 @@ check("REGRESSION GUARD: iphone-shaped hostname still types 'phone'",
 check("REGRESSION GUARD: a genuinely laptop-shaped hostname still types 'laptop' "
       "(the fix only changed the FALLBACK, not real laptop detection)",
       infer_device_type("example_pc_fritz_box") == "laptop")
+
+# BUGFIX (2026-09-07, live audit): a device with NO recognizable vendor/type keyword
+# in its own hostname, but carrying the universal ".fritz.box" local-DNS domain
+# suffix every device on this kind of network gets, used to fall through the whole
+# pattern table and match the generic "fritz" keyword -> misclassified as "router"
+# purely from DNS-domain noise, not any real signal about the device. Confirmed
+# live: an actual IoT device was showing up as device_type="router" this way.
+check("BUGFIX: a device with an UNRECOGNIZED hostname but the universal "
+      "_fritz_box domain suffix no longer falls through to 'router' -- the "
+      "domain suffix alone is not a device-type signal",
+      infer_device_type("some_unrecognized_iot_gadget_fritz_box") == "unknown",
+      f"got {infer_device_type('some_unrecognized_iot_gadget_fritz_box')!r}")
+check("BUGFIX: the SAME hostname shape, but naming a real FritzBox mesh repeater "
+      "specifically, still correctly classifies as 'router' -- the fix narrowed "
+      "the keyword to real FritzBox hardware, it didn't just delete router "
+      "detection entirely",
+      infer_device_type("fritzrepeater_1200_fritz_box") == "router")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

@@ -516,7 +516,25 @@ def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "")
     h = (hostname or "").lower()
     ua = (user_agent or "").lower()
     mv = (mac_vendor or "").lower()
-    
+
+    # BUGFIX (2026-09-07, live audit): a FritzBox's own default local-DNS domain is
+    # ".fritz.box", appended to essentially every device's DHCP-reported hostname on
+    # a FritzBox-managed network (sanitize_hostname() turns "Some-Device.fritz.box"
+    # into "some_device_fritz_box") -- pure network/DNS metadata, not a signal about
+    # the device itself. Left in place, this suffix was polluting classification at
+    # TWO separate points below: the "fritz" keyword in the pattern table (fixed by
+    # narrowing it to real FritzBox hardware names, not the generic domain) AND the
+    # weak "box" substring in the step-4 fallback heuristic a few lines down (every
+    # such hostname ends in "_box", so it would STILL have matched there and
+    # defaulted to "laptop" even after the first fix). Stripping the suffix once,
+    # here, before any heuristic runs, closes both at the root instead of chasing
+    # each symptom separately -- a device with no real signal beyond this suffix now
+    # correctly falls through to "unknown", not a plausible-looking wrong guess.
+    for _suffix in ("_fritz_box", "fritz_box"):
+        if h.endswith(_suffix) and h != _suffix:
+            h = h[: -len(_suffix)].rstrip("_")
+            break
+
     # 1. Hostname-based classification
     patterns = {
         # Specific Entertainment Overrides
@@ -550,7 +568,18 @@ def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "")
         
         # Network Infrastructure
         "pihole": "dns_server", "adguard": "dns_server", "unbound": "dns_server",
-        "router": "router", "fritz": "router", "pfsense": "router", "opnsense": "router", "unifi": "router", "openwrt": "router", "udm": "router", "mikrotik": "router",
+        # BUGFIX (2026-09-07, live audit): "fritz" alone used to be one of these
+        # keywords, matching "router" for ANY device whose hostname contains it --
+        # but a FritzBox's own default local-DNS domain is ".fritz.box", appended
+        # to essentially every device's DHCP-reported hostname on a FritzBox-managed
+        # network regardless of what the device actually is (sanitize_hostname()
+        # turns "Some-IoT-Bulb.fritz.box" into "some_iot_bulb_fritz_box"). Any
+        # device that didn't already match a more specific earlier keyword fell
+        # through to this generic domain-suffix noise and got misclassified as a
+        # router. Replaced with specific FritzBox HARDWARE keywords (the box/mesh
+        # repeater/powerline adapter itself, not the domain every device inherits).
+        "router": "router", "fritzbox": "router", "fritzrepeater": "router", "fritzpowerline": "router",
+        "pfsense": "router", "opnsense": "router", "unifi": "router", "openwrt": "router", "udm": "router", "mikrotik": "router",
         "gateway": "gateway", "modem": "gateway", "firewall": "gateway"
     }
     

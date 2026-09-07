@@ -180,6 +180,114 @@ import shutil
 shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section D (continuation session): main()'s graph-mirroring -- real gap found by
+# direct investigation: this script (and the live orphan-merge path) previously only
+# ever updated state/ids_state.json, leaving the v13 graph completely unaware of any
+# merge. main() now also mirrors each real merge into GraphStore.merge_device() when
+# a v13_graph.db exists alongside the state file.
+# ═══════════════════════════════════════════════════════════════════════════════════
+import json
+import merge_fragmented_devices as script_module
+from v13.graph.store import GraphStore
+
+tmp_dir_d = tempfile.mkdtemp(prefix="phase39_script_graph_")
+tmp_state_path_d = os.path.join(tmp_dir_d, "ids_state.json")
+tmp_graph_path_d = os.path.join(tmp_dir_d, "v13_graph.db")
+
+sm_d = StateManager(state_path=tmp_state_path_d)
+canon_d = sm_d.get_or_create("d_canon", IPV4, "smart-tv")
+canon_d.mac_address = MAC
+canon_d.known_ips.add(IPV4)
+canon_d.known_ips.add(IPV6_LL)
+orphan_d = sm_d.get_or_create("d_orphan", IPV6_LL, "unknown")
+sm_d.flush_to_disk()
+
+# The graph db must exist BEFORE main() runs for it to be picked up (matches every
+# other v13 ops script's own "no db yet -> skip gracefully" convention) -- created
+# here with one pre-existing device row for both endpoints, mirroring what a real
+# box running engine="v13" would already have.
+graph_d = GraphStore(tmp_graph_path_d)
+graph_d.upsert_device("d_canon", timestamp=time.time())
+graph_d.upsert_device("d_orphan", timestamp=time.time())
+graph_d.close()
+
+script_module.CONFIG = {"state_path": tmp_state_path_d}
+sys.argv = ["merge_fragmented_devices.py", "--apply"]
+script_module.main()
+
+verify_graph_d = GraphStore(tmp_graph_path_d)
+check("D: main() mirrors the real merge into the v13 graph -- resolve_canonical_device_id "
+      "now redirects the orphan to its canonical id",
+      verify_graph_d.resolve_canonical_device_id("d_orphan") == "d_canon")
+verify_graph_d.close()
+sm_d_reloaded = StateManager(state_path=tmp_state_path_d)
+sm_d_reloaded.load_from_disk()
+check("D: the v1-side merge ALSO happened (both stores agree, not just the graph) "
+      "-- reloaded fresh from disk, matching what main()'s own subprocess actually "
+      "persisted, not a stale in-memory object",
+      len(sm_d_reloaded.get_all_device_ids()) == 1)
+shutil.rmtree(tmp_dir_d, ignore_errors=True)
+
+
+# --- D: no v13_graph.db present -- main() skips graph mirroring cleanly, v1 merge unaffected ---
+tmp_dir_d2 = tempfile.mkdtemp(prefix="phase39_script_nograph_")
+tmp_state_path_d2 = os.path.join(tmp_dir_d2, "ids_state.json")
+
+sm_d2 = StateManager(state_path=tmp_state_path_d2)
+canon_d2 = sm_d2.get_or_create("d2_canon", IPV4, "smart-tv")
+canon_d2.mac_address = OTHER_MAC
+canon_d2.known_ips.add(IPV4)
+canon_d2.known_ips.add(IPV6_ULA)
+sm_d2.get_or_create("d2_orphan", IPV6_ULA, "unknown")
+sm_d2.flush_to_disk()
+
+# Deliberately no v13_graph.db created in tmp_dir_d2.
+script_module.CONFIG = {"state_path": tmp_state_path_d2}
+sys.argv = ["merge_fragmented_devices.py", "--apply"]
+script_module.main()  # must not raise despite no graph db existing
+
+sm_d2_reloaded = StateManager(state_path=tmp_state_path_d2)
+sm_d2_reloaded.load_from_disk()
+check("D: with no v13_graph.db present at all, main() still completes the real "
+      "v1 merge without error (graph mirroring is optional, never load-bearing)",
+      len(sm_d2_reloaded.get_all_device_ids()) == 1)
+check("D: no v13_graph.db file was created as a side effect of this run (the "
+      "skip is a real no-op, not an accidental auto-create)",
+      not (_PathForSysPath(tmp_dir_d2) / "v13_graph.db").exists())
+shutil.rmtree(tmp_dir_d2, ignore_errors=True)
+
+
+# --- D: dry run (no --apply) never touches the graph, even when a db exists ---
+tmp_dir_d3 = tempfile.mkdtemp(prefix="phase39_script_dryrun_")
+tmp_state_path_d3 = os.path.join(tmp_dir_d3, "ids_state.json")
+tmp_graph_path_d3 = os.path.join(tmp_dir_d3, "v13_graph.db")
+
+sm_d3 = StateManager(state_path=tmp_state_path_d3)
+canon_d3 = sm_d3.get_or_create("d3_canon", IPV4, "smart-tv")
+canon_d3.mac_address = MAC
+canon_d3.known_ips.add(IPV4)
+canon_d3.known_ips.add(IPV6_LL)
+sm_d3.get_or_create("d3_orphan", IPV6_LL, "unknown")
+sm_d3.flush_to_disk()
+
+graph_d3 = GraphStore(tmp_graph_path_d3)
+graph_d3.upsert_device("d3_canon", timestamp=time.time())
+graph_d3.upsert_device("d3_orphan", timestamp=time.time())
+graph_d3.close()
+
+script_module.CONFIG = {"state_path": tmp_state_path_d3}
+sys.argv = ["merge_fragmented_devices.py"]  # no --apply
+script_module.main()
+
+verify_graph_d3 = GraphStore(tmp_graph_path_d3)
+check("D: a dry run (no --apply) leaves the graph completely untouched -- "
+      "d3_orphan does NOT resolve to d3_canon",
+      verify_graph_d3.resolve_canonical_device_id("d3_orphan") == "d3_orphan")
+verify_graph_d3.close()
+shutil.rmtree(tmp_dir_d3, ignore_errors=True)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED: {FAILURES}")

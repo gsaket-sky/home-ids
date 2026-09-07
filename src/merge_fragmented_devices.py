@@ -40,6 +40,7 @@ if str(SRC_DIR) not in sys.path:
 from config import CONFIG
 from core.state_guard import StateManager
 from core.identity import _is_generic_hostname
+from v13.graph.store import GraphStore
 
 
 def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
@@ -161,14 +162,33 @@ def main():
                   f"last seen {_age_str(orphan['last_seen'])})")
         print()
 
+    # v13 full-architecture plan, continuation session: mirror each merge into the
+    # v13 graph too (GraphStore.merge_device(), audit-preserving -- tombstones the
+    # orphan rather than deleting it, so its own evidence/decisions keep resolving
+    # through the canonical id via resolve_canonical_device_id()). Real gap found
+    # by direct investigation: this script (and the live merge path) previously
+    # only ever updated state/ids_state.json, leaving the v13 graph's own devices
+    # table completely unaware of any merge -- an orphan's graph-side evidence
+    # stayed permanently fragmented from its canonical counterpart forever.
+    # Best-effort and OPTIONAL: a box with engine="v_current" (no v13 graph
+    # produced yet) or a missing db file just skips this half silently -- the
+    # real (v1) merge below is unaffected either way.
+    graph_db_path = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "v13_graph.db"
+    graph_store = GraphStore(str(graph_db_path)) if graph_db_path.exists() else None
+    if graph_store is None:
+        print(f"(No v13 graph db found at {graph_db_path} -- graph-side merge mirroring skipped.)")
+
     if not apply_changes:
         print(f"Dry run only -- would merge {len(groups)} group(s), {total_orphans} orphan "
               f"device_id(s) total, discarding each orphan's own accumulated state (baselines, "
               f"evidence, learned FP thresholds) and redirecting its known IPs/MAC to its "
-              f"group's canonical identity. Re-run with --apply to actually perform the merge.\n"
+              f"group's canonical identity{' (and audit-preservingly tombstoning it in the v13 graph)' if graph_store else ''}. "
+              f"Re-run with --apply to actually perform the merge.\n"
               f"BACK UP state/ids_state.json (and models/, if ML anomaly models are in use) "
               f"before running --apply -- discarded state and deleted model files cannot be "
               f"undone by this tool.")
+        if graph_store:
+            graph_store.close()
         return
 
     # ml_registry/fp_engine are intentionally NOT constructed here -- this is an offline
@@ -178,6 +198,7 @@ def main():
     # files under models/ are left in place, reported below for a manual follow-up pass
     # rather than deleted sight-unseen by a script that never loaded them.
     merged_count = 0
+    graph_merged_count = 0
     for group in groups:
         canonical = pick_canonical(group)
         for orphan in group:
@@ -185,10 +206,20 @@ def main():
                 continue
             if sm.merge_into_canonical(orphan["device_id"], canonical["device_id"]):
                 merged_count += 1
+                if graph_store is not None:
+                    try:
+                        graph_store.merge_device(orphan["device_id"], canonical["device_id"])
+                        graph_merged_count += 1
+                    except Exception as e:
+                        print(f"  WARNING: failed to mirror merge of {orphan['device_id']} "
+                              f"into the v13 graph (v1 state merge above already succeeded): {e}")
 
     sm.flush_to_disk()
+    if graph_store is not None:
+        graph_store.close()
     print(f"Done. Merged {merged_count} orphan device_id(s) into {len(groups)} canonical "
-          f"identit(y/ies).")
+          f"identit(y/ies)."
+          + (f" Mirrored {graph_merged_count} of those into the v13 graph." if graph_store else ""))
     print("Orphan ML model files (models/<device_id>.pkl), if any, were NOT touched by this "
           "offline run -- compare `ls models/*.pkl` against the surviving device_ids and "
           "remove anything unreferenced manually if you're using per-device ML models.")
