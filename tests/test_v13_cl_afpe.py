@@ -176,6 +176,106 @@ check("familiarity is per-identity-dimension -- an unrelated ASN owner on the sa
       cl_afpe.get_baseline_familiarity("dev_fam", asn_owner="SomeOtherASN") == 0.0)
 check("an unknown device_id always returns 0 familiarity, never crashes", cl_afpe.get_baseline_familiarity("unknown") == 0.0)
 
+# --- Phase 6c: sigma-shift widening ---
+check("a device never corrected has zero sigma shift", cl_afpe.get_sigma_shift("sigma_dev") == 0.0)
+
+cl_afpe._apply_sigma_shift("sigma_dev", now=NOW)  # default direction: TUNE_DOWN
+check("a single TUNE_DOWN (correction) widens the shift by exactly SIGMA_WIDENING_STEP (0.25)",
+      abs(cl_afpe.get_sigma_shift("sigma_dev") - 0.25) < 1e-9)
+
+for _ in range(20):
+    cl_afpe._apply_sigma_shift("sigma_dev", now=NOW)
+check("repeated TUNE_DOWN widening is capped at MAX_SIGMA_SHIFT (2.0), never exceeds it",
+      cl_afpe.get_sigma_shift("sigma_dev") == 2.0)
+
+cl_afpe._apply_sigma_shift("sigma_dev", direction="TUNE_UP", now=NOW)
+check("a single TUNE_UP (confirmed threat) tightens by the flat step (0.50), NOT the "
+      "widening step -- the asymmetry is real, confirmed via direct read of fp_engine.py",
+      abs(cl_afpe.get_sigma_shift("sigma_dev") - 1.5) < 1e-9)
+
+for _ in range(20):
+    cl_afpe._apply_sigma_shift("sigma_dev", direction="TUNE_UP", now=NOW)
+check("repeated TUNE_UP tightening is floored at -1.5, never goes lower",
+      cl_afpe.get_sigma_shift("sigma_dev") == -1.5)
+
+check("an 'unknown' device_id is a no-op for _apply_sigma_shift, never raises",
+      cl_afpe._apply_sigma_shift("unknown", now=NOW) is None
+      and cl_afpe.get_sigma_shift("unknown") == 0.0)
+
+# mark_false_positive applies sigma-shift unconditionally, regardless of branch --
+# confirmed against BOTH the default domain-routing branch (already exercised above
+# by domain_route) and the new CONNECTION_ABUSE branch (exercised below).
+check("mark_false_positive's default domain-routing branch also widened this device's "
+      "sigma shift as a side effect (matches v1's own 'runs regardless of which "
+      "branch fired' placement)",
+      cl_afpe.get_sigma_shift("known_device") > 0.0)
+
+# --- Phase 6a: per-device threshold bumping (CONNECTION_ABUSE/PORT_SCAN/INTERNAL_RECONNAISSANCE) ---
+check("a device with no correction history yet returns the caller-supplied default threshold",
+      cl_afpe.get_device_arp_sweep_threshold("thresh_dev", default=8.0) == 8.0
+      and cl_afpe.get_device_conn_abuse_unique_ip_threshold("thresh_dev", default=5.0) == 5.0
+      and cl_afpe.get_device_long_conn_duration_threshold("thresh_dev", default=14400.0) == 14400.0)
+
+store.upsert_device("thresh_dev", timestamp=NOW)
+arp_only = cl_afpe.mark_false_positive(
+    {"signature": "INTERNAL_RECONNAISSANCE", "device": {"id": "thresh_dev", "hostname": "thresh-host"},
+     "network_context": {}, "features": {"zeek_arp_sweep_count": 3}},
+    now=NOW,
+)
+check("mark_false_positive reports threshold_bumped=True for a CONNECTION_ABUSE-family signature",
+      arp_only.threshold_bumped and not arp_only.refused)
+check("...and does NOT also attempt domain/IP immunization (the branches are mutually "
+      "exclusive -- the real v1 bugfix this port exists to preserve)",
+      arp_only.immunized_destination == "" and not arp_only.is_new_immunization)
+check("ONLY the arp_sweep threshold was bumped (arp_count>0, the other two conditions "
+      "weren't true for this alert) -- the real v1 bugfix: bump only what actually fired",
+      cl_afpe.get_device_arp_sweep_threshold("thresh_dev", default=8.0) == 12.0
+      and cl_afpe.get_device_conn_abuse_unique_ip_threshold("thresh_dev", default=5.0) == 5.0
+      and cl_afpe.get_device_long_conn_duration_threshold("thresh_dev", default=14400.0) == 14400.0)
+
+store.upsert_device("thresh_dev2", timestamp=NOW)
+multi_bump = cl_afpe.mark_false_positive(
+    {"signature": "CONNECTION_ABUSE", "device": {"id": "thresh_dev2", "hostname": "thresh-host2"},
+     "network_context": {}, "features": {
+         "zeek_s0_rej_count": 30, "zeek_s0_rej_unique_ips": 10,
+         "zeek_max_duration": 20000.0, "zeek_arp_sweep_count": 0,
+     }},
+    now=NOW,
+)
+check("multiple simultaneously-true conditions bump multiple thresholds in one call "
+      "(conn-abuse-unique-ip AND long-conn, arp_sweep excluded since its own count was 0)",
+      cl_afpe.get_device_conn_abuse_unique_ip_threshold("thresh_dev2", default=5.0) == 9.0
+      and cl_afpe.get_device_long_conn_duration_threshold("thresh_dev2", default=14400.0) == 21600.0
+      and cl_afpe.get_device_arp_sweep_threshold("thresh_dev2", default=8.0) == 8.0)
+
+store.upsert_device("thresh_dev3", timestamp=NOW)
+no_condition_true = cl_afpe.mark_false_positive(
+    {"signature": "PORT_SCAN", "device": {"id": "thresh_dev3"},
+     "network_context": {}, "features": {}},
+    now=NOW,
+)
+check("when NONE of the three conditions hold (empty features), falls back to the old "
+      "blanket behavior (bump arp_sweep anyway) rather than silently doing nothing, "
+      "matching v1 exactly", no_condition_true.threshold_bumped
+      and cl_afpe.get_device_arp_sweep_threshold("thresh_dev3", default=8.0) == 12.0)
+
+store.upsert_device("thresh_dev4", timestamp=NOW)
+bump_repeat = cl_afpe.mark_false_positive(
+    {"signature": "INTERNAL_RECONNAISSANCE", "device": {"id": "thresh_dev4"},
+     "network_context": {}, "features": {"zeek_arp_sweep_count": 1}},
+    now=NOW,
+)
+cl_afpe.mark_false_positive(
+    {"signature": "INTERNAL_RECONNAISSANCE", "device": {"id": "thresh_dev4"},
+     "network_context": {}, "features": {"zeek_arp_sweep_count": 1}},
+    now=NOW,
+)
+check("a SECOND correction for the same device/key builds on the ALREADY-BUMPED value, "
+      "not the original default (12.0 -> 16.0, not 8.0 -> 12.0 again)",
+      cl_afpe.get_device_arp_sweep_threshold("thresh_dev4", default=8.0) == 16.0)
+check("correction_count increments across repeated corrections to the same key",
+      store.get_device_metadata("thresh_dev4")["fp_profile"]["arp_sweep_unique_targets_threshold"]["correction_count"] == 2)
+
 store.close()
 
 print()
