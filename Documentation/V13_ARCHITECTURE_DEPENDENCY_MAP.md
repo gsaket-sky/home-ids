@@ -606,8 +606,46 @@ User-directed investigation into three specific questions, each confirmed as a r
 
 **Deployment status**: all three fixes are safe, low-risk, additive changes — no decision/detection/suppression logic touched. `infer_device_type()`/`prune_evidence()` fixes take effect on `soc.service`'s next restart for any reason (same category as Phase 9's detector fix). The identity-merge-mirroring fix is the same. None of these need their own dedicated restart-confirmation gate the way Phase 6e's new live call did.
 
+### A30. Full-architecture shift plan: v13 closed, Release 14 shipped complete (2026-09-07)
+
+A separate, later session ran a full audit of what still relied on pre-v13
+logic despite the cutover (`Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md`
+— the authoritative record for everything in this entry; not duplicated here
+in full). Closed out **v13** as a milestone (P0 bug fixes, W1 dead-code
+cleanup, W2 the CL-AFPE shadow→live flip mechanism), then built the entire
+follow-on **Release 14** scope in the same session: Workstream 3 (durable
+graph-backed identity history), Workstream 4 (LLM-review cross-device
+correlation + GeoIP), Workstream 5 (retro-hunt loop-closing), Workstream 6
+(closed as already-satisfied — v13 already received Suricata evidence
+automatically via the shared `EvidenceStore` post-A13 cutover, no new wiring
+needed), and all 5 net-new capabilities (N1 ad-hoc threat-hunting CLI, N2
+peer-cohort behavioral baselining, N3 decision-replay/regression harness, N4
+multi-signal campaign detection via JA3/JA4 + DGA-shape correlation; N5
+in-cycle LLM review explicitly reconfirmed deferred).
+
+**Two real, previously-undocumented bugs found and fixed, unrelated to the
+v13 migration itself**: (1) the weekly ML retrain wrote to `state/models/`
+while `fp_engine.py`'s live loader read from top-level `models/` — every
+retrain since that split happened had been silently discarded; (2) Suricata
+batch scans had been timing out 100% of the time in production (151 timeouts
+/ 0 successful scans over 48h, confirmed via `.94`'s real `journalctl`) —
+root-caused to `run_suricata_on_pcap()` hardcoding `--runmode=single`, pinning
+the entire scan to one CPU core on `.94`'s real 8-core box; fixed to
+`--runmode=workers`.
+
+**Deployment status**: all code committed/pushed (`fea2f21` through
+`504236e`). The 5-item `.94` config/file manual-action list (shadow_watcher
+removal, model consolidation, dead-file cleanup, `cl_afpe_engine` +
+`cl_afpe_flip_monitor` config) was applied by the user directly and
+independently re-verified via read-only SSH — clean `soc.service` restart,
+zero errors in the post-restart journal. **Only remaining open item in the
+entire plan**: the CL-AFPE live flip itself (W2-3), correctly gated on real
+production data accumulating (≥50 eligible comparisons, zero false-negative-
+shaped divergences) via the new `cl_afpe_flip_monitor.py`, not on more
+building.
+
 ## Open items carried from the plan
 
 - Whether `IDS_PRODUCT`'s existing NAS-hosted commit history gets carried into its eventual new GitHub repo, or that repo starts fresh — deferred until that milestone is actually reached.
-- Full per-mechanism independence design (`INDEPENDENCE_FAMILY_MAP`) — not yet started, Phase 3 territory.
-- `zeek_exfiltration`/`zeek_beaconing` (`threat_signals.py:247-274`) never attach a real `.domain`/dest context to their v1 Evidence — `v13/evidence/ingest.py`'s `fallback_context` param works around this for now, but the actual root fix (threading real dest context into those two detectors themselves) is separate, not-yet-done work.
+- Full per-mechanism independence design (`INDEPENDENCE_FAMILY_MAP`) — **stale, corrected 2026-09-07**: this has been extended multiple times since (Phase 1a's `cross_device_correlation`/`novelty_context` families, Release 14's `peer_cohort_deviation`), it was never "not started." Real validation against accumulated divergence data (Group B1 in `V13_REMAINING_WORK.md`) remains genuinely open, not the family registry's existence.
+- ~~`zeek_exfiltration`/`zeek_beaconing` never attach a real `.domain`/dest context~~ — **DONE, see A27 (Phase 9) above.** This line was stale; kept struck through rather than silently deleted.

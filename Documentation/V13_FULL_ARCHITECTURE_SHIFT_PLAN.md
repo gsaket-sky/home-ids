@@ -116,14 +116,30 @@ directly, never trust this local copy.
 
 ---
 
-## Part 2a — Pending manual actions on `.94` (blocked by the auto-mode classifier)
+## Part 2a — Manual actions on `.94` — DONE 2026-09-07, verified
 
-Every SSH *write* attempt to `.94` in this session was blocked (2 for 2) — read-only
-commands (grep/ls/systemctl status) go through fine, matching the documented
-"sometimes blocked" pattern. Run these directly on `.94` (as `user`, in
-`/home/user/myscripts/home-ids/SOC`) and confirm when done — none require a
-`soc.service` restart to be safe to apply immediately, but the restart is needed
-for `fp_engine.py` to actually pick up the corrected model file:
+User ran all 5 steps directly on `.94` (SSH writes had been blocked by the
+auto-mode classifier all session, 2-for-2). Independently re-verified via
+read-only SSH after the fact, not just taken on report:
+- `shadow_watcher` scheduler block confirmed gone from `config.yaml` (only the
+  historical "REMOVED" comment remains).
+- `cl_afpe_engine: v_current` and the `cl_afpe_flip_monitor` scheduler entry
+  both confirmed present.
+- `models/fp_classifier.onnx` now matches `state/models/fp_classifier.onnx`
+  byte-for-byte (8148 bytes, both copies) — the retrain/inference split is closed.
+- `state/metrics_dump.txt` and `state_scratch/` both confirmed removed.
+- `soc.service` restarted cleanly (`ActiveEnterTimestamp` 2026-09-07 21:50:06
+  CEST) — journal since restart shows zero errors/tracebacks, only two routine,
+  unrelated lines (an AbuseIPDB rate-limit warning; local-intel correctly
+  refusing to record a multicast address as confirmed-malicious, a guard
+  working as intended, not a bug). A reactive-capture burst fired once already
+  under the new code (`trigger=wired_probe`, 21:50:59) — its Suricata scan
+  result (confirming the `--runmode=workers` fix under real load) hadn't logged
+  yet as of this check; **worth a follow-up `journalctl` check** for the first
+  real "scan complete, N alert(s)" line instead of a timeout, to close the loop
+  on Workstream 6's own fix.
+
+Original instructions (kept below for the historical record — all already applied):
 
 ```bash
 cd /home/user/myscripts/home-ids/SOC
@@ -249,10 +265,12 @@ requires, checkbox.
 > open validation question) — is now built, tested, committed, and pushed. Two
 > real bugs found and fixed along the way that weren't in the original scope at
 > all (the ML retrain/inference path split, and Suricata's 100%-timeout-rate
-> `--runmode=single` bug). **Only pending work is on `.94` itself** — the manual
-> action list in Part 2a, blocked by the auto-mode classifier on every automated
-> SSH write attempt this session — and the CL-AFPE live flip (W2-3), which is
-> correctly gated on real production data accumulating, not on more building.
+> `--runmode=single` bug). **The `.94` manual action list (Part 2a) is now DONE
+> too** — applied by the user 2026-09-07, independently re-verified via
+> read-only SSH (clean restart, config confirmed, models consolidated). The
+> only thing still open in this entire plan is the CL-AFPE live flip (W2-3),
+> which is correctly gated on real production data accumulating, not on more
+> building.
 > See the artifact for the full item-by-item trackable checklist.
 
 ### Workstream 0 — Fix confirmed bugs first (not scope cuts, block trustworthy signal for everything below)

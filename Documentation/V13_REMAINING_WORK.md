@@ -1,5 +1,15 @@
 # v13 Remaining Work — Complete Ledger
 
+**2026-09-07 update**: Groups C/D/E below (the original Phase 4/5/6 CL-AFPE/
+LLM-review/retro-hunter scope cuts) are now almost entirely resolved — see each
+item's own strikethrough annotation for which A-number closed it. Only D3
+(`ollama_soc.py`'s own campaign-withhold guard, distinct from Release 14's
+W4-1/N4 cross-device work) remains genuinely open. For a broader audit of
+everything else that still relies on pre-v13 logic despite the cutover, and a
+trackable checklist for the full architecture shift (now complete, including
+all of Groups C/D/E except D3), see
+[`V13_FULL_ARCHITECTURE_SHIFT_PLAN.md`](V13_FULL_ARCHITECTURE_SHIFT_PLAN.md).
+
 Living document, companion to [`V13_ARCHITECTURE_DEPENDENCY_MAP.md`](V13_ARCHITECTURE_DEPENDENCY_MAP.md).
 That file tracks what's *been built and tested*; this one tracks **everything still
 open** — every deferral, scope cut, and unresolved question raised anywhere across
@@ -404,7 +414,7 @@ wait for this confirmation, but the user chose to sequence it that way.
 All four exist in v-current's `fp_engine.py` and were explicitly NOT ported —
 each is its own separate subsystem, not a small addition.
 
-### C1. Per-device threshold bumping for `CONNECTION_ABUSE` corrections
+### C1. ~~Per-device threshold bumping for `CONNECTION_ABUSE` corrections~~ — DONE (A21, 2026-09-07)
 **What**: v-current raises a specific device's own arp-sweep/long-conn/
 rejected-connection thresholds when an operator corrects a `CONNECTION_ABUSE`
 alert. v13's `mark_false_positive()` falls through to generic domain/IP
@@ -417,7 +427,7 @@ correction path — not needed for the parallel run's core hypothesis/decision
 comparison, since this only affects the CORRECTION path, not the initial
 detection/scoring logic being compared.
 
-### C2. Local confirmed-intel poisoning protection
+### C2. ~~Local confirmed-intel poisoning protection~~ — DONE (A22, 2026-09-07)
 **What**: v-current's `local_intel.py` integration, plus the live-audit-derived
 exclusions (safe_ips, cloud/CDN-owned IPs, known public DNS resolvers) that keep
 a shared "confirmed malicious" store from getting poisoned by routine gateway/
@@ -429,7 +439,9 @@ the IDS's own IP, etc.) took real live-audit work this codebase already did once
 **When**: before `check_local_intel_history` (Group D below) can be un-deferred,
 and before CL-AFPE v13 supports genuine cross-device IOC confirmation at all.
 
-### C3. Sigma-shift EWMA widening
+### C3. ~~Sigma-shift EWMA widening~~ — DONE (A21, 2026-09-07): ported with its real,
+confirmed-asymmetric step sizes, resolving this entry's own "unverified open
+question" below by direct read of `threat_signals.py`.
 **What**: `_apply_sigma_shift()` widens a device's own EWMA anomaly-detection
 threshold after a confirmed false positive, so the same benign pattern doesn't
 keep re-triggering.
@@ -443,7 +455,7 @@ itself was never read. Don't assume either answer.
 **When**: read `threat_signals.py` directly before deciding whether this is a
 real port target or dead weight not worth carrying into v13 at all.
 
-### C4. ML model (LightGBM/FastEmbed) training/inference + training write-back
+### C4. ~~ML model (LightGBM/FastEmbed) training/inference + training write-back~~ — DONE (A23, 2026-09-07): reuses v-current's already-trained artifacts read-only
 **What**: v-current's Stage 2/3 statistical classifier and its training-data
 feedback loop (`autonomous_muted.jsonl` → `train_fp_classifier.py`).
 **Why it's open**: a full separate ML pipeline; the parallel run's actual
@@ -456,7 +468,7 @@ wanted — not connected to closing out Phases 1-6's own scope.
 
 ## Group D — Deliberate LLM-review scope cuts (Phase 5)
 
-### D1. Persistent caching (`_persistent_cache_key`/`ollama_analysis_cache.json`)
+### D1. ~~Persistent caching (`_persistent_cache_key`/`ollama_analysis_cache.json`)~~ — DONE (A26 Phase 8a, 2026-09-07)
 **Why it's open**: an efficiency/cost concern (avoid re-querying Ollama for
 unchanged patterns), not a correctness concern.
 **When**: before any real production-scale use — re-querying Ollama on every
@@ -464,20 +476,32 @@ single cycle for a repeating pattern would be wasteful and slow, especially
 against `.19`'s own resource-capped local model. Not needed for small-scale
 parallel-run testing.
 
-### D2. Alert grouping/dedup logic
+### D2. ~~Alert grouping/dedup logic~~ — DONE (A26 Phase 8b, 2026-09-07): a
+deliberate design consolidation, not a separate mechanism — D1's own pattern-cache
+key already provides this for free (see A26's own docstring for why).
 **Why it's open**: v-current groups near-duplicate alerts (e.g. persistence-
 timer variants of the same finding) before ever calling the LLM, to avoid
 redundant calls. v13 has no equivalent grouping step yet.
 **When**: same trigger as D1 — matters once call volume matters, not before.
 
-### D3. Campaign correlation (`_is_campaign_corroborated`)
+### D3. Campaign correlation (`_is_campaign_corroborated`) — still genuinely open,
+**not the same thing as Release 14's W4-1/N4** (2026-09-07 clarification, avoid
+conflating the two): this item is specifically `ollama_soc.py`'s own auto-suppress-
+withhold guard (deciding whether a noisy multi-device signature looks like one real
+campaign vs. several unrelated benign trips) — v13's LLM reviewer has no
+auto-suppress action to gate at all, so this exact mechanism has no v13 analogue to
+port into. W4-1 (`live_llm_review.py`'s `_inject_coordinated_targeting()`) and N4
+(`fingerprint_campaign`/`dga_seed_campaign`) solved a *related but distinct*
+problem — making v13's decision/review layers cross-device-aware at all — not this
+one. Still real, separately-scoped future work if `ollama_soc.py`'s own withhold
+guard's job ever needs a v13-native equivalent.
 **Why it's open**: distinguishes a genuine coordinated multi-device attack from
 several devices independently tripping the same noisy signal against different,
 individually-reputable destinations. Real logic, not yet ported.
 **When**: needed for full LLM-review parity with v-current; not blocking a
 single-device parallel-run comparison, which is the initial testing shape.
 
-### D4. Telegram digest building
+### D4. ~~Telegram digest building~~ — DONE (A26 Phase 8d, 2026-09-07)
 **Why it's open**: notification formatting/orchestration, deliberately left out
 of the LLM-review module itself for testability (mirrors `ClAfpeEngine`'s own
 "hand data back to the caller" shape).
@@ -485,7 +509,10 @@ of the LLM-review module itself for testability (mirrors `ClAfpeEngine`'s own
 actually built — the plan already says it reuses this exact Telegram pattern,
 so this and that should likely be built together, not this alone in isolation.
 
-### D5. Per-run query-cap / rate-limiting logic
+### D5. ~~Per-run query-cap / rate-limiting logic~~ — DONE: `live_llm_review.py`
+(Phase 5, A20) already shipped with `DEFAULT_MAX_QUERIES_PER_RUN` + strictly
+sequential (never threaded) calls, honoring the "one in-flight Ollama request"
+rule by construction.
 **Why it's open**: protects a shared Ollama instance from being overwhelmed by
 too many alerts in one run — an operational safety valve, not core logic.
 **When**: before real production-scale operation, and specifically important
@@ -496,7 +523,7 @@ Group A3 above — these two items should probably land together.
 
 ## Group E — Deliberate retro-hunter scope cut (Phase 6)
 
-### E1. `check_local_intel_history()`'s cross-device IOC cross-reference
+### E1. ~~`check_local_intel_history()`'s cross-device IOC cross-reference~~ — DONE (A25 Phase 7, 2026-09-07)
 **What**: "device B also touched this IOC three days ago but wasn't over its
 own detection threshold at the time" — catches a historical connection using
 intel the network only learned from a DIFFERENT device's later confirmation.
