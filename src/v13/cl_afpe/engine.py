@@ -45,6 +45,26 @@ cumulative sigma shift are both stored via GraphStore.update_device_metadata()/
 get_device_metadata() (Phase 3) -- a per-device JSON blob under 'fp_profile'/
 'sigma_shift' keys, the graph-native equivalent of v1's own flat
 device_fp_profiles.json/fp_sigma_shifts.json files.
+
+v13 full-architecture plan, Phase 6b: local-intel poisoning protection, ported from
+fp_engine.py's real _is_ip_protected_from_confirmed_intel() (lines 909-965),
+record_confirmed_threat() (967-1037), and Stage-1 Check 7's read-side logic
+(1203-1240) -- read directly, not guessed. REUSES intelligence/local_intel.py's
+real LocalConfirmedIntel class via constructor injection (same "inject the real
+dependency" pattern RetroHunter already uses for threat_intel_lookup) rather than
+reimplementing it -- `local_intel`/`safe_ips` are both optional (None/empty
+default), matching this module's own existing graceful-degradation pattern for
+`resolve_canonical_device_id`/`has_device`: a caller that hasn't wired a
+LocalConfirmedIntel instance yet gets a safe no-op (record does nothing, the
+hard-stop check never fires) rather than a hard requirement. Every guard found in
+the real file is ported, since each one is a documented live-incident fix: known
+public DNS resolvers, `safe_ips`, cloud/CDN-owned ASNs, private/multicast/loopback/
+reserved IPs (write-side, in record_confirmed_threat), and telemetry-domain/IP-
+protection re-checked on the READ side too (check_local_intel_hard_stop) so an
+already-poisoned entry stops being honored immediately rather than waiting for its
+TTL to lapse -- v1's own real bugfix history (8.8.8.8, this network's own IDS box,
+mDNS multicast addresses, and 357 cloud/CDN IPs were all found poisoned in
+production before these guards existed).
 """
 import time
 from dataclasses import dataclass, field
@@ -52,6 +72,8 @@ from typing import Any, Dict, Optional
 
 from v13.graph.store import GraphStore
 from v13.evidence.model import NO_DESTINATION
+from intelligence.local_intel import LocalConfirmedIntel
+from utils import KNOWN_PUBLIC_DNS_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain
 
 # Matches fp_engine.py's constants exactly.
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600
@@ -117,7 +139,8 @@ class MarkFalsePositiveResult:
 
 
 class ClAfpeEngine:
-    def __init__(self, store: GraphStore, resolve_canonical_device_id=None, has_device=None):
+    def __init__(self, store: GraphStore, resolve_canonical_device_id=None, has_device=None,
+                  local_intel: Optional[LocalConfirmedIntel] = None, safe_ips: Optional[Any] = None):
         self.store = store
         # Both optional/defaulted, same pattern fp_engine.py's own state_manager
         # dependency uses -- a no-op device-identity check when not supplied.
@@ -125,6 +148,12 @@ class ClAfpeEngine:
         self._has_device = has_device or (lambda device_id: self.store._conn.execute(
             "SELECT 1 FROM devices WHERE device_id = ?", (device_id,)).fetchone() is not None)
         self._baseline_observations: Dict[str, Dict[str, Dict[str, int]]] = {}
+        # Phase 6b: injected, real LocalConfirmedIntel -- optional (None = poisoning
+        # protection is a safe no-op: record_confirmed_threat() does nothing,
+        # check_local_intel_hard_stop() never fires), matching this constructor's
+        # own existing graceful-degradation pattern for the two params above.
+        self.local_intel = local_intel
+        self._safe_ips = safe_ips or set()
 
     # --- trust cache / immunization (graph 'trusts' edges) ----------------------
 
@@ -424,3 +453,89 @@ class ClAfpeEngine:
             count = bucket.get(kind, {}).get(str(key), 0)
             best = max(best, min(1.0, count / float(BASELINE_FAMILIARITY_OBSERVATIONS)))
         return best
+
+    # --- local-intel poisoning protection (Phase 6b) -----------------------------
+
+    def _is_ip_protected_from_confirmed_intel(self, ip: str, asn_owner: str = "") -> bool:
+        """Matches fp_engine.py's _is_ip_protected_from_confirmed_intel() exactly
+        (lines 909-965): True if `ip` should NEVER be recordable/matchable via the
+        local confirmed-intel store -- a known public DNS resolver, explicitly
+        listed in `safe_ips`, a cloud/CDN-owned ASN, or private/multicast/loopback/
+        link-local/reserved/unspecified (stdlib ipaddress -- these structurally
+        cannot be "malicious external infrastructure," the entire premise of this
+        store). Every branch here is a documented live-incident fix in v1, not a
+        speculative safeguard -- see this module's own top-of-file docstring for
+        the real numbers found poisoned in production before each one existed."""
+        if not ip or ip == "unknown":
+            return False
+        if ip in KNOWN_PUBLIC_DNS_RESOLVERS:
+            return True
+        if ip in self._safe_ips:
+            return True
+        if asn_owner and is_cloud_cdn_provider_org(asn_owner):
+            return True
+        try:
+            import ipaddress
+            addr = ipaddress.ip_address(ip)
+            return bool(addr.is_private or addr.is_multicast or addr.is_loopback
+                        or addr.is_link_local or addr.is_reserved or addr.is_unspecified)
+        except ValueError:
+            return False
+
+    def record_confirmed_threat(self, device_id: str, base_domain: Optional[str], dest_ip: Optional[str],
+                                  reason: str, asn_owner: str = "",
+                                  ttl_seconds: Optional[float] = None) -> None:
+        """Matches record_confirmed_threat() exactly (lines 967-1037): the write
+        path into the shared LocalConfirmedIntel store, so a DIFFERENT device
+        touching the same IOC later gets an immediate hard-stop via
+        check_local_intel_hard_stop() below -- the same network-wide propagation
+        concept Phase 1a already established for reputation, applied here to false-
+        positive-adjacent confirmations. Refuses to write a known-telemetry base
+        domain (too broad/shared to ever hard-stop on at this granularity) or a
+        protected IP (see _is_ip_protected_from_confirmed_intel above) -- both real,
+        live-incident-driven guards, not speculative. A no-op, not an error, when
+        no LocalConfirmedIntel was ever injected (self.local_intel is None) --
+        never raises, matching v1's own 'a bookkeeping failure must not take down
+        the confirmed-threat verdict itself' discipline."""
+        if self.local_intel is None:
+            return
+        try:
+            if base_domain and is_telemetry_domain(base_domain):
+                base_domain = None
+            if base_domain:
+                self.local_intel.record("domain", base_domain, device_id, reason=reason, ttl_seconds=ttl_seconds)
+            if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner):
+                dest_ip = "unknown"
+            if dest_ip and dest_ip != "unknown":
+                self.local_intel.record("ip", dest_ip, device_id, reason=reason, ttl_seconds=ttl_seconds)
+        except Exception:
+            # Matches v1: a bookkeeping failure here must never take down the
+            # confirmed-threat verdict that triggered this call.
+            pass
+
+    def check_local_intel_hard_stop(self, base_domain: Optional[str], dest_ip: Optional[str],
+                                       asn_owner: str = "") -> Optional[Dict[str, Any]]:
+        """Matches Stage-1 Check 7's real read-side logic exactly (fp_engine.py
+        lines 1203-1240): once ANY device on this network was confirmed touching
+        this domain/IP, a DIFFERENT device touching the SAME IOC doesn't have to
+        re-earn independent corroboration from scratch. Re-checks the SAME
+        telemetry/protection guards on the READ side as record_confirmed_threat()
+        uses on the write side -- an already-poisoned entry (e.g. a previously-
+        mis-attributed shared vendor domain) stops being honored immediately,
+        without needing to hand-edit the state file or wait for its TTL to lapse.
+
+        Returns {"target": str, "kind": "domain"|"ip", "entry": dict} for the
+        caller to build a trigger/reason string from, or None if nothing matched
+        (including when no LocalConfirmedIntel was ever injected)."""
+        if self.local_intel is None:
+            return None
+        domain_hit_eligible = bool(base_domain) and not is_telemetry_domain(base_domain)
+        local_domain_hit = self.local_intel.check("domain", base_domain) if domain_hit_eligible else None
+        if local_domain_hit:
+            return {"target": base_domain, "kind": "domain", "entry": local_domain_hit}
+        ip_hit_eligible = bool(dest_ip) and dest_ip != "unknown" \
+            and not self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner)
+        local_ip_hit = self.local_intel.check("ip", dest_ip) if ip_hit_eligible else None
+        if local_ip_hit:
+            return {"target": dest_ip, "kind": "ip", "entry": local_ip_hit}
+        return None

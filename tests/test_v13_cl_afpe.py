@@ -27,6 +27,7 @@ def check(name, cond, detail=""):
 
 from v13.graph.store import GraphStore  # noqa: E402
 from v13.cl_afpe.engine import ClAfpeEngine, MIN_TRUST_ENTRY_TTL_SECONDS, MAX_TRUST_ENTRY_TTL_SECONDS  # noqa: E402
+from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 
 tmpdir = tempfile.mkdtemp(prefix="v13_clafpe_test_")
 db_path = str(_PathForSysPath(tmpdir) / "test_clafpe.db")
@@ -275,6 +276,73 @@ check("a SECOND correction for the same device/key builds on the ALREADY-BUMPED 
       cl_afpe.get_device_arp_sweep_threshold("thresh_dev4", default=8.0) == 16.0)
 check("correction_count increments across repeated corrections to the same key",
       store.get_device_metadata("thresh_dev4")["fp_profile"]["arp_sweep_unique_targets_threshold"]["correction_count"] == 2)
+
+# --- Phase 6b: local-intel poisoning protection ---
+
+# _is_ip_protected_from_confirmed_intel: every guard, matching the real production
+# incidents fp_engine.py's own docstring documents.
+cl_afpe_no_intel = ClAfpeEngine(store)  # local_intel=None -- the safe-default case
+check("a known public DNS resolver (8.8.8.8) is always protected",
+      cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("8.8.8.8"))
+check("an IP explicitly listed in safe_ips is protected",
+      ClAfpeEngine(store, safe_ips={"192.168.1.94"})._is_ip_protected_from_confirmed_intel("192.168.1.94"))
+check("a cloud/CDN-owned ASN is protected when asn_owner is supplied",
+      cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("35.186.224.24", asn_owner="Google LLC"))
+check("a private LAN IP is protected", cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("192.168.1.1"))
+check("a multicast address (mDNS) is protected", cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("224.0.0.251"))
+check("an ordinary public IP with no protection reason is NOT protected",
+      not cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("93.184.216.34"))
+check("'unknown'/empty IPs are never protected (nothing to protect)",
+      not cl_afpe_no_intel._is_ip_protected_from_confirmed_intel("unknown")
+      and not cl_afpe_no_intel._is_ip_protected_from_confirmed_intel(""))
+
+# record_confirmed_threat / check_local_intel_hard_stop with NO LocalConfirmedIntel
+# injected -- a safe no-op throughout, never raises.
+cl_afpe_no_intel.record_confirmed_threat("dev_x", "evil-noop.example.com", "203.0.113.9", reason="test")
+check("record_confirmed_threat with local_intel=None is a safe no-op",
+      cl_afpe_no_intel.check_local_intel_hard_stop("evil-noop.example.com", "203.0.113.9") is None)
+
+# record_confirmed_threat / check_local_intel_hard_stop with a REAL LocalConfirmedIntel
+local_intel_dir = _PathForSysPath(tempfile.mkdtemp(prefix="v13_clafpe_local_intel_"))
+real_local_intel = LocalConfirmedIntel(str(local_intel_dir))
+cl_afpe_intel = ClAfpeEngine(store, local_intel=real_local_intel, safe_ips={"192.168.1.94"})
+
+check("check_local_intel_hard_stop finds nothing before any confirmation is recorded",
+      cl_afpe_intel.check_local_intel_hard_stop("evil-confirmed.example.com", "104.16.132.229") is None)
+
+cl_afpe_intel.record_confirmed_threat("dev_a", "evil-confirmed.example.com", "104.16.132.229", reason="Stage-1 test")
+domain_hit = cl_afpe_intel.check_local_intel_hard_stop("evil-confirmed.example.com", "unknown")
+check("a domain confirmed by one device is found by check_local_intel_hard_stop for "
+      "a DIFFERENT device querying the SAME domain -- the actual network-wide "
+      "propagation point of this whole mechanism",
+      domain_hit is not None and domain_hit["kind"] == "domain" and domain_hit["target"] == "evil-confirmed.example.com")
+
+ip_hit = cl_afpe_intel.check_local_intel_hard_stop(None, "104.16.132.229")
+check("the same confirmation is ALSO found via its IP independently",
+      ip_hit is not None and ip_hit["kind"] == "ip" and ip_hit["target"] == "104.16.132.229")
+
+# write-side telemetry-domain guard
+cl_afpe_intel.record_confirmed_threat("dev_b", "sentry.io", "unknown", reason="mis-attributed")
+check("record_confirmed_threat REFUSES to write a known-telemetry base domain as "
+      "confirmed-malicious -- the real live-incident guard this ports",
+      cl_afpe_intel.check_local_intel_hard_stop("sentry.io", None) is None)
+
+# write-side protected-IP guard (safe_ips)
+cl_afpe_intel.record_confirmed_threat("dev_c", None, "192.168.1.94", reason="mis-attributed")
+check("record_confirmed_threat REFUSES to write a safe_ips-protected IP as "
+      "confirmed-malicious",
+      cl_afpe_intel.check_local_intel_hard_stop(None, "192.168.1.94") is None)
+
+# read-side re-check: an entry that got into the store SOME OTHER WAY (bypassing
+# record_confirmed_threat()'s own write guard entirely -- e.g. written directly, or
+# recorded before this project's own telemetry allowlist grew to cover it) still
+# doesn't get honored -- the real v1 fix: "stops being honored immediately, without
+# needing to hand-edit the state file," not just "never written going forward."
+real_local_intel.record("domain", "sentry.io", "dev_d", reason="pre-existing, bypassed the write guard")
+check("check_local_intel_hard_stop re-applies the telemetry guard on the READ side "
+      "independently of the write guard -- an entry that got in some other way "
+      "still doesn't match",
+      cl_afpe_intel.check_local_intel_hard_stop("sentry.io", None) is None)
 
 store.close()
 
