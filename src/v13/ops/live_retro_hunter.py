@@ -21,8 +21,20 @@ design, and this module's own _notify_external_ti_findings()/_notify_local_intel
 below for the notification shape (a direct port of scripts/retro_hunter.py's own
 run_retro_hunt() notification text, using the shared v13/ops/telegram.py helper).
 
-Still deliberately deferred: per-device job-health breakdown (v1's own
-_count_findings_by_device()) -- a small, independently addable follow-up, not blocking.
+Release 14, Workstream 5 (2026-09-07): both items A25/A26 deliberately deferred are
+now wired in. (1) Per-device job-health breakdown (v1's own
+_count_findings_by_device() equivalent) -- see _count_by_device() below. (2) The
+loop-closing action: when check_local_intel_history() finds a NEWLY-implicated
+device (one that touched an IOC before it was confirmed by a different device),
+this job now ALSO calls ClAfpeEngine.record_confirmed_threat() +
+_apply_sigma_shift(TUNE_UP) for that device -- the same "close the loop" mutation
+v1's own run_retro_hunt() performs, previously named as deferred because it needed
+a ClAfpeEngine instance threaded in, which this phase does. This has a real,
+useful side effect beyond the immediate device: it adds the device to the IOC's own
+confirmed `sources` list, so the SAME match correctly stops re-firing on the next
+run (check_local_intel_history()'s own exclusion rule already treats an
+already-a-source device as "not a new finding") -- without this, the identical
+match would otherwise be reported again every single day, forever.
 """
 import ipaddress
 import logging
@@ -37,6 +49,7 @@ from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 from intelligence.geoip import GeoIPEngine  # noqa: E402
+from v13.cl_afpe.engine import ClAfpeEngine  # noqa: E402
 from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from v13.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
 from v13.ops.telegram import send_telegram  # noqa: E402
@@ -75,6 +88,52 @@ def _geo_note(geoip_engine: GeoIPEngine, ip: str) -> str:
         return f" ({', '.join(geo_parts)})" if geo_parts else ""
     except Exception:
         return ""
+
+
+def _count_by_device(items: list, device_id_getter) -> dict:
+    """v13-native equivalent of scripts/retro_hunter.py's own
+    _count_findings_by_device() -- a simple {device_id: count} tally, generic over
+    both `findings` (Evidence objects, device_id via attribute) and `local_matches`
+    (dicts, device_id via key) via the caller-supplied getter."""
+    counts: dict = {}
+    for item in items:
+        dev_id = device_id_getter(item)
+        if dev_id:
+            counts[dev_id] = counts.get(dev_id, 0) + 1
+    return counts
+
+
+def _close_local_intel_loop(cl_afpe: ClAfpeEngine, matches: list) -> int:
+    """The loop-closing action A25/A26 named as deferred: v1's own run_retro_hunt()
+    doesn't just NOTIFY about a newly-implicated device, it also confirms the
+    threat against that device's own CL-AFPE state (record_confirmed_threat() +
+    a TUNE_UP sigma-shift, tightening its sensitivity the same way a direct
+    Stage-1 hard-stop would). Returns the number of devices actually closed.
+    Best-effort per-match: one failure must not block closing the loop for every
+    OTHER match in the same run."""
+    closed = 0
+    for m in matches:
+        device_id = m.get("device_id")
+        if not device_id:
+            continue
+        try:
+            matched_kind = m.get("matched_kind")
+            base_domain = m.get("matched_value") if matched_kind == "domain" else None
+            dest_ip = m.get("matched_value") if matched_kind == "ip" else None
+            cl_afpe.record_confirmed_threat(
+                device_id, base_domain, dest_ip,
+                # Matches scripts/retro_hunter.py's own real reason string exactly
+                # (line 389) -- NOT the ORIGINAL confirmer's own reason (m["reason"],
+                # e.g. STAGE_1_HARD_STOP) -- this call is about why THIS device is
+                # being newly confirmed (a retro-hunt cross-reference), a genuinely
+                # different fact than how the FIRST device was originally confirmed.
+                reason="RETRO_HUNT_LOCAL_INTEL_MATCH",
+            )
+            cl_afpe._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous")
+            closed += 1
+        except Exception as e:
+            LOGGER.warning("Failed to close the local-intel loop for device %r: %s", device_id, e)
+    return closed
 
 
 def _notify_external_ti_findings(findings: list, days_back: float) -> None:
@@ -168,11 +227,25 @@ def main() -> None:
         # deliberately never v1's real local_confirmed_intel.json.
         local_intel = LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
         local_matches = hunter.check_local_intel_history(local_intel, days_back=DEFAULT_DAYS_BACK)
-        store.close()
         LOGGER.info(
             "Local-intel cross-reference complete: %d match(es) against the last %d days.",
             len(local_matches), DEFAULT_DAYS_BACK,
         )
+
+        # Release 14, Workstream 5 (item 2): close the loop for each newly-implicated
+        # device -- record_confirmed_threat() + a sigma TUNE_UP, the same real
+        # mutation v1's own run_retro_hunt() performs, previously deferred pending a
+        # ClAfpeEngine instance being threaded in here. Uses the SAME store/
+        # local_intel this run already has open (still open -- store.close() moved
+        # below this block).
+        closed_count = 0
+        if local_matches:
+            cl_afpe = ClAfpeEngine(store, local_intel=local_intel)
+            closed_count = _close_local_intel_loop(cl_afpe, local_matches)
+            LOGGER.info("Closed the local-intel loop for %d/%d newly-implicated device(s).",
+                        closed_count, len(local_matches))
+        store.close()
+
         if local_matches:
             # Built lazily -- only when there's something to report, matching
             # scripts/retro_hunter.py's own laziness for the exact same reason
@@ -185,7 +258,15 @@ def main() -> None:
             _notify_local_intel_matches(local_matches, geoip_engine, DEFAULT_DAYS_BACK)
 
         write_job_health(state_dir, "live_retro_hunter", time.time() - run_start,
-                          extra={"findings_count": len(findings), "local_intel_matches_count": len(local_matches)})
+                          extra={
+                              "findings_count": len(findings),
+                              "local_intel_matches_count": len(local_matches),
+                              "local_intel_loop_closed_count": closed_count,
+                              # Release 14, Workstream 5 (item 1): per-device breakdown,
+                              # v1's own _count_findings_by_device() equivalent.
+                              "findings_by_device": _count_by_device(findings, lambda e: e.device_id),
+                              "local_intel_matches_by_device": _count_by_device(local_matches, lambda m: m.get("device_id")),
+                          })
     except Exception as e:
         LOGGER.error("live_retro_hunter failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_retro_hunter", time.time() - run_start, extra={"error": str(e)})

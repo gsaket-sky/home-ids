@@ -181,6 +181,39 @@ check("the Telegram message names the victim device and the matched domain",
 check("the Telegram message correctly attributes the confirmation to li_confirmer",
       "li_confirmer" in sent_msg)
 
+# --- Release 14, Workstream 5: the loop-closing action + per-device breakdown ---
+li_health = json.loads((_li_dir / "job_health.json").read_text())["live_retro_hunter"]
+check("W5: the loop was closed for the one newly-implicated device (li_victim)",
+      li_health.get("local_intel_loop_closed_count") == 1)
+check("W5: findings_by_device/local_intel_matches_by_device breakdowns are present "
+      "and correctly attribute the one local-intel match to li_victim",
+      li_health.get("local_intel_matches_by_device") == {"li_victim": 1})
+
+from v13.cl_afpe.engine import ClAfpeEngine as _ClAfpeEngineForAssertions  # noqa: E402
+li_store_check = GraphStore(str(li_db_path))
+li_cl_afpe_check = _ClAfpeEngineForAssertions(li_store_check)
+check("W5: li_victim's CL-AFPE sigma-shift was actually tightened (TUNE_UP, a real "
+      "negative shift) as a side effect of closing the loop -- not just the "
+      "notification, a genuine confirmed-threat state mutation",
+      li_cl_afpe_check.get_sigma_shift("li_victim") < 0.0)
+li_store_check.close()
+
+# The real point of closing the loop, not just recording it: li_victim is now a
+# confirmed SOURCE for this IOC too, so a second run finds ZERO new matches for it
+# -- without this, the identical match would re-fire and re-notify every single day.
+_reset_telegram_mock = None
+with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(_li_intel_dir)), \
+     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+     patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_rerun:
+    live_retro_hunter.main()
+check("W5: a SECOND run finds ZERO new local-intel matches for li_victim -- closing "
+      "the loop means check_local_intel_history()'s own exclusion rule now correctly "
+      "treats it as an already-known source, not a fresh finding",
+      json.loads((_li_dir / "job_health.json").read_text())["live_retro_hunter"]["local_intel_matches_count"] == 0)
+check("W5: the second run sends no Telegram notification for a match that no "
+      "longer exists",
+      mock_send_telegram_rerun.call_count == 0)
+
 
 # --- Phase 7: zero matches of either kind sends NO Telegram notification ---
 _quiet_dir = TMPDIR / "quiet_phase7"
@@ -204,6 +237,33 @@ check("main() sends NO Telegram notification when neither external-TI nor "
       "local-intel finds anything -- send_telegram itself is never called on a "
       "genuinely quiet run",
       mock_send_telegram_quiet.call_count == 0)
+
+
+# --- W5 unit-level: _count_by_device / _close_local_intel_loop fail-safe ---
+
+check("_count_by_device: a plain tally, empty input -> empty dict",
+      live_retro_hunter._count_by_device([], lambda x: x) == {})
+check("_count_by_device: counts correctly across repeats and skips falsy device_ids",
+      live_retro_hunter._count_by_device(
+          [{"device_id": "a"}, {"device_id": "a"}, {"device_id": "b"}, {"device_id": None}],
+          lambda m: m.get("device_id"),
+      ) == {"a": 2, "b": 1})
+
+
+class _ExplodingClAfpe:
+    def record_confirmed_threat(self, *a, **kw):
+        raise RuntimeError("simulated CL-AFPE failure")
+
+
+check("_close_local_intel_loop: FAIL-SAFE -- one match's failure doesn't block "
+      "closing the loop for every OTHER match in the same run, and returns the "
+      "real count actually closed (zero here, since the only engine given always "
+      "raises)",
+      live_retro_hunter._close_local_intel_loop(
+          _ExplodingClAfpe(), [{"device_id": "x", "matched_kind": "domain", "matched_value": "d.example.com"}],
+      ) == 0)
+check("_close_local_intel_loop: a match with no device_id is skipped cleanly, not an error",
+      live_retro_hunter._close_local_intel_loop(_ExplodingClAfpe(), [{"matched_kind": "domain"}]) == 0)
 
 
 print(f"\n{'='*60}")

@@ -418,21 +418,41 @@ ever scoped the larger migration.
   real prompt sent to the (fake) LLM for a two-device shared-destination
   scenario actually contains `coordinated_targeting` — proving the fix closes
   the structural gap, not just that the helper function works in isolation.
-- [ ] **W4-3. In-cycle LLM review** (net-new, not a cut — see Part 4).
+- [ ] **W4-3/N5. In-cycle LLM review** — **decision reconfirmed 2026-09-07,
+  stays deferred.** Asked explicitly: building this means a background
+  dispatch queue/worker thread inside `soc.service`'s own always-running
+  process (Ollama's up-to-900s worst case makes a synchronous in-cycle call a
+  non-starter), a materially different, higher-risk change than every adapter
+  built this session, all of which call synchronously and fail-fast. The
+  4-hourly batch job already reviews everything at meaningfully lower risk;
+  chosen to leave deferred, matching A20's original reasoning, not overridden
+  just because this plan reached it.
 - [ ] **W4-4. LLM-review local-triage default.** Why cut: `query_triage()`'s own
   accuracy is unvalidated (Group B2, still open) — wiring a `hardware_profile`
   default for a capability nothing calls yet would be speculative. **Sequence
   strictly after B2 is resolved**, not before.
 
-### Workstream 5 — Retro-hunt completeness
+### Workstream 5 — Retro-hunt completeness — DONE 2026-09-07
 
-- [ ] **W5-1. Per-device job-health breakdown** for `live_retro_hunter.py` (mirrors
-  v1's `_count_findings_by_device()` — small, self-contained).
-- [ ] **W5-2. The loop-closing `record_confirmed_threat()` + sigma `TUNE_UP` action**
-  for a newly-implicated device. Why cut: A25 named this out of Phase 7's approved
-  scope explicitly (cross-reference + notification only, not this additional
-  mutation). Now unblocked since `ClAfpeEngine` exists — needs an instance threaded
-  into `live_retro_hunter.py`.
+- [x] **W5-1. Per-device job-health breakdown** for `live_retro_hunter.py`.
+  `_count_by_device()` added, generic over both `findings` (attribute access) and
+  `local_intel matches` (dict access) — `job_health.json` now carries
+  `findings_by_device`/`local_intel_matches_by_device`.
+- [x] **W5-2. The loop-closing `record_confirmed_threat()` + sigma `TUNE_UP` action**
+  for a newly-implicated device. `_close_local_intel_loop()` threads a
+  `ClAfpeEngine` instance into `live_retro_hunter.py` (previously the named
+  blocker), calling `record_confirmed_threat(reason="RETRO_HUNT_LOCAL_INTEL_MATCH")`
+  — matching `scripts/retro_hunter.py`'s own real reason string exactly — plus a
+  `TUNE_UP` sigma-shift, per-match fail-safe (one failure never blocks closing the
+  loop for other matches in the same run). Verified the actual point of doing
+  this, not just recording it: a second run against the same fixture finds ZERO
+  new matches for the now-closed device (its own exclusion rule now correctly
+  treats it as an already-known source) — without this, an identical match would
+  have re-fired and re-notified every single day. 12 new tests across
+  `tests/test_v13_live_retro_hunter.py` (end-to-end loop-closing + the
+  zero-new-matches-on-rerun proof + sigma-shift persistence check) and inline
+  unit tests for both new functions' fail-safe paths. Full `test_v13_retro_hunter.py`
+  suite re-confirmed clean.
 
 ### Workstream 6 — Suricata evidence pipeline (A6, the one genuinely large cut)
 
