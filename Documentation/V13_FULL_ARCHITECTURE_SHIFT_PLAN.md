@@ -12,9 +12,10 @@ it off here (don't delete the row — the "why it was cut" reasoning stays usefu
 Companion artifact (kept in sync with this file's Part 3/4):
 `https://claude.ai/code/artifact/4e055533-481d-461d-9e63-c47ef7dbdf90`
 
-**Versioning boundary (set 2026-09-07)**: Workstreams P0/1/2 close out **v13** as a
-milestone. Workstream 3 onward, plus the net-new items, are tracked as **Release
-14** — a fresh version, not a renumbering of the same list.
+**Versioning boundary — v13 CLOSED 2026-09-07**: Workstreams P0/1/2 (see Part 3)
+are complete — that closes out **v13** as a milestone. Workstream 3 onward, plus
+the net-new items in Part 4, are tracked as **Release 14** — a fresh version, not
+a renumbering of the same list. See Part 3's own banner for the full record.
 
 **Standing design constraint, applies to every item below**: target hardware for
 this codebase's eventual deployment is a **Raspberry Pi, 8GB RAM minimum**, not
@@ -210,6 +211,29 @@ clean startup with no new errors.
 Format per item: **what**, **why it was cut** (the real original reason, not
 "not done yet"), **what full completion requires**, checkbox.
 
+> ## 🏁 v13 is CLOSED (2026-09-07)
+>
+> Workstreams 0, 1, and 2 — the fix, bugfixes, cleanup, and CL-AFPE live-flip
+> mechanism — are all built, tested, and committed (`fea2f21`, `379a86b`). That's
+> the whole of what "v13" was scoped to be: the EvidenceGraph architecture, live,
+> with every mechanism either flipped or holding a real, automated path to flip.
+> The remaining open item (W2-3, retiring CL-AFPE's flat files) is explicitly
+> gated on real production data accumulating first, not on more building — v13
+> has nothing further to build.
+>
+> **Everything from Workstream 3 onward, plus every net-new item in Part 4, is
+> tracked as a new version: Release 14.** Not a renumbering — a fresh scope with
+> its own milestone, matching the project's own convention of naming a real
+> version boundary rather than an endless "v13.x" tail.
+
+---
+
+# Release 14 — beyond the EvidenceGraph cutover
+
+Everything below is genuinely new scope, not v13 cleanup. Same tracked-checklist
+discipline as Part 3 above: what, why it was cut/deferred, what completion
+requires, checkbox.
+
 ### Workstream 0 — Fix confirmed bugs first (not scope cuts, block trustworthy signal for everything below)
 
 - [x] **P0-1. Confirm v13 ops-job scheduling status directly on `.94`.** DONE
@@ -385,7 +409,7 @@ ever scoped the larger migration.
 
 ---
 
-## Part 4 — Net-new capability: "Now possible, not yet built"
+## Part 4 (Release 14) — Net-new capability: "Now possible, not yet built"
 
 Pulled from the companion artifact's own "Potential" section — these aren't scope
 cuts (nothing pre-v13 ever had them), they're direct consequences of the graph
