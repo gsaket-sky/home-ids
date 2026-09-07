@@ -812,6 +812,22 @@ scheduled_jobs:
       cron: "15 3 * * *"
       script: "../v13/ops/live_prune.py"
 
+    # v13 full-architecture plan, Phase 4 -- retroactive threat-intel re-scan of
+    # v13's OWN graph-backed destination history (state/v13_graph.db), NOT a
+    # replacement for the "retro_hunter" job above (that one keeps doing its own
+    # local-intel cross-reference + Telegram notification + fp_engine sigma-tuning,
+    # none of which v13's RetroHunter has yet -- see src/v13/retro_hunter.py's own
+    # documented scope cut). A confirmed-malicious destination gets written back as
+    # real reputation Evidence for the device that touched it, picked up by that
+    # device's next live decision cycle. Scheduled 45 minutes after the job above
+    # purely to avoid both doing a cold ThreatIntel feed refresh at the exact same
+    # minute -- they don't share any state, so this isn't a correctness requirement.
+    # Lives in src/v13/ops/, not scripts/, hence the "script" override below.
+    live_retro_hunter:
+      enabled: true
+      cron: "45 2 * * *"
+      script: "../v13/ops/live_retro_hunter.py"
+
 
 # =============================================================================
 # engine — v13 fast-cutover rollback switch (Documentation/
