@@ -75,16 +75,31 @@ check("DNSTunnelingHypothesis requires BOTH high rate AND high entropy",
 
 score_strong = h.evaluate(
     score_evidence([ev("dns_rate", 150), ev("dns_entropy", 4.5), ev("dns_unique_ratio", 0.9)], now=NOW),
-    rep(0),  # tier 0 (local/internal): strong signal but NOT in (3,4), isolates the Probable bump from the separate High bump
+    rep(0),  # tier 0 (local/internal): strong signal but not tier 4, isolates the Probable bump from the separate High bump
 )
 check("DNSTunnelingHypothesis reaches Probable (3.0) with the strong signal present", score_strong == 3.0)
 
-score_strong_high_tier = h.evaluate(
+# TIGHTENED (third-party architecture review, 2026-09-09): tier 3 (unclassified,
+# no external signal at all) used to also qualify for the High bump alongside
+# tier 4 -- "we know nothing about this destination" isn't evidence of anything,
+# so it no longer helps a hypothesis reach its own ceiling ("unusual is not
+# malicious"). Only tier 4 (at least one real, if weak, external reputation
+# signal) now qualifies.
+score_strong_unclassified_tier = h.evaluate(
     score_evidence([ev("dns_rate", 150), ev("dns_entropy", 4.5), ev("dns_unique_ratio", 0.9)], now=NOW),
-    rep(3),  # tier 3 (unclassified): same strong signal, but tier in (3,4) additionally triggers the High bump
+    rep(3),  # tier 3 (unclassified): strong signal alone is no longer enough for the High bump
 )
-check("DNSTunnelingHypothesis reaches High (4.0) when the strong signal is ALSO on an unclassified-tier destination",
-      score_strong_high_tier == 4.0)
+check("DNSTunnelingHypothesis does NOT reach High (4.0) on an unclassified (tier 3) "
+      "destination -- being unclassified isn't evidence of anything",
+      score_strong_unclassified_tier == 3.0, f"got {score_strong_unclassified_tier}")
+
+score_strong_weak_signal_tier = h.evaluate(
+    score_evidence([ev("dns_rate", 150), ev("dns_entropy", 4.5), ev("dns_unique_ratio", 0.9)], now=NOW),
+    rep(4),  # tier 4: at least one real (if weak) external reputation signal present
+)
+check("DNSTunnelingHypothesis reaches High (4.0) when the strong signal is paired with "
+      "a real (if weak) external reputation signal (tier 4)",
+      score_strong_weak_signal_tier == 4.0)
 
 score_only_rate = h.evaluate(score_evidence([ev("dns_rate", 150)], now=NOW), rep(3))
 check("DNSTunnelingHypothesis does NOT fire on rate alone (required_satisfied is False)",
@@ -123,12 +138,29 @@ h2.evaluate(score_evidence([ev("zeek_conn_abuse", 1)], now=NOW), rep(3))
 check("a port-scan signal alone names the hypothesis PORT_SCAN", h2.name == "PORT_SCAN")
 
 h3 = ConnectionAbuseHypothesis()
-score_multi = h3.evaluate(
+score_multi_high_conf = h3.evaluate(
     score_evidence([ev("arp_sweep", 1), ev("zeek_conn_abuse", 1)], now=NOW), rep(3),
 )
 check("TWO distinct categories together keep the general CONNECTION_ABUSE name "
       "(broader multi-stage story), not either specific name", h3.name == "CONNECTION_ABUSE")
-check("two distinct corroborating categories reach the strong/High tier", score_multi == 4.0)
+check("two distinct categories at high confidence (effective_weight>=0.85) reach the "
+      "High tier -- via genuine WITHIN-category intensity, not mere co-occurrence",
+      score_multi_high_conf == 4.0)
+
+# REWORKED (third-party architecture review, 2026-09-09): an ARP sweep (internal
+# recon) and an abnormally-long connection (often just a legitimate large
+# transfer/stream) are conceptually unrelated behaviors from different sensors --
+# co-occurring used to grant this hypothesis its own 4.0 ceiling regardless of how
+# weak either signal was on its own, double-counting the SAME cross-family
+# diversity the decision engine's own num_independent_sources already rewards.
+h4 = ConnectionAbuseHypothesis()
+score_multi_low_conf = h4.evaluate(
+    score_evidence([ev("arp_sweep", 1, confidence=0.7), ev("zeek_long_conn", 1, confidence=0.7)], now=NOW), rep(3),
+)
+check("REGRESSION GUARD: two distinct categories at MODERATE confidence "
+      "(effective_weight 0.7, clears best>=0.6 but not best>=0.85) reach only the "
+      "Probable tier now, not High -- mere category co-occurrence no longer "
+      "manufactures the ceiling score", score_multi_low_conf == 3.0, f"got {score_multi_low_conf}")
 
 # --- DNSEvasionHypothesis: 3-way naming via provenance subtag ---
 h = DNSEvasionHypothesis()
@@ -143,6 +175,34 @@ h3 = DNSEvasionHypothesis()
 h3.evaluate(score_evidence([ev("dns_evasion_anomaly", 1, provenance="detector:dns_evasion:partial_gap:note")], now=NOW), rep(3))
 check("an unrecognized/weaker subtag falls back to the least-alarming DNS_ATTRIBUTION_GAP name",
       h3.name == "DNS_ATTRIBUTION_GAP")
+
+# CAPPED (third-party architecture review, 2026-09-09): DNS_ATTRIBUTION_GAP is an
+# acknowledged ambiguity, not a confirmed evasion pattern -- it must never climb
+# the same ladder as the two confirmed names above, even with high-confidence
+# and/or corroborating evidence.
+h4 = DNSEvasionHypothesis()
+score_gap_high_conf = h4.evaluate(
+    score_evidence([
+        ev("dns_evasion_anomaly", 1, confidence=0.95, provenance="detector:dns_evasion:partial_gap:note"),
+        ev("zeek_notice", 1),  # unrelated corroborating evidence -- would trigger the strong_score bump
+    ], now=NOW), rep(3),
+)
+check("REGRESSION GUARD: DNS_ATTRIBUTION_GAP stays capped at the base floor (2.0) "
+      "even with high confidence AND corroborating evidence present -- an "
+      "acknowledged ambiguity can't independently escalate",
+      score_gap_high_conf == 2.0, f"got {score_gap_high_conf}")
+
+h5 = DNSEvasionHypothesis()
+score_policy_bypass_high_conf = h5.evaluate(
+    score_evidence([
+        ev("dns_evasion_anomaly", 1, confidence=0.95, provenance="detector:dns_evasion:policy_bypass:note"),
+        ev("zeek_notice", 1),
+    ], now=NOW), rep(3),
+)
+check("REGRESSION GUARD: a genuinely CONFIRMED evasion pattern (policy_bypass) "
+      "under the identical evidence shape still reaches High (4.0) -- the cap "
+      "targets the ambiguous case specifically, not the whole hypothesis",
+      score_policy_bypass_high_conf == 4.0, f"got {score_policy_bypass_high_conf}")
 
 # --- DGAHypothesis (effective_weight-driven thresholds) ---
 h = DGAHypothesis()
@@ -181,50 +241,49 @@ score_wrong_category = h3.evaluate(
 check("a device category NOT in the expected-high-volume set does not get this benign pass",
       score_wrong_category == 0.0)
 
-# --- Phase 1a: first_contact bump (Exfiltration/Beaconing/DNSTunnelingV2) ---
+# --- REMOVED (third-party architecture review, 2026-09-09): first_contact used to
+# bump strong_score in Exfiltration/Beaconing/DNSTunnelingV2Hypothesis -- "never
+# talked to this destination before" is real context, but novelty alone isn't
+# corroboration ("unusual is not malicious"). These are now REGRESSION GUARDS
+# proving first_contact no longer moves any of the three hypotheses' own score,
+# replacing the old tests that asserted the removed behavior. ---
 h = ExfiltrationHypothesis()
 score_moderate_alone = h.evaluate(
     score_evidence([ev("zeek_exfiltration", 1, confidence=0.7)], now=NOW), rep(3),
 )
-check("a moderate-confidence exfiltration hit alone (effective_weight 0.7, below the "
-      "old dead strong_score path) reaches SUSPICIOUS via the best>=0.6 gate",
-      score_moderate_alone == 3.0)
+check("a moderate-confidence exfiltration hit alone (effective_weight 0.7) reaches "
+      "SUSPICIOUS via the best>=0.6 gate", score_moderate_alone == 3.0)
 
 h = ExfiltrationHypothesis()
 score_weak_plus_first_contact = h.evaluate(
     score_evidence([ev("zeek_exfiltration", 1, confidence=0.4), ev("first_contact", 1.0)], now=NOW), rep(3),
 )
-check("Phase 1a REGRESSION FIX: a WEAK exfiltration hit (effective_weight 0.4, below "
-      "the best>=0.6 gate) still reaches SUSPICIOUS when paired with a genuine "
-      "first-contact signal -- strong_score used to be computed but never consulted "
-      "for this hypothesis, making first_contact a dead checklist-only field before "
-      "this fix", score_weak_plus_first_contact == 3.0)
+check("REGRESSION GUARD: a WEAK exfiltration hit (effective_weight 0.4, below the "
+      "best>=0.6 gate) does NOT reach SUSPICIOUS just because first_contact is also "
+      "present -- novelty alone is no longer corroboration",
+      score_weak_plus_first_contact == 2.0, f"got {score_weak_plus_first_contact}")
 
 h = ExfiltrationHypothesis()
 score_weak_alone = h.evaluate(
     score_evidence([ev("zeek_exfiltration", 1, confidence=0.4)], now=NOW), rep(3),
 )
-check("REGRESSION GUARD: that same weak hit WITHOUT first_contact stays at base "
-      "SUSPICIOUS-floor (2.0), confirming the fix only ADDS a path, never lowers "
-      "the bar unconditionally", score_weak_alone == 2.0)
+check("that same weak hit WITHOUT first_contact also stays at the base floor (2.0) "
+      "-- identical to the first_contact case now, confirming first_contact is inert",
+      score_weak_alone == 2.0)
 
 # confidence=0.5 (below the 0.85 best-effective_weight gate) isolates the
-# strong_score-only SUSPICIOUS path from the separate best>=0.85 HIGH path below --
-# both hypotheses' HIGH tier requires strong_score AND best>=0.85 together, so a
-# high-confidence hit would trip BOTH gates at once and not isolate anything.
+# strong_score-only SUSPICIOUS path from the separate best>=0.85 HIGH path below.
 h = BeaconingHypothesis()
 score_beacon_plain = h.evaluate(score_evidence([ev("zeek_beaconing", 1, confidence=0.5)], now=NOW), rep(3))
-score_before = score_beacon_plain
 h2 = BeaconingHypothesis()
 score_beacon_first_contact = h2.evaluate(
     score_evidence([ev("zeek_beaconing", 1, confidence=0.5), ev("first_contact", 1.0)], now=NOW), rep(3),
 )
 check("BeaconingHypothesis: a beacon hit alone (below the best>=0.85 HIGH gate, no "
       "other corroboration) stays at the base floor", score_beacon_plain == 2.0)
-check("BeaconingHypothesis: adding first_contact raises that same hit to SUSPICIOUS "
-      "via the existing strong_score gate (strong_score already gated this "
-      "hypothesis's own threshold, so first_contact was already functional here, "
-      "not dead)", score_beacon_first_contact > score_before and score_beacon_first_contact == 3.0)
+check("REGRESSION GUARD: adding first_contact does NOT raise that same beacon hit "
+      "-- novelty alone is no longer corroboration",
+      score_beacon_first_contact == score_beacon_plain == 2.0, f"got {score_beacon_first_contact}")
 
 h = DNSTunnelingV2Hypothesis()
 score_tunnel_plain = h.evaluate(
@@ -241,9 +300,9 @@ score_tunnel_first_contact = h2.evaluate(
 )
 check("DNSTunnelingV2Hypothesis: a single-signal tunnel hit alone stays at the base floor",
       score_tunnel_plain == 2.0)
-check("DNSTunnelingV2Hypothesis: adding first_contact raises a single-signal tunnel "
-      "hit to SUSPICIOUS via the existing strong_score gate",
-      score_tunnel_first_contact == 3.0)
+check("REGRESSION GUARD: adding first_contact does NOT raise that same tunnel hit "
+      "-- novelty alone is no longer corroboration",
+      score_tunnel_first_contact == score_tunnel_plain == 2.0, f"got {score_tunnel_first_contact}")
 
 # --- Phase 1a: CoordinatedTargetingHypothesis -- a genuinely new capability, no v1 equivalent ---
 h = CoordinatedTargetingHypothesis()

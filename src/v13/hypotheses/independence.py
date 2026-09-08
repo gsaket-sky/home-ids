@@ -102,6 +102,15 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
 
     # Statistical anomaly detection -- a distinct vantage point (an ML model's own
     # output), not the same as any specific behavioral sensor above.
+    #
+    # REVERSED (third-party architecture review, 2026-09-09): decision/engine.py's
+    # own ml_anomaly branch already never sets HIGH/CRITICAL directly (only
+    # ANOMALOUS/log). But before this change, this family still counted toward
+    # OTHER hypotheses' independent-source total -- an unvalidated model output
+    # could silently be the "second source" that promotes an unrelated hypothesis
+    # to HIGH, the same indirect-promotion shape already found and fixed for
+    # peer_deviation above. Now in NON_ATTACK_FAMILIES: an ML anomaly can still
+    # produce its own ANOMALOUS verdict, it just can't corroborate anything else.
     "ml_anomaly": "ml_anomaly",
 
     # BENIGN-CONTEXT ONLY, deliberately excluded from attack corroboration counting
@@ -129,11 +138,20 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # Release 14, N2 -- a genuinely distinct vantage point from cross_device_
     # correlation above: THIS device's own behavior diverging from its peer
     # cohort's norm, not another device corroborating a shared observation.
-    # Counts toward independent-source corroboration like any other real
-    # attack-shaped signal (never added to NON_ATTACK_FAMILIES) -- but
-    # PeerDeviationHypothesis itself is deliberately capped low, so this signal
-    # alone still can't reach HIGH without a second, different family
-    # corroborating it (the decision engine's own >=2-independent-source gate).
+    #
+    # REVERSED (third-party architecture review + live audit, 2026-09-09): this
+    # family used to count toward independent-source corroboration, on the
+    # reasoning that PeerDeviationHypothesis's own 3.0 cap meant it could never
+    # reach HIGH alone. That reasoning held for "alone" but not for "combined with
+    # one other weak signal from any family" -- confirmed live, twice: a device
+    # pooled into a fake device_type cohort reached HIGH from peer_deviation +
+    # stale reputation evidence alone (zero real corroboration), and a normally-
+    # active laptop (112 real distinct destinations/week) reached HIGH purely
+    # because its "laptop" peer cohort was 5 near-dormant devices (0,0,0,0,1
+    # destinations) -- a statistically fragile comparison, not real corroboration
+    # of anything. Now in NON_ATTACK_FAMILIES: PeerDeviationHypothesis still fires
+    # and still caps at SUSPICIOUS on its own, it just can no longer be the thing
+    # that pushes an unrelated hypothesis over the HIGH bar.
     "peer_deviation": "peer_cohort_deviation",
 
     # Also Phase 1a: "this destination has never been contacted before" is a fact
@@ -150,7 +168,14 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
 # verdict (it's legitimate evidence for the LocalDeviceDiscoveryHypothesis benign
 # side, never for corroborating an attack). "novelty_context" (Phase 1a) gets the
 # same treatment for the same structural reason -- see its own comment above.
-NON_ATTACK_FAMILIES = frozenset({"local_context", "novelty_context"})
+# "peer_cohort_deviation" and "ml_anomaly" (third-party review + live audit,
+# 2026-09-09) joined this set for the same reason: both are real signals worth a
+# hypothesis's own verdict, but too cheap/unvalidated to count as one of the two
+# independent SOURCES the whole HIGH bar rests on -- see each family's own comment
+# above for the live incidents that found this.
+NON_ATTACK_FAMILIES = frozenset({
+    "local_context", "novelty_context", "peer_cohort_deviation", "ml_anomaly",
+})
 
 UNKNOWN_FAMILY = "unregistered"  # visible fallback, see count_independent_families()'s own docstring
 

@@ -111,8 +111,24 @@ r_corroborated = engine.evaluate(
     [ev("malicious_ja3", timestamp=NOW - 5), ev("zeek_notice", timestamp=NOW - 5)],
     rep(5, verified_ioc=False), now=NOW,
 )
-check("tier-5, not verified, but corroborated (independent source + attack>benign) -> Corroborated Reputation Signal",
+check("tier-5, not verified, but corroborated by 2 independent families (tls_fingerprint "
+      "+ network_behavior) + attack>benign -> Corroborated Reputation Signal, CRITICAL",
       r_corroborated["decision_path"] == "tier5_corroborated" and r_corroborated["state"] == DecisionState.CRITICAL)
+
+# TIGHTENED (third-party architecture review, 2026-09-09): tier 5 without
+# verified_ioc used to reach CRITICAL from just ONE independent family -- a bare
+# crowd-sourced AbuseIPDB score, not a curated feed match, could reach auto-block
+# from a single weak corroborating hint. CRITICAL should never require LESS
+# corroboration than HIGH; now requires the same >=2-family bar.
+r_single_family_tier5 = engine.evaluate(
+    [ev("zeek_notice", timestamp=NOW - 5)],
+    rep(5, verified_ioc=False), now=NOW,
+)
+check("REGRESSION GUARD: tier-5, not verified, only ONE independent family (network_behavior "
+      "alone) no longer reaches CRITICAL -- demotes to SUSPICIOUS instead",
+      r_single_family_tier5["decision_path"] == "tier5_uncorroborated"
+      and r_single_family_tier5["state"] == DecisionState.SUSPICIOUS,
+      f"got {r_single_family_tier5['decision_path']}/{r_single_family_tier5['state']}")
 
 r_uncorroborated5 = engine.evaluate([], rep(5, verified_ioc=False), now=NOW)
 check("tier-5, not verified, no corroboration -> demotes to SUSPICIOUS, not CRITICAL",
@@ -220,6 +236,59 @@ r_custom_no_default = custom_engine.evaluate([ev("arp_spoofing", timestamp=NOW -
 check("a custom registry that omits arp_spoof entirely means arp_spoofing evidence no longer "
       "hard-stops at all -- confirms the registry is genuinely swappable, not just additive",
       r_custom_no_default["decision_path"] != "hard_stop")
+
+# --- INVARIANT BATTERY (third-party architecture review, item #11: "enforce
+# HIGH/CRITICAL invariants in code") -- rather than trusting the branch logic by
+# convention, assert the two central rules directly against a battery of varied
+# scenarios: HIGH always requires >=2 independent families, and CRITICAL never
+# comes from a path weaker than that (either a genuine deterministic hard-stop, a
+# curated-feed verified_ioc, or a tier5_corroborated path itself now gated on
+# >=2 families). If a future change weakens either bar, one of these fails. ---
+_DETERMINISTIC_CRITICAL_PATHS = {"hard_stop", "tier5_confirmed"}
+
+_invariant_scenarios = [
+    ("empty evidence, tier 3", [], rep(3)),
+    ("single dns_behavior family only", [ev("dns_dga_burst", value=1, confidence=0.95)], rep(3)),
+    ("single network_behavior family only", [ev("zeek_notice")], rep(3)),
+    ("two genuinely different families", [ev("malicious_ja3"), ev("zeek_notice")], rep(3)),
+    ("three genuinely different families",
+     [ev("malicious_ja3"), ev("zeek_notice"), ev("reputation", value=5.0)], rep(3)),
+    ("tier 5 unverified, single family", [ev("zeek_notice")], rep(5, verified_ioc=False)),
+    ("tier 5 unverified, two families", [ev("malicious_ja3"), ev("zeek_notice")], rep(5, verified_ioc=False)),
+    ("tier 5 verified_ioc, no evidence", [], rep(5, verified_ioc=True)),
+    ("fresh honeypot feature, no evidence", [], rep(3)),
+    ("fresh arp_spoofing hard-stop", [ev("arp_spoofing", timestamp=NOW - 5)], rep(3)),
+    ("stale arp_spoofing (past freshness)", [ev("arp_spoofing", timestamp=NOW - 500)], rep(3)),
+    ("geofence alone, no corroboration",
+     [ev("geofencing_violation", timestamp=NOW - 5)], rep(3)),
+    ("geofence + one corroborating family",
+     [ev("geofencing_violation", timestamp=NOW - 5, dest="bad.example.com"),
+      ev("malicious_ja3", timestamp=NOW - 5, dest="bad.example.com")], rep(3)),
+    ("local_device_discovery only (non-attack family)", [ev("local_device_discovery", value=1)], rep(3)),
+    ("trusted tier (1) with otherwise-strong evidence",
+     [ev("malicious_ja3"), ev("zeek_notice")], rep(1)),
+]
+
+for label, evidence, rep_vec in _invariant_scenarios:
+    r = engine.evaluate(evidence, rep_vec, features={"zeek_honeypot_hits": 1} if label.startswith("fresh honeypot") else None, now=NOW)
+    if r["state"] == DecisionState.HIGH:
+        # geofence_uncorroborated is a legitimate exception: it's a downgrade FROM
+        # a deterministic hard-stop fact (a confirmed GeoIP blocklist match), not
+        # an escalation via the hypothesis-driven corroboration path -- a real,
+        # already-verified fact standing alone is not the "unusual is not
+        # malicious" gap this invariant otherwise guards against.
+        is_deterministic_downgrade = r["decision_path"] == "geofence_uncorroborated"
+        check(f"INVARIANT [{label}]: HIGH implies independent_sources >= 2, OR a "
+              "deterministic hard-stop fact downgraded rather than escalated",
+              r["independent_sources"] >= 2 or is_deterministic_downgrade,
+              f"got independent_sources={r['independent_sources']} decision_path={r['decision_path']}")
+    if r["state"] == DecisionState.CRITICAL:
+        is_deterministic_path = r["decision_path"] in _DETERMINISTIC_CRITICAL_PATHS
+        is_corroborated_reputation = r["decision_path"] == "tier5_corroborated" and r["independent_sources"] >= 2
+        check(f"INVARIANT [{label}]: CRITICAL only via a deterministic hard-stop/verified_ioc, "
+              "or tier5_corroborated with independent_sources >= 2",
+              is_deterministic_path or is_corroborated_reputation,
+              f"got decision_path={r['decision_path']} independent_sources={r['independent_sources']}")
 
 print()
 if FAILURES:

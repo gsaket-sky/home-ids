@@ -117,7 +117,15 @@ _last_decision_id: Dict[str, str] = {}
 # what the graph actually still retains" -- claiming first-contact status against data
 # that's already been pruned would be a false signal, not a stronger one).
 _COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
-_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 1  # "2+ distinct devices" total = 1+ OTHER device
+# RAISED (third-party architecture review + live audit, 2026-09-09): was 1 ("2+
+# distinct devices" total = 1+ OTHER device). Confirmed live, twice, post-fix: an
+# ordinary pair of devices sharing an unclassified private destination (a second
+# device independently touching a household IP, another touching the FIRST
+# device's own IP) cleared this bar and reached HIGH from essentially nothing --
+# neither multicast, shared-infra, nor recognized-CDN, just two devices being
+# two devices. "Two coincide" isn't "coordinated"; three independently reaching
+# the same otherwise-unclassified signal is a meaningfully harder coincidence.
+_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 2  # "3+ distinct devices" total = 2+ OTHER devices
 
 # Release 14, net-new capability N4 (multi-signal campaign detection): widens the
 # SAME cross-device-correlation concept above to two more shared signals a real

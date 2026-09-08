@@ -139,7 +139,15 @@ class DNSTunnelingHypothesis(Hypothesis):
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
             score = 3.0
-        if self.strong_score > 0.5 and self.contradicting_score == 0 and rep_vector.tier in (3, 4):
+        # TIGHTENED (third-party architecture review, 2026-09-09): was `tier in
+        # (3, 4)` -- tier 3 means "unclassified, no external signal at all," not
+        # weak evidence of anything. Reaching this hypothesis's ceiling score
+        # required only rate+entropy+unique_ratio plus a destination nobody had
+        # ever looked up before, structurally the "unusual is not malicious" gap
+        # the review named. Now requires tier 4 (at least one real, if weak,
+        # external reputation signal) to reach 4.0 -- being unclassified no longer
+        # helps a hypothesis reach its own maximum.
+        if self.strong_score > 0.5 and self.contradicting_score == 0 and rep_vector.tier == 4:
             score = 4.0
         return score
 
@@ -254,8 +262,6 @@ class DGAHypothesis(Hypothesis):
 
 
 class ExfiltrationHypothesis(Hypothesis):
-    # "first_contact" (Phase 1a) added to what this hypothesis reads -- see its
-    # own strong_score bump below.
     RELEVANT_EVIDENCE_TYPES = frozenset({"zeek_exfiltration", "zeek_beaconing", "reputation", "first_contact"})
 
     def __init__(self):
@@ -273,13 +279,16 @@ class ExfiltrationHypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_beaconing", "reputation") for e in ev_store):
             self.strong_score += 1.0
-        # Phase 1a: genuine first-contact-ever (graph/window.py's domain_seen_before(),
-        # richer than baseline_familiarity's dict approximation) is a real corroborating
-        # signal for exfiltration specifically -- data leaving to a destination this
-        # device has NEVER talked to before is more suspicious than unusual-timing
-        # traffic to an already-familiar one, which today score identically.
-        if any(e.evidence_type == "first_contact" for e in ev_store):
-            self.strong_score += 1.0
+        # REMOVED (third-party architecture review, 2026-09-09): first_contact used
+        # to also bump strong_score here -- "never talked to this destination
+        # before" is real context for HOW to read other evidence, but on its own
+        # it's just novelty, not corroboration ("unusual is not malicious"). Its
+        # independence_family (novelty_context) was already excluded from
+        # num_independent_sources; this closes the same gap at the per-hypothesis
+        # score level, where it could still single-handedly raise this hypothesis's
+        # OWN score into corroboration range. first_contact stays in
+        # RELEVANT_EVIDENCE_TYPES (still valid context ai_soc.py/reporting can
+        # read), it just no longer moves the score.
 
         score = 2.0
         if best >= 0.6 and self.contradicting_score == 0:
@@ -320,10 +329,9 @@ class BeaconingHypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_exfiltration", "reputation", "malicious_ja3", "malicious_ja4") for e in ev_store):
             self.strong_score += 1.0
-        # Phase 1a: a beacon to a destination this device has never contacted before
-        # is more suspicious than a beacon-shaped pattern to a long-familiar one.
-        if any(e.evidence_type == "first_contact" for e in ev_store):
-            self.strong_score += 1.0
+        # REMOVED (third-party architecture review, 2026-09-09): see
+        # ExfiltrationHypothesis's own comment -- first_contact used to also bump
+        # strong_score here; novelty alone is not corroboration.
 
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
@@ -358,11 +366,9 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
             self.contradicting_score += 1.0
         if distinct_signals >= 2:
             self.strong_score += 1.0
-        # Phase 1a: a covert-tunnel-shaped pattern to a destination never seen
-        # before this device's own history is a real corroborating signal, same
-        # reasoning as Exfiltration/Beaconing above.
-        if any(e.evidence_type == "first_contact" for e in ev_store):
-            self.strong_score += 1.0
+        # REMOVED (third-party architecture review, 2026-09-09): see
+        # ExfiltrationHypothesis's own comment -- first_contact used to also bump
+        # strong_score here; novelty alone is not corroboration.
 
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
@@ -445,8 +451,6 @@ class ConnectionAbuseHypothesis(Hypothesis):
         if rep_vector.tier in (1, 2):
             self.contradicting_score += 1.0
         distinct_categories = sum(bool(x) for x in (scan_hits, long_hits, arp_hits))
-        if distinct_categories >= 2:
-            self.strong_score += 1.0
 
         if distinct_categories == 1:
             if arp_hits:
@@ -461,7 +465,18 @@ class ConnectionAbuseHypothesis(Hypothesis):
         score = 2.0
         if best >= 0.6 and self.contradicting_score == 0:
             score = 3.0
-        if self.strong_score > 0 and self.contradicting_score == 0:
+        # REWORKED (third-party architecture review, 2026-09-09): 4.0 used to
+        # require `distinct_categories >= 2` -- an ARP sweep (internal recon) and
+        # an abnormally-long connection (often just a legitimate large transfer or
+        # stream) are conceptually unrelated behaviors from different sensors
+        # (arp_sweep is family network_recon; conn_abuse/long_conn is family
+        # network_behavior already), so co-occurring already counts them as 2
+        # independent sources at the DECISION level -- letting them ALSO grant
+        # this ONE hypothesis its own ceiling double-counted the same diversity.
+        # Now requires genuine WITHIN-category intensity (matching the pattern
+        # every other hypothesis in this file already uses for its own 4.0),
+        # never mere co-occurrence of unrelated categories.
+        if best >= 0.85 and self.contradicting_score == 0:
             score = 4.0
         return score
 
@@ -504,6 +519,18 @@ class DNSEvasionHypothesis(Hypothesis):
             score = 3.0
         if self.strong_score > 0 and self.contradicting_score == 0:
             score = 4.0
+        # CAPPED (third-party architecture review, 2026-09-09): DNS_ATTRIBUTION_GAP
+        # is the fallback name for "this DNS-shaped anomaly doesn't clearly match
+        # either confirmed pattern above" -- an acknowledged ambiguity, not a
+        # confirmed finding, but it was climbing the identical 2.0->3.0->4.0 ladder
+        # as DNS_POLICY_BYPASS (an actively-evaded resolver) and DNS_EVASION (zero
+        # DNS history at all), both real, specific, confirmed shapes -- and it's by
+        # far the largest-volume category in production. Only a genuinely
+        # classified evasion pattern can now reach SUSPICIOUS+/HIGH-contributing
+        # territory; the ambiguous case stays at the base floor, still visible,
+        # never independently escalating.
+        if self.name == self._NAME_PARTIAL_GAP:
+            score = min(score, 2.0)
         return score
 
 

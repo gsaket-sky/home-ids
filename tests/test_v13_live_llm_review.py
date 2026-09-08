@@ -432,12 +432,22 @@ check("_inject_coordinated_targeting: no OTHER device touching the destination -
 ct_store.insert_evidence(Evidence(device_id="ct_dev2", destination_id="shared.example.com",
                                     evidence_type="dns_rate", independence_family="dns_behavior",
                                     timestamp=NOW - 30, source="s", value=5.0))
+result_two = live_llm_review._inject_coordinated_targeting(ct_store, ct_window, "ct_dev1", evidence_alone, NOW)
+check("_inject_coordinated_targeting: REGRESSION GUARD (third-party architecture "
+      "review, 2026-09-09) -- a SECOND device (2 total) touching the same "
+      "destination does NOT add coordinated_targeting anymore, matching "
+      "live_engine.py's own raised bar",
+      not any(e.evidence_type == "coordinated_targeting" for e in result_two))
+
+ct_store.insert_evidence(Evidence(device_id="ct_dev3", destination_id="shared.example.com",
+                                    evidence_type="dns_rate", independence_family="dns_behavior",
+                                    timestamp=NOW - 20, source="s", value=5.0))
 result_shared = live_llm_review._inject_coordinated_targeting(ct_store, ct_window, "ct_dev1", evidence_alone, NOW)
 ct_items = [e for e in result_shared if e.evidence_type == "coordinated_targeting"]
-check("_inject_coordinated_targeting: a SECOND device touching the same destination "
+check("_inject_coordinated_targeting: a THIRD device touching the same destination "
       "-> a synthetic coordinated_targeting item is added (the real gap this closes: "
       "live_engine.py computes this at decision time but never persists it)",
-      len(ct_items) == 1 and ct_items[0].value == 2.0)
+      len(ct_items) == 1 and ct_items[0].value == 3.0)
 check("_inject_coordinated_targeting: the ORIGINAL list is never mutated in place",
       len(evidence_alone) == 1 and not any(e.evidence_type == "coordinated_targeting" for e in evidence_alone))
 
@@ -495,6 +505,11 @@ e2e_store.insert_evidence(Evidence(device_id="e2e_dev1", destination_id="campaig
 e2e_store.insert_evidence(Evidence(device_id="e2e_dev2", destination_id="campaign.example.com",
                                      evidence_type="dns_rate", independence_family="dns_behavior",
                                      timestamp=NOW - 30, source="s", value=1.0))
+# THIRD device (third-party architecture review, 2026-09-09): the coordination
+# bar is now 3 total devices, not 2 -- see live_engine.py's own comment.
+e2e_store.insert_evidence(Evidence(device_id="e2e_dev3", destination_id="campaign.example.com",
+                                     evidence_type="dns_rate", independence_family="dns_behavior",
+                                     timestamp=NOW - 20, source="s", value=1.0))
 e2e_decision_id = e2e_store.insert_decision(
     device_id="e2e_dev1", timestamp=NOW - 10, state="SUSPICIOUS", decision_path="hypothesis_suspicious",
     confidence=0.4, risk_score=2.0, raw_payload={"hypotheses": {"attack": {"name": "NETWORK_INTRUSION"}}},

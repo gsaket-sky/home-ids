@@ -259,7 +259,15 @@ class DecisionEngine:
                 explanation = "Confirmed Malicious IOC"
                 threat_confidence = 0.99
                 decision_path = "tier5_confirmed"
-            elif num_independent_sources >= 1 and attack_score > benign_score:
+            # TIGHTENED (third-party architecture review, 2026-09-09): was
+            # `>= 1` -- rep.tier==5 here (not verified_ioc) can be reached by a
+            # bare crowd-sourced AbuseIPDB score (>=4.0) alone, not a curated
+            # threat-intel feed match. Reaching CRITICAL from that plus just ONE
+            # weak, possibly-single-family corroborating hint was the weakest path
+            # to auto-block in the whole engine -- weaker than HIGH's own bar.
+            # CRITICAL should never require LESS corroboration than HIGH; now it
+            # requires the same >=2-independent-family bar.
+            elif num_independent_sources >= 2 and attack_score > benign_score:
                 state = DecisionState.CRITICAL
                 action = "block"
                 explanation = "Corroborated Reputation Signal"

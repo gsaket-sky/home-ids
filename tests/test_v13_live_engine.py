@@ -390,22 +390,32 @@ devB_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 10, device
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="shared-target.example.com")]
 merged_B = _capture_merged(devB_ev, ReputationVector(domain="", tier=3), "p1a_devB", _ft0 + 10)
-coordinated_hits = [e for e in merged_B if e.evidence_type == "coordinated_targeting"]
-check("F1: the SECOND device to touch the SAME destination within the short window "
-      "DOES get coordinated_targeting evidence -- the actual cross-device correlation "
-      "capability, not achievable against v-current's per-device-only RollingWindow",
+check("F1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
+      "SECOND device (2 total) touching the same destination does NOT get "
+      "coordinated_targeting evidence anymore; two devices coinciding on an "
+      "unclassified destination isn't coordination",
+      not any(e.evidence_type == "coordinated_targeting" for e in merged_B))
+
+devB2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 11, device="p1a_devB2",
+                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="shared-target.example.com")]
+merged_B2 = _capture_merged(devB2_ev, ReputationVector(domain="", tier=3), "p1a_devB2", _ft0 + 11)
+coordinated_hits = [e for e in merged_B2 if e.evidence_type == "coordinated_targeting"]
+check("F1: the THIRD device (3 total) to touch the SAME destination within the short "
+      "window DOES get coordinated_targeting evidence -- the cross-device correlation "
+      "capability, now requiring a genuinely harder coincidence than 2 devices",
       len(coordinated_hits) == 1)
-check("F1: the synthetic evidence's value is the TOTAL device count (this one + 1 other = 2)",
-      coordinated_hits and coordinated_hits[0].value == 2.0)
-check("F1: the synthetic evidence names the other device in its features for audit",
-      coordinated_hits and coordinated_hits[0].features.get("other_devices") == ["p1a_devA"])
+check("F1: the synthetic evidence's value is the TOTAL device count (this one + 2 others = 3)",
+      coordinated_hits and coordinated_hits[0].value == 3.0)
+check("F1: the synthetic evidence names both other devices in its features for audit",
+      coordinated_hits and set(coordinated_hits[0].features.get("other_devices", [])) == {"p1a_devA", "p1a_devB"})
 
 _f_store = live_engine._get_graph_store()
 check("F1: the synthetic coordinated_targeting evidence was NEVER written to the graph "
       "itself (it's derived context, not a sensor observation -- writing it would "
       "recreate the evidence-duplication bug Phase 1's own incident already fixed)",
       not any(e.evidence_type == "coordinated_targeting"
-              for e in _f_store.get_evidence_for_device("p1a_devB")))
+              for e in _f_store.get_evidence_for_device("p1a_devB2")))
 
 # --- F1b: BUGFIX regression (live audit, 2026-09-08) -- a destination whose ASN
 # owner is recognized cloud/CDN/streaming infrastructure must not score as
@@ -429,18 +439,28 @@ class _FakeGeoipEngine:
         return _FakeAsnInfo(org) if org else None
 
 
+# Note: every scenario below uses THREE devices (not two) -- since the
+# third-party-review fix raised the base coordination bar to 3 total devices,
+# using only 2 would leave "no coordinated_targeting" ambiguous between the two
+# guards. Three devices isolates the ASN-owner check specifically: it must still
+# suppress coordination even when the device-count bar WOULD otherwise clear.
 devD_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 15, device="p1a_devD",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="45.57.41.1")]
 merged_D = _capture_merged(devD_ev, ReputationVector(domain="", tier=3), "p1a_devD", _ft0 + 15)
+devD2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 15.5, device="p1a_devD2",
+                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="45.57.41.1")]
+merged_D2 = _capture_merged(devD2_ev, ReputationVector(domain="", tier=3), "p1a_devD2", _ft0 + 15.5)
 devE_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 16, device="p1a_devE",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="45.57.41.1")]
 cdn_geoip = _FakeGeoipEngine({"45.57.41.1": "Netflix, Inc."})
 merged_E = _capture_merged(devE_ev, ReputationVector(domain="", tier=3), "p1a_devE", _ft0 + 16,
                              geoip_engine=cdn_geoip)
-check("F1b: BUGFIX -- two devices independently reaching a recognized CDN/streaming "
-      "IP get NO coordinated_targeting evidence when a geoip_engine is supplied",
+check("F1b: BUGFIX -- THREE devices independently reaching a recognized CDN/"
+      "streaming IP (clearing the device-count bar on its own) still get NO "
+      "coordinated_targeting evidence when a geoip_engine is supplied",
       not any(e.evidence_type == "coordinated_targeting" for e in merged_E),
       f"got {[e.evidence_type for e in merged_E]}")
 
@@ -450,6 +470,10 @@ devF_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 17, device
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="203.0.113.9")]
 merged_F0 = _capture_merged(devF_ev, ReputationVector(domain="", tier=3), "p1a_devF", _ft0 + 17)
+devF2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 17.5, device="p1a_devF2",
+                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="203.0.113.9")]
+merged_F2 = _capture_merged(devF2_ev, ReputationVector(domain="", tier=3), "p1a_devF2", _ft0 + 17.5)
 devG_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 18, device="p1a_devG",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="203.0.113.9")]
@@ -457,8 +481,8 @@ noncdn_geoip = _FakeGeoipEngine({"203.0.113.9": "Some Random Hosting LLC"})
 merged_G = _capture_merged(devG_ev, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 18,
                              geoip_engine=noncdn_geoip)
 check("F1b: REGRESSION GUARD -- an unrecognized ASN owner is unaffected; genuine "
-      "cross-device coordination still fires with a geoip_engine supplied",
-      any(e.evidence_type == "coordinated_targeting" for e in merged_G),
+      "cross-device coordination (3 total devices) still fires with a geoip_engine "
+      "supplied", any(e.evidence_type == "coordinated_targeting" for e in merged_G),
       f"got {[e.evidence_type for e in merged_G]}")
 
 # REGRESSION GUARD: omitting geoip_engine entirely (every pre-existing caller) is
@@ -467,12 +491,16 @@ devH_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 19, device
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="45.57.42.1")]
 merged_H0 = _capture_merged(devH_ev, ReputationVector(domain="", tier=3), "p1a_devH", _ft0 + 19)
+devH2_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 19.5, device="p1a_devH2",
+                         value=10.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="45.57.42.1")]
+merged_H2 = _capture_merged(devH2_ev, ReputationVector(domain="", tier=3), "p1a_devH2", _ft0 + 19.5)
 devI_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devI",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="45.57.42.1")]
 merged_I = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 20)
-check("F1b: REGRESSION GUARD -- omitting geoip_engine (unchanged default) still "
-      "fires coordinated_targeting exactly as before this fix",
+check("F1b: REGRESSION GUARD -- omitting geoip_engine (unchanged default), 3 total "
+      "devices still fires coordinated_targeting exactly as before this fix",
       any(e.evidence_type == "coordinated_targeting" for e in merged_I),
       f"got {[e.evidence_type for e in merged_I]}")
 
@@ -561,17 +589,27 @@ check("G1: the FIRST device with this JA3 fingerprint gets no fingerprint_campai
 devI_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 510, device="p1a_devI",
                         value=1.0, confidence=0.95, independence_group="zeek_network",
                         provenance="detector:zeek:malicious_ja3:campaignhash", domain="c2-b.example.com")]
-merged_I1 = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 510)
+merged_I0 = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 510)
+check("G1: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
+      "SECOND device (2 total) sharing the fingerprint does NOT get "
+      "fingerprint_campaign evidence anymore, matching the same raised bar as "
+      "destination-based coordinated_targeting",
+      not any(e.evidence_type == "fingerprint_campaign" for e in merged_I0))
+
+devI2_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 511, device="p1a_devI2",
+                         value=1.0, confidence=0.95, independence_group="zeek_network",
+                         provenance="detector:zeek:malicious_ja3:campaignhash", domain="c2-b2.example.com")]
+merged_I1 = _capture_merged(devI2_ev, ReputationVector(domain="", tier=3), "p1a_devI2", _ft0 + 511)
 fingerprint_hits = [e for e in merged_I1 if e.evidence_type == "fingerprint_campaign"]
-check("G1: the SECOND device sharing the EXACT same JA3 hash (even against a "
+check("G1: the THIRD device sharing the EXACT same JA3 hash (even against a "
       "DIFFERENT destination) DOES get fingerprint_campaign evidence -- correlates "
       "on the fingerprint, not the destination",
       len(fingerprint_hits) == 1)
-check("G1: the synthetic evidence's value is the total device count (2)",
-      fingerprint_hits and fingerprint_hits[0].value == 2.0)
+check("G1: the synthetic evidence's value is the total device count (3)",
+      fingerprint_hits and fingerprint_hits[0].value == 3.0)
 check("G1: fingerprint_campaign was NEVER written to the graph itself",
       not any(e.evidence_type == "fingerprint_campaign"
-              for e in _f_store.get_evidence_for_device("p1a_devI")))
+              for e in _f_store.get_evidence_for_device("p1a_devI2")))
 
 # A different fingerprint hash on the same cycle correctly does NOT correlate
 devJ_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_ft0 + 520, device="p1a_devJ",
@@ -594,9 +632,19 @@ check("G2: the FIRST device with this DGA shape gets no dga_seed_campaign eviden
 devL_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 610, device="p1a_devL",
                         value=1.0, confidence=0.9, independence_group="dns_behavior",
                         domain="qrstuvwx.ru")]  # DIFFERENT literal domain, SAME shape (8 letters, .ru)
-merged_L1 = _capture_merged(devL_ev, ReputationVector(domain="", tier=3), "p1a_devL", _ft0 + 610)
+merged_L0 = _capture_merged(devL_ev, ReputationVector(domain="", tier=3), "p1a_devL", _ft0 + 610)
+check("G2: REGRESSION GUARD (third-party architecture review, 2026-09-09) -- the "
+      "SECOND device (2 total) sharing the DGA shape does NOT get dga_seed_campaign "
+      "evidence anymore, matching the same raised bar as destination-based "
+      "coordinated_targeting",
+      not any(e.evidence_type == "dga_seed_campaign" for e in merged_L0))
+
+devL2_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 611, device="p1a_devL2",
+                         value=1.0, confidence=0.9, independence_group="dns_behavior",
+                         domain="ijklmnop.ru")]  # THIRD device, another literal domain, SAME shape
+merged_L1 = _capture_merged(devL2_ev, ReputationVector(domain="", tier=3), "p1a_devL2", _ft0 + 611)
 dga_hits = [e for e in merged_L1 if e.evidence_type == "dga_seed_campaign"]
-check("G2: a SECOND device hitting a DIFFERENT literal domain that shares the SAME "
+check("G2: a THIRD device hitting a DIFFERENT literal domain that shares the SAME "
       "computed DGA shape (8-letter label, .ru TLD) DOES get dga_seed_campaign "
       "evidence -- the actual point: correlating by structure, not literal string",
       len(dga_hits) == 1)
@@ -605,7 +653,7 @@ check("G2: dga_seed_campaign carries a lower confidence (0.7) than an exact-matc
       dga_hits and dga_hits[0].confidence == 0.7)
 check("G2: dga_seed_campaign was NEVER written to the graph itself",
       not any(e.evidence_type == "dga_seed_campaign"
-              for e in _f_store.get_evidence_for_device("p1a_devL")))
+              for e in _f_store.get_evidence_for_device("p1a_devL2")))
 
 # A domain with a genuinely different shape does NOT correlate
 devM_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_ft0 + 620, device="p1a_devM",

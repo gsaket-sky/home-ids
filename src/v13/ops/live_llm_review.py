@@ -132,8 +132,10 @@ _OUTPUT_FILENAME = "ollama_analysis_v13.jsonl"
 # Matches live_engine.py's own constants exactly -- same signal, same thresholds,
 # just re-derived at review time instead of read from live_engine.py's in-process
 # state (see this module's own docstring for why re-deriving is necessary at all).
+# RAISED alongside live_engine.py's own constant, 2026-09-09 -- see that module's
+# comment for the live incidents this closes.
 _COORDINATED_TARGETING_WINDOW_SECONDS = RollingWindowView.SHORT_WINDOW_SECONDS
-_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 1  # "2+ distinct devices" total = 1+ OTHER device
+_COORDINATED_TARGETING_MIN_OTHER_DEVICES = 2  # "3+ distinct devices" total = 2+ OTHER devices
 
 
 def _load_already_reviewed(output_path: Path) -> Set[str]:
