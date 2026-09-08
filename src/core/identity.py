@@ -80,6 +80,23 @@ class DeviceIdentityManager:
         # M6 FIX: Use OrderedDict so we can do proper LRU eviction via move_to_end().
         self._ip_cache: OrderedDict = OrderedDict()
         self._fritz_cache: Dict[str, Dict[str, str]] = {}
+        # BUGFIX (live audit, continuation session): Fritz!Box's /hosts webhook
+        # (fritzbox_api.py's get_dhcp_hosts(), TR-064's Hosts:1/LanDeviceHost
+        # service) is genuinely IPv4-only -- a DHCPv4 lease table, with no
+        # concept of IPv6 SLAAC/link-local addresses at all. _fritz_cache above
+        # is keyed by whatever IP string a given resolve event happens to pass
+        # as `ip`, which for a dual-stack device is frequently an IPv6 address
+        # (link-local/ULA/GUA) that Fritz!Box's own table could never contain a
+        # matching key for -- even though the SAME device's real IPv4 address
+        # (which WOULD hit the cache) is sitting right there in its own
+        # known_ips. Confirmed live: 9 currently-active devices with real,
+        # already-resolved MAC addresses and a real IPv4 address in known_ips
+        # were still showing hostname=unknown, because whichever cycle's event
+        # happened to resolve via their IPv6 address never got a chance to
+        # match. This second, MAC-keyed cache is the fallback _enrich_from_cache()
+        # tries when the IP-keyed lookup misses -- same data, same poll, just
+        # indexed a second way (Fritz!Box's own host records already carry MAC).
+        self._fritz_cache_by_mac: Dict[str, Dict[str, str]] = {}
         self._lock = threading.Lock()
         # GENERAL FIX (2026-08-27): the gateway special-case below only ever matched the
         # single configured gateway_ip literal (IPv4), so the same physical router's IPv6
@@ -107,31 +124,52 @@ class DeviceIdentityManager:
                 if resp.status_code == 200:
                     hosts_data = resp.json()  
                     new_cache = {}
+                    new_cache_by_mac = {}
                     for host in hosts_data:
                         ip = host.get("ip")
                         mac = host.get("mac", "unknown").lower()
                         name = host.get("name", "unknown")
                         if ip:
                             new_cache[ip] = {"mac": mac, "name": name}
+                        if mac and mac != "unknown":
+                            new_cache_by_mac[mac] = {"ip": ip or "unknown", "name": name}
                     with self._lock:
                         self._fritz_cache = new_cache
+                        self._fritz_cache_by_mac = new_cache_by_mac
             except Exception as e:
                 LOGGER.debug("FritzBox hosts webhook poll unavailable. Retrying in 60s. %s", e)
             time.sleep(60)
 
     def _enrich_from_cache(self, ip: str, current_mac: str, current_hostname: str) -> Tuple[str, str]:
+        if ip and ip != "unknown":
+            with self._lock:
+                fritz_data = self._fritz_cache.get(ip)
+            if fritz_data:
+                f_mac = fritz_data.get("mac", "unknown")
+                f_name = fritz_data.get("name", "unknown")
+                best_mac = f_mac if f_mac != "unknown" else current_mac
+                best_host = f_name if f_name != "unknown" else current_hostname
+                return best_mac, best_host
+
+        # BUGFIX (live audit, continuation session): the IP-keyed lookup above can
+        # never match for a dual-stack device's IPv6 addresses at all -- Fritz!Box's
+        # own DHCP-lease host list is IPv4-only (see _fritz_cache_by_mac's own
+        # __init__ comment for the full live-data confirmation). Try the SAME
+        # underlying Fritz!Box data a second way, by MAC, whenever a real MAC is
+        # already known -- this is the actual fix for the confirmed live gap, not
+        # a hypothetical: 9 currently-active devices with a resolved MAC and a real
+        # IPv4 address in known_ips stayed hostname=unknown purely because the
+        # specific event enriching them happened to pass an IPv6 address as `ip`.
+        if current_mac and current_mac != "unknown":
+            with self._lock:
+                fritz_data_by_mac = self._fritz_cache_by_mac.get(current_mac.lower())
+            if fritz_data_by_mac:
+                f_name = fritz_data_by_mac.get("name", "unknown")
+                if f_name != "unknown":
+                    return current_mac, f_name
+
         if not ip or ip == "unknown":
             return current_mac, current_hostname
-
-        with self._lock:
-            fritz_data = self._fritz_cache.get(ip)
-        
-        if fritz_data:
-            f_mac = fritz_data.get("mac", "unknown")
-            f_name = fritz_data.get("name", "unknown")
-            best_mac = f_mac if f_mac != "unknown" else current_mac
-            best_host = f_name if f_name != "unknown" else current_hostname
-            return best_mac, best_host
 
         # H5 FIX: All _ip_cache operations now happen under self._lock
         with self._lock:
