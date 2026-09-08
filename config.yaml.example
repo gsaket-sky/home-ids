@@ -381,6 +381,22 @@ device_identity:
   # merging after last being seen. Default 1800 = 30 min. [LIVE]
   identity_reidentify_window_seconds: 1800.0
 
+  # Device-identity fragmentation fix (continuation session): how often (seconds)
+  # the in-process reconciliation worker (Pipeline._identity_reconcile_worker())
+  # re-scans ALL currently-tracked devices for fragmentation (shared known-IP,
+  # shared MAC, shared non-generic hostname, or the same DHCP+JA4 fingerprint
+  # scoring identity_reidentify_min_confidence above already governs at
+  # cold-start), applied RETROACTIVELY between already-existing device_ids --
+  # something identity_reidentify_enabled's own cold-start-only mechanism never
+  # does. Runs one pass immediately at boot regardless of this value, then on
+  # this interval. Real, live production data found genuine, currently-recurring
+  # fragmentation from MAC-randomized/IPv6-privacy-addressed devices this key's
+  # own mechanism didn't previously catch. A first-pass judgment call (between
+  # router_reconcile_interval_seconds' 300s status-check cadence and something
+  # much slower, since a merge is more consequential than a status poll), not
+  # empirically tuned. [LIVE]
+  identity_reconcile_interval_seconds: 600.0
+
   # Your LAN's own gateway/router IP. A router genuinely has multiple distinct
   # physical MACs (LAN/WLAN/WAN interfaces), so MAC-based correlation above can
   # never fully unify it into one device_id on its own -- this pins it to one

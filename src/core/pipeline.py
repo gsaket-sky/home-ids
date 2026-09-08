@@ -15,6 +15,7 @@ import ipaddress
 import json
 import logging
 import math
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -47,6 +48,7 @@ from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Au
 from v13.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
 from v13.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
 from v13.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
+from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
 
 def _ip_family(ip: str) -> str:
@@ -591,6 +593,123 @@ class EnginePipeline:
         # Initial population at boot -- the reload hook above only fires on a LATER
         # change, not the config this process already started with.
         register_safe_cdn_base_domains(self.config.get("safe_cdn_base_domains", []))
+
+        # Device-identity fragmentation fix (continuation session): background
+        # reconciliation worker, matching IPSMitigator's own established
+        # background-worker pattern (_router_reconcile_worker, ips.py) exactly --
+        # daemon thread, started here (after every collaborator it needs --
+        # state_manager/ml_registry/fp_engine/identity_manager/ips_mitigator/
+        # evidence_store/metrics_exporter -- already exists on self).
+        #
+        # Deliberately NOT a scheduled_jobs.scheduler entry (the pattern
+        # live_prune.py/live_decision_archive.py/cl_afpe_flip_monitor.py use):
+        # that mechanism spawns each job as a SEPARATE SUBPROCESS
+        # (scripts/scheduler.py's own subprocess.Popen calls) against
+        # state/ids_state.json on disk. soc.service runs continuously with its
+        # OWN in-memory StateManager._states, flushing to disk every ~60s
+        # (flush_to_disk()) -- an external process's merge would be silently
+        # overwritten by the live process's own next flush within a minute.
+        # .ipc_sync_signal's existing live-reconciliation path (see below in
+        # _step()) only ever pulls IPS state back into memory, never the
+        # devices dict -- it does not cover this case either. This worker runs
+        # IN this process instead, mutating self.state_manager directly under
+        # its own lock, so there is no split-brain window at all.
+        LOGGER.info("Starting Device-Identity Reconciliation Worker Thread...")
+        threading.Thread(target=self._identity_reconcile_worker, daemon=True, name="identity_reconcile_worker").start()
+
+    def _identity_reconcile_worker(self) -> None:
+        """Periodically finds and merges device-identity fragmentation (the same
+        union-find over shared known-IP / shared MAC / shared non-generic hostname
+        / DHCP+JA4 fingerprint corroboration that src/merge_fragmented_devices.py's
+        offline CLI tool already uses -- find_fragmented_groups()/pick_canonical()
+        imported directly, one shared implementation for both callers) against the
+        LIVE self.state_manager, not an on-disk snapshot.
+
+        Runs one pass IMMEDIATELY at boot (same reasoning as IPSMitigator's own
+        boot-time reconcile fix -- ips.py:100-113 -- "so a restart converges to
+        real state right away"), then sleeps identity_reconcile_interval_seconds
+        (config, default 600.0) and repeats. A first-pass judgment call, not
+        empirically tuned, same honesty framing this project's own
+        INDEPENDENCE_FAMILY_MAP already uses for a similar not-yet-validated
+        number -- between _router_reconcile_worker's 300s status-check cadence and
+        something much slower, since a merge is more consequential than a status
+        poll.
+
+        Per merge: reuses merge_into_canonical() (state_guard.py) -- the SAME
+        primitive the real-time _merge_orphan_if_fragmented() path already uses --
+        then drains the EXACT SAME consume-once cleanup side channels
+        (_last_migrated_isolation_target/_last_orphan_merge_cleanup) via
+        self.identity_manager's own _release_stale_isolation_if_merged()/
+        _cleanup_merged_orphan(), rather than reimplementing that cleanup a second
+        time. This closes a real gap the offline script itself flags: it has no
+        live ml_registry/fp_engine/ips_mitigator/evidence_store/metrics_exporter
+        to pass through, so orphan ML model files and stale isolation/metric state
+        are left behind; this worker has all of them as real, live self.*
+        references.
+
+        Every failure mode is best-effort/non-fatal -- this must never crash the
+        pipeline's own main loop, which runs in a separate thread untouched by
+        anything here."""
+        interval = float(self.config.get("identity_reconcile_interval_seconds", 600.0))
+        if interval <= 0:
+            interval = 600.0
+        first_pass = True
+        while True:
+            if not first_pass:
+                time.sleep(interval)
+            first_pass = False
+            try:
+                self._identity_reconcile_pass()
+            except Exception as exc:
+                LOGGER.error("Identity reconcile worker pass failed (non-fatal, will retry next interval): %s",
+                             exc, exc_info=True)
+
+    def _identity_reconcile_pass(self) -> int:
+        """One reconciliation pass -- factored out of _identity_reconcile_worker()'s
+        own sleep-loop so it's directly callable/testable without an infinite loop
+        (e.g. to assert on a specific merge's cleanup side effects) and so a boot-time
+        immediate pass and the periodic one share exactly one implementation. Returns
+        the number of device_ids actually merged this pass."""
+        groups = find_fragmented_groups(self.state_manager)
+        merged_count = 0
+        for group in groups:
+            canonical = pick_canonical(group)
+            for orphan in group:
+                if orphan["device_id"] == canonical["device_id"]:
+                    continue
+                if self.state_manager.merge_into_canonical(
+                    orphan["device_id"], canonical["device_id"],
+                    ml_registry=self.ml_registry, fp_engine=self.fp_engine,
+                ):
+                    merged_count += 1
+                    try:
+                        self.identity_manager._release_stale_isolation_if_merged(self.ips_mitigator)
+                        self.identity_manager._cleanup_merged_orphan(self.evidence_store, self.metrics_exporter)
+                    except Exception as exc:
+                        LOGGER.warning(
+                            "Identity reconcile: cleanup after merging %s -> %s failed "
+                            "(the merge itself already succeeded): %s",
+                            orphan["device_id"], canonical["device_id"], exc,
+                        )
+                    try:
+                        v13_live_engine.get_graph_store().merge_device(orphan["device_id"], canonical["device_id"])
+                    except Exception as exc:
+                        LOGGER.debug(
+                            "Identity reconcile: graph-side merge mirror failed for %s -> %s "
+                            "(the real v1 merge already succeeded, unaffected): %s",
+                            orphan["device_id"], canonical["device_id"], exc,
+                        )
+        if merged_count:
+            LOGGER.warning(
+                "🔗 [IDENTITY RECONCILE] Merged %d fragmented device_id(s) into %d "
+                "canonical identit(y/ies).", merged_count, len(groups),
+            )
+            if self.config.get("telegram_enabled", False):
+                self.alert_manager.send(
+                    f"🔗 *Identity reconciliation*: merged {merged_count} fragmented "
+                    f"device(s) into {len(groups)} canonical identit(y/ies)."
+                )
+        return merged_count
 
     def run(self) -> None:
         metrics_port = int(self.config.get("metrics_port", 9105))

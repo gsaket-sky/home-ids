@@ -40,6 +40,10 @@ if str(SRC_DIR) not in sys.path:
 from config import CONFIG
 from core.state_guard import StateManager
 from core.identity import _is_generic_hostname
+from core.device_matching import (
+    dhcp_fingerprint_match, ja4_overlap, hostname_corroborates,
+    match_confidence, AUTO_MERGE_CONFIDENCE,
+)
 from v13.graph.store import GraphStore
 
 
@@ -59,6 +63,18 @@ def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
             "device_type": getattr(state, "device_type", "unknown"),
             "known_ips": known_ips,
             "last_seen": getattr(state, "last_seen", 0.0),
+            # Device-identity fragmentation fix, continuation session: captured so
+            # find_fragmented_groups() can ALSO corroborate via the same
+            # DHCP-fingerprint/JA4-overlap/hostname scoring device_matching.py
+            # already uses for cold-start reidentify -- see that module's own
+            # docstring for why each signal alone is deliberately capped, and
+            # match_confidence()'s own docstring for how they combine. Closes a
+            # real gap: a MAC-randomized device with no shared known_ip and no
+            # shared exact MAC/hostname (this script's original 3 signals) but a
+            # real DHCP+JA4 fingerprint match was previously invisible to this
+            # script entirely.
+            "dhcp_fingerprint": getattr(state, "dhcp_fingerprint", None),
+            "ja4_seen": set(state.ja4_seen.to_list()) if hasattr(state, "ja4_seen") else set(),
         }
 
 
@@ -68,8 +84,11 @@ def find_fragmented_groups(sm: StateManager) -> list:
     non-generic hostname (reuses identity.py's own _is_generic_hostname() so two
     devices that both merely fell back to the same generic name, e.g. two different
     "laptop"s, don't get falsely unioned -- only an exact, specific, real hostname
-    match counts). Returns a list of groups (each a list of device_id snapshots),
-    groups of size 1 (no fragmentation) excluded."""
+    match counts), OR clear device_matching.py's own AUTO_MERGE_CONFIDENCE bar via
+    DHCP-fingerprint/JA4-overlap/hostname scoring (the same signal set cold-start
+    reidentify already trusts live, applied retroactively -- see _device_snapshot()'s
+    own comment for why this 4th signal was added). Returns a list of groups (each a
+    list of device_id snapshots), groups of size 1 (no fragmentation) excluded."""
     dev_ids = sm.get_all_device_ids()
     snapshots = {dev_id: _device_snapshot(sm, dev_id) for dev_id in dev_ids}
 
@@ -99,6 +118,18 @@ def find_fragmented_groups(sm: StateManager) -> list:
             elif (not _is_generic_hostname(sa["hostname"]) and not _is_generic_hostname(sb["hostname"])
                   and sa["hostname"].lower() == sb["hostname"].lower()):
                 linked = True
+            else:
+                # 4th signal: the SAME DHCP-fingerprint/JA4-overlap/hostname scoring
+                # cold-start reidentify already trusts live (device_matching.py),
+                # applied retroactively between two already-existing devices -- catches
+                # a MAC-randomized device with no shared IP/MAC/hostname but a real
+                # fingerprint corroboration. Same AUTO_MERGE_CONFIDENCE bar, not a
+                # separately-tuned threshold.
+                dhcp_score = dhcp_fingerprint_match(sa["dhcp_fingerprint"], sb["dhcp_fingerprint"])
+                ja4_score = ja4_overlap(sa["ja4_seen"], sb["ja4_seen"])
+                hostname_ok = hostname_corroborates(sa["hostname"], sb["hostname"])
+                if match_confidence(dhcp_score, ja4_score, hostname_ok) >= AUTO_MERGE_CONFIDENCE:
+                    linked = True
             if linked:
                 union(a, b)
 
