@@ -156,8 +156,10 @@ read-only SSH after the fact, not just taken on report:
   (asks the calling user's own systemd instance, no new privilege requested
   at all — compatible with `NoNewPrivileges=true` instead of fighting it);
   needs `loginctl enable-linger <user>` done once so that instance exists at
-  boot. **Verification of THIS version is still pending** — not yet observed
-  under a real post-fix burst as of this note.
+  boot. **Verified working, same day**: the first real daytime burst produced
+  zero Suricata warnings on either radio, confirmed via
+  `home_ids_suricata_scan_total{outcome="success"} 2.0` with no error count
+  since the restart — Suricata evidence has genuinely reached production.
 
 Original instructions (kept below for the historical record — all already applied):
 
@@ -290,7 +292,9 @@ requires, checkbox.
 > read-only SSH (clean restart, config confirmed, models consolidated). The
 > only thing still open in this entire plan is the CL-AFPE live flip (W2-3),
 > which is correctly gated on real production data accumulating, not on more
-> building.
+> building. (Suricata's fix turned out to be four layers deep before it
+> actually worked — see Workstream 6 below for the full story; confirmed
+> genuinely working in production 2026-09-08.)
 > See the artifact for the full item-by-item trackable checklist.
 
 ### Workstream 0 — Fix confirmed bugs first (not scope cuts, block trustworthy signal for everything below)
@@ -610,11 +614,14 @@ ever scoped the larger migration.
   deliberately batch-only) and never fed the pipeline. Disabled
   (`systemctl disable --now`) — confirmed stopped, no process remains.
 
-  **Still not confirmed under real load**: the corrected `--user`-based
-  `cgroup_isolate` fix is deployed and enabled on `.94` with linger active,
-  but hasn't yet been observed against a real post-fix burst as of this note
-  — needs one more live-burst journalctl check for an actual "scan complete"
-  line before this can be marked done.
+  **VERIFIED WORKING (2026-09-08, ~14:06 CEST)**: the first real daytime burst
+  after the `--user` fix (`trigger=wired_probe`) produced zero Suricata
+  warnings for either radio — confirmed via Prometheus, not just absence of a
+  log line: `home_ids_suricata_scan_total{outcome="success"} 2.0`, no
+  `{outcome="error"}` at all since the restart. 2 successes = exactly the 2
+  radios from that burst. Suricata evidence has genuinely reached production
+  for the first time. W6-1 is now actually done, not just architecturally
+  satisfied.
   **Deliberately not also done, flagged as a real follow-up**: the
   68,620-line ruleset is the full/untrimmed feed, not the "trimmed/security
   policy" this module's own docstring says was the intended design — pruning it

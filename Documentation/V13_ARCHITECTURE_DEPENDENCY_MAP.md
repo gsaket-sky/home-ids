@@ -695,11 +695,17 @@ this way, both fixed:
    either — `--user` inherently runs as the calling user. Regression tests
    updated to assert `--user` is used and `sudo` never reappears.
 
-**Deployment status**: code committed/pushed, deployed to `.94`, linger enabled,
-config key on. **Verification in progress** — the first post-deploy bursts
-under the corrected `--user` mechanism haven't been observed yet as of this
-note; needs one more live-burst journalctl check for an actual "scan complete"
-line before this can be marked done.
+**Deployment status**: VERIFIED WORKING (2026-09-08, ~14:06 CEST). The first
+real daytime burst after the `--user` fix (`trigger=wired_probe`) produced
+zero Suricata warnings for either radio — the first clean burst since this
+whole investigation started; every prior burst all session had an explicit
+timeout or exit-1 line. Confirmed directly via Prometheus, not just absence
+of a warning: `home_ids_suricata_scan_total{outcome="success"} 2.0`, with no
+`{outcome="error"}` label present at all since the restart (Prometheus
+counters only surface labels that have actually incremented) — 2 successes
+matching exactly the 2 radios (ath0 + ath1) from that one burst, zero
+failures. **Suricata evidence has genuinely arrived in production for the
+first time.** W6-1 is now actually done, not just architecturally satisfied.
 
 **Only remaining open item in the entire plan otherwise**: the CL-AFPE live
 flip itself (W2-3), correctly gated on real production data accumulating
