@@ -444,6 +444,54 @@ check("get_devices_targeting returns [] for an IPv4 subnet-broadcast destination
 check("get_devices_targeting still works normally for a real (non-multicast) shared destination",
       set(store.get_devices_targeting("shared.example.com", since=6_999_000.0)) == {"p1a_dev_a", "p1a_dev_b"})
 
+# BUGFIX #2 regression (live audit, 2026-09-08): a PRIVATE destination that's
+# structurally shared household infrastructure (a router/hub/another of the user's
+# own devices most of the fleet talks to) must not report cross-device "targeting"
+# either -- confirmed live: 192.168.77.47 (a second Fire TV) was independently
+# touched by 7/household devices and got auto-blocked repeatedly even after the
+# multicast fix above, because the bar was just 1 OTHER device with no regard for
+# how large a share of the whole fleet that destination is normal for.
+si_store = GraphStore(str(_PathForSysPath(tmpdir) / "test_graph_shared_infra.db"))
+# A 10-device fleet (all last_seen inside the lookback window used below).
+for i in range(10):
+    si_store.insert_evidence(Evidence(device_id=f"si_fleet_{i}", destination_id="sentinel.example.com",
+                                        evidence_type="dns_entropy", independence_family="dns_behavior",
+                                        timestamp=10_000_000.0, source="s"))
+# 5 of those 10 (50% >= the 0.4 ratio bar) independently touch a shared local hub IP.
+for i in range(5):
+    si_store.insert_evidence(Evidence(device_id=f"si_fleet_{i}", destination_id="192.168.1.47",
+                                        evidence_type="zeek_notice", independence_family="network_behavior",
+                                        timestamp=10_000_100.0 + i, source="s"))
+check("get_devices_targeting returns [] for a PRIVATE destination touched by a majority "
+      "of a large-enough fleet (5/10 = 50% >= 40% bar) -- structural shared infrastructure",
+      si_store.get_devices_targeting("192.168.1.47", since=10_000_050.0) == [])
+
+# Real coordination must still work: only 2 of the same 10-device fleet touch an
+# otherwise-unusual destination (20% < the 40% bar) -- genuine corroboration signal.
+for i in range(2):
+    si_store.insert_evidence(Evidence(device_id=f"si_fleet_{i}", destination_id="192.168.1.199",
+                                        evidence_type="zeek_notice", independence_family="network_behavior",
+                                        timestamp=10_000_200.0 + i, source="s"))
+si_minority = si_store.get_devices_targeting("192.168.1.199", since=10_000_150.0)
+check("get_devices_targeting still reports real coordination when only a MINORITY of "
+      "the fleet (2/10 = 20% < 40% bar) shares an unusual private destination",
+      set(si_minority) == {"si_fleet_0", "si_fleet_1"}, f"got {si_minority}")
+
+# A small household network (< MIN_FLEET_SIZE) must never be ratio-suppressed --
+# 1 device touching something in a 2-device fleet is 50%, but the fleet is too small
+# for a ratio to mean anything.
+si_small = GraphStore(str(_PathForSysPath(tmpdir) / "test_graph_shared_infra_small.db"))
+si_small.insert_evidence(Evidence(device_id="sm_dev_a", destination_id="192.168.1.1",
+                                    evidence_type="zeek_notice", independence_family="network_behavior",
+                                    timestamp=11_000_000.0, source="s"))
+si_small.insert_evidence(Evidence(device_id="sm_dev_b", destination_id="192.168.1.1",
+                                    evidence_type="zeek_notice", independence_family="network_behavior",
+                                    timestamp=11_000_010.0, source="s"))
+si_small_targeting = si_small.get_devices_targeting("192.168.1.1", since=10_999_000.0)
+check("get_devices_targeting does NOT ratio-suppress a small fleet (2 devices, below "
+      "MIN_FLEET_SIZE) even though the touching ratio would otherwise be high",
+      set(si_small_targeting) == {"sm_dev_a", "sm_dev_b"}, f"got {si_small_targeting}")
+
 # --- get_devices_sharing_provenance (Release 14, N4: JA3/JA4 fingerprint correlation) ---
 store.insert_evidence(Evidence(device_id="n4_dev_a", destination_id="x.example.com",
                                  evidence_type="malicious_ja3", independence_family="tls_fingerprint",

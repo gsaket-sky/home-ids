@@ -30,6 +30,21 @@ _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 # tests).
 DEFAULT_EVIDENCE_RETENTION_DAYS = 90
 
+# get_devices_targeting()'s BUGFIX #2 / _is_shared_infrastructure(): a destination
+# touched by this fraction (or more) of the known device fleet, over this lookback,
+# is treated as structurally shared household infrastructure (a router, hub, or
+# another of the user's own devices most things on the LAN talk to) rather than
+# meaningful cross-device coordination -- see that method's own docstring for the
+# real incident (192.168.77.47, a second Fire TV touched by 7/household devices,
+# repeatedly auto-blocked) this closes. 7 days matches PEER_DEVIATION_WINDOW_SECONDS'
+# own precedent (live_engine.py) for "stable enough for a baseline, current enough
+# to matter." MIN_FLEET_SIZE guards against a small household network where any
+# ratio is meaningless (1 device touching something in a 2-3-device network is
+# already 33-50%).
+_SHARED_INFRASTRUCTURE_LOOKBACK_SECONDS = 7 * 86400
+_SHARED_INFRASTRUCTURE_MIN_FLEET_SIZE = 5
+_SHARED_INFRASTRUCTURE_DEVICE_RATIO = 0.4
+
 # v13 full-architecture plan, Phase 10b: SQLite PRAGMA cache_size (negative = KB,
 # per SQLite's own docs), sized against config/trust_anchors.py's own
 # VALID_HARDWARE_PROFILES. A first-pass judgment call (this project's own
@@ -593,8 +608,23 @@ class GraphStore:
         (see is_local_or_multicast_destination()'s own docstring). Without this,
         CoordinatedTargetingHypothesis (hypotheses/engine.py) scores ordinary mDNS/
         SSDP/multicast chatter as cross-device attack corroboration -- confirmed live:
-        83% of non-suppressed HIGH alerts in a 6h sample were exactly this shape."""
+        83% of non-suppressed HIGH alerts in a 6h sample were exactly this shape.
+
+        BUGFIX #2 (live audit, 2026-09-08, found investigating a real alert that
+        SURVIVED the multicast fix above): also short-circuits to [] for a PRIVATE
+        destination that's structurally shared household infrastructure -- a router,
+        hub, or another of the user's own devices that a large fraction of the whole
+        device fleet legitimately talks to. Confirmed live: 192.168.77.47 (a second
+        Fire TV, "amazon_firetv_projector_fritz_box") was independently touched by 7
+        of the household's devices; COORDINATED_TARGETING fired anyway (threshold is
+        just 1 OTHER device) and had auto-blocked that device repeatedly over the
+        prior ~36 hours. Deliberately NOT a blanket is_private exclusion (unlike the
+        multicast case, two devices sharing an unusual PRIVATE destination can still
+        be real lateral-movement signal) -- see _is_shared_infrastructure()'s own
+        docstring for the ratio-based reasoning that keeps that signal intact."""
         if is_local_or_multicast_destination(destination_id):
+            return []
+        if self._is_shared_infrastructure(destination_id, since):
             return []
         rows = self._conn.execute(
             "SELECT DISTINCT device_id FROM evidence WHERE destination_id = ? AND timestamp >= ?",
@@ -602,6 +632,41 @@ class GraphStore:
         ).fetchall()
         canonical_ids = {self.resolve_canonical_device_id(r["device_id"]) for r in rows}
         return sorted(canonical_ids)
+
+    def _is_shared_infrastructure(self, destination_id: str, since: float) -> bool:
+        """True if `destination_id` is touched by a large enough SHARE of the whole
+        known device fleet, over a longer lookback than the caller's own (typically
+        short, single-cycle) `since` window, that "multiple devices touched it" is a
+        structural fact about the destination (a router, a hub, another of the
+        user's own devices most things on the LAN talk to) rather than a meaningful
+        coincidence. get_devices_targeting()'s own docstring (BUGFIX #2) has the real
+        incident this closes.
+
+        Anchored to the CALLER's `since` (not wall-clock time.time()) so this stays
+        correct under a re-derivation anchored to a past decision's own timestamp
+        (live_llm_review.py) and deterministic under test fixtures that use a
+        synthetic clock -- extends the lookback further into the past from whatever
+        `since` already means to this call, never off real "now."
+
+        Deliberately requires BOTH a minimum absolute fleet size (a 2-3-device
+        household network makes any ratio meaningless -- one device touching
+        something IS 33-50%) and a minimum device-share ratio, not either alone."""
+        long_since = since - _SHARED_INFRASTRUCTURE_LOOKBACK_SECONDS
+        touching = self._conn.execute(
+            "SELECT DISTINCT device_id FROM evidence WHERE destination_id = ? AND timestamp >= ?",
+            (destination_id, long_since),
+        ).fetchall()
+        touching_canonical = {self.resolve_canonical_device_id(r["device_id"]) for r in touching}
+        if len(touching_canonical) < 2:
+            return False
+        fleet_row = self._conn.execute(
+            "SELECT COUNT(*) as c FROM devices WHERE merged_into_device_id IS NULL AND last_seen >= ?",
+            (long_since,),
+        ).fetchone()
+        fleet_size = int(fleet_row["c"]) if fleet_row and fleet_row["c"] is not None else 0
+        if fleet_size < _SHARED_INFRASTRUCTURE_MIN_FLEET_SIZE:
+            return False
+        return (len(touching_canonical) / fleet_size) >= _SHARED_INFRASTRUCTURE_DEVICE_RATIO
 
     def get_devices_sharing_provenance(self, evidence_type: str, provenance: str, since: float) -> List[str]:
         """Release 14, net-new capability N4 (multi-signal campaign detection):
