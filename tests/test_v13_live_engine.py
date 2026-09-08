@@ -620,6 +620,38 @@ check("H2: REGRESSION GUARD -- an empty device_type never triggers peer_deviatio
       "matching every existing (device_type-less) caller's unaffected behavior",
       not any(e.evidence_type == "peer_deviation" for e in merged_P1))
 
+# BUGFIX regression (live audit, 2026-09-08): the literal string "unknown" -- the
+# fallback pipeline.py itself passes for an unidentified device -- must get the
+# SAME treatment as an empty device_type, not silently pool every unidentified
+# device on the network into one fake cohort. Confirmed live: 13 real devices
+# shared this "unknown" cohort, and one high-traffic outlier among them skewed the
+# peer average enough to flag an otherwise near-idle device with zero real
+# evidence behind it.
+for peer_id, dests in (("p1a_unk_peer1", ["u1.example.com", "u2.example.com"]),
+                        ("p1a_unk_peer2", ["u3.example.com", "u4.example.com"])):
+    _f_store.update_device_metadata(peer_id, {"device_type": "unknown"}, timestamp=_h0 + 45)
+    for i, d in enumerate(dests):
+        _f_store.insert_evidence(Evidence(device_id=peer_id, destination_id=d, evidence_type="dns_rate",
+                                            independence_family="dns_behavior", timestamp=_h0 + 45 + i, source="s",
+                                            value=1.0))
+devU_dest_evidence = []
+for i in range(6):
+    devU_dest_evidence.append(Evidence(device_id="p1a_devU", destination_id=f"unk-anomalous-{i}.example.com",
+                                         evidence_type="dns_rate", independence_family="dns_behavior",
+                                         timestamp=_h0 + 50 + i, source="s", value=1.0))
+    _f_store.insert_evidence(devU_dest_evidence[-1])
+devU_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 56, device="p1a_devU",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="unk-anomalous-5.example.com")]
+merged_U1 = _capture_merged(devU_ev, ReputationVector(domain="", tier=3), "p1a_devU", _h0 + 56, device_type="unknown")
+check("H2: BUGFIX -- device_type=='unknown' is treated the same as empty; even "
+      "though this device's count (6) would clear the 3x/min-5 bar against its "
+      "fake 'unknown' cohort (avg 2), no peer_deviation is injected",
+      not any(e.evidence_type == "peer_deviation" for e in merged_U1), f"got {[e.evidence_type for e in merged_U1]}")
+check("H2: BUGFIX -- 'unknown' devices are never pooled as a cohort at all "
+      "(unlike a real device_type, this device's metadata is never even written)",
+      _f_store.get_device_metadata("p1a_devU").get("device_type") is None)
+
 # REGRESSION GUARD: not enough peers of this type for a meaningful comparison
 devQ_dest_evidence = [Evidence(device_id="p1a_devQ_peer", destination_id="q1.example.com",
                                  evidence_type="dns_rate", independence_family="dns_behavior",

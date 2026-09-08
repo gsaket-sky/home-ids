@@ -491,8 +491,20 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
 
     Best-effort, matching every other graph read in this module: any failure
     degrades to 'no synthetic evidence this cycle' and returns [], never blocks
-    the real decision."""
-    if not device_type:
+    the real decision.
+
+    BUGFIX (live audit, 2026-09-08): "unknown" (the literal string
+    `getattr(state, "device_type", "unknown")` falls back to across this codebase,
+    pipeline.py's own convention) is truthy, so it slipped past the guard below and
+    pooled every unidentified device on the network into one fake "unknown" cohort
+    -- physically unrelated devices (a smart plug, a laptop, a phone that hasn't
+    finished fingerprinting yet) compared against each other as if they were peers.
+    Confirmed live: 13 such devices, one genuine high-traffic outlier among them
+    skewed the "peer average" enough to flag an otherwise near-idle, still-
+    unidentified device at HIGH with zero real evidence behind it. "unknown" means
+    exactly the same thing an empty device_type does here -- no real classification
+    to compare against -- so it gets the same treatment."""
+    if not device_type or device_type == "unknown":
         return []
     try:
         store = _get_graph_store()
