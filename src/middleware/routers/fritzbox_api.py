@@ -1,3 +1,4 @@
+import threading
 import time
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
@@ -12,6 +13,46 @@ from mitigation.ips import IPSMitigator
 from pathlib import Path
 
 router = APIRouter()
+
+# BUGFIX (live audit, continuation session): get_dhcp_hosts() used to construct a
+# BRAND NEW FritzHosts (and therefore a brand new FritzConnection underneath,
+# doing a fresh TR-064 device-description/service-discovery SOAP handshake) on
+# EVERY single call. Confirmed live via direct measurement: constructing
+# FritzHosts() alone took 4.5s, get_hosts_info() itself another 3.5s -- ~8s total,
+# well past identity.py's own _poll_fritzbox_hosts() client-side timeout
+# (hardcoded 5.0s at the time this was found), meaning that background poller's
+# 60s-interval calls were TIMING OUT ON THE CLIENT SIDE EVERY SINGLE TIME even
+# though Fritz!Box itself was eventually responding successfully server-side --
+# a real, currently-active gap that silently starved DeviceIdentityManager's
+# whole Fritz!Box hostname/MAC enrichment cache (both _fritz_cache and the newer
+# _fritz_cache_by_mac) of ever having real data to serve from. Caching the
+# connection object (lazy-init once, reused across requests, a lock serializes
+# access since FastAPI can dispatch concurrent requests to this same module-level
+# object and fritzconnection's own objects aren't documented safe for genuinely
+# concurrent SOAP calls) eliminates the expensive reconnect/handshake on every
+# call -- only the FIRST request after a cold start (or after a real connection
+# failure, which clears the cache so the next call gets a fresh connection
+# rather than wedging permanently) pays that cost.
+_fritz_hosts_lock = threading.Lock()
+_fritz_hosts_cached: "FritzHosts | None" = None
+
+
+def _get_fritz_hosts(fritz_ip: str, fritz_user: str, fritz_pass: str, timeout_seconds: float) -> FritzHosts:
+    global _fritz_hosts_cached
+    with _fritz_hosts_lock:
+        if _fritz_hosts_cached is None:
+            _fritz_hosts_cached = FritzHosts(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
+        return _fritz_hosts_cached
+
+
+def _invalidate_fritz_hosts_cache() -> None:
+    """Called on a real connection/action failure so the NEXT call gets a fresh
+    connection instead of permanently reusing one that's gone bad (e.g. Fritz!Box
+    rebooted, or its TR-064 session genuinely expired) -- self-healing rather than
+    a wedge that needs a service restart to clear."""
+    global _fritz_hosts_cached
+    with _fritz_hosts_lock:
+        _fritz_hosts_cached = None
 
 class IsolationRequest(BaseModel):
     action: str = Field(..., description="Action to perform ('isolate' or 'unisolate')")
@@ -94,7 +135,7 @@ async def get_dhcp_hosts(token: str = Depends(verify_token)):
         timeout_seconds = 5.0
 
     try:
-        fh = FritzHosts(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
+        fh = _get_fritz_hosts(fritz_ip, fritz_user, fritz_pass, timeout_seconds)
         hosts_info = fh.get_hosts_info()
         parsed_hosts = []
         for host in hosts_info:
@@ -107,6 +148,7 @@ async def get_dhcp_hosts(token: str = Depends(verify_token)):
         return parsed_hosts
     except Exception as errors:
         LOGGER.error("Failed to fetch hosts from FritzBox: %s", errors)
+        _invalidate_fritz_hosts_cache()
         raise HTTPException(status_code=503, detail="FritzBox connection failed.")
 
 @router.get("/api/ipc/router_isolation_status")

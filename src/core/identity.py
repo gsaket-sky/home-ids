@@ -114,13 +114,30 @@ class DeviceIdentityManager:
 
     def _poll_fritzbox_hosts(self) -> None:
         session = requests.Session()
+        first_failure_logged = False
         while True:
             try:
                 webhook_url = self.config.get("router_hosts_url", "http://127.0.0.1:8010/hosts")
                 api_token = self.config.get("fritz_api_token", "")
                 headers = {"Authorization": f"Bearer {api_token}"} if api_token else {}
-                
-                resp = session.get(webhook_url, headers=headers, timeout=5.0)
+
+                # BUGFIX (live audit, continuation session): this was hardcoded to
+                # 5.0s -- confirmed live via direct measurement that a real,
+                # successful Fritz!Box TR-064 round-trip (fritzbox_api.py's
+                # get_dhcp_hosts()) genuinely takes ~8s on a cold connection
+                # (4.5s device-description/service-discovery handshake + 3.5s
+                # get_hosts_info() itself), meaning this poller was timing out on
+                # the CLIENT side before the SERVER's own request ever finished --
+                # every single one of its 60s-interval polls silently failed,
+                # starving _fritz_cache/_fritz_cache_by_mac of ever having real
+                # data. fritzbox_api.py's own connection-caching fix (this same
+                # session) should make most polls fast after the first, but this
+                # timeout stays generous as the real safety margin for a cold
+                # start or a genuine reconnect after Fritz!Box drops the session.
+                poll_timeout = float(self.config.get("router_hosts_poll_timeout_seconds", 20.0))
+                if poll_timeout <= 0:
+                    poll_timeout = 20.0
+                resp = session.get(webhook_url, headers=headers, timeout=poll_timeout)
                 if resp.status_code == 200:
                     hosts_data = resp.json()  
                     new_cache = {}
@@ -136,8 +153,27 @@ class DeviceIdentityManager:
                     with self._lock:
                         self._fritz_cache = new_cache
                         self._fritz_cache_by_mac = new_cache_by_mac
+                    if first_failure_logged:
+                        LOGGER.info("✅ FritzBox hosts webhook poll recovered (%d hosts).", len(new_cache))
+                        first_failure_logged = False
+                else:
+                    LOGGER.warning("FritzBox hosts webhook returned HTTP %d. Retrying in 60s.", resp.status_code)
             except Exception as e:
-                LOGGER.debug("FritzBox hosts webhook poll unavailable. Retrying in 60s. %s", e)
+                # BUGFIX (live audit, continuation session): was LOGGER.debug() --
+                # invisible at this service's normal INFO level, the exact same
+                # silence pattern this project has already found and fixed once
+                # before for a different Fritz!Box timeout (ips.py's own
+                # router-reconcile worker, 2026-09-04) -- a persistent poll
+                # failure here silently starves real hostname/MAC enrichment data
+                # with nothing surfacing it. Logged once per failure streak (not
+                # every single 60s tick) to avoid spamming the log if Fritz!Box is
+                # genuinely down for an extended period.
+                if not first_failure_logged:
+                    LOGGER.warning("FritzBox hosts webhook poll failed: %s: %s. Retrying every 60s "
+                                    "(further failures logged at DEBUG until it recovers).", type(e).__name__, e)
+                    first_failure_logged = True
+                else:
+                    LOGGER.debug("FritzBox hosts webhook poll still failing: %s", e)
             time.sleep(60)
 
     def _enrich_from_cache(self, ip: str, current_mac: str, current_hostname: str) -> Tuple[str, str]:

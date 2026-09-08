@@ -591,8 +591,28 @@ fritzbox_router:
   # connected-hosts list in sync (used by core/identity.py). [LIVE]
   router_hosts_url: http://127.0.0.1:8010/hosts
 
-  # HTTP timeout (seconds) for that hosts-list poll. [LIVE]
+  # SERVER-side timeout (seconds): passed to fritzconnection's own FritzHosts
+  # object (middleware/routers/fritzbox_api.py's get_dhcp_hosts()) as its
+  # per-SOAP-call budget against Fritz!Box's real TR-064 service. Despite this
+  # key's OLD comment ("for that hosts-list poll"), it was never actually read
+  # by the CLIENT-side poll at all (core/identity.py's _poll_fritzbox_hosts()
+  # had its own timeout hardcoded, see router_hosts_poll_timeout_seconds below
+  # for that real fix) -- corrected here to describe what this key genuinely
+  # does. [LIVE]
   router_hosts_timeout_seconds: 5.0
+
+  # CLIENT-side timeout (seconds, continuation session): how long
+  # core/identity.py's own background poller waits for the FULL HTTP round-trip
+  # to this process's own /hosts endpoint, including that endpoint's real
+  # server-side Fritz!Box work above. Confirmed live via direct measurement: a
+  # cold FritzHosts connection (device-description/service-discovery handshake)
+  # takes ~4.5s, get_hosts_info() itself another ~3.5s -- ~8s total, which the
+  # poller's own OLD hardcoded 5.0s timeout was shorter than, meaning it timed
+  # out on every single poll even when Fritz!Box was responding successfully.
+  # fritzbox_api.py now caches its FritzHosts connection (this same session) so
+  # most polls should be much faster after the first, but this stays generous
+  # as the real safety margin for a cold start or a genuine reconnect. [LIVE]
+  router_hosts_poll_timeout_seconds: 20.0
 
   # How often (seconds) ips.py's reconcile worker asks Fritz!Box for each
   # router-isolated device's REAL current WAN-access state, and clears this IDS's
