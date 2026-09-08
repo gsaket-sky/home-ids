@@ -248,8 +248,12 @@ var state = {
   activeView: 'devices',
   selectedDeviceId: null,
   deviceSearch: '',
-  sortField: 'last_seen',
-  sortDir: 'desc',
+  sort: {
+    devices: { field: 'last_seen', dir: 'desc' },
+    blockDevices: { field: 'hostname', dir: 'asc' },
+    blockDomains: { field: 'blocked_at', dir: 'desc' },
+    suricata: { field: 'timestamp', dir: 'desc' }
+  },
 
   toasts: [],
 
@@ -278,6 +282,8 @@ var state = {
   graphSelected: null,
   graphShow: { device:true, evidence:true, destination:true, decision:true },
   graphPan: { x: 0, y: 0 }, graphZoom: 1,
+  graphFitPending: false,
+  graphMultiSelected: {}, // {nodeId: true} -- nodes selected as a group; dragging any one of them moves the whole set
   graphDrag: null, // {kind:'node', id, dx, dy} or {kind:'pan', startX, startY, panX0, panY0} while a pointer drag is in progress
 
   // --- real, server-backed config state ---
@@ -377,17 +383,17 @@ async function runHuntQuery(){
 }
 
 function computeGraphLayout(nodes, edges){
-  var colX = { device: 90, evidence: 340, destination: 660, decision: 900 };
+  var colX = { device: 110, evidence: 460, destination: 980, decision: 1400 };
   var counters = { device: 0, evidence: 0, destination: 0, decision: 0 };
   var byId = {};
   var laidOut = nodes.map(function(n){
     var i = counters[n.kind] || 0;
     counters[n.kind] = i + 1;
-    var spacing = n.kind === 'evidence' ? 34 : 70;
-    var seedX = colX[n.kind] != null ? colX[n.kind] : 500;
+    var spacing = n.kind === 'evidence' ? 48 : 90;
+    var seedX = colX[n.kind] != null ? colX[n.kind] : 700;
     var out = Object.assign({}, n, {
-      x: seedX + (Math.random()-0.5)*24,
-      y: 50 + i * spacing + (Math.random()-0.5)*10,
+      x: seedX + (Math.random()-0.5)*40,
+      y: 50 + i * spacing + (Math.random()-0.5)*16,
       targetX: seedX,
       r: n.kind === 'decision' ? 11 : (n.kind === 'device' ? 12 : (n.kind === 'destination' ? 10 : 7)),
     });
@@ -407,12 +413,16 @@ function computeGraphLayout(nodes, edges){
   // edges + a gentle pull back toward each node's kind column on x (keeps the
   // device->evidence->destination->decision reading order legible instead of collapsing
   // into an unreadable hairball). Makes the initial layout feel organic rather than rigid
-  // fixed columns; the user can still drag any node anywhere afterward (attachGraphInteraction()).
-  // Bounded to n<=600 nodes -- a busier response just keeps the straight-column seed
-  // positions above instead of paying an O(n^2) relaxation cost for nothing extra useful.
+  // fixed columns; the user can still drag any node (or a shift-selected group of them,
+  // see attachGraphInteraction()) anywhere afterward. Recentering pull is deliberately
+  // weak (0.02, was 0.05) and repulsion reaches further (180px, was 120px) than the first
+  // pass at this -- that first version packed hundreds of evidence nodes into one narrow,
+  // visually "compressed" column since the strong pull-back fought the repulsion before it
+  // could spread anything out. Bounded to n<=600 nodes -- a busier response just keeps the
+  // straight-column seed positions above instead of paying an O(n^2) relaxation cost.
   var n = laidOut.length;
   if (n > 1 && n <= 600) {
-    var iterations = n > 200 ? 70 : 140;
+    var iterations = n > 200 ? 90 : 160;
     var edgePairs = laidOutEdges.map(function(e){ return [byId[e.from], byId[e.to]]; }).filter(function(p){ return p[0] && p[1]; });
     for (var it = 0; it < iterations; it++) {
       for (var a = 0; a < n; a++) {
@@ -420,9 +430,9 @@ function computeGraphLayout(nodes, edges){
           var A = laidOut[a], B = laidOut[b];
           var dx = A.x - B.x, dy = A.y - B.y;
           var distSq = dx*dx + dy*dy;
-          if (distSq > 14400 || distSq === 0) continue; // ignore far-apart pairs (>120px) -- cheap cutoff
+          if (distSq > 32400 || distSq === 0) continue; // ignore far-apart pairs (>180px) -- cheap cutoff
           var dist = Math.sqrt(distSq);
-          var force = 240 / distSq;
+          var force = 480 / distSq;
           var fx = (dx/dist) * force, fy = (dy/dist) * force;
           A.x += fx; A.y += fy;
           B.x -= fx; B.y -= fy;
@@ -433,7 +443,7 @@ function computeGraphLayout(nodes, edges){
         var ex = (B.x - A.x) * 0.018, ey = (B.y - A.y) * 0.018;
         A.x += ex; A.y += ey; B.x -= ex; B.y -= ey;
       });
-      laidOut.forEach(function(node){ node.x += (node.targetX - node.x) * 0.05; node.y = Math.max(20, node.y); });
+      laidOut.forEach(function(node){ node.x += (node.targetX - node.x) * 0.02; node.y = Math.max(20, node.y); });
     }
   }
 
@@ -450,6 +460,8 @@ async function loadGraph(){
     state.graphNodeById = laid.byId;
     state.graphPan = { x: 0, y: 0 };
     state.graphZoom = 1;
+    state.graphFitPending = true; // attachGraphInteraction() does the actual fit once the canvas has real dimensions
+    state.graphMultiSelected = {};
     state.graphLoaded = true;
   } catch (err) {
     state.graphLoadError = err.message || String(err);
@@ -542,6 +554,32 @@ function fmtTime(ts){
   return d.toISOString().slice(0,19).replace('T',' ');
 }
 
+/* ============================= generic table sorting (every table, every column) ============================= */
+
+function sortRows(rows, sort, getters){
+  var field = sort.field, dir = sort.dir === 'asc' ? 1 : -1;
+  var getter = (getters && getters[field]) || function(r){ return r[field]; };
+  var copy = rows.slice();
+  copy.sort(function(a,b){
+    var av = getter(a), bv = getter(b);
+    if (av == null && bv == null) return 0;
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    if (typeof av === 'string' && typeof bv === 'string') { av = av.toLowerCase(); bv = bv.toLowerCase(); }
+    if (av < bv) return -1*dir;
+    if (av > bv) return 1*dir;
+    return 0;
+  });
+  return copy;
+}
+function sortArrow(table, field){
+  var s = state.sort[table];
+  return s.field===field ? (s.dir==='asc' ? ' ▲' : ' ▼') : '';
+}
+function sortableTh(table, field, label, extraAttrs){
+  return '<th'+(extraAttrs||'')+' onclick="app.toggleSort(\''+table+'\',\''+field+'\')">'+label+sortArrow(table, field)+'</th>';
+}
+
 function renderDevicesView(){
   var topbarHead = '<div class="topbar"><div class="topbar-row">'
     + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the v13 evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
@@ -562,14 +600,16 @@ function renderDevicesView(){
       return (d.hostname||'').toLowerCase().indexOf(q)>=0 || (d.ip||'').indexOf(q)>=0 || (d.mac||'').toLowerCase().indexOf(q)>=0;
     });
   }
-  list.sort(function(a,b){
-    var f = state.sortField, dir = state.sortDir==='asc'?1:-1;
-    var av = a[f], bv = b[f];
-    if (av == null && bv == null) return 0;
-    if (av == null) return 1; if (bv == null) return -1;
-    if (av < bv) return -1*dir; if (av > bv) return 1*dir; return 0;
+  list = sortRows(list, state.sort.devices, {
+    device_type: function(d){ return d.device_type; },
+    ip: function(d){ return d.ip; },
+    mac: function(d){ return d.mac; },
+    state: function(d){ return d.state; },
+    containment: function(d){
+      var c = d.containment || {};
+      return (c.tarpitted?2:0) + (c.router_isolated?2:0) + (c.blocked_domain_count?1:0);
+    },
   });
-  function arrow(f){ return state.sortField===f ? (state.sortDir==='asc'?' ▲':' ▼') : ''; }
   var rows = list.map(function(d){
     var macShort = (d.mac && d.mac.length > 19) ? d.mac.slice(0,17)+'…' : (d.mac || 'unknown');
     var c = d.containment || {};
@@ -591,8 +631,15 @@ function renderDevicesView(){
   if (!rows) rows = '<tr><td colspan="9"><div class="empty-state">No devices match “'+esc(state.deviceSearch)+'”.</div></td></tr>';
   return topbarHead
     + '<div class="content"><div class="panel"><div class="table-wrap"><table><thead><tr>'
-    + '<th onclick="app.toggleSort(\'hostname\')">Device'+arrow('hostname')+'</th><th>Type</th><th>IP</th><th class="cell-mono">MAC</th><th>State</th><th>Containment</th>'
-    + '<th onclick="app.toggleSort(\'last_seen\')">Last seen'+arrow('last_seen')+'</th><th onclick="app.toggleSort(\'risk_score\')">Risk'+arrow('risk_score')+'</th><th></th>'
+    + sortableTh('devices','hostname','Device')
+    + sortableTh('devices','device_type','Type')
+    + sortableTh('devices','ip','IP')
+    + sortableTh('devices','mac','MAC',' class="cell-mono"')
+    + sortableTh('devices','state','State')
+    + sortableTh('devices','containment','Containment')
+    + sortableTh('devices','last_seen','Last seen')
+    + sortableTh('devices','risk_score','Risk')
+    + '<th></th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
 }
 
@@ -808,8 +855,13 @@ function renderBlockingView(){
   }
   var b = state.blockingState || { contained_devices: [], blocked_domains: [] };
 
-  var deviceRows = b.contained_devices.length
-    ? b.contained_devices.map(function(cd){
+  var sortedDevices = sortRows(b.contained_devices, state.sort.blockDevices, {
+    hostname: function(cd){ return cd.hostname; },
+    ip: function(cd){ return cd.ip; },
+    method: function(cd){ return (cd.tarpitted?1:0) + (cd.router_isolated?1:0); },
+  });
+  var deviceRows = sortedDevices.length
+    ? sortedDevices.map(function(cd){
         var methods = (cd.tarpitted ? '<span class="containment-pill containment-active">Tarpit</span>' : '')
           + (cd.router_isolated ? '<span class="containment-pill containment-active">Fritz!Box</span>' : '');
         return '<tr><td><div class="cell-title">'+esc(cd.hostname)+'</div><div class="cell-mono">'+esc(cd.device_id)+'</div></td>'
@@ -819,8 +871,14 @@ function renderBlockingView(){
       }).join('')
     : '<tr><td colspan="4"><div class="empty-state">No devices currently contained.</div></td></tr>';
 
-  var domainRows = b.blocked_domains.length
-    ? b.blocked_domains.map(function(dm){
+  var sortedDomains = sortRows(b.blocked_domains, state.sort.blockDomains, {
+    domain: function(dm){ return dm.domain; },
+    hostname: function(dm){ return dm.hostname; },
+    reason: function(dm){ return dm.reason; },
+    blocked_at: function(dm){ return dm.blocked_at; },
+  });
+  var domainRows = sortedDomains.length
+    ? sortedDomains.map(function(dm){
         return '<tr><td class="cell-mono">'+esc(dm.domain)+'</td><td>'+esc(dm.hostname)+'</td>'
           + '<td style="font-size:11.5px;color:var(--text-dim);">'+esc(dm.reason||'')+'</td><td class="cell-mono">'+fmtTime(dm.blocked_at)+'</td>'
           + '<td><button class="btn btn-ghost btn-sm" onclick="app.unblockDomain(\''+esc(dm.domain)+'\', null)">Unblock</button></td></tr>';
@@ -833,9 +891,13 @@ function renderBlockingView(){
 
   return topbarHead + '<div class="content">'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Contained devices</div></div>'
-    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>IP</th><th>Method</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
+    + '<div class="table-wrap"><table><thead><tr>'
+    + sortableTh('blockDevices','hostname','Device') + sortableTh('blockDevices','ip','IP') + sortableTh('blockDevices','method','Method') + '<th></th>'
+    + '</tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
     + '<div class="panel"><div class="panel-header"><div class="panel-title">Blocked domains</div></div>'
-    + '<div class="table-wrap"><table><thead><tr><th>Domain</th><th>Device</th><th>Reason</th><th>Blocked</th><th></th></tr></thead><tbody>'+domainRows+'</tbody></table></div>'
+    + '<div class="table-wrap"><table><thead><tr>'
+    + sortableTh('blockDomains','domain','Domain') + sortableTh('blockDomains','hostname','Device') + sortableTh('blockDomains','reason','Reason') + sortableTh('blockDomains','blocked_at','Blocked') + '<th></th>'
+    + '</tr></thead><tbody>'+domainRows+'</tbody></table></div>'
     + '<div class="panel-body" style="border-top:1px solid var(--border-soft);"><div class="row" style="gap:8px;flex-wrap:wrap;">'
     + '<input class="input mono" style="flex:1;min-width:180px;" placeholder="domain to block" value="'+esc(state.newBlockDomain)+'" onchange="app.onNewBlockDomain(this.value)">'
     + '<select class="select mono" onchange="app.onNewBlockDeviceId(this.value)">'+deviceOpts+'</select>'
@@ -853,7 +915,13 @@ function renderSuricataView(){
   if (state.suricataLoading && !state.suricataLoaded) {
     return topbarHead + '<div class="content"><div class="empty-state">Scanning the alert log…</div></div>';
   }
-  var list = state.suricataDetections || [];
+  var list = sortRows(state.suricataDetections || [], state.sort.suricata, {
+    hostname: function(det){ return det.hostname; },
+    timestamp: function(det){ return det.timestamp; },
+    target: function(det){ return det.target; },
+    rule: function(det){ return det.detail_recorded ? 1 : 0; },
+    severity: function(det){ return det.state || det.risk; },
+  });
   var rows = list.length
     ? list.map(function(det){
         var detail = det.detail_recorded
@@ -870,12 +938,13 @@ function renderSuricataView(){
     : '<tr><td colspan="5"><div class="empty-state">No Suricata signature matches found in the scanned window of the alert log.</div></td></tr>';
 
   return topbarHead + '<div class="content"><div class="panel"><div class="table-wrap"><table><thead><tr>'
-    + '<th>Device</th><th>When</th><th>Target</th><th>Rule</th><th>Severity</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
+    + sortableTh('suricata','hostname','Device') + sortableTh('suricata','timestamp','When') + sortableTh('suricata','target','Target') + sortableTh('suricata','rule','Rule') + sortableTh('suricata','severity','Severity')
+    + '</tr></thead><tbody>'+rows+'</tbody></table></div></div>'
     + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(state.suricataNote||'')+'</div></div>';
 }
 
 function renderGraphView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Drag any node to rearrange it, drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
+  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -904,7 +973,10 @@ function renderGraphView(){
     });
     var sw = n.id===state.graphSelected ? 3 : 1;
     var label = n.kind === 'evidence' ? (n.type_label || n.label) : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
-    return '<g class="node-group" data-node-id="'+n.id+'" style="opacity:'+(connected?1:0.22)+';">'
+    var multiSel = !!state.graphMultiSelected[n.id];
+    var ring = multiSel ? '<circle cx="'+n.x+'" cy="'+n.y+'" r="'+(n.r+5)+'" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="3,2"></circle>' : '';
+    return '<g class="node-group'+(multiSel?' multi-selected':'')+'" data-node-id="'+n.id+'" style="opacity:'+(connected?1:0.22)+';">'
+      + ring
       + '<circle cx="'+n.x+'" cy="'+n.y+'" r="'+n.r+'" fill="'+n.fill+'" stroke="'+n.stroke+'" stroke-width="'+sw+'"></circle>'
       + '<text class="node-label" x="'+(n.x+n.r+6)+'" y="'+(n.y+3)+'">'+esc(label)+'</text>'
       + '<text class="node-sub" x="'+(n.x+n.r+6)+'" y="'+(n.y+14)+'">'+esc(n.sub||'')+'</text></g>';
@@ -914,10 +986,13 @@ function renderGraphView(){
     var bg = state.graphShow[l.kind] ? l.bg : 'transparent';
     return '<div class="legend-row" onclick="app.toggleGraphKind(\''+l.kind+'\')"><div class="legend-check" style="background:'+bg+';border-color:'+l.color+';"></div><span style="color:var(--text-dim);">'+l.label+'</span></div>';
   }).join('');
-  var zoomControls = '<div class="graph-legend" style="left:auto;right:12px;top:12px;flex-direction:row;gap:6px;padding:6px 8px;">'
-    + '<button class="icon-btn" onclick="app.graphZoomBy(1.2)">+</button>'
-    + '<button class="icon-btn" onclick="app.graphZoomBy(0.8)">−</button>'
-    + '<button class="icon-btn" title="reset view" onclick="app.graphResetView()">⟲</button></div>';
+  var selCount = Object.keys(state.graphMultiSelected).length;
+  var zoomControls = '<div class="graph-legend" style="left:auto;right:12px;top:12px;flex-direction:row;gap:6px;padding:6px 8px;align-items:center;">'
+    + (selCount ? '<span style="font-size:11px;color:var(--text-dim);white-space:nowrap;">'+selCount+' selected</span><button class="btn btn-ghost btn-sm" onclick="app.graphClearSelection()">Clear</button>' : '')
+    + '<button class="icon-btn" title="zoom in" onclick="app.graphZoomBy(1.2)">+</button>'
+    + '<button class="icon-btn" title="zoom out" onclick="app.graphZoomBy(0.8)">−</button>'
+    + '<button class="icon-btn" title="fit to view" onclick="app.graphFitToView()">⛶</button>'
+    + '<button class="icon-btn" title="reset zoom" onclick="app.graphResetView()">⟲</button></div>';
 
   var drawer;
   if (state.graphSelected && byId[state.graphSelected]) {
@@ -976,9 +1051,43 @@ function _moveGraphNodeDom(id){
   });
 }
 
+function fitGraphToView(canvas){
+  var nodes = state.graphNodes;
+  if (!nodes || !nodes.length) return;
+  var minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+  nodes.forEach(function(n){
+    minX = Math.min(minX, n.x - n.r); maxX = Math.max(maxX, n.x + n.r + 150); // +150 clears the label text to the right
+    minY = Math.min(minY, n.y - n.r); maxY = Math.max(maxY, n.y + n.r);
+  });
+  var contentW = Math.max(1, maxX - minX), contentH = Math.max(1, maxY - minY);
+  var canvasW = canvas.clientWidth || 1000, canvasH = canvas.clientHeight || 600;
+  var pad = 30;
+  var scale = Math.min((canvasW - pad*2) / contentW, (canvasH - pad*2) / contentH);
+  scale = Math.max(0.06, Math.min(1.4, scale));
+  state.graphZoom = scale;
+  state.graphPan = {
+    x: pad - minX*scale + Math.max(0, (canvasW - pad*2 - contentW*scale) / 2),
+    y: pad - minY*scale + Math.max(0, (canvasH - pad*2 - contentH*scale) / 2),
+  };
+  _updateGraphTransform();
+}
+
+function _clientToWorld(canvas, clientX, clientY){
+  var rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left - state.graphPan.x) / state.graphZoom,
+    y: (clientY - rect.top - state.graphPan.y) / state.graphZoom,
+  };
+}
+
 function attachGraphInteraction(){
   var canvas = document.getElementById('graphCanvas');
-  if (!canvas || canvas._interactionAttached) return;
+  if (!canvas) return;
+  if (state.graphFitPending) {
+    fitGraphToView(canvas);
+    state.graphFitPending = false;
+  }
+  if (canvas._interactionAttached) return;
   canvas._interactionAttached = true;
 
   canvas.addEventListener('pointerdown', function(e){
@@ -989,14 +1098,32 @@ function attachGraphInteraction(){
 
     if (nodeGroup) {
       var id = nodeGroup.getAttribute('data-node-id');
+
+      // Shift-click a node: toggle its group-selection membership, no drag.
+      if (e.shiftKey) {
+        if (state.graphMultiSelected[id]) delete state.graphMultiSelected[id];
+        else state.graphMultiSelected[id] = true;
+        render();
+        return;
+      }
+
+      var groupIds = state.graphMultiSelected[id] ? Object.keys(state.graphMultiSelected) : [id];
+      var starts = {};
+      groupIds.forEach(function(gid){
+        var gn = (state.graphNodeById || {})[gid];
+        if (gn) starts[gid] = { x: gn.x, y: gn.y };
+      });
       nodeGroup.classList.add('dragging');
-      var node = (state.graphNodeById || {})[id];
-      var startNodeX = node.x, startNodeY = node.y;
       var onMove = function(ev){
         var dx = (ev.clientX - startX) / state.graphZoom, dy = (ev.clientY - startY) / state.graphZoom;
         if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
-        node.x = startNodeX + dx; node.y = startNodeY + dy;
-        _moveGraphNodeDom(id);
+        groupIds.forEach(function(gid){
+          var gn = (state.graphNodeById || {})[gid];
+          var s = starts[gid];
+          if (!gn || !s) return;
+          gn.x = s.x + dx; gn.y = s.y + dy;
+          _moveGraphNodeDom(gid);
+        });
       };
       var onUp = function(){
         canvas.removeEventListener('pointermove', onMove);
@@ -1006,6 +1133,41 @@ function attachGraphInteraction(){
       };
       canvas.addEventListener('pointermove', onMove);
       canvas.addEventListener('pointerup', onUp);
+    } else if (e.shiftKey) {
+      // Shift-drag empty background: rubber-band select every node inside the box
+      // (added to any group already selected, so several shift-drags can build one
+      // group up across separate regions of a busy graph).
+      var svgNs = 'http://www.w3.org/2000/svg';
+      var rectEl = document.createElementNS(svgNs, 'rect');
+      rectEl.setAttribute('fill', 'rgba(34,199,224,.12)');
+      rectEl.setAttribute('stroke', 'var(--accent)');
+      rectEl.setAttribute('stroke-width', '1');
+      rectEl.setAttribute('stroke-dasharray', '4,3');
+      document.getElementById('graphViewport').appendChild(rectEl);
+      var w0 = _clientToWorld(canvas, startX, startY);
+      var onMove3 = function(ev){
+        var w1 = _clientToWorld(canvas, ev.clientX, ev.clientY);
+        var x = Math.min(w0.x, w1.x), y = Math.min(w0.y, w1.y);
+        rectEl.setAttribute('x', x); rectEl.setAttribute('y', y);
+        rectEl.setAttribute('width', Math.abs(w1.x - w0.x));
+        rectEl.setAttribute('height', Math.abs(w1.y - w0.y));
+      };
+      var onUp3 = function(ev){
+        canvas.removeEventListener('pointermove', onMove3);
+        canvas.removeEventListener('pointerup', onUp3);
+        var w1 = _clientToWorld(canvas, ev.clientX, ev.clientY);
+        var minX = Math.min(w0.x, w1.x), maxX = Math.max(w0.x, w1.x);
+        var minY = Math.min(w0.y, w1.y), maxY = Math.max(w0.y, w1.y);
+        state.graphNodes.forEach(function(n){
+          if (state.graphShow[n.kind] && n.x >= minX && n.x <= maxX && n.y >= minY && n.y <= maxY) {
+            state.graphMultiSelected[n.id] = true;
+          }
+        });
+        rectEl.remove();
+        render();
+      };
+      canvas.addEventListener('pointermove', onMove3);
+      canvas.addEventListener('pointerup', onUp3);
     } else {
       canvas.classList.add('panning');
       var panX0 = state.graphPan.x, panY0 = state.graphPan.y;
@@ -1029,7 +1191,7 @@ function attachGraphInteraction(){
     var rect = canvas.getBoundingClientRect();
     var mx = e.clientX - rect.left, my = e.clientY - rect.top;
     var wx = (mx - state.graphPan.x) / state.graphZoom, wy = (my - state.graphPan.y) / state.graphZoom;
-    var newZoom = Math.max(0.25, Math.min(3, state.graphZoom * (e.deltaY < 0 ? 1.08 : 0.92)));
+    var newZoom = Math.max(0.06, Math.min(3, state.graphZoom * (e.deltaY < 0 ? 1.08 : 0.92)));
     state.graphPan.x = mx - wx * newZoom;
     state.graphPan.y = my - wy * newZoom;
     state.graphZoom = newZoom;
@@ -1213,7 +1375,12 @@ var app = {
     state.huntSinceDays=''; state.huntRan=false; render();
     runHuntQuery();
   },
-  toggleSort: function(f){ state.sortDir = (state.sortField===f && state.sortDir==='asc') ? 'desc' : 'asc'; state.sortField=f; render(); },
+  toggleSort: function(table, field){
+    var s = state.sort[table];
+    if (s.field === field) s.dir = s.dir === 'asc' ? 'desc' : 'asc';
+    else { s.field = field; s.dir = 'asc'; }
+    render();
+  },
   onDeviceSearch: function(v){ state.deviceSearch=v; render(); },
   reloadDevices: function(){ state.devicesLoaded=false; loadDevices(); },
   reloadGraph: function(){ state.graphLoaded=false; loadGraph(); },
@@ -1440,12 +1607,14 @@ var app = {
   /* ---- Suricata view ---- */
   reloadSuricata: function(){ loadSuricata(); },
 
-  /* ---- Evidence Graph: pan/zoom/drag ---- */
+  /* ---- Evidence Graph: pan/zoom/drag/group-select ---- */
   graphZoomBy: function(factor){
-    state.graphZoom = Math.max(0.25, Math.min(3, state.graphZoom * factor));
+    state.graphZoom = Math.max(0.06, Math.min(3, state.graphZoom * factor));
     render();
   },
   graphResetView: function(){ state.graphPan = { x: 0, y: 0 }; state.graphZoom = 1; render(); },
+  graphFitToView: function(){ state.graphFitPending = true; render(); },
+  graphClearSelection: function(){ state.graphMultiSelected = {}; render(); },
 };
 
 render();
