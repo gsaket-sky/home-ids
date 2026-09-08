@@ -472,6 +472,36 @@ KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
     "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
 })
 
+def is_local_or_multicast_destination(dest: str) -> bool:
+    """True if `dest` is a multicast/link-local/loopback/reserved/unspecified IP, or
+    an IPv4 subnet-directed-broadcast address (`x.x.x.255`) -- i.e. a LAN protocol
+    group address (mDNS 224.0.0.251/ff02::fb, SSDP 239.255.255.250, ICMPv6 ND/MLD
+    ff02::1/ff02::16/ff02::22, etc.), never a real single host. Every device on a
+    network legitimately, constantly sends to these addresses as part of ordinary
+    service discovery -- "N devices independently targeted this destination" or
+    "this destination inflates a device's distinct-destination count" are both
+    structurally meaningless questions for an address that isn't a host. False for
+    anything that doesn't parse as an IP (domain names pass through unaffected) and
+    deliberately NOT for `is_private` -- two devices independently targeting the same
+    private unicast LAN host can still be real corroborating signal, unlike a
+    protocol group address.
+
+    Same classification `fp_engine.py::_is_ip_protected_from_confirmed_intel()`
+    already applies for the local confirmed-intel store, after that store was found
+    poisoned hundreds of times over by exactly this traffic shape (ff02::fb,
+    224.0.0.22, 224.0.0.251 -- see that method's own docstring). Centralized here so
+    the v13 cross-device-correlation/peer-deviation graph queries (`graph/store.py`)
+    can apply the same guard instead of re-deriving it a fourth time."""
+    if not dest or dest == "unknown":
+        return False
+    try:
+        addr = ipaddress.ip_address(dest)
+    except ValueError:
+        return False
+    if addr.is_multicast or addr.is_link_local or addr.is_loopback or addr.is_reserved or addr.is_unspecified:
+        return True
+    return addr.version == 4 and str(addr).endswith(".255")
+
 def suspicious_dga(domain):
     """
     Heuristic DGA (Domain Generation Algorithm) detector.

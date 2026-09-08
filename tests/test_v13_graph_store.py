@@ -412,6 +412,38 @@ check("get_devices_targeting canonicalizes a merged orphan into its canonical id
       "(still just 2 distinct physical devices, not 3)",
       set(targeting_after_merge) == {"p1a_dev_a", "p1a_dev_b"}, f"got {targeting_after_merge}")
 
+# BUGFIX regression (live audit, 2026-09-08): multicast/link-local/broadcast
+# destinations must never report cross-device "targeting" -- every device sends mDNS/
+# SSDP/ICMPv6-ND to these addresses as ordinary LAN presence, which previously scored
+# as COORDINATED_TARGETING attack corroboration (83% of non-suppressed HIGH alerts in
+# a live 6h sample were exactly this shape).
+store.insert_evidence(Evidence(device_id="mc_dev_a", destination_id="224.0.0.251",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_000.0, source="s"))
+store.insert_evidence(Evidence(device_id="mc_dev_b", destination_id="224.0.0.251",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="mc_dev_c", destination_id="ff02::fb",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="mc_dev_d", destination_id="ff02::fb",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_020.0, source="s"))
+store.insert_evidence(Evidence(device_id="mc_dev_e", destination_id="192.168.1.255",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_020.0, source="s"))
+store.insert_evidence(Evidence(device_id="mc_dev_f", destination_id="192.168.1.255",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=7_000_030.0, source="s"))
+check("get_devices_targeting returns [] for an IPv4 multicast destination (mDNS group)",
+      store.get_devices_targeting("224.0.0.251", since=6_999_000.0) == [])
+check("get_devices_targeting returns [] for an IPv6 multicast destination (mDNS group)",
+      store.get_devices_targeting("ff02::fb", since=6_999_000.0) == [])
+check("get_devices_targeting returns [] for an IPv4 subnet-broadcast destination",
+      store.get_devices_targeting("192.168.1.255", since=6_999_000.0) == [])
+check("get_devices_targeting still works normally for a real (non-multicast) shared destination",
+      set(store.get_devices_targeting("shared.example.com", since=6_999_000.0)) == {"p1a_dev_a", "p1a_dev_b"})
+
 # --- get_devices_sharing_provenance (Release 14, N4: JA3/JA4 fingerprint correlation) ---
 store.insert_evidence(Evidence(device_id="n4_dev_a", destination_id="x.example.com",
                                  evidence_type="malicious_ja3", independence_family="tls_fingerprint",
@@ -486,6 +518,27 @@ check("get_distinct_destination_count counts DISTINCT destinations, not raw evid
       count == 2, f"got {count}")
 check("get_distinct_destination_count with no evidence at all for a device returns 0, "
       "not an error", store.get_distinct_destination_count("n2_never_seen", since=0.0) == 0)
+
+# BUGFIX regression (live audit, 2026-09-08): multicast/broadcast destinations must
+# not inflate a device's distinct-destination count -- they're ordinary LAN protocol
+# chatter every device sends, not real behavioral/destination diversity, and
+# previously fed PeerDeviationHypothesis's device-vs-cohort comparison directly.
+store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="a.example.com",
+                                 evidence_type="dns_rate", independence_family="dns_behavior",
+                                 timestamp=9_100_000.0, source="s"))
+store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="224.0.0.251",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=9_100_010.0, source="s"))
+store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="ff02::fb",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=9_100_020.0, source="s"))
+store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="239.255.255.250",
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=9_100_030.0, source="s"))
+mc_count = store.get_distinct_destination_count("n2_dev_mc", since=9_099_000.0)
+check("get_distinct_destination_count excludes multicast/broadcast destinations "
+      "(1 real destination + 3 multicast group addresses -> count is 1, not 4)",
+      mc_count == 1, f"got {mc_count}")
 
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",

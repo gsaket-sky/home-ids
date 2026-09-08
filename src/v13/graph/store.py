@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from v13.evidence.model import Evidence, NO_DESTINATION
+from utils import is_local_or_multicast_destination
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
@@ -580,7 +581,21 @@ class GraphStore:
         device_id via resolve_canonical_device_id() and dedupes -- without this, a
         device that fragmented across an old orphan id and its current canonical id
         could be miscounted as two independent devices touching the same
-        destination, when it's really one physical device."""
+        destination, when it's really one physical device.
+
+        BUGFIX (live audit, 2026-09-08): short-circuits to [] for a multicast/link-
+        local/broadcast destination_id (mDNS 224.0.0.251/ff02::fb, SSDP
+        239.255.255.250, ICMPv6 ND/MLD ff02::1/ff02::16, etc.) -- every device on the
+        LAN legitimately, constantly sends to these addresses as ordinary service
+        discovery, so "which OTHER devices also touched this destination" is always
+        true and means nothing; the SAME traffic shape already poisoned
+        fp_engine.py's confirmed-intel store before that store got this exact guard
+        (see is_local_or_multicast_destination()'s own docstring). Without this,
+        CoordinatedTargetingHypothesis (hypotheses/engine.py) scores ordinary mDNS/
+        SSDP/multicast chatter as cross-device attack corroboration -- confirmed live:
+        83% of non-suppressed HIGH alerts in a 6h sample were exactly this shape."""
+        if is_local_or_multicast_destination(destination_id):
+            return []
         rows = self._conn.execute(
             "SELECT DISTINCT device_id FROM evidence WHERE destination_id = ? AND timestamp >= ?",
             (destination_id, since),
@@ -650,12 +665,23 @@ class GraphStore:
         IoT devices talk to a small, stable set of cloud endpoints; a sudden
         jump in destination diversity is a real behavioral change worth a
         peer comparison, independent of whether any single destination looks
-        suspicious on its own)."""
-        row = self._conn.execute(
-            "SELECT COUNT(DISTINCT destination_id) as c FROM evidence WHERE device_id = ? AND timestamp >= ?",
+        suspicious on its own).
+
+        BUGFIX (live audit, 2026-09-08): excludes multicast/link-local/broadcast
+        destination_ids (mDNS, SSDP, ICMPv6 ND/MLD, etc.) before counting -- every
+        device sends to several such protocol-group addresses as a side effect of
+        ordinary LAN presence, inflating "distinct destination count" by a
+        device-type-dependent amount that has nothing to do with real behavioral
+        diversity, the exact axis PeerDeviationHypothesis compares against a peer
+        cohort. Trades the previous single indexed COUNT(DISTINCT ...) for a fetch-
+        then-filter -- acceptable per this method's own docstring reasoning (most
+        devices' distinct-destination cardinality is small; this runs once per
+        device per decision cycle, not a hot inner loop)."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT destination_id FROM evidence WHERE device_id = ? AND timestamp >= ?",
             (device_id, since),
-        ).fetchone()
-        return int(row["c"]) if row and row["c"] is not None else 0
+        ).fetchall()
+        return sum(1 for r in rows if not is_local_or_multicast_destination(r["destination_id"]))
 
     def set_destination_reputation(self, destination_id: str, tier: int,
                                      timestamp: Optional[float] = None) -> None:
