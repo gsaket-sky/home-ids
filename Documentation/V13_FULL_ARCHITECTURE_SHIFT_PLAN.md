@@ -296,6 +296,21 @@ requires, checkbox.
 > actually worked — see Workstream 6 below for the full story; confirmed
 > genuinely working in production 2026-09-08.)
 > See the artifact for the full item-by-item trackable checklist.
+>
+> **UPDATE 2026-09-08: the CL-AFPE live flip has happened.** Verified directly
+> via SSH, not assumed: `.94`'s real `config.yaml` now has `cl_afpe_engine: v13`
+> (was `v_current` as of this plan's own 2026-09-07 close). `v13/cl_afpe/engine.py`
+> is the live Layer-2 false-positive engine for every alert now, not a shadow.
+> Found incidentally while auditing live alert volume for two real bugs in the
+> new `COORDINATED_TARGETING`/`PEER_COHORT_DEVIATION` hypotheses (multicast/
+> broadcast and shared-household-infrastructure destinations scoring as
+> cross-device attack corroboration — fixed same day, `src/v13/graph/store.py`
+> commits `1ff6c97`/`2367f77`) — see
+> [`THREAT_CATEGORY_REFERENCE.md`](THREAT_CATEGORY_REFERENCE.md) for the full,
+> current trigger-condition catalog this incident fed into. `state/
+> cl_afpe_flip_monitor_state.json` is `{}` on `.94`, so the flip-monitor script's
+> own record of exactly when/why doesn't carry detail beyond the config value
+> itself — W2-3 (retiring CL-AFPE's flat files) can now be picked up.
 
 ### Workstream 0 — Fix confirmed bugs first (not scope cuts, block trustworthy signal for everything below)
 

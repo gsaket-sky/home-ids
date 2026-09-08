@@ -1,5 +1,19 @@
 # Alert Categorization Catalog
 
+> **STALE ENGINE NOTICE (added 2026-09-08, verified live via SSH, not assumed):** the table
+> below describes `core/decision_engine.py`/`intelligence/fp_engine.py` — **v-current**. As of
+> 2026-09-08, `.94`'s real `config.yaml` has `engine: v13` and `cl_afpe_engine: v13`: the
+> **actual live decision path is `v13/decision/engine.py` + `v13/hypotheses/engine.py`
+> (Layer 1) and `v13/cl_afpe/engine.py` (Layer 2)**, not the code below. v13 is a faithful port
+> of the same logic plus the specific net-new hypotheses (`COORDINATED_TARGETING`,
+> `PEER_COHORT_DEVIATION`) and structural differences (freshness-aware hard-stops) called out
+> in **[`THREAT_CATEGORY_REFERENCE.md`](THREAT_CATEGORY_REFERENCE.md)** — treat that document as
+> authoritative for current trigger conditions; this file's own verdict-condition column is kept
+> for historical/comparison value (it's still what v-current would do, and v-current remains the
+> fail-safe fallback if v13 ever raises) but no longer describes what actually decided any alert
+> written after the v13 cutover. The **volume/audit-finding rows below remain historically
+> accurate** for the 2026-08-27 snapshot they were taken from.
+
 Every verdict this engine can produce, the exact code condition that generates it, and
 what real production data (`state/alerts.json` on the live box, queried 2026-08-27) shows
 about how often each one actually fires. Built as a systematic consistency audit — the
