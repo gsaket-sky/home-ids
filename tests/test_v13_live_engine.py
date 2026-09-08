@@ -350,13 +350,16 @@ live_engine.configure(_f_graph_db_path)
 _ft0 = 3_000_000.0
 
 
-def _capture_merged(v1_evidence, rep, device_id, now, features=None, device_type=""):
+def _capture_merged(v1_evidence, rep, device_id, now, features=None, device_type="", geoip_engine=None):
     """Runs evaluate() with a thin wrapper around _v13_engine.evaluate() (same
     pattern as Section E's own _CapturingEngine) and returns the exact merged
     evidence list the decision engine actually saw for this one call.
     device_type defaults to "" (matching every pre-existing call site here
     unchanged) -- Section H (Release 14, N2) is the first caller to pass a
-    real one, since peer-deviation injection is gated on it being non-empty."""
+    real one, since peer-deviation injection is gated on it being non-empty.
+    geoip_engine defaults to None (matching every pre-existing call site --
+    omitting it is unaffected), Section F1b (live audit, 2026-09-08) is the
+    first caller to pass one."""
     captured = []
     orig_engine = live_engine._v13_engine
 
@@ -368,7 +371,7 @@ def _capture_merged(v1_evidence, rep, device_id, now, features=None, device_type
     live_engine._v13_engine = _Capture()
     try:
         live_engine.evaluate(v1_evidence, rep, device_type=device_type, features=features or {},
-                               device_id=device_id, now=now)
+                               device_id=device_id, now=now, geoip_engine=geoip_engine)
     finally:
         live_engine._v13_engine = orig_engine
     return captured[-1]
@@ -403,6 +406,75 @@ check("F1: the synthetic coordinated_targeting evidence was NEVER written to the
       "recreate the evidence-duplication bug Phase 1's own incident already fixed)",
       not any(e.evidence_type == "coordinated_targeting"
               for e in _f_store.get_evidence_for_device("p1a_devB")))
+
+# --- F1b: BUGFIX regression (live audit, 2026-09-08) -- a destination whose ASN
+# owner is recognized cloud/CDN/streaming infrastructure must not score as
+# coordinated targeting just because multiple devices independently reach it.
+# Root cause traced live: two Fire TVs on the same network independently
+# streaming Netflix (45.57.x.x) scored as "coordinated targeting" because the
+# decision engine's rep_vector.tier check that would normally suppress a
+# trusted destination is computed for a DIFFERENT domain each cycle (whichever
+# one earned the highest TI/VT/abuse risk score), never this one.
+class _FakeAsnInfo:
+    def __init__(self, org):
+        self.autonomous_system_organization = org
+
+
+class _FakeGeoipEngine:
+    def __init__(self, org_by_ip):
+        self._org_by_ip = org_by_ip
+
+    def lookup_asn(self, ip):
+        org = self._org_by_ip.get(ip)
+        return _FakeAsnInfo(org) if org else None
+
+
+devD_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 15, device="p1a_devD",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="45.57.41.1")]
+merged_D = _capture_merged(devD_ev, ReputationVector(domain="", tier=3), "p1a_devD", _ft0 + 15)
+devE_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 16, device="p1a_devE",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="45.57.41.1")]
+cdn_geoip = _FakeGeoipEngine({"45.57.41.1": "Netflix, Inc."})
+merged_E = _capture_merged(devE_ev, ReputationVector(domain="", tier=3), "p1a_devE", _ft0 + 16,
+                             geoip_engine=cdn_geoip)
+check("F1b: BUGFIX -- two devices independently reaching a recognized CDN/streaming "
+      "IP get NO coordinated_targeting evidence when a geoip_engine is supplied",
+      not any(e.evidence_type == "coordinated_targeting" for e in merged_E),
+      f"got {[e.evidence_type for e in merged_E]}")
+
+# REGRESSION GUARD: same shared destination, same device count, but the ASN owner
+# is NOT a recognized cloud/CDN org -- real coordination still fires normally.
+devF_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 17, device="p1a_devF",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="203.0.113.9")]
+merged_F0 = _capture_merged(devF_ev, ReputationVector(domain="", tier=3), "p1a_devF", _ft0 + 17)
+devG_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 18, device="p1a_devG",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="203.0.113.9")]
+noncdn_geoip = _FakeGeoipEngine({"203.0.113.9": "Some Random Hosting LLC"})
+merged_G = _capture_merged(devG_ev, ReputationVector(domain="", tier=3), "p1a_devG", _ft0 + 18,
+                             geoip_engine=noncdn_geoip)
+check("F1b: REGRESSION GUARD -- an unrecognized ASN owner is unaffected; genuine "
+      "cross-device coordination still fires with a geoip_engine supplied",
+      any(e.evidence_type == "coordinated_targeting" for e in merged_G),
+      f"got {[e.evidence_type for e in merged_G]}")
+
+# REGRESSION GUARD: omitting geoip_engine entirely (every pre-existing caller) is
+# completely unaffected -- same CDN-owned destination, still fires without one.
+devH_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 19, device="p1a_devH",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="45.57.42.1")]
+merged_H0 = _capture_merged(devH_ev, ReputationVector(domain="", tier=3), "p1a_devH", _ft0 + 19)
+devI_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20, device="p1a_devI",
+                        value=10.0, confidence=0.9, independence_group="dns_behavior",
+                        domain="45.57.42.1")]
+merged_I = _capture_merged(devI_ev, ReputationVector(domain="", tier=3), "p1a_devI", _ft0 + 20)
+check("F1b: REGRESSION GUARD -- omitting geoip_engine (unchanged default) still "
+      "fires coordinated_targeting exactly as before this fix",
+      any(e.evidence_type == "coordinated_targeting" for e in merged_I),
+      f"got {[e.evidence_type for e in merged_I]}")
 
 # --- F2: reputation propagation ---
 _f_store.set_destination_reputation("evil-shared.example.com", tier=5, timestamp=_ft0)

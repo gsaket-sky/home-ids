@@ -1449,7 +1449,7 @@ class EnginePipeline:
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
                         features=features, is_safe=is_safe,
                         fallback_evaluate=self.decision_engine.evaluate,
-                        device_id=dev_id, now=now,
+                        device_id=dev_id, now=now, geoip_engine=self.geoip_engine,
                     )
                 else:
                     decision = self.decision_engine.evaluate(

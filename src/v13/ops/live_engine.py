@@ -62,6 +62,7 @@ from v13.graph.window import RollingWindowView
 from v13.cl_afpe.engine import ClAfpeEngine
 from v13.cl_afpe.ml_scoring import MLScorer
 from intelligence.local_intel import LocalConfirmedIntel
+from utils import is_cloud_cdn_provider_org
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
 
@@ -331,7 +332,8 @@ def _dga_shape_key(domain: str) -> str:
 
 
 def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
-                                      fresh_evidence: Optional[List[Evidence]] = None) -> List[Evidence]:
+                                      fresh_evidence: Optional[List[Evidence]] = None,
+                                      geoip_engine=None) -> List[Evidence]:
     """v13 full-architecture plan, Phase 1a: computes the three new graph-only-possible
     signals for THIS cycle's decision -- cross-device correlation, reputation
     propagation, and genuine first-contact scoring (see graph/window.py's
@@ -357,7 +359,26 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
 
     Best-effort, matching every other graph read in this module: any failure degrades
     to 'no synthetic evidence this cycle' and returns [], never blocks the real
-    decision."""
+    decision.
+
+    BUGFIX (live audit, 2026-09-08): `geoip_engine` (optional -- callers without one
+    keep today's behavior unchanged) gates `coordinated_targeting` specifically, not
+    the reputation-propagation/first-contact signals below it. Root cause: the
+    decision engine's `rep_vector.tier in (1,2)` contradicting-evidence check (the
+    ONLY thing that would otherwise suppress this hypothesis on a trusted
+    destination) is computed ONCE per cycle for `reputation_target` -- whichever
+    domain earned the highest TI/VT/abuse risk score that cycle -- and reused
+    across every hypothesis regardless of relevance. `coordinated_targeting`'s own
+    evidence is about a DIFFERENT destination entirely (confirmed live: multiple
+    devices independently streaming Netflix, `45.57.x.x`, scored as "coordinated
+    targeting" while `rep_vector` that cycle described an unrelated domain with zero
+    real touching devices) -- the tier check was never evaluating the actual
+    destination this hypothesis's evidence is about. A cheap, local ASN-owner
+    lookup against THIS destination specifically (matching the same
+    `is_cloud_cdn_provider_org()` keyword list `ReputationClassifier.classify()`
+    already trusts elsewhere, `.94`'s existing GeoLite2 ASN db, no network call)
+    closes that gap at the one place this hypothesis's own evidence is created,
+    without restructuring how `rep_vector` flows through every other hypothesis."""
     synthetic: List[Evidence] = []
     fresh_evidence = fresh_evidence or []
     real_destinations = {d for d in destinations if d and d != NO_DESTINATION}
@@ -370,6 +391,14 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
             others = window.devices_targeting(
                 dest, _COORDINATED_TARGETING_WINDOW_SECONDS, now=ts, exclude_device_id=device_id,
             )
+            if others and geoip_engine is not None:
+                try:
+                    asn_info = geoip_engine.lookup_asn(dest)
+                    owner = asn_info.autonomous_system_organization if asn_info else ""
+                except Exception:
+                    owner = ""
+                if owner and is_cloud_cdn_provider_org(owner):
+                    others = []
             if len(others) >= _COORDINATED_TARGETING_MIN_OTHER_DEVICES:
                 synthetic.append(Evidence(
                     device_id=device_id, destination_id=dest, evidence_type="coordinated_targeting",
@@ -538,14 +567,22 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
              is_safe: bool = False, fallback_evaluate=None,
-             device_id: Optional[str] = None, now: Optional[float] = None) -> Dict[str, Any]:
+             device_id: Optional[str] = None, now: Optional[float] = None,
+             geoip_engine=None) -> Dict[str, Any]:
     """The live call site `pipeline.py` uses in place of
     `core/decision_engine.py`'s `DecisionEngine.evaluate()`. Same positional/keyword
     shape as v-current's own `evaluate()` (plus the new, optional `device_id`/`now`)
     so the original call site swap in pipeline.py stayed a one-line change; passing
     `device_id` is what opts a call into the graph read/write behavior described in
     this module's own docstring above -- omitting it (the default) is unaffected by
-    any of that, identical to this function's pre-Phase-1 behavior."""
+    any of that, identical to this function's pre-Phase-1 behavior.
+
+    `geoip_engine` (optional, live audit 2026-09-08): pipeline.py's own already-
+    constructed `GeoIPEngine` instance, reused as-is rather than this module
+    opening a second mmdb reader -- see `_inject_graph_derived_evidence()`'s own
+    docstring for what it gates. Omitting it degrades to today's behavior
+    unchanged, same graceful-degradation contract as every other optional
+    dependency in this module."""
     try:
         fresh_v2 = _convert_active_evidence(active_evidence_v1, features or {})
         ts = now if now is not None else time.time()
@@ -567,7 +604,8 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # _inject_graph_derived_evidence()'s own docstring for why these must
             # never reach fresh_v2 (the graph-write path).
             fresh_destinations = {ev.destination_id for ev in fresh_v2}
-            merged_v2 = merged_v2 + _inject_graph_derived_evidence(device_id, fresh_destinations, ts, fresh_v2)
+            merged_v2 = merged_v2 + _inject_graph_derived_evidence(
+                device_id, fresh_destinations, ts, fresh_v2, geoip_engine=geoip_engine)
 
             # Release 14, N2: peer-cohort behavioral baselining -- a genuinely NEW,
             # unvalidated heuristic (unlike coordinated_targeting/fingerprint_campaign/
