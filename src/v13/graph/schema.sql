@@ -103,6 +103,32 @@ CREATE TABLE decisions (
 );
 CREATE INDEX idx_decisions_device_ts ON decisions(device_id, timestamp);
 
+-- v13 full-architecture plan, IPS containment unification: a write-only AUDIT
+-- MIRROR of src/mitigation/ips.py's real containment state (StateManager's own
+-- ips_state dict stays the live, synchronous, hot-path source of truth -- the
+-- actuator logic and its cooldown/retry-queue bookkeeping all need that fast,
+-- every cycle, and are NOT replaced by this table). A dedicated table rather
+-- than the generic `edges` table below, matching this file's own established
+-- "generic edges + dedicated concept tables" split (same shape as `decisions`):
+-- containment actions have real structured, UPDATEABLE fields (status
+-- transitions, release time) that edges' append-only, CHECK-constrained
+-- `relation` column doesn't support without its own migration anyway.
+CREATE TABLE IF NOT EXISTS containment_actions (
+    action_id       TEXT PRIMARY KEY,
+    device_id       TEXT NOT NULL REFERENCES devices(device_id),
+    decision_id     TEXT REFERENCES decisions(decision_id),
+    action_type     TEXT NOT NULL CHECK (action_type IN
+                       ('dns_block','tarpit','router_isolate','release','retry','dead_letter')),
+    target          TEXT,               -- domain or MAC, whichever action_type implies
+    status          TEXT NOT NULL,      -- active|released|failed|retrying
+    reason          TEXT,
+    timestamp       REAL NOT NULL,
+    released_at     REAL,
+    metadata_json   TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_containment_device ON containment_actions(device_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_containment_status ON containment_actions(status);
+
 -- Generalized edge table -- every relationship the graph needs is one row here
 -- rather than a bespoke join table per relation type. src/dst are polymorphic
 -- (kind + id), resolved by the reading code, not by foreign keys (SQLite has no
@@ -132,6 +158,9 @@ VALUES ('(none)', 'domain', 0, 0, '{"sentinel": true}');
 -- Phase 0's resource work lands -- NOT yet enforced by this schema file alone):
 --   - evidence/edges older than 90 days: pruned, unless referenced by a decision
 --     newer than that (decisions are the audit trail; keep what they point to)
---   - decisions: kept 1 year, then archived (exported, not deleted) -- matches the
---     "durable, prunable audit trail" goal from HEE_ROADMAP.md item 4's objection
+--   - decisions: kept 1 year (180 days on pi_8gb), then archived (exported, not
+--     deleted) -- matches the "durable, prunable audit trail" goal from
+--     HEE_ROADMAP.md item 4's objection
 --   - devices/destinations: kept indefinitely (small row count, high identity value)
+--   - containment_actions: no automated retention yet (row count is inherently
+--     small -- bounded by real containment events, not per-cycle evidence volume)

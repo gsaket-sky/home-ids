@@ -44,10 +44,28 @@ _HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
     "custom": 16_000,
 }
 
+# v13 full-architecture plan, alert/decision unification, Phase 1 (write-side edge
+# cap): real production data found ONE decision with 56,073 'supports' edges (a
+# device with a very long evidence history) -- insert_decision() previously created
+# one edge per evidence_id with no cap at all, the actual root cause behind the
+# graph already holding 8M+ edge rows in production. The console's read side
+# already caps display (graph_api.py's EVIDENCE_PER_DECISION_CAP), but that only
+# bounded what got READ back, not what got WRITTEN -- this is the write-side fix.
+# Same "first-pass judgment call, not empirically tuned" honesty framing as
+# INDEPENDENCE_FAMILY_MAP. Audit completeness is not lost: insert_decision() still
+# stores the FULL, uncapped evidence_id list inside raw_payload_json -- only the
+# graph's edge-traversal representation is bounded, not the underlying truth.
+_MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE: Dict[str, int] = {
+    "pi_8gb": 25,
+    "x86_16gb": 50,
+    "custom": 50,
+}
+
 
 class GraphStore:
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
         self.db_path = db_path
+        self._hardware_profile = hardware_profile
         is_new = not Path(db_path).exists()
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
@@ -61,10 +79,50 @@ class GraphStore:
         self._in_transaction = False
         if is_new:
             self._apply_schema()
+        else:
+            # v13 full-architecture plan, IPS containment unification: schema.sql
+            # is ONLY ever executescript()'d for a brand-new db file (`is_new`
+            # above) -- an EXISTING db (e.g. .94's real, already-populated
+            # state/v13_graph.db) never re-runs it, so a table added to schema.sql
+            # after a deployment's first run would never actually reach that
+            # deployment. containment_actions' own CREATE TABLE/INDEX statements
+            # already use IF NOT EXISTS specifically so this lightweight migration
+            # step is safe to run unconditionally here too -- a no-op on a db that
+            # already has it (including a freshly-created one, which already got it
+            # via _apply_schema() above), the actual migration on one that doesn't.
+            self._migrate_existing_db()
 
     def _apply_schema(self) -> None:
         with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
             self._conn.executescript(f.read())
+        self._conn.commit()
+
+    def _migrate_existing_db(self) -> None:
+        """Runs the subset of schema.sql that's safe to apply to an already-populated
+        db (IF NOT EXISTS-guarded CREATE TABLE/INDEX statements only) -- keeps an
+        existing deployment's graph in sync with schema additions made after its
+        first run, without a separate migration-runner framework. Extend this (still
+        IF NOT EXISTS-guarded) the next time schema.sql gains a new table/index that
+        needs to reach a database that already exists."""
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS containment_actions (
+                action_id       TEXT PRIMARY KEY,
+                device_id       TEXT NOT NULL REFERENCES devices(device_id),
+                decision_id     TEXT REFERENCES decisions(decision_id),
+                action_type     TEXT NOT NULL CHECK (action_type IN
+                                   ('dns_block','tarpit','router_isolate','release','retry','dead_letter')),
+                target          TEXT,
+                status          TEXT NOT NULL,
+                reason          TEXT,
+                timestamp       REAL NOT NULL,
+                released_at     REAL,
+                metadata_json   TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_containment_device ON containment_actions(device_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_containment_status ON containment_actions(status);
+            """
+        )
         self._conn.commit()
 
     def close(self) -> None:
@@ -257,26 +315,203 @@ class GraphStore:
 
         evidence_ids (Phase 1 fix, v13 full-architecture plan): the evidence_id of
         every Evidence item that contributed to this decision -- creates an
-        evidence->decision 'supports' edge for each. Without this, prune_evidence()'s
-        own "don't delete evidence a decision still references" exception (see that
-        method's docstring) checks for edges that nothing ever created, silently
-        pruning evidence a decision's raw_payload_json still points to. Callers pass
-        the SAME evidence list they gave the decision engine, by evidence_id.
+        evidence->decision 'supports' edge for each, UP TO a hardware-profile-driven
+        cap (_MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE, most-recent-first) -- a real
+        production decision was found with 56,073 such edges before this cap
+        existed. The FULL, uncapped evidence_id list is preserved inside
+        raw_payload_json's own "_all_evidence_ids" key regardless, so audit
+        completeness isn't lost, only the graph's edge-traversal representation is
+        bounded. prune_evidence()'s own "don't delete evidence a decision still
+        references" exception (see that method's docstring) only sees the CAPPED
+        set via edges -- an evidence item outside the cap that's otherwise past
+        retention can still be pruned even though its id lingers in
+        raw_payload_json, a deliberate tradeoff (the JSON reference is inert once
+        the row is gone, same as any other historical audit text). Callers pass the
+        SAME evidence list they gave the decision engine, by evidence_id.
 
         Returns the generated decision_id."""
         decision_id = uuid.uuid4().hex
         self.upsert_device(device_id, timestamp=timestamp)
+
+        all_evidence_ids = list(evidence_ids or [])
+        capped_evidence_ids = all_evidence_ids
+        payload = dict(raw_payload or {})
+        if all_evidence_ids:
+            cap = _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE.get(
+                self._hardware_profile or "", _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE["x86_16gb"])
+            if len(all_evidence_ids) > cap:
+                placeholders = ",".join("?" * len(all_evidence_ids))
+                rows = self._conn.execute(
+                    f"SELECT evidence_id, timestamp FROM evidence WHERE evidence_id IN ({placeholders})",
+                    all_evidence_ids,
+                ).fetchall()
+                ts_by_id = {r["evidence_id"]: r["timestamp"] for r in rows}
+                # Evidence ids with no matching row yet (e.g. this cycle's own fresh
+                # items, not committed until this same transaction's insert_evidence()
+                # calls land) sort last by falling back to 0.0 -- harmless, since the
+                # full list is preserved in raw_payload_json regardless of edge order.
+                capped_evidence_ids = sorted(
+                    all_evidence_ids, key=lambda eid: ts_by_id.get(eid, 0.0), reverse=True
+                )[:cap]
+                payload["_all_evidence_ids"] = all_evidence_ids
+
         self._conn.execute(
             "INSERT INTO decisions (decision_id, device_id, timestamp, winning_hypothesis_id, "
             "state, decision_path, confidence, risk_score, mechanism_flags_json, raw_payload_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (decision_id, device_id, timestamp, winning_hypothesis_id, state, decision_path,
-             confidence, risk_score, json.dumps(mechanism_flags or {}), json.dumps(raw_payload or {})),
+             confidence, risk_score, json.dumps(mechanism_flags or {}), json.dumps(payload)),
         )
-        for eid in (evidence_ids or []):
+        for eid in capped_evidence_ids:
             self.add_edge("evidence", eid, "decision", decision_id, "supports", timestamp)
         self._maybe_commit()
         return decision_id
+
+    def update_decision_payload(self, decision_id: str, updates: Dict[str, Any],
+                                  timestamp: Optional[float] = None) -> bool:
+        """v13 full-architecture plan, alert/decision unification (Phase 2): merges
+        `updates` into an existing decision's raw_payload_json (shallow -- top-level
+        keys in `updates` overwrite the same key in the existing dict, everything
+        else untouched), the SAME merge pattern update_device_metadata() already
+        established for devices.metadata_json -- reused deliberately, not
+        reinvented. Exists so pipeline.py can enrich a decision row already written
+        by _write_graph()/insert_decision() earlier in the SAME cycle with fields
+        that only become known later (alert_payload's rich network_context/
+        features/reasoning_trail, fp_verdict, incident-notify outcome) -- without
+        this, either the whole decision write would have to be deferred until the
+        end of the cycle (a larger, riskier restructure) or that information would
+        never reach the graph at all.
+
+        `timestamp` is accepted for symmetry with update_device_metadata() but is
+        NOT written anywhere -- decisions.timestamp is the decision's own original
+        moment, not this enrichment call's; changing it here would corrupt
+        get_decisions_since()/get_decisions_older_than()'s own time-window queries.
+
+        Best-effort by DESIGN at the call site, not this method: this method itself
+        still raises on a real DB error (a caller enriching a decision it just
+        wrote wants to know if that failed) -- the "never affect the real alert"
+        fail-safety is the CALLER's responsibility (wrap the call in try/except),
+        matching every other v13 graph write's own fail-safe convention documented
+        at its own call site rather than swallowed silently in here.
+
+        Returns False (no-op) if decision_id doesn't exist; True if updated."""
+        row = self._conn.execute(
+            "SELECT raw_payload_json FROM decisions WHERE decision_id = ?", (decision_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            current = json.loads(row["raw_payload_json"]) if row["raw_payload_json"] else {}
+        except (TypeError, ValueError):
+            current = {}
+        current.update(updates)
+        self._conn.execute(
+            "UPDATE decisions SET raw_payload_json = ? WHERE decision_id = ?",
+            (json.dumps(current), decision_id),
+        )
+        self._maybe_commit()
+        return True
+
+    # --- containment actions (v13 full-architecture plan, IPS unification) -----
+
+    def insert_containment_action(self, device_id: str, action_type: str, status: str,
+                                    timestamp: Optional[float] = None, target: Optional[str] = None,
+                                    decision_id: Optional[str] = None, reason: Optional[str] = None,
+                                    metadata: Optional[Dict[str, Any]] = None) -> str:
+        """Write-only AUDIT MIRROR of a real containment action already taken by
+        src/mitigation/ips.py (Pi-hole block, Scapy tarpit, Fritz!Box router
+        isolation, or a retry/dead-letter bookkeeping event) -- this method NEVER
+        decides or performs the real action, it only records that ips.py already
+        did, immediately after ips.py's own StateManager-backed dict write. Callers
+        must treat this as best-effort (wrap in try/except at the call site,
+        matching every other v13 graph write's own fail-safe convention) -- a
+        failure here must never affect the real containment action, which has
+        already happened by the time this is called.
+
+        action_type is one of schema.sql's CHECK-constrained values
+        ('dns_block','tarpit','router_isolate','release','retry','dead_letter').
+        Returns the generated action_id."""
+        ts = timestamp if timestamp is not None else time.time()
+        action_id = uuid.uuid4().hex
+        self.upsert_device(device_id, timestamp=ts)
+        self._conn.execute(
+            "INSERT INTO containment_actions (action_id, device_id, decision_id, action_type, "
+            "target, status, reason, timestamp, released_at, metadata_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)",
+            (action_id, device_id, decision_id, action_type, target, status, reason, ts,
+             json.dumps(metadata or {})),
+        )
+        self._maybe_commit()
+        return action_id
+
+    def update_containment_status(self, action_id: str, status: str,
+                                    timestamp: Optional[float] = None) -> bool:
+        """Marks an existing containment_actions row's status (typically 'released'
+        when ips.py's own release_device()/unblock_domain() runs). Sets released_at
+        to `timestamp` (defaulting to now) ONLY when status == 'released' -- any
+        other status transition leaves released_at untouched. Returns False if
+        action_id doesn't exist; True if updated."""
+        ts = timestamp if timestamp is not None else time.time()
+        row = self._conn.execute(
+            "SELECT action_id FROM containment_actions WHERE action_id = ?", (action_id,)
+        ).fetchone()
+        if row is None:
+            return False
+        if status == "released":
+            self._conn.execute(
+                "UPDATE containment_actions SET status = ?, released_at = ? WHERE action_id = ?",
+                (status, ts, action_id),
+            )
+        else:
+            self._conn.execute(
+                "UPDATE containment_actions SET status = ? WHERE action_id = ?",
+                (status, action_id),
+            )
+        self._maybe_commit()
+        return True
+
+    def get_active_containment_for_device(self, device_id: str) -> List[Dict[str, Any]]:
+        """All containment_actions rows for this device currently in a non-terminal
+        state ('active' or 'retrying') -- the direct replacement for
+        ips.py's own get_containment_status(), which today manually scans 3
+        separate in-memory dicts by IP/MAC/dev_id with fallback chains. Resolves
+        through merged/orphan device_ids the same way get_evidence_for_device()
+        does, so a device that fragmented across an old orphan id still shows its
+        real containment history under its current canonical id."""
+        canonical = self.resolve_canonical_device_id(device_id)
+        device_ids = self._all_ids_resolving_to(canonical)
+        placeholders = ",".join("?" * len(device_ids))
+        rows = self._conn.execute(
+            f"SELECT * FROM containment_actions WHERE device_id IN ({placeholders}) "
+            "AND status IN ('active','retrying') ORDER BY timestamp DESC",
+            device_ids,
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+            out.append(d)
+        return out
+
+    def get_containment_history(self, device_id: str, since: float) -> List[Dict[str, Any]]:
+        """Full containment_actions history for this device (any status) since
+        `since` -- for threat_hunt.py/decision_replay.py-style audit queries,
+        distinct from get_active_containment_for_device()'s current-status-only
+        view. Same merged/orphan device_id resolution as that method."""
+        canonical = self.resolve_canonical_device_id(device_id)
+        device_ids = self._all_ids_resolving_to(canonical)
+        placeholders = ",".join("?" * len(device_ids))
+        rows = self._conn.execute(
+            f"SELECT * FROM containment_actions WHERE device_id IN ({placeholders}) "
+            "AND timestamp >= ? ORDER BY timestamp DESC",
+            device_ids + [since],
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+            out.append(d)
+        return out
 
     def get_evidence_for_device(self, device_id: str, since: Optional[float] = None,
                                   resolve_merges: bool = True) -> List[Evidence]:

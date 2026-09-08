@@ -38,9 +38,16 @@ LOGGER = logging.getLogger("home_ids.state_guard")
 
 
 class StateManager:
-    def __init__(self, state_path: str = "state/ids_state.json", max_devices: int = 5000):
+    def __init__(self, state_path: str = "state/ids_state.json", max_devices: int = 5000,
+                  graph_store: Optional[Any] = None):
         self.state_path = Path(state_path)
         self.max_devices = max_devices
+        # v13 full-architecture plan, device-state unification: OPTIONAL write-only
+        # graph mirror target for flush_to_disk()'s own cold-field snapshot -- see
+        # _mirror_graph_metadata()'s docstring. None (the default, and every
+        # pre-existing caller/test) means flush_to_disk() behaves EXACTLY as before
+        # this param existed.
+        self._graph_store = graph_store
         self._states: OrderedDict[str, DeviceState] = OrderedDict()
         # AUDIT FIX #14: Added missing router_isolated_devices / operator_released_devices defaults
         self._ips_state: Dict[str, Any] = {
@@ -752,8 +759,20 @@ class StateManager:
             LOGGER.debug("Acquiring global lock to initiate state file persistence.")
             with self._global_lock:
                 devices_snapshot = {}
+                graph_metadata_snapshot = {}
                 for dev_id, state in self._states.items():
                     devices_snapshot[dev_id] = state.to_dict()
+                    if self._graph_store is not None:
+                        # v13 full-architecture plan, device-state unification: cheap,
+                        # in-memory-only snapshot of the COLD field subset (see
+                        # DeviceState.to_graph_metadata()'s own docstring for exactly
+                        # which fields and why) -- taken under the SAME lock as
+                        # devices_snapshot above so it's consistent with what's about
+                        # to hit disk, but the actual graph I/O happens OUTSIDE the
+                        # lock below, matching this codebase's established
+                        # collect-under-lock/IO-outside-lock convention (see
+                        # mitigation/ips.py's release_device() for the same pattern).
+                        graph_metadata_snapshot[dev_id] = state.to_graph_metadata()
 
                 full_snapshot = {
                     "ips_state": self._ips_state,
@@ -769,10 +788,35 @@ class StateManager:
                 
             tmp_path.replace(self.state_path)
             LOGGER.info("StateManager flushed state snapshot (%d devices, IPS state) to %s", len(devices_snapshot), self.state_path)
+
+            if self._graph_store is not None:
+                self._mirror_graph_metadata(graph_metadata_snapshot)
+
             return True
         except Exception as exc:
             LOGGER.error("Failed to flush state store to %s: %s", self.state_path, exc)
             return False
+
+    def _mirror_graph_metadata(self, graph_metadata_snapshot: Dict[str, dict]) -> None:
+        """v13 full-architecture plan, device-state unification: best-effort,
+        write-only mirror of each device's COLD state fields into
+        GraphStore.update_device_metadata() -- extends the SAME durable-mirror
+        pattern src/v13/identity/live_manager.py already established for MAC/IP
+        history to the rest of a device's cold identity/audit fields (hostname,
+        device_type, confirmed_threat_count, fp_count, etc.). Deliberately never
+        read back on any hot path -- flush_to_disk()'s local DeviceState/
+        ids_state.json write above stays the sole, unchanged, in-memory-then-disk
+        source of truth for everything this class does; this call happens strictly
+        AFTER that write succeeds, and a failure here (a single device's graph
+        write, or the whole loop) never affects flush_to_disk()'s own return
+        value -- the local flush already completed successfully by the time this
+        runs. Runs at most once per flush_to_disk() call (already throttled to
+        once/60s by every real caller), not on any per-cycle hot path."""
+        for dev_id, metadata in graph_metadata_snapshot.items():
+            try:
+                self._graph_store.update_device_metadata(dev_id, metadata)
+            except Exception as exc:
+                LOGGER.debug("Device-state graph mirror failed for %r: %s", dev_id, exc)
 
     save_to_disk = flush_to_disk
 

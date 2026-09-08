@@ -20,6 +20,14 @@ raises for any reason (disk full, permissions), delete_decisions() is never call
 job_health.json records the error, and the SAME decisions are simply re-exported
 (as a fresh, differently-named file) on the next scheduled run -- "archived, not
 deleted" holds even under a failure, not just the happy path.
+
+Retention is hardware_profile-driven, matching live_prune.py's own precedent
+(_RETENTION_DAYS_BY_PROFILE) -- a pi_8gb deployment archives sooner (180 days)
+than the schema-documented 365-day default, since a Pi's shared resource budget
+means average decision row size matters more there, and this matters more now
+that raw_payload_json carries the full alert_payload superset (v13 full-
+architecture plan, alert/decision unification) instead of just v13's own internal
+decision dict. x86_16gb/custom keep the original 365-day default unchanged.
 """
 import json
 import logging
@@ -32,12 +40,20 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
+from v13.config.trust_anchors import load_hardware_profile  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
 
 LOGGER = logging.getLogger("live_decision_archive")
 
-# Matches schema.sql's own documented policy exactly ("decisions: kept 1 year").
+# Matches schema.sql's own documented policy exactly ("decisions: kept 1 year") --
+# the x86_16gb/custom default. pi_8gb overrides to a shorter window, see module docstring.
 DEFAULT_RETENTION_DAYS = 365.0
+
+_RETENTION_DAYS_BY_PROFILE = {
+    "pi_8gb": 180.0,
+    "x86_16gb": DEFAULT_RETENTION_DAYS,
+    "custom": DEFAULT_RETENTION_DAYS,
+}
 
 
 def main() -> None:
@@ -53,9 +69,12 @@ def main() -> None:
                           extra={"archived": 0, "skipped": "no_db_yet"})
         return
 
+    retention_days = _RETENTION_DAYS_BY_PROFILE.get(
+        load_hardware_profile(CONFIG), DEFAULT_RETENTION_DAYS)
+
     store = GraphStore(str(db_path))
     try:
-        to_archive = store.get_decisions_older_than(DEFAULT_RETENTION_DAYS)
+        to_archive = store.get_decisions_older_than(retention_days)
         archived_count = 0
 
         if to_archive:
@@ -73,12 +92,12 @@ def main() -> None:
             # own top-of-file docstring for why the ordering matters).
             archived_count = store.delete_decisions([d["decision_id"] for d in to_archive])
             LOGGER.info("Archived %d decision(s) older than %.0f days to %s",
-                         archived_count, DEFAULT_RETENTION_DAYS, export_path)
+                         archived_count, retention_days, export_path)
         else:
-            LOGGER.info("No decisions older than %.0f days -- nothing to archive.", DEFAULT_RETENTION_DAYS)
+            LOGGER.info("No decisions older than %.0f days -- nothing to archive.", retention_days)
 
         write_job_health(state_dir, "live_decision_archive", time.time() - run_start,
-                          extra={"archived": archived_count})
+                          extra={"archived": archived_count, "retention_days": retention_days})
     except Exception as e:
         LOGGER.error("live_decision_archive failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_decision_archive", time.time() - run_start, extra={"error": str(e)})

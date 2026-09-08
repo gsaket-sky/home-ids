@@ -243,6 +243,34 @@ class DeviceState:
             "risk_baseline": self.risk_baseline.to_dict()
         }
 
+    def to_graph_metadata(self) -> dict:
+        """v13 full-architecture plan, device-state unification: the COLD subset of
+        to_dict() -- durable, low-churn identity/audit fields worth mirroring into
+        GraphStore.update_device_metadata() (see StateManager.flush_to_disk()'s own
+        call site). Deliberately excludes every HOT field to_dict() also carries:
+        the 8 EWMABaseline dicts, seen_domains/geo_exported_ips (BoundedSets that
+        churn every cycle), and `rolling` (never in to_dict() at all -- too hot to
+        even flush to disk locally, let alone mirror into SQLite). A Pi cannot
+        afford writing that per-cycle volume into the graph on a 60s flush cadence;
+        this method exists specifically so the graph mirror and the local disk
+        flush don't have to share one undifferentiated dict."""
+        return {
+            "hostname": self.hostname,
+            "mac_address": self.mac_address,
+            "device_type": self.device_type,
+            "device_type_is_override": self.device_type_is_override,
+            "killchain_history": list(self.killchain_history),
+            "has_validated_threat": self.has_validated_threat,
+            "confirmed_threat_count": self.confirmed_threat_count,
+            "fp_count": self.fp_count,
+            "dhcp_fingerprint": self.dhcp_fingerprint,
+            "ja4_seen": self.ja4_seen.to_list(),
+            "known_ips": self.known_ips.to_list(),
+            "last_alert_time": self.last_alert_time,
+            "last_alert_confidence": self.last_alert_confidence,
+            "last_alert_signature": self.last_alert_signature,
+        }
+
     @classmethod
     def from_dict(cls, data: dict, alpha: float = 0.05):
         obj = cls(

@@ -419,12 +419,19 @@ network:
     - role: this_host
       ip: 192.168.1.2
 
-# Drives SQLite cache size / retention-pruning aggressiveness / local-vs-remote
-# Ollama default in later phases -- not yet consumed by any live behavior, just
-# validated (src/v13/config/trust_anchors.py's load_hardware_profile(), which
-# falls back to "x86_16gb" on anything unrecognized). One of:
+# Drives SQLite cache size, evidence-retention aggressiveness (live_prune.py),
+# decision-archival window (live_decision_archive.py), and the evidence->decision
+# supporting-edge cap (graph/store.py) -- genuinely consumed today, not aspirational
+# (src/v13/config/trust_anchors.py's load_hardware_profile(), which falls back to
+# "x86_16gb" on anything unrecognized). One of:
 #   pi_8gb | x86_16gb | custom
-hardware_profile: x86_16gb
+#
+# Set to pi_8gb: this is the project's real target deployment hardware (Raspberry
+# Pi, 8GB RAM minimum). Real, live-behavior consequences of this value, not
+# cosmetic: SQLite cache_size 4MB (vs 16MB on x86_16gb), evidence retention 30
+# days (vs 90), decision archival 180 days (vs 365), supporting-evidence-edge cap
+# 25 per decision (vs 50) -- see each consuming module's own docstring for why.
+hardware_profile: pi_8gb
 
 
 # -----------------------------------------------------------------------------

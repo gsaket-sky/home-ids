@@ -55,9 +55,19 @@ except (ImportError, Exception):
 
 
 class IPSMitigator:
-    def __init__(self, config: Dict[str, Any], state_manager: Optional[Any] = None, stream_writer: Optional[Any] = None):
+    def __init__(self, config: Dict[str, Any], state_manager: Optional[Any] = None, stream_writer: Optional[Any] = None,
+                  graph_store: Optional[Any] = None):
         self.config = config
         self.stream_writer = stream_writer
+        # v13 full-architecture plan, IPS containment unification: OPTIONAL
+        # write-only audit mirror into GraphStore's containment_actions table --
+        # never the real containment state (self.state_manager's ips_state dict
+        # below stays that, unchanged, hot-path). None (the default, and every
+        # pre-existing caller) means this class behaves EXACTLY as before this
+        # param existed -- every mirror call site below no-ops on None rather than
+        # erroring. See _mirror_containment()'s own docstring for the fail-safe
+        # contract every call site follows.
+        self._graph_store = graph_store
         
         if state_manager is None:
             LOGGER.warning("IPSMitigator initialized without StateManager. Booting fallback instance.")
@@ -269,6 +279,43 @@ class IPSMitigator:
         except Exception as exc:
             LOGGER.error("Failed to synchronize IPS metrics: %s", exc)
 
+    def _mirror_containment(self, device_id: str, action_type: str, status: str,
+                              target: Optional[str] = None, reason: Optional[str] = None) -> Optional[str]:
+        """v13 full-architecture plan, IPS containment unification: best-effort
+        write-only mirror of a containment action THIS CLASS HAS ALREADY TAKEN
+        into GraphStore.containment_actions -- never gates or affects the real
+        action, which has already happened by the time every call site below
+        calls this. No-ops (returns None) when self._graph_store is None (every
+        pre-existing caller). A graph failure here is logged at DEBUG (not
+        WARNING/ERROR) deliberately -- this mirror is audit-trail sugar, not a
+        signal an operator needs paged on; the real containment state
+        (self.state_manager's ips_state dict) is completely unaffected either way.
+        Returns the new action_id, or None if not mirrored (no graph_store, or a
+        failure)."""
+        if self._graph_store is None:
+            return None
+        try:
+            return self._graph_store.insert_containment_action(
+                device_id=device_id, action_type=action_type, status=status,
+                target=target, reason=reason,
+            )
+        except Exception as exc:
+            LOGGER.debug("Containment graph mirror failed (device=%s, action_type=%s): %s",
+                          device_id, action_type, exc)
+            return None
+
+    def _mirror_containment_released(self, action_id: Optional[str]) -> None:
+        """Companion to _mirror_containment() -- marks a previously-mirrored
+        action_id 'released'. No-ops silently if action_id is None (no
+        graph_store, or the original mirror call itself failed/was never made --
+        there's nothing to update in either case)."""
+        if self._graph_store is None or not action_id:
+            return
+        try:
+            self._graph_store.update_containment_status(action_id, "released")
+        except Exception as exc:
+            LOGGER.debug("Containment graph release-mirror failed (action_id=%s): %s", action_id, exc)
+
     def _save_queues(self):
         with self.state_manager._global_lock:
             LOGGER.debug("Flushing active queues and router isolation states into StateManager.")
@@ -474,6 +521,7 @@ class IPSMitigator:
         # or via an explicit operator un-isolation command.
         if is_safe:
             should_unisolate_router = False
+            tarpit_meta = None
             with self._lock:
                 if client_ip in self._tarpit_active_targets:
                     LOGGER.info("Device %s marked safe. Releasing from ARP/NDP Tarpit.", client_ip)
@@ -499,6 +547,11 @@ class IPSMitigator:
                         pass
                 if mac_addr in self._router_isolated_devices:
                     should_unisolate_router = True
+
+            # AUDIT FIX #8's own precedent (see release_device()): I/O (here, the
+            # graph write) happens OUTSIDE self._lock.
+            if tarpit_meta is not None:
+                self._mirror_containment_released(tarpit_meta.get("_graph_action_id"))
 
             if should_unisolate_router:
                 LOGGER.info("Device %s marked safe. Initiating router un-isolation restore.", hostname)
@@ -561,7 +614,13 @@ class IPSMitigator:
                         LOGGER.critical("Extreme risk detected. Executing hardware router isolation for MAC %s.", mac_addr)
                         success = self._isolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason=f"Risk Score {risk_score:.1f}: {reason}")
                         if success:
-                            self._router_isolated_devices[mac_addr] = {"ip": client_ip, "hostname": hostname, "dev_id": dev_id}
+                            graph_action_id = self._mirror_containment(
+                                dev_id, action_type="router_isolate", status="active",
+                                target=mac_addr, reason=f"Risk Score {risk_score:.1f}: {reason}")
+                            self._router_isolated_devices[mac_addr] = {
+                                "ip": client_ip, "hostname": hostname, "dev_id": dev_id,
+                                "_graph_action_id": graph_action_id,
+                            }
                             self._save_queues()
 
         tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True))
@@ -581,7 +640,13 @@ class IPSMitigator:
                             if is_operator_released and lateral_threat:
                                 LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
                             LOGGER.warning("High risk detected. Activating Scapy Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
-                            self._tarpit_active_targets[client_ip] = {"mac": mac_addr, "hostname": hostname, "dev_id": dev_id}
+                            graph_action_id = self._mirror_containment(
+                                dev_id, action_type="tarpit", status="active",
+                                target=client_ip, reason=reason)
+                            self._tarpit_active_targets[client_ip] = {
+                                "mac": mac_addr, "hostname": hostname, "dev_id": dev_id,
+                                "_graph_action_id": graph_action_id,
+                            }
                             self._save_queues()
                             ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
                             try:
@@ -818,6 +883,8 @@ class IPSMitigator:
             self._prune_dead_letter_entries(now=time.time())
             ips_dead_letter_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(1.0)
             self._save_queues()
+        self._mirror_containment(dev_id, action_type="dead_letter", status="failed",
+                                   target=domain, reason=error_msg)
 
     def _finalize_block(self, domain, hostname, device_ip, dev_id, comment: str = ""):
         timestamp = time.time()
@@ -829,6 +896,8 @@ class IPSMitigator:
         # state, on every successful block regardless of which path executed it. This is
         # the durable, always-present answer to "was this blocked by the script, and why".
         # Snapshot and update IPS state while holding the state-manager lock, then flush outside the lock.
+        graph_action_id = self._mirror_containment(dev_id, action_type="dns_block", status="active",
+                                                      target=domain, reason=comment or "Home-IDS Auto-Block")
         with self.state_manager._global_lock:
             ips_state = self.state_manager.get_ips_state()
             ips_state["blocked_domains"][domain] = {
@@ -839,6 +908,7 @@ class IPSMitigator:
                 "status": "active",
                 "persisted": True,
                 "comment": comment or "Home-IDS Auto-Block",
+                "_graph_action_id": graph_action_id,
             }
             self.state_manager.save_ips_state(ips_state)
         self.state_manager.flush_to_disk()
@@ -863,7 +933,7 @@ class IPSMitigator:
             ips_pihole_blocks_metric.labels(device=dev_id, hostname=hostname).inc()
         except Exception:
             pass
-            
+
         LOGGER.warning("🛑 [PI-HOLE IPS] Blocked malicious domain %s (Device: %s)", domain, hostname)
         return True
 
@@ -938,14 +1008,17 @@ class IPSMitigator:
             except Exception as e:
                 ips_errors_metric.labels(target_type="pihole_unblock_api").inc()
 
-        hostname, dev_id = "unknown", "unknown"
+        hostname, dev_id, graph_action_id = "unknown", "unknown", None
         with self.state_manager._global_lock:
             ips_state = self.state_manager.get_ips_state()
             meta = ips_state.get("blocked_domains", {}).pop(domain, None)
             if meta:
                 hostname, dev_id = meta.get("hostname", "unknown"), meta.get("device_id", "unknown")
+                graph_action_id = meta.get("_graph_action_id")
             self.state_manager.save_ips_state(ips_state)
             # self.state_manager.flush_to_disk()  # Removed to prevent lock contention
+
+        self._mirror_containment_released(graph_action_id)
 
         try: 
             ips_active_blocks_gauge.remove(dev_id, hostname, domain)
@@ -1008,10 +1081,13 @@ class IPSMitigator:
                 timeout_seconds = 5.0
             resp = self.session.post(webhook_url, json={"action": "unisolate", "ip": ip, "mac": mac, "reason": "Risk subsided"}, headers=headers, timeout=timeout_seconds)
             if resp.status_code == 202:
+                graph_action_id = None
                 with self._lock:
                     if mac in self._router_isolated_devices:
+                        graph_action_id = self._router_isolated_devices[mac].get("_graph_action_id")
                         del self._router_isolated_devices[mac]
                         self._save_queues()
+                self._mirror_containment_released(graph_action_id)
                 try:
                     ips_router_isolated_active.labels(dev_id, hostname, mac).set(0.0)
                     ips_router_isolated_active.remove(dev_id, hostname, mac)
@@ -1044,6 +1120,8 @@ class IPSMitigator:
         target_mac = None
         target_host = "unknown"
         target_dev = "unknown"
+        tarpit_graph_action_id = None
+        router_graph_action_id = None
 
         # Phase 1: Collect targets & update in-memory state under lock
         with self._lock:
@@ -1053,6 +1131,7 @@ class IPSMitigator:
                     target_mac = meta.get("mac")
                     target_host = meta.get("hostname", "unknown")
                     target_dev = meta.get("dev_id", "unknown")
+                    tarpit_graph_action_id = meta.get("_graph_action_id")
                     del self._tarpit_active_targets[ip]
                     self._save_queues()
                     released = True
@@ -1069,6 +1148,7 @@ class IPSMitigator:
                     target_ip = meta.get("ip", target_ip)
                     target_host = meta.get("hostname", target_host)
                     target_dev = meta.get("dev_id", target_dev)
+                    router_graph_action_id = meta.get("_graph_action_id")
                     del self._router_isolated_devices[mac]
                     self._save_queues()
                     try:
@@ -1077,7 +1157,14 @@ class IPSMitigator:
                     except Exception:
                         pass
 
-        # Phase 2: Execute router HTTP call OUTSIDE the lock to avoid blocking other operations
+        # Phase 2: Execute router HTTP call + graph mirror releases OUTSIDE the lock
+        # to avoid blocking other operations. Mirrored HERE (not via
+        # _unisolate_device_router()'s own release-mirror below) because this method
+        # already deleted the dict entries above -- by the time _unisolate_device_router()
+        # runs, self._router_isolated_devices no longer has this mac, so its own
+        # mirror-release logic would find nothing to release.
+        self._mirror_containment_released(tarpit_graph_action_id)
+        self._mirror_containment_released(router_graph_action_id)
         if target_mac and target_mac != "unknown":
             self._unisolate_device_router(mac=target_mac, ip=target_ip or "0.0.0.0", hostname=target_host, dev_id=target_dev, reason="manual")
             released = True
@@ -1156,12 +1243,15 @@ class IPSMitigator:
         """Completely un-isolates a device (Router + Tarpit) across MAC and IP changes[cite: 28]."""
         target_hostname = "unknown"
         target_dev = "unknown"
+        tarpit_graph_action_id = None
+        router_graph_action_id = None
         
         with self._lock:
             if ip_addr in self._tarpit_active_targets:
                 meta = self._tarpit_active_targets[ip_addr]
                 target_hostname = meta.get("hostname", "unknown")
                 target_dev = meta.get("dev_id", "unknown")
+                tarpit_graph_action_id = meta.get("_graph_action_id")
                 del self._tarpit_active_targets[ip_addr]
                 LOGGER.info("🧹 Cleared Tarpit entry for reassigned IP %s[cite: 28]", ip_addr)
                 
@@ -1169,9 +1259,16 @@ class IPSMitigator:
                 meta = self._router_isolated_devices[mac_addr]
                 target_hostname = meta.get("hostname", target_hostname)
                 target_dev = meta.get("dev_id", target_dev)
+                router_graph_action_id = meta.get("_graph_action_id")
                 del self._router_isolated_devices[mac_addr]
                 LOGGER.info("🧹 Cleared Router Isolation entry for new MAC %s[cite: 28]", mac_addr)
-        
+
+        # Mirrored HERE (not via _unisolate_device_router()'s own release-mirror
+        # below), same reasoning as release_device() -- the dict entries are
+        # already gone by the time _unisolate_device_router() would look for them.
+        self._mirror_containment_released(tarpit_graph_action_id)
+        self._mirror_containment_released(router_graph_action_id)
+
         if bool(self.config.get("ips_router_enabled", False)):
             self._unisolate_device_router(
                 mac=mac_addr, 

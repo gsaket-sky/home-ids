@@ -92,6 +92,18 @@ _graph_store: Optional[GraphStore] = None
 # nothing about it changed.
 _last_decision_key: Dict[str, Tuple[str, str]] = {}
 
+# v13 full-architecture plan, alert/decision unification (Phase 2): the most
+# recently WRITTEN decision_id per device, regardless of which cycle wrote it.
+# pipeline.py's alert-worthy gate (300s/60s+risk-delta re-alert cadence) fires on
+# many cycles where decision["state"]/decision_path haven't themselves "changed"
+# (a persistent HIGH re-notifying), so _last_decision_key's own dedup means most
+# alert-worthy cycles do NOT write a fresh decision row -- but the alert built that
+# cycle should still enrich the MOST RECENT real decision row for this device, not
+# require a same-cycle write. evaluate() attaches this onto decision["_graph_decision_id"]
+# on every call (whether or not this cycle itself wrote a new row) so pipeline.py's
+# later update_decision_payload() call always has a real target.
+_last_decision_id: Dict[str, str] = {}
+
 # v13 full-architecture plan, Phase 1a -- the new graph-only-possible capabilities'
 # tuning constants. Each mirrors a value already established elsewhere in this codebase
 # rather than inventing a new number: the coordinated-targeting window matches
@@ -253,7 +265,7 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
             for ev in new_v2:
                 store.insert_evidence(ev)
             if decision_changed:
-                store.insert_decision(
+                new_decision_id = store.insert_decision(
                     device_id=device_id, timestamp=timestamp,
                     state=decision["state"], decision_path=decision["decision_path"],
                     confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
@@ -273,6 +285,7 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
                     ],
                 )
                 _last_decision_key[device_id] = current_key
+                _last_decision_id[device_id] = new_decision_id
         # Only mark as written AFTER a successful commit -- a failed write leaves
         # these keys untracked, so they're correctly retried next cycle instead of
         # being silently lost from the graph forever.
@@ -561,6 +574,14 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
 
         if device_id:
             _write_graph(device_id, ts, fresh_v2, merged_v2, decision)
+            # v13 full-architecture plan, alert/decision unification (Phase 2): the
+            # most recently written decision_id for this device, whether or not
+            # THIS cycle itself wrote a new row (see _last_decision_id's own
+            # module-level comment) -- gives pipeline.py a real target for later
+            # enriching this decision with alert_payload/fp_verdict/incident-outcome
+            # fields via GraphStore.update_decision_payload(). None (never set) if
+            # the graph write itself has never succeeded for this device yet.
+            decision["_graph_decision_id"] = _last_decision_id.get(device_id)
 
         return decision
     except Exception as e:

@@ -185,11 +185,16 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "arp_sweep": "ARP-swept many distinct hosts on the LAN (host-discovery behavior)",
     "zeek_notice": "Zeek policy notice fired for this connection",
     "arp_spoofing": "Layer-2 ARP spoofing detected (this device's MAC address changed)",
+    "arp_spoof_pending": "Possible ARP spoofing -- MAC change detected, not yet confirmed",
     "ml_anomaly": "Flagged as statistically anomalous by the ML baseline model",
     "honeypot_access": "Connected to the internal honeypot decoy server",
     "zeek_lateral_scan": "Internal port scanning / lateral movement across the LAN",
+    "local_device_discovery": "Local network device-discovery traffic (e.g. UPnP/SSDP)",
     "reputation": "Destination has a poor external reputation score",
     "geofencing_violation": "Connection to a blocklisted country",
+    "suricata_signature_match": "Matched a known attack/exploit signature (Suricata)",
+    "malicious_ja3": "Malicious TLS client fingerprint (JA3)",
+    "malicious_ja4": "Malicious TLS client fingerprint (JA4+)",
     "domain": "Destination domain matches a known-malicious reputation list",
     "ip": "Destination IP matches a known-malicious reputation list",
     "mixed": "Mixed reputation signal on this connection",
@@ -406,7 +411,16 @@ class EnginePipeline:
         v13_live_engine.configure(str(state_dir / "v13_graph.db"),
                                     hardware_profile=load_hardware_profile(self.config))
 
-        self.state_manager = state_manager or StateManager(state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)))
+        # v13 full-architecture plan, device-state unification: mirrors each
+        # device's COLD fields (hostname/device_type/confirmed_threat_count/etc.,
+        # see DeviceState.to_graph_metadata()) into the graph on every
+        # flush_to_disk() -- the hot fields (baselines/rolling) never leave this
+        # process. Same already-configured graph store singleton every other v13
+        # write path this cycle reuses, not a second connection.
+        self.state_manager = state_manager or StateManager(
+            state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)),
+            graph_store=v13_live_engine.get_graph_store(),
+        )
         if state_manager is None:
             self.state_manager.load_from_disk(alpha=float(self.config.get("baseline_alpha", 0.05)))
 
@@ -507,7 +521,17 @@ class EnginePipeline:
         else:
             integration_status_metric.labels("telegram").set(0)
         
-        self.ips_mitigator = ips_mitigator or IPSMitigator(config=self.config, state_manager=self.state_manager, stream_writer=self.alert_writer)
+        # v13 full-architecture plan, IPS containment unification: the graph store
+        # singleton is already configured above (v13_live_engine.configure()) --
+        # reused here, not a second connection, matching LiveIdentityManager's own
+        # v13_live_engine.get_graph_store() call site. Passed unconditionally
+        # (not gated on config.get("engine")) since the containment audit mirror
+        # is a useful record regardless of which decision engine is live -- it's
+        # optional/best-effort at IPSMitigator's own call sites either way.
+        self.ips_mitigator = ips_mitigator or IPSMitigator(
+            config=self.config, state_manager=self.state_manager, stream_writer=self.alert_writer,
+            graph_store=v13_live_engine.get_graph_store(),
+        )
         self.ips_mitigator.state_manager = self.state_manager
         
         self.metrics_exporter = MetricsExporter()
@@ -2063,6 +2087,29 @@ class EnginePipeline:
                                     domain=alert_target_domain,
                                     dev_id=dev_id
                                 )
+                                # V13 FULL-ARCHITECTURE PLAN, PHASE 7 (presentation-layer drift
+                                # guard): get_containment_status() above (ips.py's own 3-dict
+                                # scan) stays the AUTHORITATIVE, synchronous source for the alert
+                                # text -- it's the real, zero-latency truth; the graph's
+                                # containment_actions mirror (Phase 3) is a best-effort, eventually-
+                                # consistent AUDIT COPY, so replacing the authoritative check with
+                                # the graph one would be a real reliability regression, not an
+                                # improvement. What's actually worth catching: the two
+                                # DISAGREEING at all would mean either the mirror silently failed
+                                # (ips.py's real state is right, the graph write from
+                                # mitigate()->_mirror_containment() a moment ago didn't land) or a
+                                # deeper bug -- best-effort, log-only, never affects containment_status.
+                                if "UNBLOCKED" not in containment_status:
+                                    try:
+                                        graph_active = v13_live_engine.get_graph_store().get_active_containment_for_device(dev_id)
+                                        if not graph_active:
+                                            LOGGER.warning(
+                                                "Containment drift: ips.py reports '%s' active for %s but the graph "
+                                                "mirror shows nothing active -- a containment_actions write may have "
+                                                "silently failed this cycle.", containment_status, hostname,
+                                            )
+                                    except Exception as exc:
+                                        LOGGER.debug("Containment drift check failed (non-fatal): %s", exc)
 
                             # PHASE 10 FIX: this used to rewrite ANY "UNBLOCKED" containment
                             # status to "WAITING FOR APPROVAL" purely because
@@ -2181,6 +2228,44 @@ class EnginePipeline:
                                 "Telegram suppressed for %s: occurrence #%d of ongoing incident '%s' (age %.0fs)",
                                 hostname, incident_notify.occurrence_count, incident_id, incident_notify.incident_age_seconds,
                             )
+
+                        # V13 FULL-ARCHITECTURE PLAN, ALERT/DECISION UNIFICATION (Phase 2+4):
+                        # enrich this cycle's graph decision row (already written by
+                        # v13_live_engine.evaluate()'s own _write_graph() call, earlier this
+                        # cycle) with the SAME alert_payload/fp_verdict already written to
+                        # alerts.json above, plus IncidentTracker's own notify decision for
+                        # this occurrence -- makes decisions.raw_payload_json a real superset
+                        # of alert_payload without changing alerts.json's write path at all
+                        # (AlertJSONWriter.write() above is completely untouched -- zero
+                        # regression risk to train_fp_classifier.py/LLM review, which read its
+                        # existing flat JSONL shape). IncidentTracker's own hot-path code and
+                        # behavior are also completely unchanged -- only the FACT that a notify
+                        # decision was made gets recorded, for audit, reusing this one call
+                        # rather than adding a second graph write. Best-effort: a failure here
+                        # must never affect the alert already decided/written above.
+                        graph_decision_id = decision.get("_graph_decision_id")
+                        if graph_decision_id:
+                            try:
+                                v13_live_engine.get_graph_store().update_decision_payload(
+                                    graph_decision_id,
+                                    {
+                                        "alert_payload": alert_payload,
+                                        "fp_verdict": fp_verdict,
+                                        "incident": {
+                                            "key": incident_id,
+                                            "should_notify": incident_notify.should_notify,
+                                            "occurrence_count": incident_notify.occurrence_count,
+                                            "is_escalation": incident_notify.is_escalation,
+                                            "incident_age_seconds": incident_notify.incident_age_seconds,
+                                        },
+                                    },
+                                )
+                            except Exception as exc:
+                                LOGGER.warning(
+                                    "Failed to enrich graph decision %r with alert_payload/fp_verdict/incident "
+                                    "for %s -- alerts.json/Telegram are already decided and unaffected: %s",
+                                    graph_decision_id, hostname, exc,
+                                )
 
                         if fp_verdict["suppress"] and telegram_worthy:
                             # PHASE 64: the reset below (PHASE 6's own comment: "leaving stale
