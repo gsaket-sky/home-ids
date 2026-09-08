@@ -1926,6 +1926,24 @@ class EnginePipeline:
                             # the SAME active_evidence list already in scope here, same
                             # treatment as hee_evidence_families right above.
                             "hee_evidence_types": sorted({ev.type for ev in active_evidence}),
+                            # Console Suricata surfacing (this session): suricata_scan.py's
+                            # suricata_alerts_to_evidence() already builds a rich provenance
+                            # string ("detector:suricata:{signature_id}:{category}:{signature}")
+                            # on each Evidence object, but nothing downstream ever persisted
+                            # that detail onto the alert record -- confirmed directly against
+                            # .94's live state/alerts.json: 0 of 25 historical
+                            # SIGNATURE_MATCHED_THREAT alerts have a signature name anywhere in
+                            # the file, only the hypothesis label. Additive field, parses that
+                            # same provenance string back out for suricata-type evidence in the
+                            # SAME active_evidence list already in scope here (no new evidence
+                            # lookup). Historical alerts predating this change simply have an
+                            # empty list here -- the console shows an honest "not recorded for
+                            # this alert" fallback rather than guessing.
+                            "suricata_matches": [
+                                {"signature_id": parts[2], "category": parts[3], "signature": parts[4]}
+                                for ev in active_evidence if ev.type == "suricata_signature_match"
+                                for parts in [ev.provenance.split(":", 4)] if len(parts) == 5
+                            ],
                             # PHASE 58b (destination-ownership/baseline-familiarity
                             # validator precondition): this cycle's own reputation tier
                             # for the destination -- rep_vector is already computed above

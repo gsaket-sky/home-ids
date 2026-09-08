@@ -6,6 +6,7 @@ Builds a small real GraphStore (temp SQLite file) and a real StateManager (temp 
 file) via monkeypatch, rather than mocking either -- both are cheap and exercising the
 actual SQL/serialization code is the point.
 """
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -82,3 +83,85 @@ def test_list_devices_handles_missing_graph_db(tmp_path, monkeypatch, state_file
     result = devices_api.list_devices(token="test")
     # StateManager still knows about dev_a even with no graph db at all.
     assert any(d["device_id"] == "dev_a" and d["has_graph_history"] is False for d in result["devices"])
+
+
+def test_containment_for_reports_none_by_default(graph_db, state_file):
+    ips_state = {"tarpit_targets": {}, "router_isolated_devices": {}, "blocked_domains": {}}
+    c = devices_api._containment_for(ips_state, "192.168.1.50", "unknown", "dev_a")
+    assert c == {"tarpitted": False, "router_isolated": False, "blocked_domain_count": 0}
+
+
+def test_containment_for_reports_active_containment(graph_db, state_file):
+    ips_state = {
+        "tarpit_targets": {"192.168.1.50": {"mac": "aa:bb", "hostname": "workstation-1", "dev_id": "dev_a"}},
+        "router_isolated_devices": {"aa:bb": {"ip": "192.168.1.50", "hostname": "workstation-1", "dev_id": "dev_a"}},
+        "blocked_domains": {
+            "evil.example": {"device_id": "dev_a", "device_ip": "192.168.1.50"},
+            "other.example": {"device_id": "dev_a", "device_ip": "192.168.1.50"},
+        },
+    }
+    c = devices_api._containment_for(ips_state, "192.168.1.50", "aa:bb", "dev_a")
+    assert c == {"tarpitted": True, "router_isolated": True, "blocked_domain_count": 2}
+
+
+def test_list_devices_includes_containment_field(graph_db, state_file):
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    sm.save_ips_state({"tarpit_targets": {"192.168.1.50": {"mac": "unknown", "hostname": "workstation-1", "dev_id": "dev_a"}}})
+    sm.flush_to_disk()
+
+    result = devices_api.list_devices(token="test")
+    by_id = {d["device_id"]: d for d in result["devices"]}
+    assert by_id["dev_a"]["containment"]["tarpitted"] is True
+    assert by_id["dev_b_no_state"]["containment"]["tarpitted"] is False
+
+
+def test_device_detail_includes_blocked_domains(graph_db, state_file):
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    sm.save_ips_state({"blocked_domains": {"evil.example": {"device_id": "dev_a", "device_ip": "192.168.1.50", "comment": "test block", "timestamp": 123.0}}})
+    sm.flush_to_disk()
+
+    result = devices_api.get_device_detail("dev_a", token="test")
+    assert result["blocked_domains"] == [{"domain": "evil.example", "reason": "test block", "blocked_at": 123.0}]
+    assert result["containment"]["blocked_domain_count"] == 1
+
+
+@pytest.fixture
+def pihole_db(tmp_path):
+    db_path = tmp_path / "pihole-FTL.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE queries (timestamp INTEGER, type INTEGER, client TEXT, domain TEXT)")
+    now = int(time.time())
+    rows = [
+        (now - 10, 1, "192.168.1.50", "example.com"),
+        (now - 20, 1, "192.168.1.50", "example.com"),
+        (now - 30, 1, "192.168.1.50", "other.example.com"),
+        (now - 40, 1, "192.168.1.99", "someone-elses-device.example"),  # different client -- excluded
+        (now - 90000, 1, "192.168.1.50", "too-old.example.com"),  # outside 24h window -- excluded
+    ]
+    conn.executemany("INSERT INTO queries VALUES (?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_top_domains_scopes_to_device_and_window(graph_db, state_file, pihole_db, monkeypatch):
+    real_get = devices_api.CONFIG.get
+    monkeypatch.setattr(devices_api.CONFIG, "get", staticmethod(
+        lambda k, d=None: str(pihole_db) if k == "pihole_db" else real_get(k, d)
+    ))
+    result = devices_api.get_device_top_domains("dev_a", hours=24, token="test")
+    domains = {row["domain"]: row["count"] for row in result["domains"]}
+    assert domains == {"example.com": 2, "other.example.com": 1}
+
+
+def test_top_domains_missing_db_returns_503(graph_db, state_file, tmp_path, monkeypatch):
+    real_get = devices_api.CONFIG.get
+    monkeypatch.setattr(devices_api.CONFIG, "get", staticmethod(
+        lambda k, d=None: str(tmp_path / "does_not_exist.db") if k == "pihole_db" else real_get(k, d)
+    ))
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        devices_api.get_device_top_domains("dev_a", hours=24, token="test")
+    assert exc.value.status_code == 503

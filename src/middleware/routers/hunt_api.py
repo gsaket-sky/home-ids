@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
+from middleware.humanize import label_evidence_type, label_hypothesis
 from core.state_guard import StateManager
 from v13.ops import threat_hunt, decision_replay
 
@@ -35,7 +36,9 @@ def _hostname_for(sm: StateManager, device_id: str) -> str:
 
 
 def _evidence_to_dict(ev) -> dict:
-    return dataclasses.asdict(ev)
+    d = dataclasses.asdict(ev)
+    d["type_label"], d["type_description"] = label_evidence_type(d.get("evidence_type", ""))
+    return d
 
 
 @router.get("/api/hunt/devices_touching")
@@ -66,8 +69,11 @@ def decision_timeline(decision_id: str, token: str = Depends(verify_token)):
         result = threat_hunt.decision_timeline(store, decision_id)
     if result is None:
         raise HTTPException(status_code=404, detail=f"No decision found with decision_id='{decision_id}'.")
+    decision = dict(result["decision"])
+    explanation = (decision.get("raw_payload") or {}).get("explanation")
+    decision["explanation_label"], decision["explanation_description"] = label_hypothesis(explanation)
     return {
-        "decision": result["decision"],
+        "decision": decision,
         "evidence": [_evidence_to_dict(e) for e in result["evidence"]],
     }
 
@@ -80,10 +86,16 @@ def device_history(device_id: str, since_days: Optional[float] = Query(None, ge=
         if store is None:
             raise HTTPException(status_code=404, detail="No graph database available.")
         result = threat_hunt.device_history(store, device_id, since=since)
+    decisions = []
+    for d in result["decisions"]:
+        d = dict(d)
+        explanation = (d.get("raw_payload") or {}).get("explanation")
+        d["explanation_label"], d["explanation_description"] = label_hypothesis(explanation)
+        decisions.append(d)
     return {
         "canonical_device_id": result["canonical_device_id"],
         "evidence": [_evidence_to_dict(e) for e in result["evidence"]],
-        "decisions": result["decisions"],
+        "decisions": decisions,
     }
 
 

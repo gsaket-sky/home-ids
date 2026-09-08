@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, Query
 
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
+from middleware.humanize import label_evidence_type, label_hypothesis
 from core.state_guard import StateManager
 
 router = APIRouter()
@@ -79,10 +80,12 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
         })
 
     for eid, ev in evidence_by_id.items():
+        type_label, type_description = label_evidence_type(ev.evidence_type)
         nodes.append({
             "id": f"evidence:{eid}", "kind": "evidence",
             "label": ev.evidence_type, "sub": ev.independence_family,
             "confidence": ev.confidence, "timestamp": ev.timestamp, "source": ev.source,
+            "type_label": type_label, "type_description": type_description,
         })
         edges.append({"from": f"device:{ev.device_id}", "to": f"evidence:{eid}", "relation": "observed"})
         if ev.destination_id != "(none)":
@@ -95,11 +98,13 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
 
     for d in decisions:
         winning = (d.get("raw_payload") or {}).get("explanation")
+        winning_label, winning_description = label_hypothesis(winning)
         total_edges = edge_totals_by_decision.get(d["decision_id"], 0)
         nodes.append({
             "id": f"decision:{d['decision_id']}", "kind": "decision", "label": d["state"],
             "sub": d["decision_id"], "risk_score": d["risk_score"], "confidence": d["confidence"],
             "timestamp": d["timestamp"], "winning_hypothesis": winning,
+            "winning_hypothesis_label": winning_label, "winning_hypothesis_description": winning_description,
             "evidence_total": total_edges,
             "evidence_truncated": total_edges > EVIDENCE_PER_DECISION_CAP,
         })

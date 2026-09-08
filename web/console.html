@@ -141,7 +141,7 @@
   .empty-state{padding:40px 20px;text-align:center;color:var(--text-faint);font-size:12.5px;}
 
   .graph-wrap{display:flex;height:600px;gap:16px;}
-  .graph-canvas{flex:1;background:var(--bg-panel);border:1px solid var(--border-soft);border-radius:6px;position:relative;overflow:auto;}
+  .graph-canvas{flex:1;background:var(--bg-panel);border:1px solid var(--border-soft);border-radius:6px;position:relative;overflow:hidden;}
   .graph-legend{position:absolute;top:12px;left:12px;background:rgba(24,27,34,.9);border:1px solid var(--border);border-radius:6px;padding:10px 12px;font-size:11px;display:flex;flex-direction:column;gap:6px;z-index:2;}
   .legend-row{display:flex;align-items:center;gap:7px;cursor:pointer;}
   .legend-check{width:12px;height:12px;border-radius:3px;border:1px solid var(--border);flex:0 0 12px;}
@@ -152,6 +152,31 @@
   .search-wrap{position:relative;flex:0 0 auto;}
   .search-wrap svg{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:13px;height:13px;color:var(--text-faint);pointer-events:none;}
   .search-input{padding-left:28px;width:220px;}
+
+  /* ---- toasts ---- */
+  .toast-stack{position:fixed;bottom:18px;right:18px;display:flex;flex-direction:column;gap:8px;z-index:50;max-width:360px;}
+  .toast{padding:10px 14px;border-radius:6px;font-size:12.5px;line-height:1.5;border:1px solid;box-shadow:0 4px 14px rgba(0,0,0,.35);}
+  .toast-success{background:rgba(63,191,127,.14);border-color:rgba(63,191,127,.4);color:#bdf0d4;}
+  .toast-error{background:var(--danger-bg);border-color:var(--danger-border);color:#e0a582;}
+
+  /* ---- staged-edit save bar ---- */
+  .save-bar{position:sticky;bottom:0;left:0;right:0;background:var(--bg-elevated);border-top:1px solid var(--accent-dim);padding:10px 20px;display:flex;align-items:center;justify-content:space-between;gap:12px;z-index:5;}
+  .save-bar span{font-size:12px;color:var(--text-dim);}
+  .pending-dot{width:6px;height:6px;border-radius:50%;background:var(--sev-suspicious);flex:0 0 6px;display:inline-block;margin-left:6px;}
+
+  /* ---- containment / blocking ---- */
+  .containment-pill{display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:10px;border:1px solid;white-space:nowrap;}
+  .containment-none{color:var(--text-faint);border-color:var(--border);}
+  .containment-active{color:var(--sev-critical);border-color:rgba(224,82,63,.4);background:rgba(224,82,63,.1);}
+  .action-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;}
+  .btn-danger{border-color:rgba(224,82,63,.45);color:#e0a58a;}
+  .btn-danger:hover{background:rgba(224,82,63,.12);}
+
+  /* ---- evidence graph: pan/zoom/drag ---- */
+  .graph-canvas{cursor:grab;}
+  .graph-canvas.panning{cursor:grabbing;}
+  .graph-canvas svg g.node-group{cursor:pointer;}
+  .graph-canvas svg g.node-group.dragging{cursor:grabbing;}
 </style>
 </head>
 <body>
@@ -175,6 +200,23 @@ function tierColor(t){
   return '#6b7280';
 }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+var _toastId = 0;
+function showToast(kind, message, ms){
+  var id = ++_toastId;
+  state.toasts.push({ id: id, kind: kind, message: message });
+  render();
+  setTimeout(function(){
+    state.toasts = state.toasts.filter(function(t){ return t.id !== id; });
+    render();
+  }, ms || 5000);
+}
+function renderToasts(){
+  if (!state.toasts.length) return '';
+  return '<div class="toast-stack">' + state.toasts.map(function(t){
+    return '<div class="toast toast-'+(t.kind==='error'?'error':'success')+'">'+esc(t.message)+'</div>';
+  }).join('') + '</div>';
+}
 function sevPill(state){
   return '<span class="pill" style="color:'+sevColor(state)+';border-color:'+sevBorder(state)+';background:'+sevBg(state)+'">'
     + '<span class="dot" style="background:'+sevColor(state)+'"></span>'+state+'</span>';
@@ -195,7 +237,9 @@ var ICONS = {
   graph:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="6" cy="6" r="2.4"></circle><circle cx="18" cy="6" r="2.4"></circle><circle cx="12" cy="18" r="2.4"></circle><path d="M8 7.3L11 16M16 7.3L13 16M8.4 6h7.2"></path></svg>',
   config:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 13.5a7.4 7.4 0 000-3l1.9-1.4-2-3.4-2.2.9a7.6 7.6 0 00-2.6-1.5L14.1 3h-4l-.4 2.1a7.6 7.6 0 00-2.6 1.5l-2.2-.9-2 3.4L4.6 10.5a7.4 7.4 0 000 3L2.7 15l2 3.4 2.2-.9c.75.65 1.63 1.16 2.6 1.5L10 22h4l.4-2.1a7.6 7.6 0 002.6-1.5l2.2.9 2-3.4z"></path></svg>',
   search:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M20 20l-5.5-5.5"></path></svg>',
-  close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"></path></svg>'
+  close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
+  blocking:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="10" rx="1.5"></rect><path d="M8 10V7a4 4 0 018 0v3"></path></svg>',
+  suricata:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 12L18 8M12 3.5v3M12 20.5v-3M3.5 12h3M20.5 12h-3"></path></svg>'
 };
 
 /* ============================= mutable state ============================= */
@@ -207,8 +251,19 @@ var state = {
   sortField: 'last_seen',
   sortDir: 'desc',
 
+  toasts: [],
+
   devicesLoading: false, devicesLoaded: false, devicesLoadError: null, devices: [],
   deviceDetailLoading: false, deviceDetailError: null, deviceDetail: null,
+  deviceActionBusy: null, // set to an action name while an isolate/tarpit/release/block call is in flight
+
+  topDomainsLoading: false, topDomainsLoaded: false, topDomainsError: null, topDomains: null,
+  newDeviceBlockDomain: '',
+
+  blockingLoading: false, blockingLoaded: false, blockingLoadError: null, blockingState: null,
+  newBlockDomain: '', newBlockDeviceId: '', newBlockReason: '',
+
+  suricataLoading: false, suricataLoaded: false, suricataLoadError: null, suricataDetections: [], suricataNote: '',
 
   huntMode: 'touching',
   huntDest: '',
@@ -222,6 +277,8 @@ var state = {
   graphNodes: [], graphEdges: [],
   graphSelected: null,
   graphShow: { device:true, evidence:true, destination:true, decision:true },
+  graphPan: { x: 0, y: 0 }, graphZoom: 1,
+  graphDrag: null, // {kind:'node', id, dx, dy} or {kind:'pan', startX, startY, panX0, panY0} while a pointer drag is in progress
 
   // --- real, server-backed config state ---
   configSection: null,        // set once rows load, to the first section
@@ -233,7 +290,17 @@ var state = {
   configLoaded: false,
   configLoadError: null,
   newOverridePattern: '',
-  newOverrideType: 'iot'
+  newOverrideType: 'iot',
+
+  // --- staged edits: nothing PATCHes until Save is clicked ---
+  pendingConfigEdits: {},     // {key: newValue}
+  configSaving: false,
+  pendingOverrideEdits: {},   // {pattern: newType} -- existing-row edits awaiting save
+  pendingOverrideRemovals: {}, // {pattern: true}
+  pendingNewOverrides: [],    // [{pattern, type}] staged via "+ Add override" until saved
+  overridesSaving: false,
+  pendingDeviceType: null,    // staged device-type value on the Device Detail page, or null
+  deviceTypeSaving: false
 };
 
 /* ============================= config API client ============================= */
@@ -310,7 +377,6 @@ async function runHuntQuery(){
 }
 
 function computeGraphLayout(nodes, edges){
-  var order = ['device', 'evidence', 'destination', 'decision'];
   var colX = { device: 90, evidence: 340, destination: 660, decision: 900 };
   var counters = { device: 0, evidence: 0, destination: 0, decision: 0 };
   var byId = {};
@@ -318,9 +384,11 @@ function computeGraphLayout(nodes, edges){
     var i = counters[n.kind] || 0;
     counters[n.kind] = i + 1;
     var spacing = n.kind === 'evidence' ? 34 : 70;
+    var seedX = colX[n.kind] != null ? colX[n.kind] : 500;
     var out = Object.assign({}, n, {
-      x: colX[n.kind] != null ? colX[n.kind] : 500,
-      y: 50 + i * spacing,
+      x: seedX + (Math.random()-0.5)*24,
+      y: 50 + i * spacing + (Math.random()-0.5)*10,
+      targetX: seedX,
       r: n.kind === 'decision' ? 11 : (n.kind === 'device' ? 12 : (n.kind === 'destination' ? 10 : 7)),
     });
     if (n.kind === 'decision') { out.fill = hexA(sevColor(n.label), 0.85); out.stroke = sevColor(n.label); }
@@ -334,6 +402,41 @@ function computeGraphLayout(nodes, edges){
     var relColor = { observed:'#4a5568', targets:'#5a6478', supports:'#22c7e0', contradicts:'#e0523f' };
     return Object.assign({}, e, { stroke: relColor[e.relation] || '#6b7280', dash: e.relation==='contradicts' ? '4,3' : '' });
   });
+
+  // Light force relaxation, run once on load: mutual repulsion + spring attraction along
+  // edges + a gentle pull back toward each node's kind column on x (keeps the
+  // device->evidence->destination->decision reading order legible instead of collapsing
+  // into an unreadable hairball). Makes the initial layout feel organic rather than rigid
+  // fixed columns; the user can still drag any node anywhere afterward (attachGraphInteraction()).
+  // Bounded to n<=600 nodes -- a busier response just keeps the straight-column seed
+  // positions above instead of paying an O(n^2) relaxation cost for nothing extra useful.
+  var n = laidOut.length;
+  if (n > 1 && n <= 600) {
+    var iterations = n > 200 ? 70 : 140;
+    var edgePairs = laidOutEdges.map(function(e){ return [byId[e.from], byId[e.to]]; }).filter(function(p){ return p[0] && p[1]; });
+    for (var it = 0; it < iterations; it++) {
+      for (var a = 0; a < n; a++) {
+        for (var b = a+1; b < n; b++) {
+          var A = laidOut[a], B = laidOut[b];
+          var dx = A.x - B.x, dy = A.y - B.y;
+          var distSq = dx*dx + dy*dy;
+          if (distSq > 14400 || distSq === 0) continue; // ignore far-apart pairs (>120px) -- cheap cutoff
+          var dist = Math.sqrt(distSq);
+          var force = 240 / distSq;
+          var fx = (dx/dist) * force, fy = (dy/dist) * force;
+          A.x += fx; A.y += fy;
+          B.x -= fx; B.y -= fy;
+        }
+      }
+      edgePairs.forEach(function(pair){
+        var A = pair[0], B = pair[1];
+        var ex = (B.x - A.x) * 0.018, ey = (B.y - A.y) * 0.018;
+        A.x += ex; A.y += ey; B.x -= ex; B.y -= ey;
+      });
+      laidOut.forEach(function(node){ node.x += (node.targetX - node.x) * 0.05; node.y = Math.max(20, node.y); });
+    }
+  }
+
   return { nodes: laidOut, edges: laidOutEdges, byId: byId };
 }
 
@@ -345,6 +448,8 @@ async function loadGraph(){
     state.graphNodes = laid.nodes;
     state.graphEdges = laid.edges;
     state.graphNodeById = laid.byId;
+    state.graphPan = { x: 0, y: 0 };
+    state.graphZoom = 1;
     state.graphLoaded = true;
   } catch (err) {
     state.graphLoadError = err.message || String(err);
@@ -372,6 +477,44 @@ async function loadConfig(){
   }
 }
 
+async function loadBlockingState(){
+  state.blockingLoading = true; state.blockingLoadError = null; render();
+  try {
+    state.blockingState = await apiFetch('/api/mitigation/state');
+    state.blockingLoaded = true;
+  } catch (err) {
+    state.blockingLoadError = err.message || String(err);
+  } finally {
+    state.blockingLoading = false; render();
+  }
+}
+
+async function loadSuricata(){
+  state.suricataLoading = true; state.suricataLoadError = null; render();
+  try {
+    var data = await apiFetch('/api/suricata/recent?limit=50');
+    state.suricataDetections = data.detections;
+    state.suricataNote = data.note || '';
+    state.suricataLoaded = true;
+  } catch (err) {
+    state.suricataLoadError = err.message || String(err);
+  } finally {
+    state.suricataLoading = false; render();
+  }
+}
+
+async function loadTopDomains(deviceId){
+  state.topDomainsLoading = true; state.topDomainsError = null; render();
+  try {
+    state.topDomains = await apiFetch('/api/devices/' + encodeURIComponent(deviceId) + '/top_domains?hours=24');
+    state.topDomainsLoaded = true;
+  } catch (err) {
+    state.topDomainsError = err.message || String(err);
+  } finally {
+    state.topDomainsLoading = false; render();
+  }
+}
+
 /* ============================= render helpers ============================= */
 
 function typeOptionsHtml(selectedVal){
@@ -379,7 +522,7 @@ function typeOptionsHtml(selectedVal){
 }
 
 function renderSidebar(){
-  var defs = [['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['config','Config','config']];
+  var defs = [['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['config','Config','config']];
   var items = defs.map(function(d){
     var id=d[0], label=d[1], icon=d[2];
     var active = (state.activeView===id) || (id==='devices' && state.activeView==='deviceDetail');
@@ -429,21 +572,26 @@ function renderDevicesView(){
   function arrow(f){ return state.sortField===f ? (state.sortDir==='asc'?' ▲':' ▼') : ''; }
   var rows = list.map(function(d){
     var macShort = (d.mac && d.mac.length > 19) ? d.mac.slice(0,17)+'…' : (d.mac || 'unknown');
+    var c = d.containment || {};
+    var containment = c.tarpitted || c.router_isolated
+      ? '<span class="containment-pill containment-active">🔒 '+(c.tarpitted && c.router_isolated ? 'Tarpit + Fritz!Box' : c.tarpitted ? 'Tarpit' : 'Fritz!Box')+'</span>'
+      : (c.blocked_domain_count ? '<span class="containment-pill containment-none">'+c.blocked_domain_count+' domain(s) blocked</span>' : '<span class="containment-pill containment-none">🔓</span>');
     return '<tr class="row-clickable" onclick="app.selectDevice(\''+d.device_id+'\')">'
       + '<td><div class="cell-title">'+esc(d.hostname)+'</div><div class="cell-mono">'+d.device_id+'</div></td>'
       + '<td><span class="tag">'+esc(d.device_type)+'</span></td>'
       + '<td class="cell-mono">'+esc(d.ip||'—')+'</td>'
       + '<td class="cell-mono">'+esc(macShort)+'</td>'
       + '<td>'+(d.state ? sevPill(d.state) : '<span class="tag">not yet evaluated</span>')+'</td>'
+      + '<td>'+containment+'</td>'
       + '<td class="cell-mono">'+fmtTime(d.last_seen)+'</td>'
       + '<td class="cell-mono">'+(d.risk_score != null ? d.risk_score : '—')+'</td>'
       + '<td><button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();app.selectDevice(\''+d.device_id+'\')">Open →</button></td>'
       + '</tr>';
   }).join('');
-  if (!rows) rows = '<tr><td colspan="8"><div class="empty-state">No devices match “'+esc(state.deviceSearch)+'”.</div></td></tr>';
+  if (!rows) rows = '<tr><td colspan="9"><div class="empty-state">No devices match “'+esc(state.deviceSearch)+'”.</div></td></tr>';
   return topbarHead
     + '<div class="content"><div class="panel"><div class="table-wrap"><table><thead><tr>'
-    + '<th onclick="app.toggleSort(\'hostname\')">Device'+arrow('hostname')+'</th><th>Type</th><th>IP</th><th class="cell-mono">MAC</th><th>State</th>'
+    + '<th onclick="app.toggleSort(\'hostname\')">Device'+arrow('hostname')+'</th><th>Type</th><th>IP</th><th class="cell-mono">MAC</th><th>State</th><th>Containment</th>'
     + '<th onclick="app.toggleSort(\'last_seen\')">Last seen'+arrow('last_seen')+'</th><th onclick="app.toggleSort(\'risk_score\')">Risk'+arrow('risk_score')+'</th><th></th>'
     + '</tr></thead><tbody>'+rows+'</tbody></table></div></div></div>';
 }
@@ -472,6 +620,45 @@ function renderDeviceDetailView(){
       }).join('')
     : '<span style="color:var(--text-faint);font-size:11.5px;">No MAC-rotation merges on record for this identity.</span>';
 
+  var pendingType = state.pendingDeviceType != null ? state.pendingDeviceType : d.device_type;
+  var typeDirty = pendingType !== d.device_type;
+  var typeSaveRow = typeDirty
+    ? '<div class="row" style="gap:8px;margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="app.saveDeviceType()" '+(state.deviceTypeSaving?'disabled':'')+'>'+(state.deviceTypeSaving?'Saving…':'Save')+'</button>'
+      + '<button class="btn btn-sm" onclick="app.discardDeviceType()" '+(state.deviceTypeSaving?'disabled':'')+'>Cancel</button></div>'
+    : '';
+
+  var c = d.containment || { tarpitted:false, router_isolated:false, blocked_domain_count:0 };
+  var busy = state.deviceActionBusy;
+  var containmentPills = (c.tarpitted ? '<span class="containment-pill containment-active">🔒 Tarpitted</span>' : '')
+    + (c.router_isolated ? '<span class="containment-pill containment-active">🔒 Fritz!Box isolated</span>' : '')
+    + (!c.tarpitted && !c.router_isolated ? '<span class="containment-pill containment-none">🔓 Not contained</span>' : '');
+  var blockedList = (d.blocked_domains||[]).length
+    ? '<div class="table-wrap"><table><thead><tr><th>Domain</th><th>Reason</th><th>Blocked</th><th></th></tr></thead><tbody>'
+      + d.blocked_domains.map(function(b){
+          return '<tr><td class="cell-mono">'+esc(b.domain)+'</td><td style="font-size:11.5px;color:var(--text-dim);">'+esc(b.reason||'')+'</td><td class="cell-mono">'+fmtTime(b.blocked_at)+'</td>'
+            + '<td><button class="btn btn-ghost btn-sm" '+(busy==='unblock:'+b.domain?'disabled':'')+' onclick="app.unblockDomain(\''+esc(b.domain)+'\', \''+d.device_id+'\')">Unblock</button></td></tr>';
+        }).join('') + '</tbody></table></div>'
+    : '<div class="empty-state" style="padding:14px;">No domains currently blocked for this device.</div>';
+
+  var topDomainsHtml;
+  if (state.topDomainsError) {
+    topDomainsHtml = '<div class="error-banner">Could not load top domains: '+esc(state.topDomainsError)+'.</div>';
+  } else if (state.topDomainsLoading && !state.topDomainsLoaded) {
+    topDomainsHtml = '<div class="empty-state" style="padding:20px;">Querying Pi-hole…</div>';
+  } else if (state.topDomains) {
+    var rows = (state.topDomains.domains||[]);
+    topDomainsHtml = (rows.length
+      ? '<div class="table-wrap"><table><thead><tr><th>Domain</th><th>Queries</th><th></th></tr></thead><tbody>'
+        + rows.map(function(r){
+            return '<tr><td class="cell-mono">'+esc(r.domain)+'</td><td class="cell-mono">'+r.count+'</td>'
+              + '<td><button class="btn btn-ghost btn-sm" onclick="app.onNewDeviceBlockDomain(\''+esc(r.domain)+'\');app.blockDomainForDevice(\''+d.device_id+'\')">Block</button></td></tr>';
+          }).join('') + '</tbody></table></div>'
+      : '<div class="empty-state" style="padding:14px;">No DNS queries recorded for this device in the window.</div>')
+      + '<div style="font-size:11px;color:var(--text-faint);margin-top:8px;">'+esc(state.topDomains.note||'')+'</div>';
+  } else {
+    topDomainsHtml = '<div class="empty-state" style="padding:20px;">'+esc(d.top_domains_note||'')+'</div>';
+  }
+
   return ''
     + '<div class="topbar"><div class="topbar-row"><div>'
     + topbarBack
@@ -480,7 +667,7 @@ function renderDeviceDetailView(){
     + '</div><button class="btn" onclick="app.traceThisDevice()">Trace evidence timeline →</button></div></div>'
     + '<div class="content"><div class="grid2">'
     + '<div class="panel"><div class="panel-header"><div class="panel-title">Classification — device_type_overrides</div></div><div class="panel-body">'
-    + '<div class="kv-row"><div class="kv-key">device_type</div><div class="kv-val"><select class="select mono" style="width:100%;" onchange="app.assignDeviceType(\''+esc(d.hostname)+'\', this.value)">'+typeOptionsHtml(d.device_type)+'</select></div></div>'
+    + '<div class="kv-row"><div class="kv-key">device_type</div><div class="kv-val"><select class="select mono" style="width:100%;" onchange="app.stageDeviceType(this.value)">'+typeOptionsHtml(pendingType)+'</select>'+typeSaveRow+'</div></div>'
     + '<div class="kv-row"><div class="kv-key">source</div><div class="kv-val">'+sourceBadge+'</div></div>'
     + '<div class="kv-row"><div class="kv-key">matches by</div><div class="kv-val" style="color:var(--text-dim);">hostname substring, first match in file order -- see Config → network_and_devices, saved as pattern "'+esc(d.hostname)+'"</div></div>'
     + '</div></div>'
@@ -493,8 +680,20 @@ function renderDeviceDetailView(){
     + '<div class="kv-row"><div class="kv-key">confirmed_threat_count</div><div class="kv-val cell-mono">'+d.confirmed_threat_count+'</div></div>'
     + '</div></div>'
     + '</div>'
-    + '<div class="panel" style="margin-top:14px;"><div class="panel-header"><div class="panel-title">Top 10 domains (all-time)</div></div>'
-    + '<div class="panel-body"><div class="empty-state" style="padding:20px;">'+esc(d.top_domains_note)+'</div></div>'
+    + '<div class="panel" style="margin-top:14px;"><div class="panel-header"><div class="panel-title">Containment</div>'+containmentPills+'</div>'
+    + '<div class="panel-body">'
+    + '<div class="action-row">'
+    + '<button class="btn btn-danger btn-sm" '+(busy?'disabled':'')+' onclick="app.isolateRouter(\''+d.device_id+'\', \''+esc(d.hostname)+'\')">Isolate via Fritz!Box</button>'
+    + '<button class="btn btn-danger btn-sm" '+(busy?'disabled':'')+' onclick="app.tarpitDevice(\''+d.device_id+'\', \''+esc(d.hostname)+'\')">Tarpit (Layer-2)</button>'
+    + '<button class="btn btn-sm" '+(busy?'disabled':'')+' onclick="app.releaseDevice(\''+d.device_id+'\', \''+esc(d.hostname)+'\')">Release everything</button>'
+    + '</div>'
+    + '<div style="margin-top:16px;"><div class="panel-title" style="margin-bottom:8px;">Blocked domains ('+c.blocked_domain_count+')</div>'+blockedList+'</div>'
+    + '<div class="row" style="gap:8px;margin-top:12px;">'
+    + '<input class="input mono" style="flex:1;" placeholder="domain to block for this device" value="'+esc(state.newDeviceBlockDomain)+'" onchange="app.onNewDeviceBlockDomain(this.value)">'
+    + '<button class="btn btn-sm" '+(busy?'disabled':'')+' onclick="app.blockDomainForDevice(\''+d.device_id+'\')">Block domain</button>'
+    + '</div></div></div>'
+    + '<div class="panel" style="margin-top:14px;"><div class="panel-header"><div class="panel-title">Top 10 domains</div></div>'
+    + '<div class="panel-body">'+topDomainsHtml+'</div>'
     + '</div></div>';
 }
 
@@ -553,16 +752,19 @@ function renderHuntView(){
     } else if (state.huntMode==='timeline') {
       var dec = r.decision;
       var items = r.evidence.map(function(e){
-        return '<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type">'+esc(e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
-          + '<div class="tl-body">'+ (e.destination_id !== '(none)' ? 'target: '+esc(e.destination_id)+' · ' : '') +'confidence '+e.confidence+' · source '+esc(e.source)+' · family '+esc(e.independence_family)+'</div></div></div>';
+        return '<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type" title="'+esc(e.evidence_type)+'">'+esc(e.type_label || e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
+          + '<div class="tl-body">'+(e.type_description ? esc(e.type_description)+'<br>' : '')+(e.destination_id !== '(none)' ? 'target: '+esc(e.destination_id)+' · ' : '') +'confidence '+e.confidence+' · source '+esc(e.source)+' · family '+esc(e.independence_family)+'</div></div></div>';
       }).join('');
+      var decExplanation = dec.explanation_label || (dec.raw_payload && dec.raw_payload.explanation) || '—';
       items += '<div class="tl-item"><div class="tl-card" style="border-color:'+sevColor(dec.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(dec.state)+'">DECISION — '+dec.state+'</span><span class="tl-time">'+fmtTime(dec.timestamp)+'</span></div>'
-        + '<div class="tl-body">explanation: <b>'+esc(dec.raw_payload && dec.raw_payload.explanation || '—')+'</b> · confidence '+dec.confidence+' · risk '+dec.risk_score+'<br>decision_path: '+esc(dec.decision_path)+'</div></div></div>';
+        + '<div class="tl-body">explanation: <b>'+esc(decExplanation)+'</b>'+(dec.explanation_description ? ' — '+esc(dec.explanation_description) : '')+' · confidence '+dec.confidence+' · risk '+dec.risk_score+'<br>decision_path: '+esc(dec.decision_path)+'</div></div></div>';
       body = '<div class="timeline">'+items+'</div>';
     } else if (state.huntMode==='history') {
-      var decItems = r.decisions.map(function(d){ return { t:d.timestamp, html:'<div class="tl-item"><div class="tl-card" style="border-color:'+sevBorder(d.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(d.state)+'">DECISION — '+d.state+'</span><span class="tl-time">'+fmtTime(d.timestamp)+'</span></div>'
-        + '<div class="tl-body">confidence '+d.confidence+' · risk '+d.risk_score+' · '+esc(d.decision_path)+'</div></div></div>' }; });
-      var evItems = r.evidence.map(function(e){ return { t:e.timestamp, html:'<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type">'+esc(e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
+      var decItems = r.decisions.map(function(d){
+        var expl = d.explanation_label || (d.raw_payload && d.raw_payload.explanation) || '';
+        return { t:d.timestamp, html:'<div class="tl-item"><div class="tl-card" style="border-color:'+sevBorder(d.state)+';"><div class="tl-head"><span class="tl-type" style="color:'+sevColor(d.state)+'">DECISION — '+d.state+'</span><span class="tl-time">'+fmtTime(d.timestamp)+'</span></div>'
+        + '<div class="tl-body">'+(expl ? esc(expl)+' · ' : '')+'confidence '+d.confidence+' · risk '+d.risk_score+' · '+esc(d.decision_path)+'</div></div></div>' }; });
+      var evItems = r.evidence.map(function(e){ return { t:e.timestamp, html:'<div class="tl-item"><div class="tl-card"><div class="tl-head"><span class="tl-type" title="'+esc(e.evidence_type)+'">'+esc(e.type_label || e.evidence_type)+'</span><span class="tl-time">'+fmtTime(e.timestamp)+'</span></div>'
         + '<div class="tl-body">'+(e.destination_id !== '(none)' ? 'target: '+esc(e.destination_id)+' · ' : '')+'confidence '+e.confidence+' · source '+esc(e.source)+'</div></div></div>' }; });
       var all = decItems.concat(evItems).sort(function(a,b){ return a.t>b.t?-1:1; }).map(function(x){ return x.html; }).join('');
       body = all ? '<div class="timeline">'+all+'</div>' : '<div class="empty-state">No decisions or evidence for this device in the selected window.</div>';
@@ -595,8 +797,85 @@ function renderHuntView(){
     + '<div class="content"><div class="mode-tabs">'+tabs+'</div><div class="panel" style="margin-bottom:16px;"><div class="panel-body">'+formHtml+'</div></div>'+resultsHtml+'</div>';
 }
 
+function renderBlockingView(){
+  var topbarHead = '<div class="topbar"><div class="view-title">Blocking</div><div class="view-sub">Everything currently contained by this engine — Fritz!Box WAN isolation, Layer-2 tarpit, and Pi-hole domain blocks — with manual release/unblock, plus a form to block a domain by hand.</div></div>';
+
+  if (state.blockingLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not load blocking state: '+esc(state.blockingLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadBlocking()">Retry</button></div></div>';
+  }
+  if (state.blockingLoading && !state.blockingLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Loading…</div></div>';
+  }
+  var b = state.blockingState || { contained_devices: [], blocked_domains: [] };
+
+  var deviceRows = b.contained_devices.length
+    ? b.contained_devices.map(function(cd){
+        var methods = (cd.tarpitted ? '<span class="containment-pill containment-active">Tarpit</span>' : '')
+          + (cd.router_isolated ? '<span class="containment-pill containment-active">Fritz!Box</span>' : '');
+        return '<tr><td><div class="cell-title">'+esc(cd.hostname)+'</div><div class="cell-mono">'+esc(cd.device_id)+'</div></td>'
+          + '<td class="cell-mono">'+esc(cd.ip||'—')+'</td><td>'+methods+'</td>'
+          + '<td><button class="btn btn-ghost btn-sm" onclick="app.releaseDevice(\''+esc(cd.device_id)+'\', \''+esc(cd.hostname)+'\')">Release</button> '
+          + '<button class="btn btn-ghost btn-sm" onclick="app.selectDevice(\''+esc(cd.device_id)+'\')">Open →</button></td></tr>';
+      }).join('')
+    : '<tr><td colspan="4"><div class="empty-state">No devices currently contained.</div></td></tr>';
+
+  var domainRows = b.blocked_domains.length
+    ? b.blocked_domains.map(function(dm){
+        return '<tr><td class="cell-mono">'+esc(dm.domain)+'</td><td>'+esc(dm.hostname)+'</td>'
+          + '<td style="font-size:11.5px;color:var(--text-dim);">'+esc(dm.reason||'')+'</td><td class="cell-mono">'+fmtTime(dm.blocked_at)+'</td>'
+          + '<td><button class="btn btn-ghost btn-sm" onclick="app.unblockDomain(\''+esc(dm.domain)+'\', null)">Unblock</button></td></tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">No domains currently blocked.</div></td></tr>';
+
+  var deviceOpts = '<option value="">— none (manual) —</option>' + (state.devices||[]).map(function(dv){
+    return '<option value="'+dv.device_id+'"'+(dv.device_id===state.newBlockDeviceId?' selected':'')+'>'+esc(dv.hostname)+'</option>';
+  }).join('');
+
+  return topbarHead + '<div class="content">'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Contained devices</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>IP</th><th>Method</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
+    + '<div class="panel"><div class="panel-header"><div class="panel-title">Blocked domains</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Domain</th><th>Device</th><th>Reason</th><th>Blocked</th><th></th></tr></thead><tbody>'+domainRows+'</tbody></table></div>'
+    + '<div class="panel-body" style="border-top:1px solid var(--border-soft);"><div class="row" style="gap:8px;flex-wrap:wrap;">'
+    + '<input class="input mono" style="flex:1;min-width:180px;" placeholder="domain to block" value="'+esc(state.newBlockDomain)+'" onchange="app.onNewBlockDomain(this.value)">'
+    + '<select class="select mono" onchange="app.onNewBlockDeviceId(this.value)">'+deviceOpts+'</select>'
+    + '<input class="input" style="flex:1;min-width:160px;" placeholder="reason (optional)" value="'+esc(state.newBlockReason)+'" onchange="app.onNewBlockReason(this.value)">'
+    + '<button class="btn btn-primary" onclick="app.submitBlockDomain()">Block domain</button>'
+    + '</div></div></div></div>';
+}
+
+function renderSuricataView(){
+  var topbarHead = '<div class="topbar"><div class="view-title">Suricata</div><div class="view-sub">Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the v13 evidence graph yet — see Documentation/CONSOLE_DATA_API.md).</div></div>';
+
+  if (state.suricataLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not load Suricata detections: '+esc(state.suricataLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadSuricata()">Retry</button></div></div>';
+  }
+  if (state.suricataLoading && !state.suricataLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Scanning the alert log…</div></div>';
+  }
+  var list = state.suricataDetections || [];
+  var rows = list.length
+    ? list.map(function(det){
+        var detail = det.detail_recorded
+          ? det.matches.map(function(m){ return '<div class="cell-mono" style="font-size:11px;">'+esc(m.category)+' — '+esc(m.signature)+'</div>'; }).join('')
+          : '<span style="color:var(--text-faint);font-size:11.5px;">signature detail not recorded for this alert</span>';
+        return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(det.device_id)+'\')">'
+          + '<td><div class="cell-title">'+esc(det.hostname)+'</div><div class="cell-mono">'+esc(det.device_id)+'</div></td>'
+          + '<td class="cell-mono">'+fmtTime(det.timestamp)+'</td>'
+          + '<td class="cell-mono">'+esc(det.target||'—')+'</td>'
+          + '<td>'+detail+'</td>'
+          + '<td>'+(det.state ? sevPill(det.state) : '<span class="tag">'+esc(String(det.risk||'—'))+'</span>')+'</td>'
+          + '</tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">No Suricata signature matches found in the scanned window of the alert log.</div></td></tr>';
+
+  return topbarHead + '<div class="content"><div class="panel"><div class="table-wrap"><table><thead><tr>'
+    + '<th>Device</th><th>When</th><th>Target</th><th>Rule</th><th>Severity</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>'
+    + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(state.suricataNote||'')+'</div></div>';
+}
+
 function renderGraphView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Click any node to inspect it; toggle kinds off to declutter. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
+  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Drag any node to rearrange it, drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -617,16 +896,15 @@ function renderGraphView(){
     var a = byId[e.from], b = byId[e.to];
     if (!a || !b) return '';
     var touches = !state.graphSelected || e.from===state.graphSelected || e.to===state.graphSelected;
-    return '<line x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'" stroke="'+e.stroke+'" stroke-width="'+(touches?1.6:1)+'" opacity="'+(touches?0.9:0.12)+'" stroke-dasharray="'+(e.dash||'')+'"></line>';
+    return '<line data-edge-from="'+e.from+'" data-edge-to="'+e.to+'" x1="'+a.x+'" y1="'+a.y+'" x2="'+b.x+'" y2="'+b.y+'" stroke="'+e.stroke+'" stroke-width="'+(touches?1.6:1)+'" opacity="'+(touches?0.9:0.12)+'" stroke-dasharray="'+(e.dash||'')+'"></line>';
   }).join('');
-  var maxY = Math.max(300, visibleNodes.reduce(function(m,n){ return Math.max(m, n.y); }, 0) + 60);
   var nodesSvg = visibleNodes.map(function(n){
     var connected = !state.graphSelected || n.id===state.graphSelected || state.graphEdges.some(function(e){
       return (e.from===state.graphSelected && e.to===n.id) || (e.to===state.graphSelected && e.from===n.id);
     });
     var sw = n.id===state.graphSelected ? 3 : 1;
-    var label = n.kind === 'evidence' ? n.label : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
-    return '<g onclick="app.selectGraphNode(\''+n.id+'\')" style="cursor:pointer;opacity:'+(connected?1:0.22)+';">'
+    var label = n.kind === 'evidence' ? (n.type_label || n.label) : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
+    return '<g class="node-group" data-node-id="'+n.id+'" style="opacity:'+(connected?1:0.22)+';">'
       + '<circle cx="'+n.x+'" cy="'+n.y+'" r="'+n.r+'" fill="'+n.fill+'" stroke="'+n.stroke+'" stroke-width="'+sw+'"></circle>'
       + '<text class="node-label" x="'+(n.x+n.r+6)+'" y="'+(n.y+3)+'">'+esc(label)+'</text>'
       + '<text class="node-sub" x="'+(n.x+n.r+6)+'" y="'+(n.y+14)+'">'+esc(n.sub||'')+'</text></g>';
@@ -636,6 +914,10 @@ function renderGraphView(){
     var bg = state.graphShow[l.kind] ? l.bg : 'transparent';
     return '<div class="legend-row" onclick="app.toggleGraphKind(\''+l.kind+'\')"><div class="legend-check" style="background:'+bg+';border-color:'+l.color+';"></div><span style="color:var(--text-dim);">'+l.label+'</span></div>';
   }).join('');
+  var zoomControls = '<div class="graph-legend" style="left:auto;right:12px;top:12px;flex-direction:row;gap:6px;padding:6px 8px;">'
+    + '<button class="icon-btn" onclick="app.graphZoomBy(1.2)">+</button>'
+    + '<button class="icon-btn" onclick="app.graphZoomBy(0.8)">−</button>'
+    + '<button class="icon-btn" title="reset view" onclick="app.graphResetView()">⟲</button></div>';
 
   var drawer;
   if (state.graphSelected && byId[state.graphSelected]) {
@@ -644,24 +926,115 @@ function renderGraphView(){
     if (n.kind==='device') {
       fields = [['device_id', n.sub], ['hostname', n.label]];
     } else if (n.kind==='evidence') {
-      fields = [['type',n.label],['family',n.sub],['confidence',n.confidence],['source',n.source],['timestamp', fmtTime(n.timestamp)]];
+      fields = [['what happened', (n.type_label || n.label) + (n.type_description ? ' — ' + n.type_description : '')],
+                ['raw type', n.label], ['family',n.sub],['confidence',n.confidence],['source',n.source],['timestamp', fmtTime(n.timestamp)]];
     } else if (n.kind==='destination') {
       fields = [['kind',n.sub],['label',n.label]];
     } else {
+      var explanation = n.winning_hypothesis_label
+        ? n.winning_hypothesis_label + (n.winning_hypothesis_description ? ' — ' + n.winning_hypothesis_description : '')
+        : (n.winning_hypothesis || '—');
       fields = [['state',n.label],['decision_id',n.sub],['risk_score',n.risk_score],['confidence',n.confidence],
-                ['timestamp', fmtTime(n.timestamp)],['explanation', n.winning_hypothesis || '—'],
+                ['timestamp', fmtTime(n.timestamp)],['explanation', explanation],
                 ['evidence shown', n.evidence_truncated ? ('capped — showing recent subset of ' + n.evidence_total) : (n.evidence_total || 0)]];
     }
     var kvRows = fields.map(function(f){ return '<div class="kv-row"><div class="kv-key">'+f[0]+'</div><div class="kv-val cell-mono">'+esc(String(f[1]))+'</div></div>'; }).join('');
-    drawer = '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:2px;">'+n.kind.toUpperCase()+'</div><div style="font-size:14px;font-weight:600;margin-bottom:12px;">'+esc(n.label)+'</div>'+kvRows;
+    drawer = '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:2px;">'+n.kind.toUpperCase()+'</div><div style="font-size:14px;font-weight:600;margin-bottom:12px;">'+esc(n.type_label || n.label)+'</div>'+kvRows;
   } else {
     drawer = '<div class="empty-state">Click a node to inspect its fields.</div>';
   }
 
+  var transform = 'translate('+state.graphPan.x+','+state.graphPan.y+') scale('+state.graphZoom+')';
   return topbarHead
-    + '<div class="content"><div class="graph-wrap"><div class="graph-canvas"><div class="graph-legend">'+legend+'</div>'
-    + '<svg width="1080" height="'+maxY+'" style="display:block;">'+edgesSvg+nodesSvg+'</svg></div>'
+    + '<div class="content"><div class="graph-wrap"><div class="graph-canvas" id="graphCanvas"><div class="graph-legend">'+legend+'</div>'+zoomControls
+    + '<svg id="graphSvg" width="100%" height="100%" style="display:block;"><g id="graphViewport" transform="'+transform+'">'+edgesSvg+nodesSvg+'</g></svg></div>'
     + '<div class="graph-drawer">'+drawer+'</div></div></div>';
+}
+
+/* ============================= Evidence Graph: drag / pan / zoom ============================= */
+
+function _updateGraphTransform(){
+  var vp = document.getElementById('graphViewport');
+  if (vp) vp.setAttribute('transform', 'translate('+state.graphPan.x+','+state.graphPan.y+') scale('+state.graphZoom+')');
+}
+
+function _moveGraphNodeDom(id){
+  var n = (state.graphNodeById || {})[id];
+  if (!n) return;
+  var g = document.querySelector('[data-node-id="'+CSS.escape(id)+'"]');
+  if (g) {
+    var circle = g.querySelector('circle'), labels = g.querySelectorAll('text');
+    if (circle) { circle.setAttribute('cx', n.x); circle.setAttribute('cy', n.y); }
+    if (labels[0]) { labels[0].setAttribute('x', n.x+n.r+6); labels[0].setAttribute('y', n.y+3); }
+    if (labels[1]) { labels[1].setAttribute('x', n.x+n.r+6); labels[1].setAttribute('y', n.y+14); }
+  }
+  document.querySelectorAll('[data-edge-from="'+CSS.escape(id)+'"]').forEach(function(line){
+    line.setAttribute('x1', n.x); line.setAttribute('y1', n.y);
+  });
+  document.querySelectorAll('[data-edge-to="'+CSS.escape(id)+'"]').forEach(function(line){
+    line.setAttribute('x2', n.x); line.setAttribute('y2', n.y);
+  });
+}
+
+function attachGraphInteraction(){
+  var canvas = document.getElementById('graphCanvas');
+  if (!canvas || canvas._interactionAttached) return;
+  canvas._interactionAttached = true;
+
+  canvas.addEventListener('pointerdown', function(e){
+    var nodeGroup = e.target.closest('[data-node-id]');
+    var startX = e.clientX, startY = e.clientY;
+    var moved = false;
+    canvas.setPointerCapture(e.pointerId);
+
+    if (nodeGroup) {
+      var id = nodeGroup.getAttribute('data-node-id');
+      nodeGroup.classList.add('dragging');
+      var node = (state.graphNodeById || {})[id];
+      var startNodeX = node.x, startNodeY = node.y;
+      var onMove = function(ev){
+        var dx = (ev.clientX - startX) / state.graphZoom, dy = (ev.clientY - startY) / state.graphZoom;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) moved = true;
+        node.x = startNodeX + dx; node.y = startNodeY + dy;
+        _moveGraphNodeDom(id);
+      };
+      var onUp = function(){
+        canvas.removeEventListener('pointermove', onMove);
+        canvas.removeEventListener('pointerup', onUp);
+        nodeGroup.classList.remove('dragging');
+        if (!moved) app.selectGraphNode(id);
+      };
+      canvas.addEventListener('pointermove', onMove);
+      canvas.addEventListener('pointerup', onUp);
+    } else {
+      canvas.classList.add('panning');
+      var panX0 = state.graphPan.x, panY0 = state.graphPan.y;
+      var onMove2 = function(ev){
+        state.graphPan.x = panX0 + (ev.clientX - startX);
+        state.graphPan.y = panY0 + (ev.clientY - startY);
+        _updateGraphTransform();
+      };
+      var onUp2 = function(){
+        canvas.removeEventListener('pointermove', onMove2);
+        canvas.removeEventListener('pointerup', onUp2);
+        canvas.classList.remove('panning');
+      };
+      canvas.addEventListener('pointermove', onMove2);
+      canvas.addEventListener('pointerup', onUp2);
+    }
+  });
+
+  canvas.addEventListener('wheel', function(e){
+    e.preventDefault();
+    var rect = canvas.getBoundingClientRect();
+    var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    var wx = (mx - state.graphPan.x) / state.graphZoom, wy = (my - state.graphPan.y) / state.graphZoom;
+    var newZoom = Math.max(0.25, Math.min(3, state.graphZoom * (e.deltaY < 0 ? 1.08 : 0.92)));
+    state.graphPan.x = mx - wx * newZoom;
+    state.graphPan.y = my - wy * newZoom;
+    state.graphZoom = newZoom;
+    _updateGraphTransform();
+  }, { passive: false });
 }
 
 function renderConfigView(){
@@ -687,18 +1060,36 @@ function renderConfigView(){
     : '';
 
   var deviceTypeMapHtml = '';
+  var overridePendingCount = Object.keys(state.pendingOverrideEdits).length
+    + Object.values(state.pendingOverrideRemovals).filter(Boolean).length
+    + state.pendingNewOverrides.length;
   if (!state.configSearch && state.configSection==='network_and_devices') {
     var rows = state.deviceTypeOverrides.map(function(o){
-      return '<tr><td class="cell-mono">'+esc(o.pattern)+'</td><td><select class="select mono" onchange="app.setOverrideType(\''+esc(o.pattern)+'\', this.value)">'+typeOptionsHtml(o.type)+'</select></td>'
-        + '<td><button class="icon-btn" onclick="app.removeOverride(\''+esc(o.pattern)+'\')">'+ICONS.close+'</button></td></tr>';
+      var removing = !!state.pendingOverrideRemovals[o.pattern];
+      var pendingType = app.currentOverrideType(o);
+      var dirty = pendingType !== o.type;
+      return '<tr style="'+(removing?'opacity:.45;text-decoration:line-through;':'')+'">'
+        + '<td class="cell-mono">'+esc(o.pattern)+(dirty&&!removing?'<span class="pending-dot" title="unsaved change"></span>':'')+'</td>'
+        + '<td><select class="select mono" '+(removing?'disabled':'')+' onchange="app.setOverrideType(\''+esc(o.pattern)+'\', this.value)">'+typeOptionsHtml(pendingType)+'</select></td>'
+        + '<td><button class="icon-btn" title="'+(removing?'undo remove':'remove')+'" onclick="app.removeOverride(\''+esc(o.pattern)+'\')">'+ICONS.close+'</button></td></tr>';
+    }).join('') + state.pendingNewOverrides.map(function(a, idx){
+      return '<tr><td class="cell-mono">'+esc(a.pattern)+'<span class="pending-dot" title="unsaved, new"></span></td>'
+        + '<td><span class="tag">'+esc(a.type)+'</span></td>'
+        + '<td><button class="icon-btn" onclick="app.removePendingNewOverride('+idx+')">'+ICONS.close+'</button></td></tr>';
     }).join('');
+    var overrideSaveBar = overridePendingCount
+      ? '<div class="save-bar" style="border-radius:0 0 6px 6px;"><span>'+overridePendingCount+' unsaved change(s)</span>'
+        + '<div style="display:flex;gap:8px;"><button class="btn btn-sm" onclick="app.discardOverrideEdits()" '+(state.overridesSaving?'disabled':'')+'>Discard</button>'
+        + '<button class="btn btn-primary btn-sm" onclick="app.saveOverrideEdits()" '+(state.overridesSaving?'disabled':'')+'>'+(state.overridesSaving?'Saving…':'Save changes')+'</button></div></div>'
+      : '';
     deviceTypeMapHtml = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">device_type_overrides <span class="badge badge-live" style="margin-left:8px;">LIVE, real</span></div>'
       + '<span style="font-size:11px;color:var(--text-faint);">hostname substring → type, first match wins</span></div>'
       + '<div class="table-wrap"><table><thead><tr><th>Pattern</th><th>Type</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>'
       + '<div class="panel-body" style="padding-top:10px;"><div class="row" style="gap:8px;">'
       + '<input class="input mono" style="flex:1;" placeholder="hostname pattern, e.g. LIVINGROOM" value="'+esc(state.newOverridePattern)+'" onchange="app.onNewOverridePattern(this.value)">'
       + '<select class="select mono" onchange="app.onNewOverrideType(this.value)">'+typeOptionsHtml(state.newOverrideType)+'</select>'
-      + '<button class="btn" onclick="app.addOverride()">+ Add override</button></div></div></div>';
+      + '<button class="btn" onclick="app.addOverride()">+ Stage override</button></div></div>'
+      + overrideSaveBar + '</div>';
   }
 
   var q = state.configSearch.toLowerCase();
@@ -707,34 +1098,37 @@ function renderConfigView(){
     : state.configRows.filter(function(r){ return r.section===state.configSection; });
 
   var rowsHtml = baseRows.map(function(r){
+    var val = app.currentConfigValue(r);
+    var dirty = Object.prototype.hasOwnProperty.call(state.pendingConfigEdits, r.key);
     var control;
     if (!r.editable) {
-      control = '<input class="input mono" style="width:100%;max-width:420px;" value="'+esc(Array.isArray(r.value)?r.value.join(', '):r.value)+'" disabled title="restart required -- not editable here">';
+      control = '<input class="input mono" style="width:100%;max-width:420px;" value="'+esc(Array.isArray(val)?val.join(', '):val)+'" disabled title="restart required -- not editable here">';
     } else if (r.type==='bool') {
-      var toggleBg = r.value ? 'rgba(34,199,224,.25)' : 'var(--bg-elevated)';
-      var knobLeft = r.value ? '17px' : '2px';
-      var knobColor = r.value ? 'var(--accent)' : 'var(--text-faint)';
+      var toggleBg = val ? 'rgba(34,199,224,.25)' : 'var(--bg-elevated)';
+      var knobLeft = val ? '17px' : '2px';
+      var knobColor = val ? 'var(--accent)' : 'var(--text-faint)';
       control = '<div class="toggle" style="background:'+toggleBg+';" onclick="app.toggleBool(\''+r.key+'\')"><div class="toggle-knob" style="left:'+knobLeft+';background:'+knobColor+';"></div></div>';
     } else if (r.type==='enum') {
-      var opts = (r.options||[]).map(function(v){ return '<option value="'+v+'"'+(v===r.value?' selected':'')+'>'+v+'</option>'; }).join('');
+      var opts = (r.options||[]).map(function(v){ return '<option value="'+v+'"'+(v===val?' selected':'')+'>'+v+'</option>'; }).join('');
       control = '<select class="select mono" style="width:220px;" onchange="app.setConfigValue(\''+r.key+'\', this.value)">'+opts+'</select>';
     } else if (r.type==='number') {
-      control = '<input class="input mono" style="width:220px;" value="'+esc(r.value)+'" onchange="app.setConfigValue(\''+r.key+'\', this.value)">';
+      control = '<input class="input mono" style="width:220px;" value="'+esc(val)+'" onchange="app.setConfigValue(\''+r.key+'\', this.value)">';
     } else if (r.type==='list') {
-      var chips = (r.value||[]).map(function(v, idx){
+      var chips = (val||[]).map(function(v, idx){
         return '<span class="chip">'+esc(v)+'<button onclick="app.removeListItem(\''+r.key+'\','+idx+')">✕</button></span>';
       }).join('');
       control = '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">'+chips
         + '<input class="input mono" style="width:150px;padding:4px 8px;" placeholder="+ add" onkeydown="if(event.key===\'Enter\'){app.addListItem(\''+r.key+'\', this.value); this.value=\'\';}">'
         + '</div>';
     } else {
-      control = '<input class="input mono" style="width:100%;max-width:420px;" value="'+esc(r.value)+'" onchange="app.setConfigValue(\''+r.key+'\', this.value)">';
+      control = '<input class="input mono" style="width:100%;max-width:420px;" value="'+esc(val)+'" onchange="app.setConfigValue(\''+r.key+'\', this.value)">';
     }
 
     return '<div class="config-row">'
       + '<div class="config-key-col"><div class="config-key"><span>'+r.key+'</span>'
       + (r.restart_required ? '<span class="badge badge-restart">RESTART</span>' : '<span class="badge badge-live">LIVE</span>')
       + (r.overridden ? '<span class="modified-dot" title="overridden"></span>' : '')
+      + (dirty ? '<span class="pending-dot" title="unsaved change"></span>' : '')
       + (state.configSearch ? '<span class="tag">'+r.section+'</span>' : '')
       + '</div><div class="config-desc">'+esc(r.description)+'</div></div>'
       + '<div class="config-val-col">'+control
@@ -744,15 +1138,23 @@ function renderConfigView(){
   }).join('');
   if (!rowsHtml) rowsHtml = '<div class="empty-state">No keys match “'+esc(state.configSearch)+'”.</div>';
 
+  var pendingCount = Object.keys(state.pendingConfigEdits).length;
+  var saveBar = pendingCount
+    ? '<div class="save-bar"><span>'+pendingCount+' unsaved change(s) — nothing is applied until you save</span>'
+      + '<div style="display:flex;gap:8px;"><button class="btn btn-sm" onclick="app.discardConfigEdits()" '+(state.configSaving?'disabled':'')+'>Discard</button>'
+      + '<button class="btn btn-primary btn-sm" onclick="app.saveConfigEdits()" '+(state.configSaving?'disabled':'')+'>'+(state.configSaving?'Saving…':'Save '+pendingCount+' change(s)')+'</button></div></div>'
+    : '';
+
   return ''
     + '<div class="topbar"><div class="topbar-row">'
-    + '<div><div class="view-title">Config — config.yaml</div><div class="view-sub">Every LIVE key, grouped as it is on disk, reading and writing the real server via state/config_overrides.json. RESTART keys show current value but aren\'t editable here.</div></div>'
+    + '<div><div class="view-title">Config — config.yaml</div><div class="view-sub">Every LIVE key, grouped as it is on disk. Edits are staged here and only reach the running server — via state/config_overrides.json — when you click Save. RESTART keys show current value but aren\'t editable here.</div></div>'
     + '<div class="search-wrap">'+ICONS.search+'<input id="configSearchInput" class="input search-input" placeholder="Search all keys…" value="'+esc(state.configSearch)+'" oninput="app.onConfigSearch(this.value)"></div>'
     + '</div></div>'
-    + '<div class="content" style="padding:0;"><div class="config-body">'
+    + '<div class="content" style="padding:0;display:flex;flex-direction:column;">'
+    + '<div class="config-body" style="flex:1;min-height:0;">'
     + '<div class="section-nav">'+sectionsHtml+'</div>'
     + '<div class="config-scroll">'+danger+deviceTypeMapHtml+rowsHtml+'</div>'
-    + '</div></div>';
+    + '</div>' + saveBar + '</div>';
 }
 
 function renderApp(){
@@ -761,8 +1163,10 @@ function renderApp(){
   else if (state.activeView==='deviceDetail') view = renderDeviceDetailView();
   else if (state.activeView==='hunt') view = renderHuntView();
   else if (state.activeView==='graph') view = renderGraphView();
+  else if (state.activeView==='blocking') view = renderBlockingView();
+  else if (state.activeView==='suricata') view = renderSuricataView();
   else view = renderConfigView();
-  return renderSidebar() + '<div class="main-panel">'+view+'</div>';
+  return renderSidebar() + '<div class="main-panel">'+view+'</div>' + renderToasts();
 }
 
 function render(){
@@ -778,6 +1182,7 @@ function render(){
       if (selStart !== null) { try { el.setSelectionRange(selStart, selEnd); } catch(e){} }
     }
   }
+  if (state.activeView === 'graph') attachGraphInteraction();
 }
 
 /* ============================= app actions ============================= */
@@ -790,8 +1195,18 @@ var app = {
     if (v === 'devices' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
     if (v === 'hunt' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
     if (v === 'graph' && !state.graphLoading && !state.graphLoaded) loadGraph();
+    if (v === 'blocking' && !state.blockingLoading) loadBlockingState();
+    if (v === 'blocking' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
+    if (v === 'suricata' && !state.suricataLoading && !state.suricataLoaded) loadSuricata();
   },
-  selectDevice: function(id){ state.activeView='deviceDetail'; state.selectedDeviceId=id; render(); loadDeviceDetail(id); },
+  selectDevice: function(id){
+    state.activeView='deviceDetail'; state.selectedDeviceId=id;
+    state.topDomainsLoaded=false; state.topDomains=null; state.topDomainsError=null;
+    state.newDeviceBlockDomain=''; state.deviceActionBusy=null; state.pendingDeviceType=null;
+    render();
+    loadDeviceDetail(id);
+    loadTopDomains(id);
+  },
   backToDevices: function(){ state.activeView='devices'; render(); },
   traceThisDevice: function(){
     state.activeView='hunt'; state.huntMode='history'; state.huntDeviceId=state.selectedDeviceId;
@@ -821,55 +1236,216 @@ var app = {
   onConfigSearch: function(v){ state.configSearch=v; render(); },
   setConfigSection: function(s){ state.configSection=s; state.configSearch=''; render(); },
 
-  setConfigValue: async function(key, rawValue){
-    try {
-      await apiFetch('/api/config/' + encodeURIComponent(key), { method: 'PATCH', body: JSON.stringify({ value: rawValue }) });
-      await loadConfig();
-    } catch (err) { window.alert('Save failed: ' + err.message); render(); }
+  /* ---- Config tab: staged edits, nothing PATCHes until Save is clicked ---- */
+  currentConfigValue: function(row){
+    return Object.prototype.hasOwnProperty.call(state.pendingConfigEdits, row.key) ? state.pendingConfigEdits[row.key] : row.value;
   },
-  toggleBool: async function(key){
+  setConfigValue: function(key, rawValue){
+    state.pendingConfigEdits[key] = rawValue;
+    render();
+  },
+  toggleBool: function(key){
     var row = state.configRows.filter(function(r){ return r.key===key; })[0];
-    await app.setConfigValue(key, !row.value);
+    app.setConfigValue(key, !app.currentConfigValue(row));
   },
-  removeListItem: async function(key, idx){
+  removeListItem: function(key, idx){
     var row = state.configRows.filter(function(r){ return r.key===key; })[0];
-    var arr = row.value.slice(); arr.splice(idx, 1);
-    await app.setConfigValue(key, arr);
+    var arr = app.currentConfigValue(row).slice(); arr.splice(idx, 1);
+    app.setConfigValue(key, arr);
   },
-  addListItem: async function(key, val){
+  addListItem: function(key, val){
     val = (val||'').trim(); if (!val) return;
     var row = state.configRows.filter(function(r){ return r.key===key; })[0];
-    await app.setConfigValue(key, row.value.concat([val]));
+    app.setConfigValue(key, app.currentConfigValue(row).concat([val]));
+  },
+  discardConfigEdits: function(){ state.pendingConfigEdits = {}; render(); },
+  saveConfigEdits: async function(){
+    var keys = Object.keys(state.pendingConfigEdits);
+    if (!keys.length) return;
+    state.configSaving = true; render();
+    var succeeded = [], failed = [];
+    for (var i = 0; i < keys.length; i++) {
+      var key = keys[i];
+      try {
+        await apiFetch('/api/config/' + encodeURIComponent(key), { method: 'PATCH', body: JSON.stringify({ value: state.pendingConfigEdits[key] }) });
+        succeeded.push(key);
+      } catch (err) {
+        failed.push(key + ': ' + (err.message || err));
+      }
+    }
+    succeeded.forEach(function(k){ delete state.pendingConfigEdits[k]; });
+    state.configSaving = false;
+    await loadConfig();
+    if (succeeded.length) showToast('success', '✓ ' + succeeded.length + ' saved and now live (' + new Date().toLocaleTimeString() + ')' + (failed.length ? ' — ' + failed.length + ' failed' : ''));
+    if (failed.length) showToast('error', 'Failed to save: ' + failed.join('; '));
+    render();
   },
   resetConfigValue: async function(key){
-    try { await apiFetch('/api/config/' + encodeURIComponent(key), { method: 'DELETE' }); await loadConfig(); }
-    catch (err) { window.alert('Reset failed: ' + err.message); render(); }
+    delete state.pendingConfigEdits[key];
+    try {
+      await apiFetch('/api/config/' + encodeURIComponent(key), { method: 'DELETE' });
+      await loadConfig();
+      showToast('success', '✓ ' + key + ' reset to config.yaml baseline');
+    } catch (err) { showToast('error', 'Reset failed: ' + err.message); render(); }
   },
 
-  assignDeviceType: async function(pattern, type){
-    try {
-      await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(pattern), { method: 'PATCH', body: JSON.stringify({ type: type }) });
-      var data = await apiFetch('/api/config');
-      state.deviceTypeOverrides = data.device_type_overrides;
-      if (state.deviceDetail) await loadDeviceDetail(state.deviceDetail.device_id);
-      else render();
-    } catch (err) { window.alert('Save failed: ' + err.message); render(); }
+  /* ---- device_type_overrides panel (Config tab): staged edits, own Save ---- */
+  currentOverrideType: function(o){
+    return Object.prototype.hasOwnProperty.call(state.pendingOverrideEdits, o.pattern) ? state.pendingOverrideEdits[o.pattern] : o.type;
   },
-  setOverrideType: function(pattern, type){ app.assignDeviceType(pattern, type); },
-  removeOverride: async function(pattern){
-    try {
-      await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(pattern), { method: 'DELETE' });
-      await loadConfig();
-    } catch (err) { window.alert('Remove failed: ' + err.message); render(); }
+  setOverrideType: function(pattern, type){ state.pendingOverrideEdits[pattern] = type; render(); },
+  removeOverride: function(pattern){
+    state.pendingOverrideRemovals[pattern] = !state.pendingOverrideRemovals[pattern];
+    render();
   },
   onNewOverridePattern: function(v){ state.newOverridePattern=v; render(); },
   onNewOverrideType: function(v){ state.newOverrideType=v; render(); },
-  addOverride: async function(){
-    if (!state.newOverridePattern.trim()) return;
-    await app.assignDeviceType(state.newOverridePattern.trim(), state.newOverrideType);
+  addOverride: function(){
+    var pattern = state.newOverridePattern.trim();
+    if (!pattern) return;
+    state.pendingNewOverrides.push({ pattern: pattern, type: state.newOverrideType });
     state.newOverridePattern = '';
     render();
-  }
+  },
+  removePendingNewOverride: function(idx){ state.pendingNewOverrides.splice(idx, 1); render(); },
+  discardOverrideEdits: function(){
+    state.pendingOverrideEdits = {}; state.pendingOverrideRemovals = {}; state.pendingNewOverrides = [];
+    render();
+  },
+  saveOverrideEdits: async function(){
+    var edits = Object.keys(state.pendingOverrideEdits);
+    var removals = Object.keys(state.pendingOverrideRemovals).filter(function(p){ return state.pendingOverrideRemovals[p]; });
+    var additions = state.pendingNewOverrides.slice();
+    if (!edits.length && !removals.length && !additions.length) return;
+    state.overridesSaving = true; render();
+    var okCount = 0, errs = [];
+    for (var i = 0; i < edits.length; i++) {
+      var p = edits[i];
+      try { await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(p), { method: 'PATCH', body: JSON.stringify({ type: state.pendingOverrideEdits[p] }) }); okCount++; delete state.pendingOverrideEdits[p]; }
+      catch (err) { errs.push(p + ': ' + err.message); }
+    }
+    for (var j = 0; j < removals.length; j++) {
+      var rp = removals[j];
+      try { await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(rp), { method: 'DELETE' }); okCount++; delete state.pendingOverrideRemovals[rp]; }
+      catch (err) { errs.push(rp + ': ' + err.message); }
+    }
+    for (var k = 0; k < additions.length; k++) {
+      var add = additions[k];
+      try { await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(add.pattern), { method: 'PATCH', body: JSON.stringify({ type: add.type }) }); okCount++; }
+      catch (err) { errs.push(add.pattern + ': ' + err.message); }
+    }
+    state.pendingNewOverrides = state.pendingNewOverrides.filter(function(a){ return errs.some(function(e){ return e.indexOf(a.pattern+':') === 0; }); });
+    state.overridesSaving = false;
+    await loadConfig();
+    if (okCount) showToast('success', '✓ ' + okCount + ' device-type override(s) saved and now live');
+    if (errs.length) showToast('error', 'Failed: ' + errs.join('; '));
+    render();
+  },
+
+  /* ---- Device Detail page: device-type assignment, staged, own Save ---- */
+  stageDeviceType: function(type){ state.pendingDeviceType = type; render(); },
+  saveDeviceType: async function(){
+    if (state.pendingDeviceType == null || !state.deviceDetail) return;
+    state.deviceTypeSaving = true; render();
+    try {
+      await apiFetch('/api/config/device_type_overrides/' + encodeURIComponent(state.deviceDetail.hostname), { method: 'PATCH', body: JSON.stringify({ type: state.pendingDeviceType }) });
+      showToast('success', '✓ device_type saved — now ' + state.pendingDeviceType);
+      state.pendingDeviceType = null;
+      await loadDeviceDetail(state.deviceDetail.device_id);
+    } catch (err) {
+      showToast('error', 'Save failed: ' + err.message);
+    } finally {
+      state.deviceTypeSaving = false; render();
+    }
+  },
+  discardDeviceType: function(){ state.pendingDeviceType = null; render(); },
+
+  /* ---- containment: isolate / tarpit / release (device), block / unblock (domain) ---- */
+  isolateRouter: function(deviceId, hostname){
+    if (!window.confirm('Isolate ' + hostname + ' via Fritz!Box WAN block? This cuts off its internet access until released.')) return;
+    app._runDeviceAction(deviceId, 'isolate_router', '/api/devices/' + encodeURIComponent(deviceId) + '/isolate_router', 'Isolated via Fritz!Box.');
+  },
+  tarpitDevice: function(deviceId, hostname){
+    if (!window.confirm('Tarpit ' + hostname + ' (Layer-2 ARP/NDP)? This blackholes its LAN traffic until released.')) return;
+    app._runDeviceAction(deviceId, 'tarpit', '/api/devices/' + encodeURIComponent(deviceId) + '/tarpit', 'Tarpitted.');
+  },
+  releaseDevice: function(deviceId, hostname){
+    if (!window.confirm('Release ' + hostname + ' from all containment (Fritz!Box isolation, tarpit, and any blocked domains)?')) return;
+    app._runDeviceAction(deviceId, 'release', '/api/devices/' + encodeURIComponent(deviceId) + '/release', 'Released.', 'POST', {});
+  },
+  _runDeviceAction: async function(deviceId, actionName, path, successMsg, method, body){
+    state.deviceActionBusy = actionName; render();
+    try {
+      await apiFetch(path, { method: method || 'POST', body: JSON.stringify(body || {}) });
+      showToast('success', '✓ ' + successMsg);
+      if (state.deviceDetail && state.deviceDetail.device_id === deviceId) await loadDeviceDetail(deviceId);
+      if (state.devicesLoaded) await loadDevices();
+      if (state.blockingLoaded) await loadBlockingState();
+    } catch (err) {
+      showToast('error', 'Action failed: ' + err.message);
+    } finally {
+      state.deviceActionBusy = null; render();
+    }
+  },
+  onNewDeviceBlockDomain: function(v){ state.newDeviceBlockDomain = v; render(); },
+  blockDomainForDevice: async function(deviceId){
+    var domain = (state.newDeviceBlockDomain || '').trim();
+    if (!domain) return;
+    state.deviceActionBusy = 'block_domain'; render();
+    try {
+      await apiFetch('/api/domains/block', { method: 'POST', body: JSON.stringify({ domain: domain, device_id: deviceId }) });
+      showToast('success', '✓ blocked ' + domain);
+      state.newDeviceBlockDomain = '';
+      await loadDeviceDetail(deviceId);
+      if (state.blockingLoaded) await loadBlockingState();
+    } catch (err) {
+      showToast('error', 'Block failed: ' + err.message);
+    } finally {
+      state.deviceActionBusy = null; render();
+    }
+  },
+  unblockDomain: async function(domain, deviceIdToRefresh){
+    if (!window.confirm('Unblock ' + domain + '?')) return;
+    state.deviceActionBusy = 'unblock:' + domain; render();
+    try {
+      await apiFetch('/api/domains/unblock', { method: 'POST', body: JSON.stringify({ domain: domain }) });
+      showToast('success', '✓ unblocked ' + domain);
+      if (deviceIdToRefresh) await loadDeviceDetail(deviceIdToRefresh);
+      if (state.blockingLoaded) await loadBlockingState();
+    } catch (err) {
+      showToast('error', 'Unblock failed: ' + err.message);
+    } finally {
+      state.deviceActionBusy = null; render();
+    }
+  },
+
+  /* ---- Blocking view (global) ---- */
+  reloadBlocking: function(){ loadBlockingState(); },
+  onNewBlockDomain: function(v){ state.newBlockDomain = v; render(); },
+  onNewBlockDeviceId: function(v){ state.newBlockDeviceId = v; render(); },
+  onNewBlockReason: function(v){ state.newBlockReason = v; render(); },
+  submitBlockDomain: async function(){
+    var domain = state.newBlockDomain.trim();
+    if (!domain) return;
+    try {
+      await apiFetch('/api/domains/block', { method: 'POST', body: JSON.stringify({
+        domain: domain, device_id: state.newBlockDeviceId || null, reason: state.newBlockReason || null,
+      }) });
+      showToast('success', '✓ blocked ' + domain);
+      state.newBlockDomain = ''; state.newBlockReason = '';
+      await loadBlockingState();
+    } catch (err) { showToast('error', 'Block failed: ' + err.message); render(); }
+  },
+
+  /* ---- Suricata view ---- */
+  reloadSuricata: function(){ loadSuricata(); },
+
+  /* ---- Evidence Graph: pan/zoom/drag ---- */
+  graphZoomBy: function(factor){
+    state.graphZoom = Math.max(0.25, Math.min(3, state.graphZoom * factor));
+    render();
+  },
+  graphResetView: function(){ state.graphPan = { x: 0, y: 0 }; state.graphZoom = 1; render(); },
 };
 
 render();

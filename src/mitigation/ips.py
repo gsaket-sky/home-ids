@@ -657,6 +657,67 @@ class IPSMitigator:
                         else:
                             self._ensure_tarpit_target(client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id)
 
+    def operator_isolate_router(self, dev_id: str, ip: str, mac: str, hostname: str,
+                                  reason: str = "Operator-requested Fritz!Box isolation") -> "tuple[bool, str]":
+        """Console 'Isolate via Fritz!Box' button: explicit operator action, independent
+        of mitigate()'s own risk-score/interactive-mode/cooldown gating -- those gates
+        exist to keep the AUTONOMOUS decision path cautious, not a human who just clicked
+        a button. Mirrors the bookkeeping mitigate() already does for its own
+        router-isolation path (state dict entry, graph mirror, Prometheus gauge) so this
+        device shows up identically to an autonomously-isolated one everywhere else
+        (Grafana, get_containment_status(), the reconcile worker). Network I/O kept
+        outside self._lock, same rationale as release_device()'s own AUDIT FIX #8.
+        Returns (success, reason) -- reason is always populated on failure, for the API
+        layer to surface directly rather than a bare 'failed'."""
+        if not bool(self.config.get("ips_router_enabled", False)):
+            return False, "Router isolation is disabled in config (ips_router_enabled=false)."
+        if not mac or mac == "unknown":
+            return False, "No known MAC address for this device -- Fritz!Box isolation needs one."
+        with self._lock:
+            if mac in self._router_isolated_devices:
+                return True, "Already isolated."
+        success = self._isolate_device_router(mac=mac, ip=ip, hostname=hostname, dev_id=dev_id, reason=reason)
+        if not success:
+            return False, "Fritz!Box refused or was unreachable for this action -- see server logs for detail."
+        graph_action_id = self._mirror_containment(dev_id, action_type="router_isolate", status="active", target=mac, reason=reason)
+        with self._lock:
+            self._router_isolated_devices[mac] = {"ip": ip, "hostname": hostname, "dev_id": dev_id, "_graph_action_id": graph_action_id}
+            self._save_queues()
+        try:
+            ips_router_isolated_active.labels(dev_id, hostname, mac).set(1.0)
+        except Exception:
+            pass
+        return True, "Isolated via Fritz!Box."
+
+    def operator_tarpit(self, dev_id: str, ip: str, mac: str, hostname: str,
+                          reason: str = "Operator-requested Layer-2 tarpit") -> "tuple[bool, str]":
+        """Console 'Tarpit (Layer-2)' button -- see operator_isolate_router()'s docstring
+        for why this bypasses mitigate()'s own autonomous-path gating. Purely local (no
+        network I/O of its own beyond scapy's background sniff threads, already running),
+        so the whole registration stays under self._lock, same as mitigate()'s own tarpit
+        path."""
+        if not bool(self.config.get("ips_tarpit_enabled", True)):
+            return False, "Tarpit is disabled in config (ips_tarpit_enabled=false)."
+        if not self.tarpit_armed:
+            return False, "Tarpit subsystem isn't armed on this server (no scapy, or no raw-socket permission) -- see server logs."
+        if not ip or ip == "unknown":
+            return False, "No known IP address for this device -- the tarpit needs one."
+        if not mac or mac == "unknown":
+            return False, "No known MAC address for this device -- the tarpit needs one."
+        with self._lock:
+            if ip in self._tarpit_active_targets:
+                return True, "Already tarpitted."
+            graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active", target=ip, reason=reason)
+            self._tarpit_active_targets[ip] = {"mac": mac, "hostname": hostname, "dev_id": dev_id, "_graph_action_id": graph_action_id}
+            self._save_queues()
+        try:
+            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac).set(1.0)
+            ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac).inc()
+        except Exception:
+            pass
+        LOGGER.critical("⚠️ [OPERATOR TARPIT] Console-requested Layer-2 isolation for %s (%s).", hostname, ip)
+        return True, "Tarpitted (Layer-2 ARP/NDP)."
+
     def _arp_tarpit_loop(self) -> None:
         while True:
             try:
