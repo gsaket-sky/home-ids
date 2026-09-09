@@ -2694,35 +2694,39 @@ class EnginePipeline:
                                     bucket = context_evidence if ev.independence_group == "local_context" else grouped_evidence
                                     if ev.independence_group not in bucket or ev.value > bucket[ev.independence_group].value:
                                         bucket[ev.independence_group] = ev
-                                # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review):
-                                # active_evidence structurally never contains v13-only
-                                # synthetic evidence (coordinated_targeting/peer_deviation/
-                                # fingerprint_campaign/dga_seed_campaign -- v13/ops/
-                                # live_engine.py's own docstrings), so this WHY block was
-                                # always empty for a COORDINATED_TARGETING/PEER_COHORT_
-                                # DEVIATION-driven verdict. Confirmed live: 34 of 121 alerts
-                                # in a 24h sample, every one this exact shape, showed "HIGH"
-                                # alongside "0 independent evidence families" and zero WHY
-                                # bullets -- looked like (and was flagged externally as) an
-                                # invariant violation, though num_independent_sources itself
-                                # was always correct; only this reconstruction was
-                                # incomplete. decision["winning_evidence"] (decision/
-                                # engine.py, this same session) carries the real fired
-                                # evidence for exactly these cases -- bridged into a
-                                # matching synthetic v1 Evidence object (independence_group
-                                # set to v13's own family name; see _EVIDENCE_FAMILY_LABELS/
-                                # _EVIDENCE_PLAIN_LANGUAGE's matching new entries) so
-                                # _describe_evidence() and the grouping/sorting logic below
-                                # need no special-casing. Scoped to the winning hypothesis's
-                                # own relevant evidence (not the full independent-source
-                                # set) -- sufficient for every case actually observed live
-                                # (the winning attack was always COORDINATED_TARGETING/
-                                # PEER_COHORT_DEVIATION itself in all 34 samples), though a
-                                # v13-synthetic family corroborating a DIFFERENT winning
-                                # hypothesis would still show incompletely -- not yet seen
-                                # live, flagged for a future pass if it ever is.
-                                for we in decision.get("winning_evidence", []):
-                                    fam = _V13_SYNTHETIC_EVIDENCE_FAMILY.get(we.get("evidence_type"))
+                                # BUGFIX (live audit, 2026-09-09, real production alerts --
+                                # confirmed via a live PEER_COHORT_DEVIATION HIGH alert whose
+                                # PERSISTED hee_evidence_families/hee_independent_sources were
+                                # already correct [4/4, this session's own evidence_families
+                                # fix] but whose ACTUAL SENT TELEGRAM TEXT still showed only 1
+                                # -- sometimes 0 -- families): active_evidence is a SHORT-TTL
+                                # (~600s, EvidenceStore.get_for_device()) local snapshot, but
+                                # independence_families/num_independent_sources (decision/
+                                # engine.py) draws on v13's graph-window query, up to 86400s/
+                                # 24h (live_engine.py's _query_graph_window()). Corroborating
+                                # evidence older than ~10 minutes is still genuinely valid for
+                                # THIS decision but has already aged out of active_evidence --
+                                # no amount of fixing THIS loop's active_evidence handling can
+                                # surface evidence active_evidence never had. An EARLIER version
+                                # of this fix only bridged decision["winning_evidence"]
+                                # (correct for destination attribution, but scoped to just the
+                                # WINNING hypothesis's own RELEVANT_EVIDENCE_TYPES -- e.g. only
+                                # `peer_deviation` for PEER_COHORT_DEVIATION, missing the OTHER
+                                # 3 real corroborating families that actually justified HIGH).
+                                # decision["attack_evidence"] (decision/engine.py, this same
+                                # pass) is the fix: the FULL post-domain-stripping set
+                                # independent_sources itself counts against, not just the
+                                # winning hypothesis's own slice -- bridged into synthetic v1
+                                # Evidence objects so _describe_evidence() and the grouping/
+                                # sorting logic below need no special-casing, same pattern as
+                                # before, just fed from the complete list instead of a narrow
+                                # one. Naturally de-duplicates against active_evidence's own
+                                # real items via the SAME "keep the higher .value per family"
+                                # rule the loop above already uses -- a family present in both
+                                # just keeps whichever value is higher, never double-counted
+                                # (grouped_evidence is keyed by family, one entry each).
+                                for we in decision.get("attack_evidence", []):
+                                    fam = we.get("independence_family") or _V13_SYNTHETIC_EVIDENCE_FAMILY.get(we.get("evidence_type"))
                                     if not fam:
                                         continue
                                     dest = we.get("destination_id")
@@ -2740,12 +2744,18 @@ class EnginePipeline:
                                     # third-party review, same reasoning already applied to
                                     # local_context above) -- decision["evidence_families"]
                                     # (this same session's own fix, just above) correctly
-                                    # never includes it. Routing it into grouped_evidence
-                                    # here would inflate fam_count PAST hee_independent_
-                                    # sources, creating a NEW families-vs-sources mismatch
-                                    # in the opposite direction from the one this whole fix
-                                    # exists to close. context_evidence (shown, never
-                                    # counted) is the correct bucket, same as local_context.
+                                    # never includes it (attack_evidence is already filtered
+                                    # to exclude NON_ATTACK_FAMILIES, decision/engine.py).
+                                    # Routing it into grouped_evidence here would inflate
+                                    # fam_count PAST hee_independent_sources, creating a NEW
+                                    # families-vs-sources mismatch in the opposite direction
+                                    # from the one this whole fix exists to close.
+                                    # context_evidence (shown, never counted) is the correct
+                                    # bucket, same as local_context. In practice this branch
+                                    # is now dead code (attack_evidence never contains a
+                                    # NON_ATTACK_FAMILIES member), kept as an explicit
+                                    # defense-in-depth guard rather than trusting that
+                                    # invariant silently.
                                     bucket = context_evidence if fam == "peer_cohort_deviation" else grouped_evidence
                                     if fam not in bucket or synth_ev.value > bucket[fam].value:
                                         bucket[fam] = synth_ev

@@ -285,6 +285,37 @@ r_we_benign = engine.evaluate([], rep(3), now=NOW)
 check("winning_evidence is empty (not crashing) when no attack hypothesis wins at all",
       r_we_benign["winning_evidence"] == [])
 
+# --- attack_evidence (BUGFIX, live audit 2026-09-09, REAL production alerts): a live
+# PEER_COHORT_DEVIATION HIGH alert's PERSISTED hee_evidence_families/
+# hee_independent_sources were already correct (4/4, evidence_families fix above) but
+# the ACTUAL SENT TELEGRAM TEXT still showed only 1 -- sometimes 0 -- families, because
+# pipeline.py's WHY-block bridge only used winning_evidence (scoped to the WINNING
+# hypothesis's own RELEVANT_EVIDENCE_TYPES -- for PEER_COHORT_DEVIATION, just
+# peer_deviation, missing the 3 OTHER real corroborating families). Unlike
+# winning_evidence, attack_evidence must include EVERY family independent_sources
+# counts against, not just the winning hypothesis's own slice -- reusing the SAME r_we
+# scenario above: zeek_notice (network_behavior) is a DIFFERENT hypothesis's own
+# evidence type (NetworkIntrusionHypothesis, not DGA_BOTNET_C2 which won here), excluded
+# from winning_evidence but MUST be present in attack_evidence since it's a real,
+# counted corroborating source (independent_sources==2, dns_behavior+network_behavior).
+check("attack_evidence includes EVERY corroborating family, not just the winning "
+      "hypothesis's own slice -- zeek_notice (a DIFFERENT hypothesis's evidence type) "
+      "must be present even though winning_evidence correctly excludes it",
+      any(w["evidence_type"] == "zeek_notice" for w in r_we["attack_evidence"]),
+      f"got {r_we['attack_evidence']}")
+check("attack_evidence's length matches independent_sources's own family count exactly "
+      "(one entry per distinct independence_family among {dns_dga_burst/dns_rate -> "
+      "dns_behavior, zeek_notice -> network_behavior})",
+      len({w['independence_family'] for w in r_we["attack_evidence"]}) == r_we["independent_sources"] == 2,
+      f"got attack_evidence={r_we['attack_evidence']} independent_sources={r_we['independent_sources']}")
+check("each attack_evidence entry carries its own independence_family directly -- "
+      "pipeline.py's WHY-block bridge needs no separate type-to-family mapping",
+      all("independence_family" in w and w["independence_family"] for w in r_we["attack_evidence"]))
+
+r_ae_benign = engine.evaluate([], rep(3), now=NOW)
+check("attack_evidence is an empty list (not crashing) when there's no evidence at all",
+      r_ae_benign["attack_evidence"] == [])
+
 # --- evidence_families/evidence_types (BUGFIX, live audit 2026-09-09, third-party
 # ChatGPT review of real production alerts): pipeline.py's persisted
 # hee_evidence_families/hee_evidence_types were ALWAYS recomputed independently from

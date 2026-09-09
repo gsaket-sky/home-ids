@@ -356,6 +356,32 @@ class DecisionEngine:
         evidence_families = sorted(independence_families)
         evidence_types = sorted({e.evidence_type for e in attack_evidence})
 
+        # BUGFIX (live audit, 2026-09-09, real production alerts): winning_evidence
+        # above is scoped to just the WINNING hypothesis's own RELEVANT_EVIDENCE_TYPES
+        # -- correct for destination attribution (pipeline.py's alert_dest_ip switch),
+        # but wrong for the Telegram WHY-block's evidence list, which needs EVERY
+        # family that actually backs independent_sources, not just the winning
+        # hypothesis's own. Confirmed live: a real PEER_COHORT_DEVIATION HIGH alert
+        # persisted hee_independent_sources=4/hee_evidence_families correctly (this
+        # session's own evidence_families fix, above) but the ACTUAL SENT TELEGRAM
+        # TEXT showed only 1 (sometimes 0) families -- because pipeline.py's WHY-block
+        # loops over its OWN active_evidence (a short ~600s-TTL local snapshot,
+        # EvidenceStore.get_for_device()), while independence_families here draws on
+        # v13's graph-window query (up to 86400s / 24h, live_engine.py's
+        # _query_graph_window()) -- corroborating evidence older than ~10 minutes is
+        # still valid for THIS decision but has already aged out of pipeline.py's own
+        # short-TTL list, so the WHY-block literally cannot see it no matter how the
+        # display code is written, UNLESS the decision hands it over explicitly.
+        # attack_evidence is exactly that -- the full post-domain-stripping set
+        # independent_sources counts against -- serialized (Evidence isn't JSON-safe
+        # as-is) the same way winning_evidence already is, plus independence_family so
+        # pipeline.py doesn't need its own type-to-family mapping to consume it.
+        full_attack_evidence = [
+            {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features,
+             "value": e.value, "confidence": e.confidence, "independence_family": family_for(e.evidence_type)}
+            for e in attack_evidence
+        ]
+
         return {
             "state": state,
             "action": action,
@@ -370,4 +396,5 @@ class DecisionEngine:
             "winning_evidence": winning_evidence,
             "evidence_families": evidence_families,
             "evidence_types": evidence_types,
+            "attack_evidence": full_attack_evidence,
         }
