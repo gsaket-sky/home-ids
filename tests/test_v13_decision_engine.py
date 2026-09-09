@@ -285,6 +285,36 @@ r_we_benign = engine.evaluate([], rep(3), now=NOW)
 check("winning_evidence is empty (not crashing) when no attack hypothesis wins at all",
       r_we_benign["winning_evidence"] == [])
 
+# --- REGRESSION GUARD (found live, checking a real sent Telegram alert -- this exact
+# scenario silently never worked from the day it was written): winning_evidence must
+# include the winning hypothesis's OWN evidence even when that evidence's family is in
+# NON_ATTACK_FAMILIES (peer_deviation's own family, peer_cohort_deviation, is excluded
+# from CORROBORATION counting -- a different question from whether it should be
+# DISPLAYABLE as the winning hypothesis's own reasoning). Without this, pipeline.py's
+# "Talked to N distinct destinations vs peer average" behavioral-stat line can never
+# fire for a PEER_COHORT_DEVIATION alert, silently falling back to a meaningless
+# "Contacted `unknown`" line instead -- confirmed live, every real PEER_COHORT_
+# DEVIATION alert this session ever showed exactly that fallback.
+peer_dev_ev = Evidence(
+    device_id="dev1", destination_id=NO_DESTINATION, evidence_type="peer_deviation",
+    independence_family="peer_cohort_deviation", timestamp=NOW, source="s",
+    value=42.0, confidence=0.6,
+    features={"device_type": "smart_plug", "my_count": 42, "peer_avg": 8.5, "peer_count": 4},
+)
+r_peer = engine.evaluate([peer_dev_ev], rep(3), now=NOW)
+check("REGRESSION GUARD: winning_evidence is NOT empty when PEER_COHORT_DEVIATION wins "
+      "-- peer_deviation's own family (peer_cohort_deviation) is excluded from "
+      "attack_evidence/corroboration-counting, but must still be displayable",
+      len(r_peer["winning_evidence"]) > 0, f"got {r_peer}")
+check("REGRESSION GUARD: winning_evidence's peer_deviation entry carries the real "
+      "my_count/peer_avg/peer_count/device_type features pipeline.py's behavioral-stat "
+      "line needs -- not just present, but with the actual usable data",
+      any(w.get("evidence_type") == "peer_deviation"
+          and (w.get("features") or {}).get("my_count") == 42
+          and (w.get("features") or {}).get("peer_avg") == 8.5
+          for w in r_peer["winning_evidence"]),
+      f"got {r_peer['winning_evidence']}")
+
 # --- attack_evidence (BUGFIX, live audit 2026-09-09, REAL production alerts): a live
 # PEER_COHORT_DEVIATION HIGH alert's PERSISTED hee_evidence_families/
 # hee_independent_sources were already correct (4/4, evidence_families fix above) but

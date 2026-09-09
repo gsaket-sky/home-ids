@@ -325,15 +325,34 @@ class DecisionEngine:
         # displayed "Contacted <most-recent-connection>" -- almost always multicast
         # (mDNS/SSDP/ICMPv6) since that's simply the most frequent LAN traffic --
         # completely unrelated to the real coordinated destination or peer-cohort
-        # statistic that actually satisfied the hypothesis. attack_evidence here is
-        # already the correctly winning-hypothesis-scoped subset (domain-linkage
-        # filter above); narrowing further to relevant_types (the winning
-        # hypothesis's OWN declared evidence types) gives pipeline.py exactly what it
-        # needs, serialized (Evidence isn't JSON-safe as-is).
+        # statistic that actually satisfied the hypothesis.
+        #
+        # BUGFIX (found live, same day, checking a real sent alert -- NEVER actually
+        # worked since the day it was written): this used to filter from
+        # attack_evidence, which excludes NON_ATTACK_FAMILIES members --
+        # peer_cohort_deviation (peer_deviation's own family) is one of those (this
+        # session's own earlier fix, generalizing the third-party review's original
+        # exclusion). PeerDeviationHypothesis's RELEVANT_EVIDENCE_TYPES is ONLY
+        # {"peer_deviation"} -- so for every PEER_COHORT_DEVIATION-winning cycle ever,
+        # winning_evidence was structurally guaranteed empty, and pipeline.py's own
+        # "Talked to N distinct destinations vs peer average" behavioral-stat line
+        # (added the same original session as this field) silently never fired,
+        # falling through to the generic "Contacted `unknown`" line instead -- exactly
+        # what every real PEER_COHORT_DEVIATION alert this whole conversation has
+        # shown. Excluding a family from CORROBORATION-counting (why it's in
+        # NON_ATTACK_FAMILIES) is a different question from whether that hypothesis's
+        # own evidence should be DISPLAYABLE -- reads from ev_store (the raw,
+        # unfiltered-by-NON_ATTACK_FAMILIES evidence list) instead. Safe widening for
+        # every OTHER consumer (COORDINATED_TARGETING/DATA_EXFILTRATION/C2_BEACONING's
+        # own relevant types are all real attack families already, never excluded by
+        # NON_ATTACK_FAMILIES, so this changes nothing for them) -- and Gap-64's own
+        # domain-linkage stripping above only ever touches "reputation"-family items,
+        # never peer_deviation/coordinated_targeting/zeek_exfiltration/zeek_beaconing,
+        # so nothing Gap-64 would have stripped is reintroduced here either.
         winning_evidence = [
             {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features,
              "value": e.value, "confidence": e.confidence}
-            for e in attack_evidence if relevant_types and e.evidence_type in relevant_types
+            for e in ev_store if relevant_types and e.evidence_type in relevant_types
         ]
 
         # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review): pipeline.py's
