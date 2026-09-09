@@ -976,8 +976,16 @@ class EnginePipeline:
                 _last_alert_time = getattr(state, "last_alert_time", 0.0)
                 _last_alert_sig  = getattr(state, "last_alert_signature", "")
                 _last_bl_update  = getattr(state, "last_baseline_update", 0.0)
-                # Snapshot rolling domain keys for TI lookups (avoids holding lock during I/O)
-                _rolling_domain_keys = list(state.rolling.domains.keys()) if hasattr(state, "rolling") else []
+                # Snapshot rolling domain keys for TI lookups (avoids holding lock during I/O).
+                # BUGFIX (live audit, 2026-09-09): same multicast/broadcast exclusion as
+                # _select_target_domain()'s own fix just below -- this separate snapshot feeds
+                # its own TI-lookup loop a few hundred lines down (`for domain in
+                # _rolling_domain_keys: ... reputation_target = domain`), which can
+                # independently attribute reputation_target to a raw multicast IP key exactly
+                # the same way _select_target_domain() could before its fix.
+                _rolling_domain_keys = [
+                    d for d in state.rolling.domains.keys() if not is_local_or_multicast_destination(d)
+                ] if hasattr(state, "rolling") else []
                 _killchain_hist = list(getattr(state, "killchain_history", []))
 
             # ─── PHASE 2: Pre-fetch Zeek data outside the lock ──────────────────────
@@ -3290,7 +3298,27 @@ class EnginePipeline:
         if not hasattr(state, "rolling") or not hasattr(state.rolling, "domains") or not state.rolling.domains:
             return "unknown"
 
-        domains_dict = state.rolling.domains
+        # BUGFIX (live audit, 2026-09-09): state.rolling.domains's keys are not always
+        # real DNS names -- a raw destination IP lands here as a fallback "domain" when
+        # there's no PTR/DNS name for it, and a multicast/broadcast LAN protocol address
+        # (SSDP 239.255.255.250 chief among them) can be by far the most FREQUENT such
+        # key on a real home network, since group discovery traffic is chatty. None of
+        # the 3 priority tiers below filtered these out, so a multicast address could
+        # become top_domain -> reputation_target (pipeline.py's own "which destination
+        # actually earned this risk score" attribution, a few hundred lines below this
+        # function) with nothing structurally preventing it -- confirmed live: 239.
+        # 255.255.250 had accumulated 782 "reputation" evidence rows on .94's graph,
+        # continuously, over 2.5 days, directly feeding PEER_COHORT_DEVIATION's WHY-block
+        # ("Destination has a poor external reputation score -- 239.255.255.250" on a
+        # real alert). is_local_or_multicast_destination() already exists and is used
+        # pervasively elsewhere for exactly this filtering; it safely passes real domain
+        # names through unaffected (only parses as an IP, never matches a hostname).
+        domains_dict = {
+            dom: cnt for dom, cnt in state.rolling.domains.items()
+            if not is_local_or_multicast_destination(dom)
+        }
+        if not domains_dict:
+            return "unknown"
 
         # Priority 1: ThreatIntel IOC match
         if ti_engine:
