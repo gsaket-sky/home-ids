@@ -159,7 +159,7 @@ check("the top status block (already done / your move / if you do nothing) is co
 check("a WHAT HAPPENED (facts) section exists, separate from WHY (evidence/inference)",
       "*WHAT HAPPENED*" in pipeline_src and "*WHY*" in pipeline_src)
 check("WHY uses the plain-language _describe_evidence() helper, not a raw f'{ev.type} ({ev.value})' dump",
-      "why_lines = [_describe_evidence(ev) for ev in" in pipeline_src)
+      "why_lines = [_describe_evidence(ev, self.geoip_engine) for ev in" in pipeline_src)
 check("exactly one CONFIDENCE line exists, built from the reconciled _build_confidence_line() "
       "helper rather than two separately-placed raw percentages",
       "*CONFIDENCE:* {confidence_line}" in pipeline_src)

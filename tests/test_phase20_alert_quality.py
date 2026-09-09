@@ -178,9 +178,17 @@ check("spread exactly AT the threshold withholds (>=, not >)",
 pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
 check("pipeline.py's WHY section uses plain-language evidence descriptions, not a raw "
       "'group: type (value)' stutter-prone dump",
-      "why_lines = [_describe_evidence(ev) for ev in" in pipeline_src)
+      "why_lines = [_describe_evidence(ev, self.geoip_engine) for ev in" in pipeline_src)
 check("_describe_evidence() surfaces Evidence.domain when the detector attached one",
-      'domain_suffix = f" — `{ev.domain}`" if getattr(ev, "domain", None) else ""' in pipeline_src)
+      'domain_suffix = f" — `{ev_domain}`{geo_note}" if ev_domain else ""' in pipeline_src)
+# BUGFIX (explicit user request, 2026-09-09): a bare IP in the WHY-block told a human
+# reader nothing about what it was -- _describe_evidence() now also appends the same
+# "(Org, Country)" ASN/geo annotation the "Contacted" line already used
+# (_build_geo_note(), added 2026-08-27 for that line specifically).
+check("_describe_evidence() enriches the domain with ASN/geo context via the same "
+      "_build_geo_note() helper the Contacted line already uses, not a second "
+      "implementation",
+      "geo_note = _build_geo_note(geoip_engine, ev_domain)" in pipeline_src)
 check("the WHY section shows plain-language sentences with no raw per-signal magnitude at "
       "all, so there's no number left to misread as a probability (Phase 20's underlying "
       "concern, now structurally impossible rather than just labeled)",

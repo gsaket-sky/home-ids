@@ -423,6 +423,61 @@ from core.pipeline import _describe_evidence as _describe_evidence_real
 description = _describe_evidence_real(notice_evidence[0])
 check("THE CORE FIX: _describe_evidence() surfaces the real notice type in the WHY line",
       "SSL::Invalid_Server_Cert" in description, f"got '{description}'")
+check("BUGFIX (explicit user request, 2026-09-09): the WHY line also shows the "
+      "weak/medium/strong/highly_deterministic tier, not just the raw note type -- "
+      "a human reader can't tell severity from the note type string alone",
+      "(medium)" in description, f"got '{description}'")
+
+# REGRESSION GUARD: pre-deploy evidence still inside the 24h graph window (old
+# 4-segment provenance, no tier subtag at all) must not show a fabricated tier.
+old_format_ev = Evidence(
+    type="zeek_notice", source="zeek", timestamp=time.time(), device="dev1",
+    value=1.0, confidence=0.75, independence_group="zeek_network",
+    provenance="detector:zeek:notice:SSL::Invalid_Server_Cert",
+)
+old_format_description = _describe_evidence_real(old_format_ev)
+check("REGRESSION GUARD: old-format provenance (pre-tier, from before this fix "
+      "deployed) still shows the note type but omits any tier annotation rather "
+      "than showing a wrong/fabricated one",
+      "Invalid_Server_Cert" in old_format_description and "(medium)" not in old_format_description,
+      f"got '{old_format_description}'")
+
+# BUGFIX (explicit user request, 2026-09-09): a bare IP in a WHY-block bullet told a
+# human reader nothing about what it actually was -- _describe_evidence() now accepts
+# an optional geoip_engine and appends the same "(Org, Country)" annotation the
+# "WHAT HAPPENED" section's own "Contacted" line already used (_build_geo_note()).
+class _FakeASNResult:
+    def __init__(self, org):
+        self.autonomous_system_organization = org
+
+class _FakeCountry:
+    def __init__(self, name):
+        self.name = name
+
+class _FakeCityResult:
+    def __init__(self, country_name):
+        self.country = _FakeCountry(country_name)
+
+class _FakeGeoIPEngine:
+    """Mirrors GeoIPEngine's real interface (lookup_asn/lookup) with no mmdb needed."""
+    def lookup_asn(self, ip):
+        return _FakeASNResult("PacketHub S.A.") if ip == "103.86.96.100" else None
+    def lookup(self, ip):
+        return _FakeCityResult("Australia") if ip == "103.86.96.100" else None
+
+notice_events_geo = [{"type": "zeek_notice", "note": "SSL::Invalid_Server_Cert",
+                       "dest_port": 443, "confidence": 0.75, "dest_ip": "103.86.96.100"}]
+notice_evidence_geo = detector.detect("dev1", notice_events_geo)
+description_with_geo = _describe_evidence_real(notice_evidence_geo[0], _FakeGeoIPEngine())
+check("_describe_evidence() appends ASN/country context for an IP-shaped domain, "
+      "via the SAME _build_geo_note() helper the Contacted line already uses",
+      "PacketHub S.A." in description_with_geo and "Australia" in description_with_geo,
+      f"got '{description_with_geo}'")
+description_without_geoip_engine = _describe_evidence_real(notice_evidence_geo[0])
+check("REGRESSION GUARD: omitting geoip_engine entirely (every existing call site "
+      "before this change) is a safe no-op -- no crash, no geo annotation",
+      "PacketHub" not in description_without_geoip_engine,
+      f"got '{description_without_geoip_engine}'")
 
 # BUGFIX regression (live audit, 2026-09-09): a zeek_notice item can ALSO reach the
 # WHY-block through a SEPARATE bridge -- decision["attack_evidence"] (real

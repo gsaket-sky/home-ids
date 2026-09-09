@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, ZEEK_NOTICE_TIER_SCORE_WEIGHT
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -264,32 +264,54 @@ _V13_SYNTHETIC_EVIDENCE_FAMILY = {
 }
 
 
-def _describe_evidence(ev) -> str:
+def _describe_evidence(ev, geoip_engine=None) -> str:
     """One human-readable sentence for ONE piece of evidence -- see
     _EVIDENCE_PLAIN_LANGUAGE's module comment for why this replaced showing the raw
     per-signal magnitude directly. Appends the specific domain/IP this evidence came
     from when the detector attached one (Evidence.domain) -- this is the domain THIS
     evidence actually fired on, which is not guaranteed to be the alert's own "Target"
     line (that's the most-notable domain in the window, picked independently of which
-    evidence fired -- a live-data audit found these can differ within one alert)."""
+    evidence fired -- a live-data audit found these can differ within one alert).
+
+    BUGFIX (explicit user request, 2026-09-09): a bare IP here told a human reader
+    nothing about what it actually was -- the "WHAT HAPPENED" section's own
+    "Contacted" line already solved this exact problem for its own target
+    (_build_geo_note(), added 2026-08-27 after a real WireGuard-to-Bharti-Airtel
+    alert was unreadable without it), but the per-evidence WHY-block bullets never
+    got the same treatment. geoip_engine is optional (defaults to None, e.g. for
+    every existing test call site) -- _build_geo_note() itself already no-ops
+    cleanly on None or a real domain name, so this never changes behavior for a
+    caller that doesn't have a GeoIPEngine handy."""
     text = _EVIDENCE_PLAIN_LANGUAGE.get(ev.type, ev.type.replace("_", " ").capitalize())
-    domain_suffix = f" — `{ev.domain}`" if getattr(ev, "domain", None) else ""
+    ev_domain = getattr(ev, "domain", None)
+    geo_note = _build_geo_note(geoip_engine, ev_domain) if ev_domain else ""
+    domain_suffix = f" — `{ev_domain}`{geo_note}" if ev_domain else ""
     # BUGFIX (reviewer suggestion, implemented): zeek_notice previously gave no way to
     # tell a genuinely alarming notice type apart from a routine one -- provenance now
     # carries the real note type (see zeek_network.py), surfaced here the same way
     # domain_suffix already surfaces per-evidence detail for other types.
     # BUGFIX (live audit, 2026-09-09): provenance format gained a weak/medium/strong/
     # highly_deterministic tier subtag ("detector:zeek:notice:{tier}:{note_type}",
-    # utils.py's classify_zeek_notice()) -- split(",", 3)[3] now returns
-    # "{tier}:{note_type}" instead of the clean note_type alone. Same
-    # split(":", 4)[4] convention this file already uses for subtag-carrying
-    # provenance elsewhere; the tier itself isn't shown here (a display concern
-    # separate from what fed HEE's scoring), just the real note type as before.
+    # utils.py's classify_zeek_notice()) -- split(":", 4) now returns
+    # ["detector", "zeek", "notice", "{tier}", "{note_type}"] instead of the clean
+    # note_type alone at index [3]. Same split(":", 4)[4] convention this file
+    # already uses for subtag-carrying provenance elsewhere.
+    # BUGFIX (explicit user request, 2026-09-09): the tier itself now shows too, not
+    # just the raw note type -- "Zeek policy notice fired -- weird:data_before_
+    # established" told a human nothing about whether that specific notice was
+    # actually worth their attention or routine capture noise; "(weak)" vs.
+    # "(highly deterministic)" does. Validated against ZEEK_NOTICE_TIER_SCORE_
+    # WEIGHT's own key set rather than trusted blindly -- pre-deploy evidence still
+    # inside the 24h graph window (old 4-segment provenance, no tier subtag) has a
+    # non-tier fragment at index [3] instead, which this correctly omits rather than
+    # showing as if it were a real tier.
     notice_suffix = ""
     if ev.type == "zeek_notice" and getattr(ev, "provenance", ""):
         parts = ev.provenance.split(":", 4)
         if len(parts) == 5 and parts[4] and parts[4] != "unknown":
-            notice_suffix = f" — `{parts[4]}`"
+            tier = parts[3]
+            tier_suffix = f" _({tier.replace('_', ' ')})_" if tier in ZEEK_NOTICE_TIER_SCORE_WEIGHT else ""
+            notice_suffix = f" — `{parts[4]}`{tier_suffix}"
     return f"{text}{domain_suffix}{notice_suffix}"
 
 
@@ -2860,20 +2882,21 @@ class EnginePipeline:
                                     bucket = context_evidence if fam == "peer_cohort_deviation" else grouped_evidence
                                     if fam not in bucket or synth_ev.value > bucket[fam].value:
                                         bucket[fam] = synth_ev
-                                why_lines = [_describe_evidence(ev) for ev in
+                                why_lines = [_describe_evidence(ev, self.geoip_engine) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 # VERSION 12: family labels, aligned to why_lines by construction --
                                 # both sort the SAME dict by the SAME key function (stable sort, ties
                                 # preserve dict insertion order identically in both), so
                                 # zip(why_families, why_lines) below pairs each label with its own
                                 # description. Kept as a second pass (not folded into why_lines
-                                # itself) so the existing `why_lines = [_describe_evidence(ev) for ev
-                                # in ...]` line -- what tests/test_phase20_alert_quality.py and
-                                # tests/test_phase28_alert_redesign.py both check for verbatim --
-                                # stays intact.
+                                # itself) so the existing `why_lines = [_describe_evidence(ev,
+                                # self.geoip_engine) for ev in ...]` line -- what
+                                # tests/test_phase20_alert_quality.py and
+                                # tests/test_phase28_alert_redesign.py both check for verbatim
+                                # (updated 2026-09-09 for the geoip_engine param) -- stays intact.
                                 why_families = [fam for fam, ev in
                                                  sorted(grouped_evidence.items(), key=lambda kv: kv[1].value, reverse=True)]
-                                context_lines = [_describe_evidence(ev) for ev in
+                                context_lines = [_describe_evidence(ev, self.geoip_engine) for ev in
                                                   sorted(context_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 active_evidence.clear()
 
