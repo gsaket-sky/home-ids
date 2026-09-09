@@ -49,6 +49,28 @@ pass also shipped, tested, and deployed:
    regularity: `tdr>0.75` across `>=15` observations) can reach HIGH/CRITICAL now;
    `low_and_slow`/`uniform_jitter` (thinner signals, no regularity requirement) are
    capped at the base floor, same treatment `DNS_ATTRIBUTION_GAP` already gets.
+5. **WHY-block was reading a short-TTL evidence snapshot** (`v13/decision/engine.py`'s
+   new `attack_evidence` field, `core/pipeline.py`) — the persisted alert JSON was
+   already correct, but the ACTUAL Telegram text still showed 0-1 families because
+   `pipeline.py`'s WHY-block looped over its own ~600s-TTL local evidence snapshot
+   while the decision itself draws on v13's 24h graph-window query. Found and fixed
+   from 2 real Telegram alerts the user pasted mid-conversation, live-verified against
+   the user's own next real alert (not just a data pull).
+6. **Reputation evidence/tier ignored known-trusted infrastructure**
+   (`core/pipeline.py`, new `reputation_target`-scoped ASN lookup) — the general
+   "reputation" evidence (read by every hypothesis) was created purely on "was any
+   TI/VT/AbuseIPDB score nonzero," never checking whether the destination is
+   known-trusted infra the way `COORDINATED_TARGETING`'s own evidence-creation site
+   already does (`a214a2f`). Separately, `rep_classifier.classify()`'s own tier-2
+   trusted-infra check existed but asked about `dest_ip`'s ownership instead of
+   `reputation_target`'s (can legitimately differ). **Retroactive cleanup**: the code
+   fix alone doesn't touch evidence already sitting in the graph (86400s TTL) — a live
+   audit of `.94`'s graph db found 70 of 112 distinct "reputation"-evidence
+   destinations (62.5%) were known-trusted cloud/CDN infra, some with 100+ stale rows
+   each (Amazon `34.200.1.24`: 222 rows, Google `34.54.88.138`: 128) — confirming this
+   had been generating false positives at scale for days. User-approved, precisely
+   scoped DELETE (`evidence_type="reputation"` only, only those 70 destinations)
+   removed 1,466 stale rows; 1,925 legitimate (non-infra) rows left untouched.
 
 ---
 
@@ -239,6 +261,51 @@ this repo has no documented mapping for.
 **Trigger**: once Suricata actually fires in production with real category data to
 look at — pull a live sample (`suricata_matches` field on real alerts) FIRST, THEN
 design the tiering against real categories seen, not a guessed list.
+
+### I2. Extend known-trusted-infra exemption to behavioral evidence types (found live, 2026-09-09)
+
+**Current state**: the "reputation" evidence-creation gap (item 6 above, "Fixed this
+same session") is closed — known-trusted cloud/CDN infra (Google/Microsoft/Amazon/
+Cloudflare/Akamai/Netflix/Alibaba/Hetzner, `is_cloud_cdn_provider_org()`) can no longer
+produce false "poor reputation" evidence. But the SAME live alert that surfaced that
+bug also showed `zeek_conn_abuse` ("many rejected connections") firing against Google
+(`142.251.141.33`) and `dns_evasion_anomaly` ("no matching DNS lookup history") firing
+against an unrecognized German ISP (`62.245.139.33`) in the SAME cycle — neither of
+those evidence types has ANY trusted-infra exemption at all.
+
+**Why NOT extended the same day**: this is NOT the same risk shape as the reputation
+case. Reputation evidence is a cheap, external, often-noisy TI/VT/AbuseIPDB score —
+exempting known-trusted ASN owners from it is low-risk (the same score for the SAME
+IP wouldn't mean much even if genuine, since shared cloud IPs commonly accumulate
+noise from OTHER tenants). `zeek_conn_abuse`/`dns_evasion_anomaly` are about THIS
+DEVICE'S OWN observed behavior — a stronger, more direct signal. This codebase's own
+`_CLOUD_CDN_ORG_KEYWORDS` docstring (`utils.py`) already warns against a blanket
+"trust this cloud provider" list specifically because it "would create a real blind
+spot for C2 hosted on the same infrastructure" — malware is commonly hosted on major
+cloud providers precisely to blend into traffic exactly like this. A device
+genuinely compromised and beaconing to a C2 server hosted on AWS/GCP/Azure would
+produce EXACTLY these two evidence shapes, and a blanket exemption would blind the
+engine to it.
+
+**Proposed approach, NOT a quick copy-paste of the reputation fix**: if picked up,
+needs its own design pass distinguishing "this destination is trusted" from "this
+device's OWN behavior toward it is anomalous regardless of the destination's
+identity" — e.g. `zeek_conn_abuse`'s existing `own_dns_failing` dampener (this device's
+own blocked/nxdomain ratio) is the right SHAPE of signal (behavioral context about
+THIS device, not identity-based trust about the destination), not a `is_cloud_cdn_
+provider_org()` exemption. Possibly: dampen confidence rather than suppress outright,
+or require a SECOND corroborating signal before a known-cloud-IP-targeted
+`zeek_conn_abuse`/`dns_evasion_anomaly` item counts toward `independent_sources`
+(mirroring how `peer_cohort_deviation`/`ml_anomaly`/`policy` are already excluded from
+counting, this session's own earlier fixes) rather than not creating the evidence at
+all.
+
+**Trigger**: a dedicated look at real production volume for `zeek_conn_abuse`/
+`dns_evasion_anomaly` against known-cloud destinations specifically (mirroring how
+item 6's reputation cleanup started with a live graph-db audit, not a guess) — check
+whether this is ALSO a large-scale pattern before designing the fix, since the
+reputation case turned out to be 62.5% of all reputation evidence and the fix's shape
+depended on knowing that scale.
 
 ### I. Remove numeric score as the primary decision mechanism (audit §25)
 
