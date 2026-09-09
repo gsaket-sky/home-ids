@@ -1834,6 +1834,38 @@ class EnginePipeline:
                                     alert_dest_ip = ev.domain
                                     alert_target_domain = "unknown"
                                     break
+                        # BUGFIX (live audit, 2026-09-09): COORDINATED_TARGETING/
+                        # PEER_COHORT_DEVIATION had no branch here at all -- their
+                        # evidence (coordinated_targeting/peer_deviation) is v13-only,
+                        # synthesized inside decision_engine.evaluate() from graph
+                        # queries and never written into pipeline.py's own
+                        # active_evidence store, so both signatures silently fell
+                        # through to the generic dest_ip fallback ("whatever this
+                        # device connected to most recently"). Confirmed live: the two
+                        # highest-volume signatures (~57% of unsuppressed HIGH alerts
+                        # in a 7h sample) were displayed as "Contacted 224.0.0.22" /
+                        # "Contacted ff02::1" / "Contacted unknown" -- multicast/
+                        # broadcast noise the multicast-exclusion fix (1ff6c97)
+                        # already correctly keeps OUT of the actual scoring, just
+                        # never made it into the display. decision.get("winning_evidence")
+                        # (decision/engine.py, this same session) carries the real
+                        # v13-only evidence that satisfied the winning hypothesis.
+                        # coordinated_targeting DOES have a real destination_id (the
+                        # destination multiple devices targeted); peer_deviation is
+                        # device-level by design (destination_id=NO_DESTINATION,
+                        # live_engine.py) -- explicitly "unknown" here rather than a
+                        # misleading fallback, same treatment as the DNS_EVASION
+                        # "no domain by design" branch above.
+                        elif primary_sig_base == "COORDINATED_TARGETING":
+                            alert_target_domain = "unknown"
+                            for we in decision.get("winning_evidence", []):
+                                dest = we.get("destination_id")
+                                if we.get("evidence_type") == "coordinated_targeting" and dest and dest != "(none)":
+                                    alert_dest_ip = dest
+                                    break
+                        elif primary_sig_base == "PEER_COHORT_DEVIATION":
+                            alert_dest_ip = "unknown"
+                            alert_target_domain = "unknown"
                         elif primary_sig_base == "Layer-2 ARP Spoofing Detected":
                             for ev in active_evidence:
                                 if ev.type == "arp_spoofing" and ev.domain:
@@ -2670,8 +2702,36 @@ class EnginePipeline:
                                 alert_msg += (
                                     f"\n━━━━━━━━━━━━━━━━━━━━\n"
                                     f"📍 *WHAT HAPPENED* _(facts)_\n"
-                                    f"- Contacted `{target_display}`{target_geo_note} ({service_name} / Port {dest_port})\n"
                                 )
+                                # BUGFIX (live audit, 2026-09-09): PEER_COHORT_DEVIATION's
+                                # evidence is device-level by design (destination_id=
+                                # NO_DESTINATION, live_engine.py's
+                                # _inject_peer_deviation_evidence() -- "distinct
+                                # destination count" is a behavioral statistic about the
+                                # device, not any single connection), so target_display
+                                # was always "unknown" for this signature and "Contacted
+                                # `unknown` (... / Port ...)" told the operator literally
+                                # nothing about what actually triggered the alert. The
+                                # real numbers (my_count/peer_avg/peer_count/device_type)
+                                # already exist on the evidence's own .features
+                                # (winning_evidence, decision/engine.py) -- show those
+                                # instead of a fabricated "Contacted" line.
+                                peer_stat_shown = False
+                                if primary_sig_base == "PEER_COHORT_DEVIATION":
+                                    for we in decision.get("winning_evidence", []):
+                                        if we.get("evidence_type") != "peer_deviation":
+                                            continue
+                                        pf = we.get("features") or {}
+                                        if "my_count" in pf and "peer_avg" in pf:
+                                            alert_msg += (
+                                                f"- Talked to `{pf['my_count']}` distinct destinations recently "
+                                                f"vs. a `{pf.get('device_type', 'peer')}` cohort average of "
+                                                f"`{pf['peer_avg']}` (across {pf.get('peer_count', '?')} peer(s))\n"
+                                            )
+                                            peer_stat_shown = True
+                                        break
+                                if not peer_stat_shown:
+                                    alert_msg += f"- Contacted `{target_display}`{target_geo_note} ({service_name} / Port {dest_port})\n"
                                 # BUGFIX (live alert audit): get_app_context()'s generic fallback
                                 # (no HTTP User-Agent seen) is literally f"{proto} Port {port}" --
                                 # e.g. "Application: TCP Port 55443" directly under "Contacted ...

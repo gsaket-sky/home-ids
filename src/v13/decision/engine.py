@@ -312,6 +312,29 @@ class DecisionEngine:
 
         trail.append(f"Verdict: {state} / {action} — {explanation} (confidence={threat_confidence:.2f})")
 
+        # BUGFIX (live audit, 2026-09-09): pipeline.py's alert-building step has its
+        # own destination-attribution switch (per primary_sig_base) that reaches back
+        # into active_evidence for the real evidence-linked domain/IP a given
+        # signature fired on -- but that switch can only see pipeline.py's OWN v1
+        # Evidence store, never the v13-only synthetic evidence
+        # (coordinated_targeting/peer_deviation, live_engine.py's
+        # _inject_graph_derived_evidence()/_inject_peer_deviation_evidence()) that
+        # only ever existed inside THIS evaluate() call's evidence_list. Confirmed
+        # live: COORDINATED_TARGETING/PEER_COHORT_DEVIATION alerts (the two highest-
+        # volume signatures, ~57% of unsuppressed HIGH alerts in a 7h sample)
+        # displayed "Contacted <most-recent-connection>" -- almost always multicast
+        # (mDNS/SSDP/ICMPv6) since that's simply the most frequent LAN traffic --
+        # completely unrelated to the real coordinated destination or peer-cohort
+        # statistic that actually satisfied the hypothesis. attack_evidence here is
+        # already the correctly winning-hypothesis-scoped subset (domain-linkage
+        # filter above); narrowing further to relevant_types (the winning
+        # hypothesis's OWN declared evidence types) gives pipeline.py exactly what it
+        # needs, serialized (Evidence isn't JSON-safe as-is).
+        winning_evidence = [
+            {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features}
+            for e in attack_evidence if relevant_types and e.evidence_type in relevant_types
+        ]
+
         return {
             "state": state,
             "action": action,
@@ -323,4 +346,5 @@ class DecisionEngine:
             "hypothesis_weight": hypothesis_weight,
             "reasoning_trail": trail,
             "decision_path": decision_path,
+            "winning_evidence": winning_evidence,
         }
