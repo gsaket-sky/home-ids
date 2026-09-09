@@ -256,13 +256,27 @@ HYPOTHESIS_RELEVANT_EVIDENCE_TYPES: Dict[str, FrozenSet[str]] = {
 
 
 class AdvertisingBurstHypothesis(Hypothesis):
+    # BUGFIX (live audit, 2026-09-09): a NO-OP today (dns_rate, detectors/dns_behavior.py,
+    # never sets .domain -- a device-wide rate aggregate, no single destination), but
+    # this hypothesis's rep_vector.tier==2 check is a REQUIRED gate for a BENIGN verdict,
+    # not just a suppression modifier -- if dns_rate destination attribution is ever added
+    # later (the same gap already closed for zeek_exfiltration/zeek_beaconing via
+    # live_engine.py's _NEEDS_LAST_DEST_IP_FALLBACK), an unrelated cycle's rep_vector could
+    # wrongly approve real attack traffic as benign "advertising," a worse failure mode
+    # than the attack-hypothesis false-negatives this session's fix targets (this one
+    # needs LESS corroboration to go wrong: a single required gate, not a corroboration
+    # count). Declaring this now, ahead of any live gap, costs nothing (empty
+    # my_destinations today means _effective_rep_tier() is a pure pass-through) and closes
+    # the risk before it's ever live.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_rate"})
+
     def __init__(self):
         super().__init__("ADVERTISING_BURST")
 
     def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
         self._reset_eval_state()
         has_high_rate = any(e.evidence_type == "dns_rate" and e.value > 50 for e in ev_store)
-        self.required_satisfied = has_high_rate and (rep_vector.tier == 2)
+        self.required_satisfied = has_high_rate and (self._effective_rep_tier(ev_store, rep_vector) == 2)
         if not self.required_satisfied:
             return 0.0
         score = 3.0
@@ -654,13 +668,23 @@ class DeviceProfileBenignHypothesis(Hypothesis):
     # not an import (no v13 fp_engine module to import from yet).
     FAMILIARITY_TRUST_BAR = 0.6
 
+    # BUGFIX (live audit, 2026-09-09): see AdvertisingBurstHypothesis's own comment --
+    # same NO-OP-today, latent-risk-later reasoning (dns_rate never carries a
+    # destination yet). is_familiar_destination is a separate, real per-device signal
+    # already OR'd in here and has_competing_attack_evidence is a safety valve (any
+    # attack-shaped evidence at all blocks this verdict outright regardless of tier),
+    # so the live risk here is smaller than AdvertisingBurstHypothesis's single-gate
+    # case -- still worth closing for the same reason.
+    RELEVANT_EVIDENCE_TYPES = frozenset({"dns_rate"})
+
     def __init__(self):
         super().__init__("DEVICE_PROFILE_TELEMETRY")
 
     def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
         self._reset_eval_state()
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
         is_expected_category = device_type in self._EXPECTED_HIGH_VOLUME_CATEGORIES
-        is_trusted_destination = rep_vector.tier in (0, 1, 2)
+        is_trusted_destination = eff_tier in (0, 1, 2)
         is_familiar_destination = baseline_familiarity >= self.FAMILIARITY_TRUST_BAR
         has_elevated_dns_activity = any(e.evidence_type == "dns_rate" and e.value > 20 for e in ev_store)
         has_competing_attack_evidence = any(e.evidence_type in self.ATTACK_SHAPED_EVIDENCE_TYPES for e in ev_store)
@@ -673,7 +697,7 @@ class DeviceProfileBenignHypothesis(Hypothesis):
             return 0.0
 
         score = 2.5
-        if rep_vector.tier in (0, 1):
+        if eff_tier in (0, 1):
             score = 3.0
         return score
 

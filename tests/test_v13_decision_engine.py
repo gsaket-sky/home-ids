@@ -237,6 +237,32 @@ check("a custom registry that omits arp_spoof entirely means arp_spoofing eviden
       "hard-stops at all -- confirms the registry is genuinely swappable, not just additive",
       r_custom_no_default["decision_path"] != "hard_stop")
 
+# --- winning_evidence (BUGFIX, live audit 2026-09-09): pipeline.py's alert-building
+# step needs the REAL evidence that satisfied the winning hypothesis (destination +
+# features), not just the hypotheses dict/reasoning_trail strings it already had --
+# see pipeline.py's own COORDINATED_TARGETING/PEER_COHORT_DEVIATION attribution
+# branches (src/core/pipeline.py) for the consuming side that motivated this.
+r_we = engine.evaluate(
+    [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
+     ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
+     ev("zeek_notice", value=1.0, dest="unrelated-destination.example")],
+    rep(3), now=NOW,
+)
+check("winning_evidence is populated for an attack-hypothesis-driven verdict",
+      len(r_we["winning_evidence"]) > 0, f"got {r_we['winning_evidence']}")
+check("winning_evidence is scoped to the WINNING hypothesis's own RELEVANT_EVIDENCE_TYPES -- "
+      "the unrelated zeek_notice evidence (a different hypothesis's own evidence type) is excluded",
+      all(w["evidence_type"] in ("dns_dga_burst", "dns_rate") for w in r_we["winning_evidence"])
+      and not any(w["evidence_type"] == "zeek_notice" for w in r_we["winning_evidence"]),
+      f"got {r_we['winning_evidence']}")
+check("winning_evidence carries the real destination_id for the evidence that has one",
+      any(w["destination_id"] == "evil-dga.example" for w in r_we["winning_evidence"]),
+      f"got {r_we['winning_evidence']}")
+
+r_we_benign = engine.evaluate([], rep(3), now=NOW)
+check("winning_evidence is empty (not crashing) when no attack hypothesis wins at all",
+      r_we_benign["winning_evidence"] == [])
+
 # --- INVARIANT BATTERY (third-party architecture review, item #11: "enforce
 # HIGH/CRITICAL invariants in code") -- rather than trusting the branch logic by
 # convention, assert the two central rules directly against a battery of varied

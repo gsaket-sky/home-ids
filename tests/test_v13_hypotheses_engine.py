@@ -26,12 +26,13 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from v13.evidence.model import Evidence  # noqa: E402
+from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from v13.hypotheses.engine import (  # noqa: E402
     HypothesisEngine, DNSTunnelingHypothesis, NetworkIntrusionHypothesis,
     ConnectionAbuseHypothesis, DNSEvasionHypothesis, DeviceProfileBenignHypothesis,
     DGAHypothesis, ExfiltrationHypothesis, BeaconingHypothesis, DNSTunnelingV2Hypothesis,
-    CoordinatedTargetingHypothesis, PeerDeviationHypothesis, compute_freshness, score_evidence,
+    CoordinatedTargetingHypothesis, PeerDeviationHypothesis, AdvertisingBurstHypothesis,
+    compute_freshness, score_evidence,
 )
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 
@@ -46,6 +47,16 @@ def ev(evidence_type, value, timestamp=NOW, family="general", provenance="", con
 
 def rep(tier, domain="x.com"):
     return ReputationVector(domain=domain, tier=tier)
+
+
+def ev_at(evidence_type, value, destination_id, timestamp=NOW, family="general", provenance=""):
+    """Like ev() above but with an explicit destination_id -- ev() hardcodes "x.com"
+    (matching rep()'s own default domain), so every check using ev()/rep() together
+    only ever exercises the SAME-destination path. Needed to exercise the mismatch/
+    ambiguous paths of _effective_rep_tier() (BUGFIX, live audit 2026-09-09) below."""
+    return Evidence(device_id="dev1", destination_id=destination_id, evidence_type=evidence_type,
+                      independence_family=family, timestamp=timestamp, source="s",
+                      value=value, confidence=1.0, provenance=provenance)
 
 
 # --- freshness/TTL mechanism ---
@@ -414,6 +425,96 @@ check("evaluate_all() falls back to DIRECT_IOC_HIT when no attack hypothesis fir
 result_empty = engine.evaluate_all([], rep(3))
 check("evaluate_all() with zero evidence falls back to UNKNOWN_BENIGN / DIRECT_IOC_HIT cleanly, no crash",
       result_empty["benign"]["name"] == "UNKNOWN_BENIGN" and result_empty["attack"]["name"] == "DIRECT_IOC_HIT")
+
+# --- BUGFIX (live audit, 2026-09-09): Hypothesis._effective_rep_tier() -- generalizes
+# a214a2f's single-hypothesis (CoordinatedTargetingHypothesis) per-destination
+# reputation fix to all 11 attack hypotheses, both the trust-suppression (tier in
+# (1,2)) and escalation (tier==4 / tier in (3,4)/(3,4,5)) directions. Every check
+# above this point uses ev()'s hardcoded "x.com" destination alongside rep()'s
+# matching default domain -- exercises only the "rep_vector IS about my destination"
+# path. These use ev_at() to construct evidence at an explicit, different
+# destination, directly exercising the mismatch/match/ambiguous paths.
+
+# Suppression direction (DGAHypothesis, tier in (1,2)):
+dga_hits = [
+    ev_at("dns_dga_burst", 1.0, "evil-dga-domain.ru"),
+    ev_at("dns_rate", 150.0, NO_DESTINATION),
+]
+dga = DGAHypothesis()
+dga_mismatched = dga.evaluate(score_evidence(dga_hits, now=NOW), rep(1, domain="totally-unrelated-cdn.com"))
+check("REGRESSION GUARD: a rep_vector describing an UNRELATED destination no longer wrongly "
+      "suppresses a real DGA hit via a trusted (tier 1) verdict about something else",
+      dga_mismatched >= 3.0 and dga.contradicting_score == 0, f"got score={dga_mismatched}")
+
+dga_matched = dga.evaluate(score_evidence(dga_hits, now=NOW), rep(1, domain="evil-dga-domain.ru"))
+check("a rep_vector that DOES describe this hypothesis's own destination still suppresses it normally",
+      dga_matched == 2.0 and dga.contradicting_score == 1.0, f"got score={dga_matched}")
+
+dga_ambiguous = dga.evaluate(score_evidence(dga_hits, now=NOW), rep(1, domain=""))
+check("a rep_vector with NO domain info at all (ambiguous) still applies its tier unchanged -- "
+      "matches decision_engine.py's own Gap-64 'never touch the ambiguous case' rule",
+      dga_ambiguous == 2.0 and dga.contradicting_score == 1.0, f"got score={dga_ambiguous}")
+
+# Escalation direction (DNSTunnelingHypothesis, the one hypothesis whose escalation
+# check requires tier==4 exactly, not a wider (3,4,5)-style range that already treats
+# "unclassified" as escalation-eligible regardless of this fix -- see this session's
+# own analysis for why that range is a separate, pre-existing design choice this fix
+# deliberately doesn't also change).
+dns_tunnel_hits = [
+    ev_at("dns_rate", 150.0, "sketchy-domain.example"),
+    ev_at("dns_entropy", 4.5, "sketchy-domain.example"),
+    ev_at("dns_unique_ratio", 0.9, "sketchy-domain.example"),
+]
+dnst = DNSTunnelingHypothesis()
+dnst_mismatched = dnst.evaluate(score_evidence(dns_tunnel_hits, now=NOW), rep(4, domain="totally-different-domain.example"))
+check("REGRESSION GUARD: an unrelated tier-4 rep_vector no longer wrongly escalates a DNS-tunneling "
+      "finding it has nothing to do with (falls back to neutral/unclassified, not tier 4)",
+      dnst_mismatched == 3.0, f"got score={dnst_mismatched}")
+
+dnst_matched = dnst.evaluate(score_evidence(dns_tunnel_hits, now=NOW), rep(4, domain="sketchy-domain.example"))
+check("a tier-4 rep_vector that DOES describe this hypothesis's own destination still escalates it normally",
+      dnst_matched == 4.0, f"got score={dnst_matched}")
+
+# PeerDeviationHypothesis's own evidence is device-level by design (destination_id=
+# NO_DESTINATION, live_engine.py's _inject_peer_deviation_evidence()) -- confirms the
+# generalized fix is a correct NO-OP here, not an accidental behavior change to the
+# one hypothesis that deliberately has no destination to compare against.
+pd_hits = [ev_at("peer_deviation", 0.9, NO_DESTINATION)]
+pd = PeerDeviationHypothesis()
+pd_score = pd.evaluate(score_evidence(pd_hits, now=NOW), rep(1, domain="some-unrelated-domain.example"))
+check("PeerDeviationHypothesis (destination-less evidence by design) is unaffected by the "
+      "generalized fix -- an unrelated-domain rep_vector still applies its tier unchanged, the "
+      "same ambiguous-case behavior it had before this fix",
+      pd_score == 2.0 and pd.contradicting_score == 1.0, f"got score={pd_score}")
+
+# --- BUGFIX (live audit, 2026-09-09): the 2 benign hypotheses whose REQUIRED gate reads
+# rep_vector.tier (AdvertisingBurstHypothesis/DeviceProfileBenignHypothesis) now also
+# route through _effective_rep_tier(). In production this is a no-op today (dns_rate
+# never carries a destination), but these tests use ev_at() to simulate the gap being
+# closed later (the same way zeek_exfiltration/zeek_beaconing's identical gap already
+# was, via live_engine.py's _NEEDS_LAST_DEST_IP_FALLBACK) -- proving the safety net is
+# actually wired correctly, not just declared.
+ab = AdvertisingBurstHypothesis()
+ab_hits = [ev_at("dns_rate", 60.0, "some-cdn.example")]
+ab_matched = ab.evaluate(score_evidence(ab_hits, now=NOW), rep(2, domain="some-cdn.example"))
+check("AdvertisingBurstHypothesis fires normally when rep_vector DOES describe its own destination",
+      ab_matched > 0.0, f"got score={ab_matched}")
+ab_mismatched = ab.evaluate(score_evidence(ab_hits, now=NOW), rep(2, domain="totally-different.example"))
+check("REGRESSION GUARD: AdvertisingBurstHypothesis does NOT fire on an unrelated tier-2 "
+      "rep_vector -- a benign verdict must not be approved based on a destination this "
+      "evidence has nothing to do with",
+      ab_mismatched == 0.0, f"got score={ab_mismatched}")
+
+dpb = DeviceProfileBenignHypothesis()
+dpb_hits = [ev_at("dns_rate", 30.0, "some-cdn.example")]
+dpb_matched = dpb.evaluate(score_evidence(dpb_hits, now=NOW), rep(1, domain="some-cdn.example"), device_type="smart_tv")
+check("DeviceProfileBenignHypothesis fires normally when rep_vector DOES describe its own destination",
+      dpb_matched > 0.0, f"got score={dpb_matched}")
+dpb_mismatched = dpb.evaluate(score_evidence(dpb_hits, now=NOW), rep(1, domain="unrelated.example"), device_type="smart_tv")
+check("REGRESSION GUARD: DeviceProfileBenignHypothesis does NOT fire on an unrelated "
+      "trusted-tier rep_vector alone (no baseline_familiarity here either) -- same "
+      "wrong-destination-approves-benign-verdict risk closed",
+      dpb_mismatched == 0.0, f"got score={dpb_mismatched}")
 
 print()
 if FAILURES:

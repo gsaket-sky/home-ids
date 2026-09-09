@@ -1866,6 +1866,58 @@ class EnginePipeline:
                         elif primary_sig_base == "PEER_COHORT_DEVIATION":
                             alert_dest_ip = "unknown"
                             alert_target_domain = "unknown"
+                        # BUGFIX (live audit, 2026-09-09, same pass as COORDINATED_TARGETING/
+                        # PEER_COHORT_DEVIATION above): a broader check across every
+                        # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES name found 4 more signatures
+                        # falling through to the same generic dest_ip fallback with no branch
+                        # of their own -- DNS_TUNNELING, DATA_EXFILTRATION, C2_BEACONING,
+                        # SIGNATURE_MATCHED_THREAT (plus decision_engine.py's own hard-stop
+                        # name for the same underlying evidence, "Confirmed Exploit/Malware
+                        # Signature (Suricata)"). DNS_TUNNELING's own evidence
+                        # (dns_rate/dns_entropy/dns_unique_ratio, detectors/dns_behavior.py)
+                        # never sets .domain at all -- a genuine device-wide DNS-rate
+                        # aggregate, no single destination to name, same "destination-less by
+                        # design" shape as PEER_COHORT_DEVIATION above.
+                        elif primary_sig_base == "DNS_TUNNELING":
+                            alert_dest_ip = "unknown"
+                            alert_target_domain = "unknown"
+                        # DATA_EXFILTRATION/C2_BEACONING's own evidence (zeek_exfiltration/
+                        # zeek_beaconing, detectors/threat_signals.py) has the SAME known gap
+                        # v13/ops/live_engine.py's own _NEEDS_LAST_DEST_IP_FALLBACK already
+                        # documents and patches (a last-known-dest-IP fallback, applied when
+                        # v13 converts this cycle's v1 evidence to its own model) -- so
+                        # decision.get("winning_evidence") already carries a usable
+                        # destination_id for these two, the same field COORDINATED_TARGETING
+                        # above reads, no new plumbing needed.
+                        elif primary_sig_base == "DATA_EXFILTRATION":
+                            alert_target_domain = "unknown"
+                            for we in decision.get("winning_evidence", []):
+                                dest = we.get("destination_id")
+                                if we.get("evidence_type") == "zeek_exfiltration" and dest and dest != "(none)" and dest != "unknown":
+                                    alert_dest_ip = dest
+                                    break
+                        elif primary_sig_base == "C2_BEACONING":
+                            alert_target_domain = "unknown"
+                            for we in decision.get("winning_evidence", []):
+                                dest = we.get("destination_id")
+                                if we.get("evidence_type") == "zeek_beaconing" and dest and dest != "(none)" and dest != "unknown":
+                                    alert_dest_ip = dest
+                                    break
+                        # SIGNATURE_MATCHED_THREAT (SuricataSignatureHypothesis, a
+                        # corroborating-evidence-tier Suricata match) and "Confirmed Exploit/
+                        # Malware Signature (Suricata)" (decision_engine.py's own hard-stop
+                        # name for a high-confidence Suricata match) are two different verdict
+                        # PATHS over the exact same suricata_signature_match evidence
+                        # (detectors/suricata_scan.py), which already sets a real .domain
+                        # (target_ip) directly on the v1 evidence -- same simple pattern as
+                        # the NETWORK_INTRUSION/ARP-spoofing/honeypot branches above, no
+                        # winning_evidence needed.
+                        elif primary_sig_base in ("SIGNATURE_MATCHED_THREAT", "Confirmed Exploit/Malware Signature (Suricata)"):
+                            for ev in active_evidence:
+                                if ev.type == "suricata_signature_match" and ev.domain:
+                                    alert_dest_ip = ev.domain
+                                    alert_target_domain = "unknown"
+                                    break
                         elif primary_sig_base == "Layer-2 ARP Spoofing Detected":
                             for ev in active_evidence:
                                 if ev.type == "arp_spoofing" and ev.domain:
