@@ -577,6 +577,33 @@ ZEEK_NOTICE_TIER_SCORE_WEIGHT = {
     "weak": 0.0, "medium": 0.5, "strong": 0.75, "highly_deterministic": 1.0,
 }
 
+# BUGFIX (explicit user request, 2026-09-09): evidence_type was a single flat
+# "zeek_notice" for every tier, requiring every consumer (hypotheses' RELEVANT_
+# EVIDENCE_TYPES, the attack_evidence bridge, destination attribution, etc.) to
+# parse a tier out of provenance with string-splitting. Fragmenting BY TIER (not by
+# the ~27+ individual Notice::Type/weird names, which would explode
+# RELEVANT_EVIDENCE_TYPES enumeration and require a code change before any brand-new
+# notice type could be recognized at all) gives a small, stable, exhaustive set that
+# every consumer can do a plain `evidence_type in ZEEK_NOTICE_EVIDENCE_TYPES` (or
+# `... in ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES`, excluding weak) check against.
+ZEEK_NOTICE_EVIDENCE_TYPES = frozenset(
+    f"zeek_notice_{tier}" for tier in ZEEK_NOTICE_TIER_SCORE_WEIGHT
+)
+# The subset that should ever count as "this evidence is attack-shaped" for a
+# competing-evidence/required-corroboration gate -- weak (routine capture/protocol
+# noise) deliberately excluded, matching NetworkIntrusionHypothesis/
+# DeviceProfileBenignHypothesis's own tier-aware treatment.
+ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES = frozenset(
+    f"zeek_notice_{tier}" for tier in ZEEK_NOTICE_TIER_SCORE_WEIGHT if tier != "weak"
+)
+
+
+def zeek_notice_evidence_type(tier: str) -> str:
+    """The evidence_type string for a given weak/medium/strong/highly_deterministic
+    tier -- the single source of truth for the "zeek_notice_{tier}" naming
+    convention, so no call site hand-builds the f-string independently."""
+    return f"zeek_notice_{tier}"
+
 
 def classify_zeek_notice(note_type: str) -> str:
     """Classifies a Zeek notice.log Notice::Type or synthesized weird.log

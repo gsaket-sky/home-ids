@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, ZEEK_NOTICE_TIER_SCORE_WEIGHT
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, ZEEK_NOTICE_TIER_SCORE_WEIGHT, ZEEK_NOTICE_EVIDENCE_TYPES
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -185,7 +185,14 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "zeek_conn_abuse": "Abnormal connection pattern (many short-lived or rejected connections)",
     "zeek_long_conn": "Unusually long-lived connection",
     "arp_sweep": "ARP-swept many distinct hosts on the LAN (host-discovery behavior)",
-    "zeek_notice": "Zeek policy notice fired for this connection",
+    # BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+    # evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- same
+    # base text for all 4, since the actual distinguishing detail (note type + tier)
+    # is appended by _describe_evidence()'s own notice_suffix, not this base text.
+    "zeek_notice_weak": "Zeek policy notice fired for this connection",
+    "zeek_notice_medium": "Zeek policy notice fired for this connection",
+    "zeek_notice_strong": "Zeek policy notice fired for this connection",
+    "zeek_notice_highly_deterministic": "Zeek policy notice fired for this connection",
     "arp_spoofing": "Layer-2 ARP spoofing detected (this device's MAC address changed)",
     "arp_spoof_pending": "Possible ARP spoofing -- MAC change detected, not yet confirmed",
     "ml_anomaly": "Flagged as statistically anomalous by the ML baseline model",
@@ -290,28 +297,40 @@ def _describe_evidence(ev, geoip_engine=None) -> str:
     # tell a genuinely alarming notice type apart from a routine one -- provenance now
     # carries the real note type (see zeek_network.py), surfaced here the same way
     # domain_suffix already surfaces per-evidence detail for other types.
-    # BUGFIX (live audit, 2026-09-09): provenance format gained a weak/medium/strong/
-    # highly_deterministic tier subtag ("detector:zeek:notice:{tier}:{note_type}",
-    # utils.py's classify_zeek_notice()) -- split(":", 4) now returns
-    # ["detector", "zeek", "notice", "{tier}", "{note_type}"] instead of the clean
-    # note_type alone at index [3]. Same split(":", 4)[4] convention this file
-    # already uses for subtag-carrying provenance elsewhere.
-    # BUGFIX (explicit user request, 2026-09-09): the tier itself now shows too, not
-    # just the raw note type -- "Zeek policy notice fired -- weird:data_before_
-    # established" told a human nothing about whether that specific notice was
-    # actually worth their attention or routine capture noise; "(weak)" vs.
-    # "(highly deterministic)" does. Validated against ZEEK_NOTICE_TIER_SCORE_
-    # WEIGHT's own key set rather than trusted blindly -- pre-deploy evidence still
-    # inside the 24h graph window (old 4-segment provenance, no tier subtag) has a
-    # non-tier fragment at index [3] instead, which this correctly omits rather than
-    # showing as if it were a real tier.
+    # BUGFIX (explicit user request, 2026-09-09): evidence_type is now
+    # "zeek_notice_{tier}" (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) instead of a flat
+    # "zeek_notice" with the tier hidden in a provenance subtag -- the tier comes
+    # straight from ev.type now, provenance only needs to carry the note type
+    # ("detector:zeek:notice:{note_type}", split(":", 3)[3]). The tier itself is
+    # shown too, not just the raw note type -- "Zeek policy notice fired --
+    # weird:data_before_established" told a human nothing about whether that
+    # specific notice was actually worth their attention or routine capture noise;
+    # "(weak)" vs. "(highly deterministic)" does.
     notice_suffix = ""
-    if ev.type == "zeek_notice" and getattr(ev, "provenance", ""):
-        parts = ev.provenance.split(":", 4)
-        if len(parts) == 5 and parts[4] and parts[4] != "unknown":
-            tier = parts[3]
-            tier_suffix = f" _({tier.replace('_', ' ')})_" if tier in ZEEK_NOTICE_TIER_SCORE_WEIGHT else ""
-            notice_suffix = f" — `{parts[4]}`{tier_suffix}"
+    if ev.type in ZEEK_NOTICE_EVIDENCE_TYPES and getattr(ev, "provenance", ""):
+        tier = ev.type[len("zeek_notice_"):]
+        parts = ev.provenance.split(":", 3)
+        note_type = parts[3] if len(parts) == 4 else ""
+        if note_type and note_type != "unknown":
+            notice_suffix = f" — `{note_type}` _({tier.replace('_', ' ')})_"
+    elif ev.type == "zeek_notice" and getattr(ev, "provenance", ""):
+        # BACKWARD COMPAT: evidence written before this fragmentation deploy still
+        # carries the old flat "zeek_notice" evidence_type -- still valid within the
+        # 24h graph window, self-resolving as it ages out. Its provenance may be in
+        # EITHER the tier-in-provenance format (detector:zeek:notice:{tier}:
+        # {note_type}, from the same-day tiering fix that preceded this
+        # fragmentation) or the original untiered format (detector:zeek:notice:
+        # {note_type}) -- try the 5-segment tiered form first so evidence from
+        # earlier today still shows its tier, falling back to the 4-segment
+        # untiered form so older evidence still shows a note type rather than
+        # going silent.
+        parts5 = ev.provenance.split(":", 4)
+        if len(parts5) == 5 and parts5[3] in ZEEK_NOTICE_TIER_SCORE_WEIGHT and parts5[4] and parts5[4] != "unknown":
+            notice_suffix = f" — `{parts5[4]}` _({parts5[3].replace('_', ' ')})_"
+        else:
+            parts4 = ev.provenance.split(":", 3)
+            if len(parts4) == 4 and parts4[3] and parts4[3] != "unknown":
+                notice_suffix = f" — `{parts4[3]}`"
     return f"{text}{domain_suffix}{notice_suffix}"
 
 
@@ -1991,8 +2010,13 @@ class EnginePipeline:
                         # dynamic name whenever zeek_lateral_scan drove the finding
                         # (hypotheses/engine.py) -- same evidence types, same attribution logic.
                         elif primary_sig_base in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT"):
+                            # BUGFIX (explicit user request, 2026-09-09): "zeek_notice"
+                            # fragmented into 4 evidence_type values by tier -- ev.type ==
+                            # "zeek_notice" (bare) also still matched for evidence written
+                            # before this deploy, still valid within the 24h graph window.
                             for ev in active_evidence:
-                                if ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice") and ev.domain:
+                                if (ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice")
+                                        or ev.type in ZEEK_NOTICE_EVIDENCE_TYPES) and ev.domain:
                                     alert_dest_ip = ev.domain
                                     alert_target_domain = "unknown"
                                     break

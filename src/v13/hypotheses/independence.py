@@ -68,8 +68,15 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "malicious_ja3": "tls_fingerprint",
     "malicious_ja4": "tls_fingerprint",
 
-    # General Zeek flow-level behavioral notices.
-    "zeek_notice": "network_behavior",
+    # General Zeek flow-level behavioral notices. BUGFIX (explicit user request,
+    # 2026-09-09): "zeek_notice" fragmented into 4 evidence_type values by tier
+    # (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- all 4 still share this SAME family,
+    # this split is about evidence_type-level scoring granularity, not about which
+    # vantage point they come from (still the same Zeek notice/weird stream).
+    "zeek_notice_weak": "network_behavior",
+    "zeek_notice_medium": "network_behavior",
+    "zeek_notice_strong": "network_behavior",
+    "zeek_notice_highly_deterministic": "network_behavior",
     "zeek_lateral_scan": "network_behavior",
     "zeek_conn_abuse": "network_behavior",
     "zeek_long_conn": "network_behavior",

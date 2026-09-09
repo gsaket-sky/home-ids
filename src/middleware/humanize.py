@@ -35,7 +35,14 @@ EVIDENCE_TYPE_LABELS = {
     "dns_unique_ratio": ("High ratio of unique domains", "A high fraction of this device's DNS queries are for domains never seen before -- consistent with domain-generation-algorithm (DGA) traffic."),
     "dns_evasion_anomaly": ("DNS evasion pattern", "Query pattern consistent with evading DNS-based blocking (e.g. NXDOMAIN bursts, suspicious TLD concentration)."),
     "suricata_signature_match": ("Suricata signature match", "A real Suricata IDS rule fired against captured traffic for this device -- see the Suricata tab for which rule, when available."),
-    "zeek_notice": ("Zeek protocol notice", "Zeek's own protocol analyzers (SSL, weird-traffic, etc.) flagged something about this connection worth noting."),
+    # BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+    # evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- same
+    # base description, the label itself names the tier so an operator can tell a
+    # routine capture artifact apart from a real attack-technique notice at a glance.
+    "zeek_notice_weak": ("Zeek protocol notice (weak)", "Zeek's own protocol analyzers flagged something about this connection -- classified weak (routine TCP-framing/capture-timing artifact, not attacker behavior)."),
+    "zeek_notice_medium": ("Zeek protocol notice (medium)", "Zeek's own protocol analyzers flagged something about this connection -- classified medium (touches real payload/protocol content, e.g. an invalid TLS cert)."),
+    "zeek_notice_strong": ("Zeek protocol notice (strong)", "Zeek's own protocol analyzers flagged something about this connection -- classified strong (a well-documented attack-technique notice type, e.g. port scanning)."),
+    "zeek_notice_highly_deterministic": ("Zeek protocol notice (highly deterministic)", "Zeek's own protocol analyzers flagged something about this connection -- classified highly deterministic (a curated threat-intel/signature match, not a probabilistic heuristic)."),
     "coordinated_targeting": ("Coordinated targeting", "Multiple devices on this network contacted the same suspicious destination in a short window -- suggests a coordinated campaign rather than one device acting alone."),
     "first_contact": ("First-ever contact with this destination", "This device has never been observed contacting this destination before now."),
     "fingerprint_campaign": ("TLS fingerprint campaign match", "This connection's JA3/JA4 TLS fingerprint matches a fingerprint seen across a wider malicious campaign."),

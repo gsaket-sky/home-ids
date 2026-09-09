@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional
 
 from v13.evidence.model import Evidence, NO_DESTINATION
-from utils import ZEEK_NOTICE_TIER_SCORE_WEIGHT
+from utils import ZEEK_NOTICE_TIER_SCORE_WEIGHT, ZEEK_NOTICE_EVIDENCE_TYPES, ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
 try:
     from intelligence.reputation.classifier import ReputationVector
@@ -202,27 +202,32 @@ class DNSTunnelingHypothesis(Hypothesis):
         return score
 
 
+# BUGFIX (explicit user request, 2026-09-09): zeek_notice's tier now lives directly
+# in evidence_type ("zeek_notice_{tier}", utils.py's ZEEK_NOTICE_EVIDENCE_TYPES)
+# instead of a provenance subtag -- confirmed live that zeek_notice evidence was
+# 214,795 of 218,405 total evidence rows (98.3%) in .94's graph, and every
+# consumer that cared about tier needed to string-parse provenance just to tell
+# them apart. _ZEEK_NOTICE_EVIDENCE_TYPE_WEIGHT maps the 4 stable evidence_type
+# strings directly to their scoring weight -- a plain dict lookup, no parsing.
+_ZEEK_NOTICE_EVIDENCE_TYPE_WEIGHT = {
+    f"zeek_notice_{tier}": weight for tier, weight in ZEEK_NOTICE_TIER_SCORE_WEIGHT.items()
+}
+
+
 def _zeek_notice_weight(e: ScoredEvidence) -> float:
-    """Extracts the weak/medium/strong/highly_deterministic tier
-    intelligence/detectors/zeek_network.py encodes as a provenance subtag
-    ("detector:zeek:notice:{tier}:{note_type}") and returns its scoring weight --
-    see utils.py's classify_zeek_notice()/ZEEK_NOTICE_TIER_SCORE_WEIGHT for the full
-    incident and tier definitions. Same "detector:...:{subtag}:{note}" convention,
-    split(":", 4)[3], that DNSTunnelingV2Hypothesis/BeaconingHypothesis/
-    DNSEvasionHypothesis's own subtag parsing already uses elsewhere in this file.
-    Returns 0.0 for anything that isn't a zeek_notice. Pre-deploy evidence still
-    inside the 24h graph window (old 4-segment provenance, no tier subtag) safely
-    defaults to medium (0.5) rather than crashing or silently zeroing out."""
-    if e.evidence_type != "zeek_notice":
-        return 0.0
-    tier = e.provenance.split(":", 4)[3] if e.provenance.count(":") >= 3 else "medium"
-    return ZEEK_NOTICE_TIER_SCORE_WEIGHT.get(tier, 0.5)
+    """Returns the scoring weight for a zeek_notice_{tier} evidence item (0.0 for
+    anything that isn't one of the 4 known zeek_notice evidence types) -- see
+    utils.py's classify_zeek_notice()/ZEEK_NOTICE_TIER_SCORE_WEIGHT for the full
+    incident and tier definitions."""
+    return _ZEEK_NOTICE_EVIDENCE_TYPE_WEIGHT.get(e.evidence_type, 0.0)
 
 
 class NetworkIntrusionHypothesis(Hypothesis):
+    # BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+    # evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES).
     RELEVANT_EVIDENCE_TYPES = frozenset({
-        "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice", "arp_spoof_pending",
-    })
+        "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "arp_spoof_pending",
+    }) | ZEEK_NOTICE_EVIDENCE_TYPES
     _NAME_NETWORK_INTRUSION = "NETWORK_INTRUSION"
     _NAME_LATERAL_MOVEMENT = "LATERAL_MOVEMENT"
 
@@ -708,12 +713,19 @@ class DeviceProfileBenignHypothesis(Hypothesis):
     # v13 doesn't have that shared-with-the-LLM-validator concern (yet -- Phase 5),
     # so this is declared directly here; kept as its own named constant (not inlined)
     # so a future Phase 5 module can import it the same way v-current's validator does.
+    # BUGFIX (live audit + explicit user request, 2026-09-09): "zeek_notice" used to
+    # be a single flat type here, requiring a special-cased tier check in evaluate()
+    # below (weak-tier notices, ~90% of all zeek_notice volume, shouldn't veto an
+    # otherwise-legitimate benign verdict). Now that evidence_type is fragmented by
+    # tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES), the fix is just: don't include
+    # the weak variant in this set at all -- ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
+    # already excludes it, so evaluate() needs no special-casing anymore.
     ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
         "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
-        "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
+        "malicious_ja4", "zeek_exfiltration", "zeek_beaconing",
         "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
         "arp_spoof_pending",
-    })
+    }) | ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
     # Matches fp_engine.py's FAMILIARITY_TRUST_BAR -- v13's CL-AFPE port (Phase 4)
     # doesn't exist yet, so this is a literal copy of the current live value (0.6,
@@ -743,17 +755,16 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         # BUGFIX (live audit, 2026-09-09): this "safety valve" used to treat ANY
         # zeek_notice as competing attack evidence purely by presence, blind to
         # tier -- given how common weak-tier notices are (a single TCP-capture
-        # artifact type alone fired 68,575 times on .94's real network, per
-        # _zeek_notice_weight()'s own incident writeup above), this made the
-        # safety valve fire on nearly every active device, making a benign
+        # artifact type alone fired 68,575 times on .94's real network), this made
+        # the safety valve fire on nearly every active device, making a benign
         # device-profile verdict nearly unreachable in practice whenever ordinary
-        # background noise was present. Only medium-or-above notices now count as
-        # competing evidence; every other ATTACK_SHAPED_EVIDENCE_TYPES member is
-        # unaffected (unconditional presence, as before).
+        # background noise was present.
+        # BUGFIX (explicit user request, 2026-09-09): now that zeek_notice's tier
+        # lives directly in evidence_type, this is a plain membership check again --
+        # ATTACK_SHAPED_EVIDENCE_TYPES above already excludes zeek_notice_weak, so
+        # no special-casing is needed here anymore.
         has_competing_attack_evidence = any(
-            (e.evidence_type in self.ATTACK_SHAPED_EVIDENCE_TYPES and e.evidence_type != "zeek_notice")
-            or (e.evidence_type == "zeek_notice" and _zeek_notice_weight(e) > 0.0)
-            for e in ev_store
+            e.evidence_type in self.ATTACK_SHAPED_EVIDENCE_TYPES for e in ev_store
         )
 
         self.required_satisfied = (

@@ -418,22 +418,22 @@ check("get_devices_targeting canonicalizes a merged orphan into its canonical id
 # as COORDINATED_TARGETING attack corroboration (83% of non-suppressed HIGH alerts in
 # a live 6h sample were exactly this shape).
 store.insert_evidence(Evidence(device_id="mc_dev_a", destination_id="224.0.0.251",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_000.0, source="s"))
 store.insert_evidence(Evidence(device_id="mc_dev_b", destination_id="224.0.0.251",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_010.0, source="s"))
 store.insert_evidence(Evidence(device_id="mc_dev_c", destination_id="ff02::fb",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_010.0, source="s"))
 store.insert_evidence(Evidence(device_id="mc_dev_d", destination_id="ff02::fb",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_020.0, source="s"))
 store.insert_evidence(Evidence(device_id="mc_dev_e", destination_id="192.168.1.255",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_020.0, source="s"))
 store.insert_evidence(Evidence(device_id="mc_dev_f", destination_id="192.168.1.255",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                  timestamp=7_000_030.0, source="s"))
 check("get_devices_targeting returns [] for an IPv4 multicast destination (mDNS group)",
       store.get_devices_targeting("224.0.0.251", since=6_999_000.0) == [])
@@ -460,7 +460,7 @@ for i in range(10):
 # 5 of those 10 (50% >= the 0.4 ratio bar) independently touch a shared local hub IP.
 for i in range(5):
     si_store.insert_evidence(Evidence(device_id=f"si_fleet_{i}", destination_id="192.168.1.47",
-                                        evidence_type="zeek_notice", independence_family="network_behavior",
+                                        evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                         timestamp=10_000_100.0 + i, source="s"))
 check("get_devices_targeting returns [] for a PRIVATE destination touched by a majority "
       "of a large-enough fleet (5/10 = 50% >= 40% bar) -- structural shared infrastructure",
@@ -470,7 +470,7 @@ check("get_devices_targeting returns [] for a PRIVATE destination touched by a m
 # otherwise-unusual destination (20% < the 40% bar) -- genuine corroboration signal.
 for i in range(2):
     si_store.insert_evidence(Evidence(device_id=f"si_fleet_{i}", destination_id="192.168.1.199",
-                                        evidence_type="zeek_notice", independence_family="network_behavior",
+                                        evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                         timestamp=10_000_200.0 + i, source="s"))
 si_minority = si_store.get_devices_targeting("192.168.1.199", since=10_000_150.0)
 check("get_devices_targeting still reports real coordination when only a MINORITY of "
@@ -482,10 +482,10 @@ check("get_devices_targeting still reports real coordination when only a MINORIT
 # for a ratio to mean anything.
 si_small = GraphStore(str(_PathForSysPath(tmpdir) / "test_graph_shared_infra_small.db"))
 si_small.insert_evidence(Evidence(device_id="sm_dev_a", destination_id="192.168.1.1",
-                                    evidence_type="zeek_notice", independence_family="network_behavior",
+                                    evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                     timestamp=11_000_000.0, source="s"))
 si_small.insert_evidence(Evidence(device_id="sm_dev_b", destination_id="192.168.1.1",
-                                    evidence_type="zeek_notice", independence_family="network_behavior",
+                                    evidence_type="zeek_notice_medium", independence_family="network_behavior",
                                     timestamp=11_000_010.0, source="s"))
 si_small_targeting = si_small.get_devices_targeting("192.168.1.1", since=10_999_000.0)
 check("get_devices_targeting does NOT ratio-suppress a small fleet (2 devices, below "
@@ -600,6 +600,36 @@ check("prune_device_destinations deletes rows older than the retention window",
       deleted >= 2, f"got {deleted}")
 check("prune_device_destinations actually removes the pruned rows -- count drops to 0",
       store.get_distinct_destination_count("n2_dev_rt", since=0.0) == 0)
+
+# --- prune_weak_zeek_notices (explicit user request, 2026-09-09 -- zeek_notice was
+# 98.3% of .94's real evidence table; weak-tier alone accounted for the overwhelming
+# majority, contributing ZERO scoring weight to any hypothesis) ---
+_wnow = 9_400_000.0
+store.insert_evidence(Evidence(device_id="wn_dev1", destination_id=NO_DESTINATION,
+                                 evidence_type="zeek_notice_weak", independence_family="network_behavior",
+                                 timestamp=_wnow - 13 * 3600, source="s"))  # older than 12h -- prunable
+store.insert_evidence(Evidence(device_id="wn_dev1", destination_id=NO_DESTINATION,
+                                 evidence_type="zeek_notice_weak", independence_family="network_behavior",
+                                 timestamp=_wnow - 1 * 3600, source="s"))  # within 12h -- kept
+store.insert_evidence(Evidence(device_id="wn_dev1", destination_id=NO_DESTINATION,
+                                 evidence_type="zeek_notice_medium", independence_family="network_behavior",
+                                 timestamp=_wnow - 13 * 3600, source="s"))  # same age, but NOT weak -- kept
+weak_deleted = store.prune_weak_zeek_notices(older_than_hours=12.0, now=_wnow)
+check("prune_weak_zeek_notices deletes exactly the old WEAK-tier row, nothing else",
+      weak_deleted == 1, f"got {weak_deleted}")
+remaining_weak = store._conn.execute(
+    "SELECT COUNT(*) AS c FROM evidence WHERE device_id = 'wn_dev1' AND evidence_type = 'zeek_notice_weak'"
+).fetchone()["c"]
+remaining_medium = store._conn.execute(
+    "SELECT COUNT(*) AS c FROM evidence WHERE device_id = 'wn_dev1' AND evidence_type = 'zeek_notice_medium'"
+).fetchone()["c"]
+check("REGRESSION GUARD: the recent weak-tier row survives (within the 12h window)",
+      remaining_weak == 1, f"got {remaining_weak}")
+check("REGRESSION GUARD: a medium-tier row of the SAME age is untouched -- this prune "
+      "is scoped to weak tier specifically, not a blanket age-based sweep",
+      remaining_medium == 1, f"got {remaining_medium}")
+check("prune_weak_zeek_notices with nothing to prune is a safe no-op (0, not an error)",
+      store.prune_weak_zeek_notices(older_than_hours=12.0, now=_wnow) == 0)
 
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",

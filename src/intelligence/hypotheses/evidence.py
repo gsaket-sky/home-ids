@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 import time
 
+from utils import ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
+
 @dataclass
 class Evidence:
     type: str               # e.g., "dns_entropy", "reputation_tier"
@@ -89,12 +91,17 @@ ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 # those genuinely are ambiguous signals a device-profile hypothesis is allowed to explain
 # as routine telemetry, not attack-specific on their own -- see
 # DeviceProfileBenignHypothesis's own docstring.
+# BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+# evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- weak
+# (routine TCP-framing/capture-timing noise, not attacker behavior) deliberately
+# excluded here too, matching v13's own DeviceProfileBenignHypothesis treatment,
+# so the two engines don't silently diverge on this exact question again.
 ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
     "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",
-    "malicious_ja4", "zeek_notice", "zeek_exfiltration", "zeek_beaconing",
+    "malicious_ja4", "zeek_exfiltration", "zeek_beaconing",
     "zeek_conn_abuse", "zeek_long_conn", "arp_sweep", "dns_evasion_anomaly",
     "arp_spoof_pending",
-})
+}) | ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
 class EvidenceStore:
     def __init__(self):

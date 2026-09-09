@@ -109,7 +109,7 @@ check("tier-5 + verified_ioc=True -> Confirmed Malicious IOC, CRITICAL",
       r_verified["decision_path"] == "tier5_confirmed" and r_verified["state"] == DecisionState.CRITICAL)
 
 r_corroborated = engine.evaluate(
-    [ev("malicious_ja3", timestamp=NOW - 5), ev("zeek_notice", timestamp=NOW - 5)],
+    [ev("malicious_ja3", timestamp=NOW - 5), ev("zeek_notice_medium", timestamp=NOW - 5)],
     rep(5, verified_ioc=False), now=NOW,
 )
 check("tier-5, not verified, but corroborated by 2 independent families (tls_fingerprint "
@@ -122,7 +122,7 @@ check("tier-5, not verified, but corroborated by 2 independent families (tls_fin
 # from a single weak corroborating hint. CRITICAL should never require LESS
 # corroboration than HIGH; now requires the same >=2-family bar.
 r_single_family_tier5 = engine.evaluate(
-    [ev("zeek_notice", timestamp=NOW - 5)],
+    [ev("zeek_notice_medium", timestamp=NOW - 5)],
     rep(5, verified_ioc=False), now=NOW,
 )
 check("REGRESSION GUARD: tier-5, not verified, only ONE independent family (network_behavior "
@@ -157,7 +157,7 @@ check("a lateral-scan-driven attack hypothesis WITH genuine two-family corrobora
       "(network_behavior + tls_fingerprint) reaches HIGH via the hypothesis_high path",
       r_high["decision_path"] == "hypothesis_high" and r_high["state"] == DecisionState.HIGH)
 
-r_suspicious = engine.evaluate([ev("zeek_notice", value=1)], rep(3), now=NOW)
+r_suspicious = engine.evaluate([ev("zeek_notice_medium", value=1)], rep(3), now=NOW)
 check("a weaker, single-source attack hypothesis (score 2.0) stays at SUSPICIOUS, not HIGH",
       r_suspicious["decision_path"] == "hypothesis_suspicious" and r_suspicious["state"] == DecisionState.SUSPICIOUS)
 
@@ -268,15 +268,15 @@ check("a custom registry that omits arp_spoof entirely means arp_spoofing eviden
 r_we = engine.evaluate(
     [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
      ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
-     ev("zeek_notice", value=1.0, dest="unrelated-destination.example")],
+     ev("zeek_notice_medium", value=1.0, dest="unrelated-destination.example")],
     rep(3), now=NOW,
 )
 check("winning_evidence is populated for an attack-hypothesis-driven verdict",
       len(r_we["winning_evidence"]) > 0, f"got {r_we['winning_evidence']}")
 check("winning_evidence is scoped to the WINNING hypothesis's own RELEVANT_EVIDENCE_TYPES -- "
-      "the unrelated zeek_notice evidence (a different hypothesis's own evidence type) is excluded",
+      "the unrelated zeek_notice_medium evidence (a different hypothesis's own evidence type) is excluded",
       all(w["evidence_type"] in ("dns_dga_burst", "dns_rate") for w in r_we["winning_evidence"])
-      and not any(w["evidence_type"] == "zeek_notice" for w in r_we["winning_evidence"]),
+      and not any(w["evidence_type"] == "zeek_notice_medium" for w in r_we["winning_evidence"]),
       f"got {r_we['winning_evidence']}")
 check("winning_evidence carries the real destination_id for the evidence that has one",
       any(w["destination_id"] == "evil-dga.example" for w in r_we["winning_evidence"]),
@@ -325,18 +325,18 @@ check("REGRESSION GUARD: winning_evidence's peer_deviation entry carries the rea
 # peer_deviation, missing the 3 OTHER real corroborating families). Unlike
 # winning_evidence, attack_evidence must include EVERY family independent_sources
 # counts against, not just the winning hypothesis's own slice -- reusing the SAME r_we
-# scenario above: zeek_notice (network_behavior) is a DIFFERENT hypothesis's own
+# scenario above: zeek_notice_medium (network_behavior) is a DIFFERENT hypothesis's own
 # evidence type (NetworkIntrusionHypothesis, not DGA_BOTNET_C2 which won here), excluded
 # from winning_evidence but MUST be present in attack_evidence since it's a real,
 # counted corroborating source (independent_sources==2, dns_behavior+network_behavior).
 check("attack_evidence includes EVERY corroborating family, not just the winning "
-      "hypothesis's own slice -- zeek_notice (a DIFFERENT hypothesis's evidence type) "
+      "hypothesis's own slice -- zeek_notice_medium (a DIFFERENT hypothesis's evidence type) "
       "must be present even though winning_evidence correctly excludes it",
-      any(w["evidence_type"] == "zeek_notice" for w in r_we["attack_evidence"]),
+      any(w["evidence_type"] == "zeek_notice_medium" for w in r_we["attack_evidence"]),
       f"got {r_we['attack_evidence']}")
 check("attack_evidence's length matches independent_sources's own family count exactly "
       "(one entry per distinct independence_family among {dns_dga_burst/dns_rate -> "
-      "dns_behavior, zeek_notice -> network_behavior})",
+      "dns_behavior, zeek_notice_medium -> network_behavior})",
       len({w['independence_family'] for w in r_we["attack_evidence"]}) == r_we["independent_sources"] == 2,
       f"got attack_evidence={r_we['attack_evidence']} independent_sources={r_we['independent_sources']}")
 check("each attack_evidence entry carries its own independence_family directly -- "
@@ -356,14 +356,15 @@ check("attack_evidence is an empty list (not crashing) when there's no evidence 
 # real note type correctly via winning_evidence/active_evidence but not via this path.
 r_ae_prov = engine.evaluate(
     [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
-     ev("zeek_notice", value=1.0, dest="unrelated-destination.example",
-        provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
+     ev("zeek_notice_medium", value=1.0, dest="unrelated-destination.example",
+        provenance="detector:zeek:notice:SSL::Invalid_Server_Cert")],
     rep(3), now=NOW,
 )
-check("REGRESSION GUARD: attack_evidence's zeek_notice entry carries the real "
-      "provenance (note type + tier), not dropped at serialization",
-      any(w["evidence_type"] == "zeek_notice"
-          and w.get("provenance") == "detector:zeek:notice:medium:SSL::Invalid_Server_Cert"
+check("REGRESSION GUARD: attack_evidence's zeek_notice_medium entry carries the real "
+      "provenance (note type -- the tier itself now lives in evidence_type, not "
+      "dropped at serialization",
+      any(w["evidence_type"] == "zeek_notice_medium"
+          and w.get("provenance") == "detector:zeek:notice:SSL::Invalid_Server_Cert"
           for w in r_ae_prov["attack_evidence"]),
       f"got {r_ae_prov['attack_evidence']}")
 
@@ -405,12 +406,12 @@ _DETERMINISTIC_CRITICAL_PATHS = {"hard_stop", "tier5_confirmed"}
 _invariant_scenarios = [
     ("empty evidence, tier 3", [], rep(3)),
     ("single dns_behavior family only", [ev("dns_dga_burst", value=1, confidence=0.95)], rep(3)),
-    ("single network_behavior family only", [ev("zeek_notice")], rep(3)),
-    ("two genuinely different families", [ev("malicious_ja3"), ev("zeek_notice")], rep(3)),
+    ("single network_behavior family only", [ev("zeek_notice_medium")], rep(3)),
+    ("two genuinely different families", [ev("malicious_ja3"), ev("zeek_notice_medium")], rep(3)),
     ("three genuinely different families",
-     [ev("malicious_ja3"), ev("zeek_notice"), ev("reputation", value=5.0)], rep(3)),
-    ("tier 5 unverified, single family", [ev("zeek_notice")], rep(5, verified_ioc=False)),
-    ("tier 5 unverified, two families", [ev("malicious_ja3"), ev("zeek_notice")], rep(5, verified_ioc=False)),
+     [ev("malicious_ja3"), ev("zeek_notice_medium"), ev("reputation", value=5.0)], rep(3)),
+    ("tier 5 unverified, single family", [ev("zeek_notice_medium")], rep(5, verified_ioc=False)),
+    ("tier 5 unverified, two families", [ev("malicious_ja3"), ev("zeek_notice_medium")], rep(5, verified_ioc=False)),
     ("tier 5 verified_ioc, no evidence", [], rep(5, verified_ioc=True)),
     ("fresh honeypot feature, no evidence", [], rep(3)),
     ("fresh arp_spoofing hard-stop", [ev("arp_spoofing", timestamp=NOW - 5)], rep(3)),
@@ -422,7 +423,7 @@ _invariant_scenarios = [
       ev("malicious_ja3", timestamp=NOW - 5, dest="bad.example.com")], rep(3)),
     ("local_device_discovery only (non-attack family)", [ev("local_device_discovery", value=1)], rep(3)),
     ("trusted tier (1) with otherwise-strong evidence",
-     [ev("malicious_ja3"), ev("zeek_notice")], rep(1)),
+     [ev("malicious_ja3"), ev("zeek_notice_medium")], rep(1)),
 ]
 
 for label, evidence, rep_vec in _invariant_scenarios:

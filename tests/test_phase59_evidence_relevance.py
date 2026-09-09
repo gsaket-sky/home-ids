@@ -87,9 +87,11 @@ check("DNSTunnelingHypothesis declares exactly its own required/strong evidence 
       DNSTunnelingHypothesis.RELEVANT_EVIDENCE_TYPES == frozenset({"dns_rate", "dns_entropy", "dns_unique_ratio"}))
 
 check("NetworkIntrusionHypothesis declares exactly its own required evidence types "
-      "(union of live + shadow variants)",
+      "(union of live + shadow variants) -- zeek_notice fragmented into 4 evidence_type "
+      "values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) as of 2026-09-09",
       NetworkIntrusionHypothesis.RELEVANT_EVIDENCE_TYPES == frozenset({
-          "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice", "arp_spoof_pending",
+          "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "arp_spoof_pending",
+          "zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic",
       }))
 
 check("a hypothesis that hasn't declared an override (AdvertisingBurstHypothesis) "
@@ -132,9 +134,12 @@ check("arp_spoof_pending (present, relevant to NETWORK_INTRUSION) lands in "
       "present_relevant",
       bd["present_relevant"] == ["arp_spoof_pending"])
 
-check("zeek_lateral_scan/malicious_ja3/ja4/zeek_notice (relevant but not present on "
-      "THIS alert) land in absent_relevant",
-      set(bd["absent_relevant"]) == {"zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice"})
+check("zeek_lateral_scan/malicious_ja3/ja4/zeek_notice_{tier}x4 (relevant but not "
+      "present on THIS alert) land in absent_relevant",
+      set(bd["absent_relevant"]) == {
+          "zeek_lateral_scan", "malicious_ja3", "malicious_ja4",
+          "zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic",
+      })
 
 check("dns_rate (present on the alert, but NOT relevant to NETWORK_INTRUSION -- the "
       "exact live failure mode) lands in present_irrelevant",

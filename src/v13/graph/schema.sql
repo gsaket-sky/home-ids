@@ -73,6 +73,11 @@ CREATE TABLE evidence (
 CREATE INDEX idx_evidence_device_ts ON evidence(device_id, timestamp);
 CREATE INDEX idx_evidence_destination ON evidence(destination_id);
 CREATE INDEX idx_evidence_family ON evidence(independence_family);
+-- Supports prune_weak_zeek_notices()'s type+timestamp filter (and any other
+-- type-scoped query) without a full table scan -- added alongside that method,
+-- explicit user request, 2026-09-09, after confirming live that zeek_notice
+-- evidence was 98.3% of this table's total rows on .94's real graph.
+CREATE INDEX idx_evidence_type_ts ON evidence(evidence_type, timestamp);
 
 -- Named hypothesis catalog (NETWORK_INTRUSION, DGA_BOTNET_C2, DEVICE_PROFILE_TELEMETRY,
 -- ...). `version` mirrors this codebase's existing VALIDATOR_SCHEMA_VERSION pattern
@@ -196,3 +201,10 @@ VALUES ('(none)', 'domain', 0, 0, '{"sentinel": true}');
 --     only consumer (peer-cohort baselining) only ever looks back 7 days
 --     (_PEER_DEVIATION_WINDOW_SECONDS), a shorter retention than evidence's 90 days
 --     is deliberate since nothing else reads this table
+--   - evidence_type='zeek_notice_weak' rows specifically: pruned at 12 HOURS
+--     (prune_weak_zeek_notices(), explicit user request, 2026-09-09) -- confirmed
+--     live that zeek_notice evidence was 98.3% of this table's total rows on .94's
+--     real graph, and weak-tier notices contribute ZERO scoring weight to any
+--     hypothesis (utils.py's ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"] == 0.0), so the
+--     full 90-day window has no benefit to any live decision for this specific
+--     evidence_type, only disk cost

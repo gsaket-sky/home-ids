@@ -2,6 +2,7 @@ from typing import List, Dict, Any
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore, ATTACK_SHAPED_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
 from intelligence.fp_engine import FAMILIARITY_TRUST_BAR
+from utils import ZEEK_NOTICE_EVIDENCE_TYPES
 
 class Hypothesis:
     # PHASE 59 (Gap 6 item 3, evidence relevance): the Evidence `type` values this
@@ -102,10 +103,16 @@ class NetworkIntrusionHypothesis(Hypothesis):
     # the relevance breakdown doesn't need to know which variant is active. This is the
     # exact set the live 2026-09-03 incident's LLM reasoning never engaged with at all
     # (it cited dns_rate/unique_domains/entropy instead -- none of which appear here).
+    # BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+    # evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- this
+    # fallback engine (v13 is the live primary; this only runs via decision_engine.py's
+    # own use as a fallback_evaluate) deliberately keeps its pre-existing "any notice
+    # counts" behavior rather than adopting v13's newer tier-weighting logic --
+    # disproportionate effort for a rarely-exercised safety net.
     RELEVANT_EVIDENCE_TYPES = frozenset({
-        "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice",
+        "zeek_lateral_scan", "malicious_ja3", "malicious_ja4",
         "arp_spoof_pending",
-    })
+    }) | ZEEK_NOTICE_EVIDENCE_TYPES
     _NAME_NETWORK_INTRUSION = "NETWORK_INTRUSION"
     _NAME_LATERAL_MOVEMENT = "LATERAL_MOVEMENT"
 
@@ -142,7 +149,7 @@ class NetworkIntrusionHypothesis(Hypothesis):
         has_lateral_scan = any(e.type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
         if use_gap2_fix:
             has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4") for e in ev_store)
-            has_notable_notice = any(e.type == "zeek_notice" for e in ev_store)
+            has_notable_notice = any(e.type in ZEEK_NOTICE_EVIDENCE_TYPES for e in ev_store)
         else:
             # BUGFIX (live audit): a single genuinely-new MAC flip on an IP (zeek_features.py's
             # _bind_mac()) is now corroboration-required weak evidence, not an instant
@@ -151,7 +158,10 @@ class NetworkIntrusionHypothesis(Hypothesis):
             # genuine flip within the same 600s window still hard-stops directly
             # (decision_engine.py's has_arp_spoof, unaffected by this). This weak single-flip
             # case needs a second independent source, same as every other hypothesis here.
-            has_malicious_tls = any(e.type in ("malicious_ja3", "malicious_ja4", "zeek_notice") for e in ev_store)
+            has_malicious_tls = any(
+                e.type in ("malicious_ja3", "malicious_ja4") or e.type in ZEEK_NOTICE_EVIDENCE_TYPES
+                for e in ev_store
+            )
             has_notable_notice = False
         has_mac_flip = any(e.type == "arp_spoof_pending" for e in ev_store)
 

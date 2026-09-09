@@ -124,29 +124,27 @@ check("a lateral scan alone renames the hypothesis to LATERAL_MOVEMENT",
 check("a lateral scan alone hard-escalates to HIGH (4.0) when uncontradicted", score_lateral == 4.0)
 
 h2 = NetworkIntrusionHypothesis()
-score_notice_only = h2.evaluate(score_evidence([ev("zeek_notice", 1)], now=NOW), rep(3))
-check("zeek_notice alone (no lateral scan) keeps the base NETWORK_INTRUSION name",
+score_notice_only = h2.evaluate(score_evidence([ev("zeek_notice_medium", 1)], now=NOW), rep(3))
+check("zeek_notice_medium alone (no lateral scan) keeps the base NETWORK_INTRUSION name",
       h2.name == "NETWORK_INTRUSION")
-check("zeek_notice alone (no other corroboration) stays at Suspicious (2.0), "
+check("zeek_notice_medium alone (no other corroboration) stays at Suspicious (2.0), "
       "not treated as strong on its own", score_notice_only == 2.0)
 
 h3 = NetworkIntrusionHypothesis()
 score_ja3_plus_notice = h3.evaluate(
-    score_evidence([ev("malicious_ja3", 1), ev("zeek_notice", 1)], now=NOW), rep(4),
+    score_evidence([ev("malicious_ja3", 1), ev("zeek_notice_medium", 1)], now=NOW), rep(4),
 )
-check("a real JA3 match plus a corroborating notice with no real tier subtag (test "
-      "default, defaults to medium per _zeek_notice_weight()) gets partial strong "
+check("a real JA3 match plus a corroborating medium-tier notice gets partial strong "
       "credit (0.5 * 0.5 medium-tier weight = 0.25) and still reaches Probable, "
       "matching the Gap-2 fix's exact intent (notice can corroborate but never "
       "single-handedly equal a real fingerprint match)",
       h3.strong_score == 0.25 and score_ja3_plus_notice == 3.0)
 
-# --- NetworkIntrusionHypothesis: zeek_notice tier weighting (live audit, 2026-09-09) ---
+# --- NetworkIntrusionHypothesis: zeek_notice tier weighting (live audit, 2026-09-09;
+# tier fragmented into evidence_type itself, explicit user request, same day) ---
 h3w = NetworkIntrusionHypothesis()
 score_ja3_plus_weak_notice = h3w.evaluate(
-    score_evidence([ev("malicious_ja3", 1),
-                    ev("zeek_notice", 1, provenance="detector:zeek:notice:weak:weird:data_before_established")],
-                   now=NOW), rep(4),
+    score_evidence([ev("malicious_ja3", 1), ev("zeek_notice_weak", 1)], now=NOW), rep(4),
 )
 check("REGRESSION GUARD: a WEAK-tier notice (e.g. weird:data_before_established, a "
       "TCP-capture artifact) contributes ZERO strong credit even alongside a real "
@@ -155,9 +153,7 @@ check("REGRESSION GUARD: a WEAK-tier notice (e.g. weird:data_before_established,
 
 h3s = NetworkIntrusionHypothesis()
 score_ja3_plus_strong_notice = h3s.evaluate(
-    score_evidence([ev("malicious_ja3", 1),
-                    ev("zeek_notice", 1, provenance="detector:zeek:notice:strong:Scan::Address_Scan")],
-                   now=NOW), rep(4),
+    score_evidence([ev("malicious_ja3", 1), ev("zeek_notice_strong", 1)], now=NOW), rep(4),
 )
 check("a STRONG-tier notice (e.g. Scan::Address_Scan) alongside a real JA3 match "
       "gets more strong credit (0.5 * 0.75 = 0.375) than a medium-tier one, but "
@@ -166,8 +162,7 @@ check("a STRONG-tier notice (e.g. Scan::Address_Scan) alongside a real JA3 match
 
 h3hd = NetworkIntrusionHypothesis()
 score_notice_only_highly_det = h3hd.evaluate(
-    score_evidence([ev("zeek_notice", 1, provenance="detector:zeek:notice:highly_deterministic:Intel::Notice")],
-                   now=NOW), rep(4),
+    score_evidence([ev("zeek_notice_highly_deterministic", 1)], now=NOW), rep(4),
 )
 check("a HIGHLY_DETERMINISTIC-tier notice (e.g. a real Intel::Notice hit) ALONE, "
       "with no other strong signal this cycle, still earns real corroborating "
@@ -177,13 +172,22 @@ check("a HIGHLY_DETERMINISTIC-tier notice (e.g. a real Intel::Notice hit) ALONE,
 
 h3hd2 = NetworkIntrusionHypothesis()
 score_notice_only_medium = h3hd2.evaluate(
-    score_evidence([ev("zeek_notice", 1, provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
-                   now=NOW), rep(4),
+    score_evidence([ev("zeek_notice_medium", 1)], now=NOW), rep(4),
 )
 check("REGRESSION GUARD: a lone MEDIUM-tier notice (e.g. SSL::Invalid_Server_Cert), "
       "with no other strong signal, stays at the base floor (2.0) -- only "
       "highly_deterministic clears the bar to corroborate on its own",
       score_notice_only_medium == 2.0)
+
+h3old = NetworkIntrusionHypothesis()
+score_old_format_notice = h3old.evaluate(
+    score_evidence([ev("malicious_ja3", 1), ev("zeek_notice", 1)], now=NOW), rep(4),
+)
+check("REGRESSION GUARD: pre-fragmentation evidence (bare 'zeek_notice', no tier "
+      "suffix at all -- still valid within the 24h graph window right after this "
+      "deploy) safely degrades to zero weight, same as weak -- never crashes, never "
+      "silently over-trusted",
+      h3old.strong_score == 0.0 and score_old_format_notice == 2.0)
 
 # --- ConnectionAbuseHypothesis: 3-way dynamic naming ---
 h = ConnectionAbuseHypothesis()
@@ -241,7 +245,7 @@ h4 = DNSEvasionHypothesis()
 score_gap_high_conf = h4.evaluate(
     score_evidence([
         ev("dns_evasion_anomaly", 1, confidence=0.95, provenance="detector:dns_evasion:partial_gap:note"),
-        ev("zeek_notice", 1),  # unrelated corroborating evidence -- would trigger the strong_score bump
+        ev("zeek_notice_medium", 1),  # unrelated corroborating evidence -- would trigger the strong_score bump
     ], now=NOW), rep(3),
 )
 check("REGRESSION GUARD: DNS_ATTRIBUTION_GAP stays capped at the base floor (2.0) "
@@ -253,7 +257,7 @@ h5 = DNSEvasionHypothesis()
 score_policy_bypass_high_conf = h5.evaluate(
     score_evidence([
         ev("dns_evasion_anomaly", 1, confidence=0.95, provenance="detector:dns_evasion:policy_bypass:note"),
-        ev("zeek_notice", 1),
+        ev("zeek_notice_medium", 1),
     ], now=NOW), rep(3),
 )
 check("REGRESSION GUARD: a genuinely CONFIRMED evasion pattern (policy_bypass) "
@@ -299,9 +303,7 @@ check("genuine attack-shaped evidence (malicious_ja3) present at all BLOCKS the 
 # this benign path nearly unreachable in practice.
 h2w = DeviceProfileBenignHypothesis()
 score_weak_notice_ok = h2w.evaluate(
-    score_evidence([ev("dns_rate", 30),
-                    ev("zeek_notice", 1, provenance="detector:zeek:notice:weak:weird:data_before_established")],
-                   now=NOW),
+    score_evidence([ev("dns_rate", 30), ev("zeek_notice_weak", 1)], now=NOW),
     rep(1), device_type="smart_tv",
 )
 check("REGRESSION GUARD: a WEAK-tier zeek_notice does NOT block the benign verdict "
@@ -310,9 +312,7 @@ check("REGRESSION GUARD: a WEAK-tier zeek_notice does NOT block the benign verdi
 
 h2m = DeviceProfileBenignHypothesis()
 score_medium_notice_blocked = h2m.evaluate(
-    score_evidence([ev("dns_rate", 30),
-                    ev("zeek_notice", 1, provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
-                   now=NOW),
+    score_evidence([ev("dns_rate", 30), ev("zeek_notice_medium", 1)], now=NOW),
     rep(1), device_type="smart_tv",
 )
 check("a MEDIUM-tier-or-above zeek_notice (e.g. SSL::Invalid_Server_Cert) still "

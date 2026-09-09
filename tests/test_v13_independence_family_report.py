@@ -51,8 +51,14 @@ check("malicious_ja3 (v13: tls_fingerprint) collapses to v1's 'zeek_network'",
       _v1_equivalent_family("malicious_ja3") == "zeek_network")
 check("zeek_exfiltration (v13: data_transfer_pattern) collapses to v1's 'zeek_network'",
       _v1_equivalent_family("zeek_exfiltration") == "zeek_network")
-check("zeek_notice (v13: network_behavior) collapses to v1's 'zeek_network'",
-      _v1_equivalent_family("zeek_notice") == "zeek_network")
+check("zeek_notice_medium (v13: network_behavior) collapses to v1's 'zeek_network' -- "
+      "all 4 zeek_notice_{tier} evidence types (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) "
+      "still collapse the same way, this split is orthogonal to the tier fragmentation",
+      _v1_equivalent_family("zeek_notice_medium") == "zeek_network")
+check("REGRESSION GUARD: every one of the 4 zeek_notice_{tier} evidence types "
+      "collapses to v1's 'zeek_network', not just the one checked above",
+      all(_v1_equivalent_family(t) == "zeek_network" for t in
+          ("zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic")))
 check("an unaffected type (dns_entropy) keeps its OWN v13 family unchanged -- "
       "v-current's own grouping already agrees with v13's here",
       _v1_equivalent_family("dns_entropy") == "dns_behavior")

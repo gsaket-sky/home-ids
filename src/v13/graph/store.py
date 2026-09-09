@@ -34,6 +34,22 @@ DEFAULT_EVIDENCE_RETENTION_DAYS = 90
 # consumer (peer-cohort baselining) only ever looks back 7 days
 # (_PEER_DEVIATION_WINDOW_SECONDS, v13/ops/live_engine.py).
 DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS = 30
+# zeek_notice_weak's own MUCH shorter retention (explicit user request, 2026-09-09 --
+# "check the current evidence table's per-type row counts ... collapsing repeated
+# identical weak notices... a real, separate optimization"). Confirmed live on .94:
+# evidence_type='zeek_notice' (pre-fragmentation) was 214,795 of 218,405 total
+# evidence rows (98.3%), and the single most common weak-tier note type alone
+# (weird:data_before_established) accounted for 68,688 of those on its own -- the
+# graph db was already 5.05GB after just 3.5 days of uptime. Weak-tier notices
+# contribute ZERO scoring weight to any hypothesis (utils.py's
+# ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"] == 0.0, v13/hypotheses/engine.py's
+# NetworkIntrusionHypothesis/DeviceProfileBenignHypothesis both already ignore them)
+# -- keeping them for the full 90-day evidence window has zero benefit to any live
+# decision, only disk cost. 12 hours is generous relative to that zero-benefit
+# baseline: enough for an operator reviewing "what happened in the last several
+# hours" via the console/API, nowhere near the 24h graph-query-window corroboration
+# actually depends on for evidence that DOES score.
+DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS = 12.0
 
 # get_devices_targeting()'s BUGFIX #2 / _is_shared_infrastructure(): a destination
 # touched by this fraction (or more) of the known device fleet, over this lookback,
@@ -151,6 +167,8 @@ class GraphStore:
                 PRIMARY KEY (device_id, destination_id)
             );
             CREATE INDEX IF NOT EXISTS idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
+
+            CREATE INDEX IF NOT EXISTS idx_evidence_type_ts ON evidence(evidence_type, timestamp);
             """
         )
         self._conn.commit()
@@ -1036,6 +1054,45 @@ class GraphStore:
         with self.transaction():
             rows = self._conn.execute(
                 "SELECT evidence_id FROM evidence WHERE timestamp < ? AND evidence_id NOT IN ("
+                "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
+                "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
+                ")",
+                (cutoff, cutoff),
+            ).fetchall()
+            evidence_ids = [r["evidence_id"] for r in rows]
+            if not evidence_ids:
+                return 0
+            placeholders = ",".join("?" * len(evidence_ids))
+            self._conn.execute(
+                f"DELETE FROM edges WHERE "
+                f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
+                f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
+                evidence_ids + evidence_ids,
+            )
+            cur = self._conn.execute(
+                f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
+            )
+            return cur.rowcount
+
+    def prune_weak_zeek_notices(self, older_than_hours: float = DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS,
+                                  now: Optional[float] = None) -> int:
+        """Deletes evidence_type='zeek_notice_weak' rows older than the cutoff --
+        see DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS's own docstring for why this
+        gets its own much-shorter, tier-specific retention instead of waiting for
+        prune_evidence()'s full 90-day (or hardware-profile-scaled) window. Same
+        edge-cleanup-then-row-delete pattern as prune_evidence() (the ordering
+        matters for the same reason -- see that method's own BUGFIX comment on
+        dangling edges), just scoped to one evidence_type and hours instead of days.
+        Same 'still referenced by a recent decision, keep it anyway' carve-out too --
+        a decision that legitimately cited a weak notice (rare, since it contributes
+        zero scoring weight, but not impossible if it showed up in a display-only
+        context) shouldn't have its own audit trail invalidated by this faster
+        sweep. Returns the number of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_hours * 3600
+        with self.transaction():
+            rows = self._conn.execute(
+                "SELECT evidence_id FROM evidence WHERE evidence_type = 'zeek_notice_weak' "
+                "AND timestamp < ? AND evidence_id NOT IN ("
                 "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
                 "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
                 ")",

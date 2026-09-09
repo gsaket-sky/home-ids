@@ -70,8 +70,11 @@ check("an UNMAPPED evidence type degrades gracefully (de-snaked, capitalized), n
 _REAL_EVIDENCE_TYPES = {
     "dns_rate", "dns_entropy", "dns_unique_ratio", "dns_evasion_anomaly", "dns_dga_burst",
     "dns_tunnel_v2", "zeek_exfiltration", "zeek_beaconing", "zeek_conn_abuse", "zeek_long_conn",
-    "arp_sweep", "zeek_notice", "arp_spoofing", "ml_anomaly", "honeypot_access",
+    "arp_sweep", "arp_spoofing", "ml_anomaly", "honeypot_access",
     "zeek_lateral_scan", "reputation", "geofencing_violation", "domain", "ip", "mixed",
+    # "zeek_notice" fragmented into 4 evidence_type values by tier (utils.py's
+    # ZEEK_NOTICE_EVIDENCE_TYPES, explicit user request, 2026-09-09).
+    "zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic",
 }
 missing = _REAL_EVIDENCE_TYPES - set(_EVIDENCE_PLAIN_LANGUAGE.keys())
 check("every real evidence type emitted anywhere in the codebase has a genuine plain-language mapping",

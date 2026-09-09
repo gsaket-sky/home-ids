@@ -39,7 +39,8 @@ def check(name, cond, detail=""):
 from ollama_soc import _evidence_relevance_taxonomy, _evidence_relevance_breakdown
 
 # NetworkIntrusionHypothesis.RELEVANT_EVIDENCE_TYPES = {zeek_lateral_scan, malicious_ja3,
-# malicious_ja4, zeek_notice, arp_spoof_pending} -- same fixture shape test_phase59 uses.
+# malicious_ja4, arp_spoof_pending} | {zeek_notice_weak/medium/strong/highly_deterministic}
+# -- same fixture shape test_phase59 uses.
 _base_payload = {
     "signature": "NETWORK_INTRUSION (persisted 1543s)",
     "hee_evidence_types": ["arp_spoof_pending", "dns_rate"],
@@ -57,10 +58,12 @@ check("SUPPORTS == present_relevant (arp_spoof_pending is both present and relev
 check("IRRELEVANT == present_irrelevant (dns_rate is present but not relevant to "
       "NETWORK_INTRUSION)",
       tax_a is not None and tax_a["irrelevant"] == ["dns_rate"], f"got {tax_a}")
-check("NEUTRAL == absent_relevant (the other 4 relevant types, simply not observed)",
-      tax_a is not None and sorted(tax_a["neutral"]) == sorted(
-          ["zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice"]
-      ), f"got {tax_a}")
+check("NEUTRAL == absent_relevant (the other 7 relevant types, simply not observed -- "
+      "zeek_notice fragmented into 4 evidence_type values by tier, 2026-09-09)",
+      tax_a is not None and sorted(tax_a["neutral"]) == sorted([
+          "zeek_lateral_scan", "malicious_ja3", "malicious_ja4",
+          "zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic",
+      ]), f"got {tax_a}")
 check("hypothesis name matches the signature base (persistence suffix stripped)",
       tax_a is not None and tax_a["hypothesis"] == "NETWORK_INTRUSION", f"got {tax_a}")
 

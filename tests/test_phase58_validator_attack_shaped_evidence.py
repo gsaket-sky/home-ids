@@ -84,9 +84,15 @@ check("DeviceProfileBenignHypothesis's class attribute IS the shared module-leve
       DeviceProfileBenignHypothesis._ATTACK_SHAPED_EVIDENCE_TYPES is ATTACK_SHAPED_EVIDENCE_TYPES)
 
 check("the set is non-trivial and includes the exact types the live incident involved "
-      "(arp_sweep, zeek_lateral_scan) plus zeek_notice/malicious_ja3/ja4",
-      {"arp_sweep", "zeek_lateral_scan", "zeek_notice", "malicious_ja3", "malicious_ja4"}
+      "(arp_sweep, zeek_lateral_scan) plus zeek_notice_medium/malicious_ja3/ja4 -- "
+      "zeek_notice fragmented into 4 evidence_type values by tier (2026-09-09), "
+      "weak deliberately excluded (routine capture noise, not attack-shaped)",
+      {"arp_sweep", "zeek_lateral_scan", "zeek_notice_medium", "malicious_ja3", "malicious_ja4"}
       <= ATTACK_SHAPED_EVIDENCE_TYPES)
+check("REGRESSION GUARD: zeek_notice_weak is deliberately NOT attack-shaped -- a "
+      "single TCP-capture-artifact notice type alone fired 68,575 times on .94's "
+      "real network, and shouldn't veto an otherwise-legitimate benign verdict",
+      "zeek_notice_weak" not in ATTACK_SHAPED_EVIDENCE_TYPES)
 
 check("deliberately excludes the ambiguous dns_behavior-family signals (dns_rate/"
       "dns_entropy/dns_unique_ratio aren't Evidence `type` values that exist anyway, "
@@ -158,10 +164,16 @@ check("does NOT affect 'malicious' classifications at all (this check is gated "
 print("\n--- Section C: source-level wiring ---")
 
 _pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+# NOTE: found stale during unrelated work (2026-09-09) -- pipeline.py's own
+# "hee_evidence_types" field was extended to UNION with decision.get("evidence_types",
+# []) (the v13-synthetic-type gap fix, same session, unrelated to Phase 58) after this
+# check was first written; the underlying INTENT (still reads from the SAME
+# active_evidence list, not a separately-fetched one) is unchanged, just the exact
+# source text this check was verifying verbatim.
 check("pipeline.py persists hee_evidence_types from the SAME active_evidence list "
       "hee_evidence_families already reads (not a separately-fetched, potentially "
       "stale list)",
-      '"hee_evidence_types": sorted({ev.type for ev in active_evidence})' in _pipeline_src)
+      '{ev.type for ev in active_evidence} | set(decision.get("evidence_types", []))' in _pipeline_src)
 
 _soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
 check("ollama_soc.py strips hee_evidence_types from the LLM prompt "

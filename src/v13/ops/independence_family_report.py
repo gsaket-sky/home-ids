@@ -47,11 +47,17 @@ LOGGER = logging.getLogger("v13.ops.independence_family_report")
 
 # hypotheses/independence.py's own documented KNOWN DISCREPANCY -- these three v13
 # families all collapse into v-current's single lumped "zeek_network" family.
+# BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
+# evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- all 4
+# still belong to v1's same lumped family, this is an evidence_type-granularity
+# change, not a family change.
+from utils import ZEEK_NOTICE_EVIDENCE_TYPES  # noqa: E402
+
 _V1_LUMPED_ZEEK_NETWORK_TYPES = frozenset({
     "malicious_ja3", "malicious_ja4",
-    "zeek_notice", "zeek_lateral_scan", "zeek_conn_abuse", "zeek_long_conn",
+    "zeek_lateral_scan", "zeek_conn_abuse", "zeek_long_conn",
     "zeek_exfiltration", "zeek_beaconing",
-})
+}) | ZEEK_NOTICE_EVIDENCE_TYPES
 
 # HypothesisEngine's own real corroboration bar (matches decision/engine.py's `>= 2`
 # independent-source threshold used throughout this codebase's tier logic).

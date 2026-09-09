@@ -411,13 +411,16 @@ notice_events = [{"type": "zeek_notice", "note": "SSL::Invalid_Server_Cert",
 notice_evidence = detector.detect("dev1", notice_events)
 check("THE CORE FIX: ZeekNetworkDetector carries the real notice type into "
       "Evidence.provenance, not a generic fixed string",
-      bool(notice_evidence) and notice_evidence[0].provenance == "detector:zeek:notice:medium:SSL::Invalid_Server_Cert",
+      bool(notice_evidence) and notice_evidence[0].provenance == "detector:zeek:notice:SSL::Invalid_Server_Cert",
       f"got provenance={notice_evidence[0].provenance if notice_evidence else 'NO EVIDENCE'}")
-check("BUGFIX (live audit, 2026-09-09): provenance also carries a weak/medium/strong/"
-      "highly_deterministic tier subtag now -- SSL::Invalid_Server_Cert classifies as "
-      "medium (utils.py's classify_zeek_notice()), and confidence is set per-tier "
-      "(0.65) instead of the old flat 0.75 for every notice type",
-      notice_evidence[0].confidence == 0.65, f"got confidence={notice_evidence[0].confidence}")
+check("BUGFIX (explicit user request, 2026-09-09): evidence_type now carries the "
+      "weak/medium/strong/highly_deterministic tier directly ('zeek_notice_{tier}', "
+      "utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) instead of a flat 'zeek_notice' with "
+      "the tier hidden in a provenance subtag -- SSL::Invalid_Server_Cert classifies "
+      "as medium (utils.py's classify_zeek_notice()), and confidence is set "
+      "per-tier (0.65) instead of the old flat 0.75 for every notice type",
+      notice_evidence[0].type == "zeek_notice_medium" and notice_evidence[0].confidence == 0.65,
+      f"got type={notice_evidence[0].type} confidence={notice_evidence[0].confidence}")
 
 from core.pipeline import _describe_evidence as _describe_evidence_real
 description = _describe_evidence_real(notice_evidence[0])
@@ -492,19 +495,20 @@ check("REGRESSION GUARD: omitting geoip_engine entirely (every existing call sit
 # name (a different string than this file's "zeek_network" v1 group name).
 from core.pipeline import _EVIDENCE_FAMILY_LABELS
 synth_notice_ev = Evidence(
-    type="zeek_notice", source="v13_live_engine", timestamp=time.time(), device="dev1",
+    type="zeek_notice_medium", source="v13_live_engine", timestamp=time.time(), device="dev1",
     value=1.0, confidence=0.65, independence_group="network_behavior",
-    provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert",
+    provenance="detector:zeek:notice:SSL::Invalid_Server_Cert",
 )
-check("REGRESSION GUARD: a zeek_notice item synthesized via the attack_evidence bridge "
-      "(v13's own 'network_behavior' family name, not v1's 'zeek_network') still "
+check("REGRESSION GUARD: a zeek_notice_medium item synthesized via the attack_evidence "
+      "bridge (v13's own 'network_behavior' family name, not v1's 'zeek_network') still "
       "resolves to the correct 'Network (Zeek)' display label",
       _EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.independence_group) == "Network (Zeek)",
       f"got {_EVIDENCE_FAMILY_LABELS.get(synth_notice_ev.independence_group)!r}")
-check("REGRESSION GUARD: that same synthesized zeek_notice item, now that provenance "
-      "is propagated through the bridge, still surfaces the real note type in the "
-      "WHY line -- not the generic fallback",
-      "SSL::Invalid_Server_Cert" in _describe_evidence_real(synth_notice_ev),
+check("REGRESSION GUARD: that same synthesized zeek_notice_medium item, now that "
+      "provenance is propagated through the bridge, still surfaces the real note "
+      "type AND its tier in the WHY line -- not the generic fallback",
+      "SSL::Invalid_Server_Cert" in _describe_evidence_real(synth_notice_ev)
+      and "(medium)" in _describe_evidence_real(synth_notice_ev),
       f"got '{_describe_evidence_real(synth_notice_ev)}'")
 
 # REGRESSION GUARD: a notice with no real type (malformed/missing) doesn't show a

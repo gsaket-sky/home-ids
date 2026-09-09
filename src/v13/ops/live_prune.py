@@ -33,7 +33,10 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from v13.config.trust_anchors import load_hardware_profile  # noqa: E402
-from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS  # noqa: E402
+from v13.graph.store import (  # noqa: E402
+    GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
+    DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS,
+)
 
 LOGGER = logging.getLogger("live_prune")
 
@@ -70,13 +73,23 @@ def main() -> None:
         # already the right number regardless of hardware profile (its only
         # consumer only ever looks back 7 days).
         dd_deleted = store.prune_device_destinations(older_than_days=DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS)
+        # BUGFIX (explicit user request, 2026-09-09): zeek_notice_weak rows get their
+        # own much-shorter, tier-specific retention -- see DEFAULT_WEAK_ZEEK_NOTICE_
+        # RETENTION_HOURS's own docstring (graph/store.py) for the full incident
+        # (confirmed live: 98.3% of the evidence table on .94 was zeek_notice,
+        # contributing zero scoring weight at the weak tier).
+        weak_notice_deleted = store.prune_weak_zeek_notices(older_than_hours=DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS)
         store.close()
-        LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) older than %d days, from %s",
-                     deleted, retention_days, dd_deleted, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS, db_path)
+        LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) "
+                     "older than %d days, %d zeek_notice_weak row(s) older than %.0fh, from %s",
+                     deleted, retention_days, dd_deleted, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
+                     weak_notice_deleted, DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS, db_path)
         write_job_health(state_dir, "live_prune", time.time() - run_start,
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
-                                 "device_destinations_retention_days": DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS})
+                                 "device_destinations_retention_days": DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
+                                 "weak_notice_deleted": weak_notice_deleted,
+                                 "weak_notice_retention_hours": DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})

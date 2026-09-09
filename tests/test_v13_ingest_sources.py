@@ -134,7 +134,7 @@ check("zeek_exfiltration gets a fallback_context from a real last_dest_ip",
 check("zeek_beaconing gets a fallback_context from a real last_dest_ip",
       _build_fallback_context("zeek_beaconing", {"last_dest_ip": "5.6.7.8"}) == {"dest_ip": "5.6.7.8"})
 check("an evidence type outside the known gap gets no fallback_context",
-      _build_fallback_context("zeek_notice", {"last_dest_ip": "5.6.7.8"}) is None)
+      _build_fallback_context("zeek_notice_medium", {"last_dest_ip": "5.6.7.8"}) is None)
 check("ZeekFeatureExtractor's own 'unknown' no-data sentinel is never treated as a real destination",
       _build_fallback_context("zeek_exfiltration", {"last_dest_ip": "unknown"}) is None)
 check("a missing last_dest_ip key produces no fallback_context (not a crash)",
@@ -180,7 +180,7 @@ class _FakeDetector:
                               device=device, value=6.0, confidence=0.9, independence_group="zeek_network"),
             _FakeV1Evidence(type="zeek_beaconing", source="threat_signals", timestamp=1.0,
                               device=device, value=0.8, confidence=0.7, independence_group="zeek_network"),
-            _FakeV1Evidence(type="zeek_notice", source="threat_signals", timestamp=1.0,
+            _FakeV1Evidence(type="zeek_notice_medium", source="threat_signals", timestamp=1.0,
                               device=device, value=1.0, confidence=0.75, independence_group="zeek_network"),
         ]
 
@@ -204,8 +204,8 @@ check("zeek_exfiltration gets destination_id from the fallback (A2 closed)",
       by_type["zeek_exfiltration"].destination_id == "10.0.0.99")
 check("zeek_beaconing gets destination_id from the fallback (A2 closed)",
       by_type["zeek_beaconing"].destination_id == "10.0.0.99")
-check("zeek_notice (no gap) is left as NO_DESTINATION, not given a misleading fallback",
-      by_type["zeek_notice"].destination_id == NO_DESTINATION)
+check("zeek_notice_medium (no gap) is left as NO_DESTINATION, not given a misleading fallback",
+      by_type["zeek_notice_medium"].destination_id == NO_DESTINATION)
 check("independence_family is populated from INDEPENDENCE_FAMILY_MAP, not left defaulted",
       not by_type["zeek_exfiltration"].features.get("independence_family_defaulted", False))
 
@@ -283,10 +283,12 @@ class _FakeExtractorWithAlerts:
 
 a11_results = run_detection_cycle(_FakeExtractorWithAlerts(), _EmptyDetector(), "192.168.1.60")
 a11_by_type = {ev.evidence_type: ev for ev in a11_results}
-check("A11: ZeekNetworkDetector's zeek_notice evidence is now produced (previously never called)",
-      "zeek_notice" in a11_by_type)
-check("A11: zeek_notice keeps ZeekNetworkDetector's own real destination attribution (dest_ip)",
-      a11_by_type["zeek_notice"].destination_id == "10.0.0.77")
+check("A11: ZeekNetworkDetector's zeek_notice evidence is now produced (previously never "
+      "called) -- evidence_type is zeek_notice_medium, SSL::Invalid_Server_Cert's real "
+      "tier (utils.py's classify_zeek_notice(), 2026-09-09), not a flat 'zeek_notice'",
+      "zeek_notice_medium" in a11_by_type)
+check("A11: zeek_notice_medium keeps ZeekNetworkDetector's own real destination attribution (dest_ip)",
+      a11_by_type["zeek_notice_medium"].destination_id == "10.0.0.77")
 check("A11: ZeekNetworkDetector's malicious_ja3 evidence is now produced",
       "malicious_ja3" in a11_by_type)
 check("A11: malicious_ja3 keeps its own real domain attribution (server SNI)",
@@ -296,7 +298,7 @@ check("A11: DNSBehaviorDetector's dns_rate evidence is now produced (query_rate=
 check("A11: DNSBehaviorDetector's dns_entropy evidence is now produced (entropy_avg=4.5 > 4.0 threshold)",
       "dns_entropy" in a11_by_type)
 check("A11: new evidence types get a real independence_family, not the defaulted fallback",
-      not a11_by_type["zeek_notice"].features.get("independence_family_defaulted", False)
+      not a11_by_type["zeek_notice_medium"].features.get("independence_family_defaulted", False)
       and not a11_by_type["dns_rate"].features.get("independence_family_defaulted", False))
 
 quiet_results = run_detection_cycle(_FakeExtractor2(), _EmptyDetector(), "192.168.1.61")
@@ -444,7 +446,7 @@ with tempfile.TemporaryDirectory() as tmp:
     now2 = time.time()
     decision_store.insert_evidence(Evidence(
         device_id="dec_dev1", destination_id="192.168.1.61",
-        evidence_type="zeek_notice", independence_family="zeek_network",
+        evidence_type="zeek_notice_medium", independence_family="zeek_network",
         timestamp=now2 - 100, source="threat_signals", confidence=0.6, value=1.0,
     ))
     decision_store.insert_evidence(Evidence(
@@ -480,7 +482,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     decision_store.insert_evidence(Evidence(
         device_id="dec_dev2", destination_id=NO_DESTINATION,
-        evidence_type="zeek_notice", independence_family="zeek_network",
+        evidence_type="zeek_notice_medium", independence_family="zeek_network",
         timestamp=now2, source="threat_signals", confidence=0.5, value=1.0,
     ))
     spy2 = _SpyReputationClassifier()

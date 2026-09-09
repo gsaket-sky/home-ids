@@ -69,7 +69,7 @@ check("A: honeypot hard-stop fires through the adapter exactly like calling v13'
 two_family_ev = [
     V1Evidence(type="malicious_ja3", source="zeek", timestamp=now, device="d1", value=1.0,
                 confidence=0.9, independence_group="zeek_network", domain="evil.example.com"),
-    V1Evidence(type="zeek_notice", source="zeek", timestamp=now, device="d1", value=1.0,
+    V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=now, device="d1", value=1.0,
                 confidence=0.75, independence_group="zeek_network", domain="evil.example.com"),
 ]
 r_vcurrent = vcurrent_engine.evaluate(list(two_family_ev), ReputationVector(domain="evil.example.com", tier=3))
@@ -103,11 +103,11 @@ check("C: ZeekFeatureExtractor's own 'unknown' sentinel is correctly treated as 
       "not a real one, matching sources.py's _NO_DEST_SENTINEL handling exactly",
       "state" in r_sentinel)
 
-no_gap_ev = [V1Evidence(type="zeek_notice", source="zeek", timestamp=now, device="d3",
+no_gap_ev = [V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=now, device="d3",
                           value=1.0, confidence=0.9, independence_group="zeek_network", domain=None)]
 r_no_gap = live_engine.evaluate(no_gap_ev, ReputationVector(domain="", tier=3),
                                   features={"last_dest_ip": "203.0.113.60"})
-check("C: a type with NO destination gap (zeek_notice) never gets the fallback_context "
+check("C: a type with NO destination gap (zeek_notice_medium) never gets the fallback_context "
       "misapplied to it, even when last_dest_ip is present in the same call",
       "state" in r_no_gap)
 

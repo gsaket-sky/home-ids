@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 from intelligence.hypotheses.evidence import Evidence
-from utils import classify_zeek_notice, ZEEK_NOTICE_TIER_CONFIDENCE
+from utils import classify_zeek_notice, ZEEK_NOTICE_TIER_CONFIDENCE, zeek_notice_evidence_type
 import time
 
 class ZeekNetworkDetector:
@@ -50,24 +50,27 @@ class ZeekNetworkDetector:
                 # EVERY notice type, regardless of which one fired -- utils.py's
                 # classify_zeek_notice() (see its own docstring for the full incident,
                 # grounded in .94's real notice.log/weird.log distribution) now sets it
-                # per-tier instead. The tier is also embedded as a provenance subtag
-                # ("detector:zeek:notice:{tier}:{note_type}"), the SAME
-                # "detector:...:{subtag}:{note}" convention DNSTunnelingV2Hypothesis/
-                # BeaconingHypothesis/DNSEvasionHypothesis's own subtag parsing already
-                # uses (split(":", 4)[3]) -- so v13/hypotheses/engine.py's
-                # NetworkIntrusionHypothesis/DeviceProfileBenignHypothesis can weight a
-                # notice by its actual tier instead of treating any zeek_notice's mere
-                # PRESENCE as equally notable.
+                # per-tier instead.
+                # BUGFIX (explicit user request, 2026-09-09): evidence_type is now
+                # "zeek_notice_{tier}" (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES/
+                # zeek_notice_evidence_type()) instead of a flat "zeek_notice" with the
+                # tier hidden inside a provenance subtag -- confirmed live that
+                # zeek_notice evidence was 214,795 of 218,405 total evidence rows
+                # (98.3%) in .94's graph, and every hypothesis/validator that reasons
+                # about "is this notable" needed a provenance-string-parse just to tell
+                # tiers apart. A plain `evidence_type in {...}` set check now works
+                # everywhere instead. provenance keeps just the real note type (no
+                # longer needs the tier subtag, since it's in .type now).
                 tier = classify_zeek_notice(note_type)
                 ev_list.append(Evidence(
-                    type="zeek_notice",
+                    type=zeek_notice_evidence_type(tier),
                     source="zeek",
                     timestamp=now,
                     device=device,
                     value=1.0,
                     confidence=ZEEK_NOTICE_TIER_CONFIDENCE[tier],
                     independence_group="zeek_network",
-                    provenance=f"detector:zeek:notice:{tier}:{note_type}",
+                    provenance=f"detector:zeek:notice:{note_type}",
                     domain=evt.get("dest_ip") or None,
                 ))
                 
