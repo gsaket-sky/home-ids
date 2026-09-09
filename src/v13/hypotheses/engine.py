@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional
 
-from v13.evidence.model import Evidence
+from v13.evidence.model import Evidence, NO_DESTINATION
 
 try:
     from intelligence.reputation.classifier import ReputationVector
@@ -80,6 +80,10 @@ class ScoredEvidence:
     def provenance(self) -> str:
         return self.evidence.provenance
 
+    @property
+    def destination_id(self) -> str:
+        return self.evidence.destination_id
+
     def effective_weight(self) -> float:
         return self.evidence.effective_weight(self.freshness)
 
@@ -110,6 +114,46 @@ class Hypothesis:
         self.supporting_score = 0.0
         self.contradicting_score = 0.0
 
+    def _effective_rep_tier(self, ev_store: List[ScoredEvidence], rep_vector) -> int:
+        """Generalizes a214a2f's per-destination reputation fix (which only
+        covered CoordinatedTargetingHypothesis) to every attack hypothesis --
+        third-party review flagged the same root cause as still open everywhere
+        else: pipeline.py computes ONE rep_vector per cycle for reputation_target
+        (whichever destination earned the highest TI/VT/abuse risk score THAT
+        CYCLE), reused verbatim by every hypothesis's rep_vector.tier check
+        regardless of whether ITS OWN evidence concerns that destination at all
+        (confirmed live: two Fire TVs independently streaming Netflix scored as
+        coordinated targeting because that cycle's rep_vector described an
+        unrelated domain with zero real touching devices -- the exact same shape
+        of bug is structurally possible for every other tier-gated hypothesis
+        below, just not yet caught live for each one individually).
+
+        Same domain-linkage discipline as decision_engine.py's own Gap-64 fix
+        (only strip/ignore when BOTH sides carry destination info and they
+        PROVABLY differ; never touch the ambiguous case where either side lacks
+        it) -- rep_vector.domain is the ONE destination it was actually computed
+        for; if this hypothesis's own RELEVANT_EVIDENCE_TYPES hits carry a real,
+        different destination_id, rep_vector describes something else and is
+        neutral (tier 3 -- "unclassified," ReputationVector's own documented
+        "neutral, NOT malicious by default" value) for this hypothesis's
+        purposes, applied to BOTH directions (trust-suppression tier in (1,2)
+        AND escalation tier in (3,4)/(3,4,5) checks alike) since a wrong tier is
+        equally capable of wrongly suppressing a real attack as it is of wrongly
+        escalating a benign one. A hypothesis with no RELEVANT_EVIDENCE_TYPES
+        declared (the benign hypotheses -- this fix is scoped to attack
+        hypotheses only, matching item 3's actual problem statement) can never
+        have a real destination to compare against, so this always falls
+        through to the ambiguous case for them: today's behavior, unchanged."""
+        my_destinations = {
+            e.destination_id for e in ev_store
+            if e.evidence_type in self.RELEVANT_EVIDENCE_TYPES
+            and e.destination_id and e.destination_id != NO_DESTINATION
+        }
+        rep_domain = getattr(rep_vector, "domain", "") or ""
+        if my_destinations and rep_domain and rep_domain not in my_destinations:
+            return 3
+        return rep_vector.tier
+
     def evaluate(self, ev_store: List[ScoredEvidence], rep_vector, device_type: str = "",
                   baseline_familiarity: float = 0.0) -> float:
         raise NotImplementedError
@@ -133,7 +177,12 @@ class DNSTunnelingHypothesis(Hypothesis):
         if any(e.evidence_type == "dns_unique_ratio" and e.value > 0.8 for e in ev_store):
             self.strong_score += 1.0
 
-        if rep_vector.tier in (1, 2):
+        # BUGFIX (live audit, 2026-09-09, generalizing a214a2f): eff_tier is
+        # rep_vector.tier only when rep_vector actually concerns THIS
+        # hypothesis's own evidence destination -- see _effective_rep_tier()'s
+        # own docstring.
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
 
         score = 2.0
@@ -147,7 +196,7 @@ class DNSTunnelingHypothesis(Hypothesis):
         # the review named. Now requires tier 4 (at least one real, if weak,
         # external reputation signal) to reach 4.0 -- being unclassified no longer
         # helps a hypothesis reach its own maximum.
-        if self.strong_score > 0.5 and self.contradicting_score == 0 and rep_vector.tier == 4:
+        if self.strong_score > 0.5 and self.contradicting_score == 0 and eff_tier == 4:
             score = 4.0
         return score
 
@@ -184,13 +233,14 @@ class NetworkIntrusionHypothesis(Hypothesis):
         elif has_notable_notice and strong_count >= 1:
             self.strong_score += 0.5
 
-        if rep_vector.tier in (1, 2):
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
 
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
             score = 3.0
-        if self.strong_score > 0.5 and self.contradicting_score == 0 and rep_vector.tier in (3, 4, 5):
+        if self.strong_score > 0.5 and self.contradicting_score == 0 and eff_tier in (3, 4, 5):
             score = 4.0
 
         if has_lateral_scan and self.contradicting_score == 0:
@@ -248,7 +298,8 @@ class DGAHypothesis(Hypothesis):
             return 0.0
         best = max(e.effective_weight() for e in hits)
 
-        if rep_vector.tier in (1, 2):
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
         if any(e.evidence_type == "dns_rate" and e.value > 100 for e in ev_store):
             self.strong_score += 1.0
@@ -256,7 +307,7 @@ class DGAHypothesis(Hypothesis):
         score = 2.0
         if best >= 0.6 and self.contradicting_score == 0:
             score = 3.0
-        if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0 and rep_vector.tier in (3, 4, 5):
+        if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0 and eff_tier in (3, 4, 5):
             score = 4.0
         return score
 
@@ -275,7 +326,8 @@ class ExfiltrationHypothesis(Hypothesis):
             return 0.0
         best = max(e.effective_weight() for e in hits)
 
-        if rep_vector.tier in (1, 2):
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_beaconing", "reputation") for e in ev_store):
             self.strong_score += 1.0
@@ -325,7 +377,8 @@ class BeaconingHypothesis(Hypothesis):
             return 0.0
         best = max(e.effective_weight() for e in hits)
 
-        if rep_vector.tier in (1, 2):
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
         if any(e.evidence_type in ("zeek_exfiltration", "reputation", "malicious_ja3", "malicious_ja4") for e in ev_store):
             self.strong_score += 1.0
@@ -362,7 +415,8 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
             for e in hits
         })
 
-        if rep_vector.tier in (1, 2):
+        eff_tier = self._effective_rep_tier(ev_store, rep_vector)
+        if eff_tier in (1, 2):
             self.contradicting_score += 1.0
         if distinct_signals >= 2:
             self.strong_score += 1.0
@@ -373,7 +427,7 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
         score = 2.0
         if self.strong_score > 0 and self.contradicting_score == 0:
             score = 3.0
-        if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0 and rep_vector.tier in (3, 4):
+        if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0 and eff_tier in (3, 4):
             score = 4.0
         return score
 
@@ -416,7 +470,7 @@ class CoordinatedTargetingHypothesis(Hypothesis):
         # live_engine.py's injection sites.
         total_devices = max((e.value or 0) for e in hits)
 
-        if rep_vector.tier in (1, 2):
+        if self._effective_rep_tier(ev_store, rep_vector) in (1, 2):
             self.contradicting_score += 1.0
         if total_devices >= 3:
             self.strong_score += 1.0
@@ -448,7 +502,7 @@ class ConnectionAbuseHypothesis(Hypothesis):
             return 0.0
         best = max(e.effective_weight() for e in (scan_hits + long_hits + arp_hits))
 
-        if rep_vector.tier in (1, 2):
+        if self._effective_rep_tier(ev_store, rep_vector) in (1, 2):
             self.contradicting_score += 1.0
         distinct_categories = sum(bool(x) for x in (scan_hits, long_hits, arp_hits))
 
@@ -509,7 +563,7 @@ class DNSEvasionHypothesis(Hypothesis):
         else:
             self.name = self._NAME_PARTIAL_GAP
 
-        if rep_vector.tier in (1, 2):
+        if self._effective_rep_tier(ev_store, rep_vector) in (1, 2):
             self.contradicting_score += 1.0
         if any(e.evidence_type != "dns_evasion_anomaly" for e in ev_store):
             self.strong_score += 1.0
@@ -548,7 +602,7 @@ class SuricataSignatureHypothesis(Hypothesis):
             return 0.0
         best = max(e.effective_weight() for e in hits)
 
-        if rep_vector.tier in (1, 2):
+        if self._effective_rep_tier(ev_store, rep_vector) in (1, 2):
             self.contradicting_score += 1.0
         if len(hits) >= 2:
             self.strong_score += 1.0
@@ -657,7 +711,7 @@ class PeerDeviationHypothesis(Hypothesis):
         if not self.required_satisfied:
             return 0.0
         best = max(e.effective_weight() for e in hits)
-        if rep_vector.tier in (1, 2):
+        if self._effective_rep_tier(ev_store, rep_vector) in (1, 2):
             self.contradicting_score += 1.0
         if best >= 0.5 and self.contradicting_score == 0:
             return 3.0
