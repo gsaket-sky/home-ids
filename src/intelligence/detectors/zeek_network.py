@@ -1,5 +1,6 @@
 from typing import List, Dict, Any
 from intelligence.hypotheses.evidence import Evidence
+from utils import classify_zeek_notice, ZEEK_NOTICE_TIER_CONFIDENCE
 import time
 
 class ZeekNetworkDetector:
@@ -45,15 +46,28 @@ class ZeekNetworkDetector:
                 # slot other detectors already use for this exact purpose (see
                 # threat_signals.py's add() helper).
                 note_type = evt.get("note", "") or "unknown"
+                # BUGFIX (live audit, 2026-09-09): confidence used to be a flat 0.75 for
+                # EVERY notice type, regardless of which one fired -- utils.py's
+                # classify_zeek_notice() (see its own docstring for the full incident,
+                # grounded in .94's real notice.log/weird.log distribution) now sets it
+                # per-tier instead. The tier is also embedded as a provenance subtag
+                # ("detector:zeek:notice:{tier}:{note_type}"), the SAME
+                # "detector:...:{subtag}:{note}" convention DNSTunnelingV2Hypothesis/
+                # BeaconingHypothesis/DNSEvasionHypothesis's own subtag parsing already
+                # uses (split(":", 4)[3]) -- so v13/hypotheses/engine.py's
+                # NetworkIntrusionHypothesis/DeviceProfileBenignHypothesis can weight a
+                # notice by its actual tier instead of treating any zeek_notice's mere
+                # PRESENCE as equally notable.
+                tier = classify_zeek_notice(note_type)
                 ev_list.append(Evidence(
                     type="zeek_notice",
                     source="zeek",
                     timestamp=now,
                     device=device,
                     value=1.0,
-                    confidence=evt.get("confidence", 0.75),
+                    confidence=ZEEK_NOTICE_TIER_CONFIDENCE[tier],
                     independence_group="zeek_network",
-                    provenance=f"detector:zeek:notice:{note_type}",
+                    provenance=f"detector:zeek:notice:{tier}:{note_type}",
                     domain=evt.get("dest_ip") or None,
                 ))
                 

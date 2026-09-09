@@ -268,11 +268,18 @@ def _describe_evidence(ev) -> str:
     # tell a genuinely alarming notice type apart from a routine one -- provenance now
     # carries the real note type (see zeek_network.py), surfaced here the same way
     # domain_suffix already surfaces per-evidence detail for other types.
+    # BUGFIX (live audit, 2026-09-09): provenance format gained a weak/medium/strong/
+    # highly_deterministic tier subtag ("detector:zeek:notice:{tier}:{note_type}",
+    # utils.py's classify_zeek_notice()) -- split(",", 3)[3] now returns
+    # "{tier}:{note_type}" instead of the clean note_type alone. Same
+    # split(":", 4)[4] convention this file already uses for subtag-carrying
+    # provenance elsewhere; the tier itself isn't shown here (a display concern
+    # separate from what fed HEE's scoring), just the real note type as before.
     notice_suffix = ""
     if ev.type == "zeek_notice" and getattr(ev, "provenance", ""):
-        parts = ev.provenance.split(":", 3)
-        if len(parts) == 4 and parts[3] and parts[3] != "unknown":
-            notice_suffix = f" — `{parts[3]}`"
+        parts = ev.provenance.split(":", 4)
+        if len(parts) == 5 and parts[4] and parts[4] != "unknown":
+            notice_suffix = f" — `{parts[4]}`"
     return f"{text}{domain_suffix}{notice_suffix}"
 
 

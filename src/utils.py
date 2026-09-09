@@ -502,6 +502,100 @@ def is_local_or_multicast_destination(dest: str) -> bool:
         return True
     return addr.version == 4 and str(addr).endswith(".255")
 
+
+# Zeek notice.log/weird.log severity tiers -- weak/medium/strong/highly_deterministic.
+#
+# BACKGROUND (live audit, 2026-09-09): every Zeek notice/weird, regardless of WHICH
+# Notice::Type or weird name actually fired, used to collapse into one identical
+# evidence shape (evidence_type="zeek_notice", confidence=0.75 hardcoded, one flat
+# independence_family) -- the real type string survived only as inert free text in
+# Evidence.provenance, read for display and exact-match correlation, never for
+# scoring. Grounded in .94's own real notice.log/weird.log distribution (a live
+# query against ~215K real "zeek_notice" evidence rows), not Zeek's full generic
+# catalog -- the overwhelming majority of what actually fires on a real home network
+# is TCP-state/capture artifacts (asymmetric routing, packet reordering, mirroring
+# gaps), not attacker behavior. The single most common type alone,
+# weird:data_before_established, accounted for 68,575 of those rows on its own.
+#
+# WEAK: TCP framing/capture-timing artifacts. Overwhelmingly benign -- packet
+# reordering, asymmetric routing (Zeek only seeing one direction), NAT/middlebox
+# rewriting, or ordinary connection-pooling reuse. None of these say anything about
+# the actual application-layer content of the traffic.
+ZEEK_NOTICE_TIER_WEAK = frozenset({
+    "weird:data_before_established", "weird:inappropriate_FIN",
+    "weird:possible_split_routing", "weird:above_hole_data_without_any_acks",
+    "weird:connection_originator_SYN_ack", "weird:line_terminated_with_single_CR",
+    "weird:active_connection_reuse", "weird:SYN_inside_connection",
+    "weird:window_recision", "weird:truncated_tcp_payload",
+    "weird:TCP_ack_underflow_or_misorder", "weird:TCP_seq_underflow_or_misorder",
+    "weird:SYN_after_partial", "weird:SYN_seq_jump", "weird:premature_connection_reuse",
+    "weird:data_after_reset", "weird:bad_SYN_ack", "weird:SYN_after_reset",
+    "weird:bad_TCP_header_len", "weird:SYN_after_close",
+    # dnp3 is an industrial-control (ICS/SCADA) protocol -- a home network has
+    # essentially no legitimate reason to run real DNP3, so a malformed-DNP3-header
+    # weird here is almost always Zeek's dynamic protocol detection misfiring on some
+    # OTHER traffic that happens to match DNP3's magic-byte heuristics, not a genuine
+    # ICS attack. Context (home network) outweighs the protocol's scary industrial
+    # reputation.
+    "weird:dnp3_header_lacks_magic", "weird:dnp3_corrupt_header_checksum",
+})
+
+# MEDIUM: touches actual application-layer content or protocol semantics, not just
+# TCP framing -- genuinely ambiguous (commonly explained by buggy/minimal IoT
+# firmware, self-signed local-API certs, etc.), but not pure network noise either.
+ZEEK_NOTICE_TIER_MEDIUM = frozenset({
+    "SSL::Invalid_Server_Cert", "weird:irc_invalid_command", "weird:bad_HTTP_request",
+    "weird:inflate_failed",
+})
+
+# STRONG: either Zeek's OWN policy layer already promoted this from a raw weird
+# (Weird::Activity -- a real, observed type on .94), or a well-documented Zeek
+# Notice::Type whose whole purpose is flagging a specific attack TECHNIQUE (address/
+# port scanning, credential brute-forcing, SQLi). Most of these have not yet been
+# observed on .94 -- verify the exact Notice::Type string against real Zeek docs/
+# logs before trusting a new one blindly if it ever fires.
+ZEEK_NOTICE_TIER_STRONG = frozenset({
+    "Weird::Activity",
+    "Scan::Address_Scan", "Scan::Port_Scan",
+    "SSH::Password_Guessing",
+    "HTTP::SQL_Injection_Attacker", "HTTP::SQL_Injection_Victim",
+    "FTP::Bruteforcing",
+    "Signatures::Multiple_Sig_Responder",
+})
+
+# HIGHLY_DETERMINISTIC: not a probabilistic behavioral heuristic at all -- a
+# deterministic fact that curated threat intel or a signature match fired. Not yet
+# observed on .94.
+ZEEK_NOTICE_TIER_HIGHLY_DETERMINISTIC = frozenset({
+    "Intel::Notice", "Signatures::Sensitive_Signature",
+})
+
+ZEEK_NOTICE_TIER_CONFIDENCE = {
+    "weak": 0.4, "medium": 0.65, "strong": 0.85, "highly_deterministic": 0.97,
+}
+ZEEK_NOTICE_TIER_SCORE_WEIGHT = {
+    "weak": 0.0, "medium": 0.5, "strong": 0.75, "highly_deterministic": 1.0,
+}
+
+
+def classify_zeek_notice(note_type: str) -> str:
+    """Classifies a Zeek notice.log Notice::Type or synthesized weird.log
+    ("weird:{name}") string into weak/medium/strong/highly_deterministic -- see the
+    tier frozensets' own comments above for what's actually grounded in .94's real
+    traffic vs. a documented-but-not-yet-observed placeholder. An unrecognized type
+    (a real Zeek notice this classification hasn't caught up to yet) defaults to
+    "medium" -- neither silently trusted as strong evidence nor silently dismissed as
+    noise; add it to the appropriate set above once a real example is seen and its
+    actual character is understood, don't guess ahead of data."""
+    if note_type in ZEEK_NOTICE_TIER_HIGHLY_DETERMINISTIC:
+        return "highly_deterministic"
+    if note_type in ZEEK_NOTICE_TIER_STRONG:
+        return "strong"
+    if note_type in ZEEK_NOTICE_TIER_WEAK:
+        return "weak"
+    return "medium"
+
+
 def suspicious_dga(domain):
     """
     Heuristic DGA (Domain Generation Algorithm) detector.

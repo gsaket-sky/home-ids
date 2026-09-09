@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Optional
 
 from v13.evidence.model import Evidence, NO_DESTINATION
+from utils import ZEEK_NOTICE_TIER_SCORE_WEIGHT
 
 try:
     from intelligence.reputation.classifier import ReputationVector
@@ -201,6 +202,23 @@ class DNSTunnelingHypothesis(Hypothesis):
         return score
 
 
+def _zeek_notice_weight(e: ScoredEvidence) -> float:
+    """Extracts the weak/medium/strong/highly_deterministic tier
+    intelligence/detectors/zeek_network.py encodes as a provenance subtag
+    ("detector:zeek:notice:{tier}:{note_type}") and returns its scoring weight --
+    see utils.py's classify_zeek_notice()/ZEEK_NOTICE_TIER_SCORE_WEIGHT for the full
+    incident and tier definitions. Same "detector:...:{subtag}:{note}" convention,
+    split(":", 4)[3], that DNSTunnelingV2Hypothesis/BeaconingHypothesis/
+    DNSEvasionHypothesis's own subtag parsing already uses elsewhere in this file.
+    Returns 0.0 for anything that isn't a zeek_notice. Pre-deploy evidence still
+    inside the 24h graph window (old 4-segment provenance, no tier subtag) safely
+    defaults to medium (0.5) rather than crashing or silently zeroing out."""
+    if e.evidence_type != "zeek_notice":
+        return 0.0
+    tier = e.provenance.split(":", 4)[3] if e.provenance.count(":") >= 3 else "medium"
+    return ZEEK_NOTICE_TIER_SCORE_WEIGHT.get(tier, 0.5)
+
+
 class NetworkIntrusionHypothesis(Hypothesis):
     RELEVANT_EVIDENCE_TYPES = frozenset({
         "zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice", "arp_spoof_pending",
@@ -218,8 +236,21 @@ class NetworkIntrusionHypothesis(Hypothesis):
         self._reset_eval_state()
         has_lateral_scan = any(e.evidence_type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
         has_malicious_tls = any(e.evidence_type in ("malicious_ja3", "malicious_ja4") for e in ev_store)
-        has_notable_notice = any(e.evidence_type == "zeek_notice" for e in ev_store)
         has_mac_flip = any(e.evidence_type == "arp_spoof_pending" for e in ev_store)
+
+        # BUGFIX (live audit, 2026-09-09): zeek_notice used to count as "notable"
+        # purely by PRESENCE, blind to which Notice::Type/weird actually fired --
+        # confirmed live against .94's own graph that the single most common notice,
+        # weird:data_before_established (a TCP-capture/reordering artifact, not
+        # attacker behavior), alone accounted for 68,575 real evidence rows, every
+        # one of which could satisfy this hypothesis's required_satisfied gate on
+        # its own. _zeek_notice_weight() (module-level, above) now reads the tier
+        # zeek_network.py encodes -- only medium-or-above notices can activate or
+        # corroborate this hypothesis; weak (routine protocol-edge-case/capture-
+        # artifact) notices contribute nothing, matching this codebase's own
+        # "unusual is not malicious" rule.
+        notice_weight = max((_zeek_notice_weight(e) for e in ev_store), default=0.0)
+        has_notable_notice = notice_weight > 0.0
 
         self.required_satisfied = has_lateral_scan or has_malicious_tls or has_mac_flip or has_notable_notice
         if not self.required_satisfied:
@@ -231,7 +262,13 @@ class NetworkIntrusionHypothesis(Hypothesis):
         if strong_count >= 2:
             self.strong_score += 1.0
         elif has_notable_notice and strong_count >= 1:
-            self.strong_score += 0.5
+            self.strong_score += 0.5 * notice_weight
+        elif has_notable_notice and notice_weight >= 1.0:
+            # A highly_deterministic notice (e.g. a real Intel::Notice/Signatures::
+            # match) is real corroborating weight even with no OTHER strong signal
+            # this cycle -- still short of strong_count>=2's full 1.0, since it's
+            # one signal, not two independently-corroborating ones.
+            self.strong_score += 0.75
 
         eff_tier = self._effective_rep_tier(ev_store, rep_vector)
         if eff_tier in (1, 2):
@@ -703,7 +740,21 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         is_trusted_destination = eff_tier in (0, 1, 2)
         is_familiar_destination = baseline_familiarity >= self.FAMILIARITY_TRUST_BAR
         has_elevated_dns_activity = any(e.evidence_type == "dns_rate" and e.value > 20 for e in ev_store)
-        has_competing_attack_evidence = any(e.evidence_type in self.ATTACK_SHAPED_EVIDENCE_TYPES for e in ev_store)
+        # BUGFIX (live audit, 2026-09-09): this "safety valve" used to treat ANY
+        # zeek_notice as competing attack evidence purely by presence, blind to
+        # tier -- given how common weak-tier notices are (a single TCP-capture
+        # artifact type alone fired 68,575 times on .94's real network, per
+        # _zeek_notice_weight()'s own incident writeup above), this made the
+        # safety valve fire on nearly every active device, making a benign
+        # device-profile verdict nearly unreachable in practice whenever ordinary
+        # background noise was present. Only medium-or-above notices now count as
+        # competing evidence; every other ATTACK_SHAPED_EVIDENCE_TYPES member is
+        # unaffected (unconditional presence, as before).
+        has_competing_attack_evidence = any(
+            (e.evidence_type in self.ATTACK_SHAPED_EVIDENCE_TYPES and e.evidence_type != "zeek_notice")
+            or (e.evidence_type == "zeek_notice" and _zeek_notice_weight(e) > 0.0)
+            for e in ev_store
+        )
 
         self.required_satisfied = (
             is_expected_category and (is_trusted_destination or is_familiar_destination)

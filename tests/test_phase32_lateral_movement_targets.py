@@ -411,8 +411,13 @@ notice_events = [{"type": "zeek_notice", "note": "SSL::Invalid_Server_Cert",
 notice_evidence = detector.detect("dev1", notice_events)
 check("THE CORE FIX: ZeekNetworkDetector carries the real notice type into "
       "Evidence.provenance, not a generic fixed string",
-      bool(notice_evidence) and notice_evidence[0].provenance == "detector:zeek:notice:SSL::Invalid_Server_Cert",
+      bool(notice_evidence) and notice_evidence[0].provenance == "detector:zeek:notice:medium:SSL::Invalid_Server_Cert",
       f"got provenance={notice_evidence[0].provenance if notice_evidence else 'NO EVIDENCE'}")
+check("BUGFIX (live audit, 2026-09-09): provenance also carries a weak/medium/strong/"
+      "highly_deterministic tier subtag now -- SSL::Invalid_Server_Cert classifies as "
+      "medium (utils.py's classify_zeek_notice()), and confidence is set per-tier "
+      "(0.65) instead of the old flat 0.75 for every notice type",
+      notice_evidence[0].confidence == 0.65, f"got confidence={notice_evidence[0].confidence}")
 
 from core.pipeline import _describe_evidence as _describe_evidence_real
 description = _describe_evidence_real(notice_evidence[0])

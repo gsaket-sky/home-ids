@@ -316,6 +316,27 @@ behavior) after this session's fix.
 whenever a family's classification changes, rather than treating this as a one-time
 exercise.
 
+**Update (2026-09-09, live audit)**: `zeek_notice` (the `B`/`C` row above lists it
+under `malicious_ja3`/`malicious_ja4` company implicitly via `network_behavior`, but
+it was never actually differentiated from them) turned out to be a single evidence
+type silently spanning ALL FOUR classes depending on which real `Notice::Type`/weird
+fired — every one of them collapsed into one identical shape (`confidence=0.75`
+flat, one family) with the real type surviving only as inert text in `provenance`.
+Fixed: `utils.py`'s `classify_zeek_notice()` now grades the actual observed
+type into weak/medium/strong/highly_deterministic (grounded in .94's own real
+notice.log/weird.log distribution — see its own docstring), `zeek_network.py` sets
+confidence per-tier instead of the old flat value, and `v13/hypotheses/engine.py`'s
+`NetworkIntrusionHypothesis`/`DeviceProfileBenignHypothesis` read the tier (a
+provenance subtag, `detector:zeek:notice:{tier}:{note_type}`) instead of treating any
+`zeek_notice`'s mere presence as equally notable. Concretely: weak-tier notices (TCP-
+capture/framing artifacts — confirmed the single most common one,
+`weird:data_before_established`, alone fired 68,575 times on .94's real network) now
+contribute nothing to either hypothesis; only medium-or-above notices can activate/
+corroborate `NetworkIntrusionHypothesis` or block `DeviceProfileBenignHypothesis`'s
+benign verdict. `zeek_notice` itself stays classified as class B/C on this table
+(it's evidence a hypothesis CAN score on, at varying strength) — this update is about
+making that strength real instead of assumed.
+
 ### G. Home Network Protocol Context Layer (audit §21)
 
 **Current state**: functionally covered by several SEPARATE mechanisms rather than one

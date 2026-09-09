@@ -134,10 +134,56 @@ h3 = NetworkIntrusionHypothesis()
 score_ja3_plus_notice = h3.evaluate(
     score_evidence([ev("malicious_ja3", 1), ev("zeek_notice", 1)], now=NOW), rep(4),
 )
-check("a real JA3 match plus a corroborating notice gets partial strong credit (0.5) "
-      "and reaches Probable, matching the Gap-2 fix's exact intent (notice can corroborate "
-      "but never single-handedly equal a real fingerprint match)",
-      h3.strong_score == 0.5 and score_ja3_plus_notice == 3.0)
+check("a real JA3 match plus a corroborating notice with no real tier subtag (test "
+      "default, defaults to medium per _zeek_notice_weight()) gets partial strong "
+      "credit (0.5 * 0.5 medium-tier weight = 0.25) and still reaches Probable, "
+      "matching the Gap-2 fix's exact intent (notice can corroborate but never "
+      "single-handedly equal a real fingerprint match)",
+      h3.strong_score == 0.25 and score_ja3_plus_notice == 3.0)
+
+# --- NetworkIntrusionHypothesis: zeek_notice tier weighting (live audit, 2026-09-09) ---
+h3w = NetworkIntrusionHypothesis()
+score_ja3_plus_weak_notice = h3w.evaluate(
+    score_evidence([ev("malicious_ja3", 1),
+                    ev("zeek_notice", 1, provenance="detector:zeek:notice:weak:weird:data_before_established")],
+                   now=NOW), rep(4),
+)
+check("REGRESSION GUARD: a WEAK-tier notice (e.g. weird:data_before_established, a "
+      "TCP-capture artifact) contributes ZERO strong credit even alongside a real "
+      "JA3 match -- routine protocol/capture noise is not corroboration",
+      h3w.strong_score == 0.0 and score_ja3_plus_weak_notice == 2.0)
+
+h3s = NetworkIntrusionHypothesis()
+score_ja3_plus_strong_notice = h3s.evaluate(
+    score_evidence([ev("malicious_ja3", 1),
+                    ev("zeek_notice", 1, provenance="detector:zeek:notice:strong:Scan::Address_Scan")],
+                   now=NOW), rep(4),
+)
+check("a STRONG-tier notice (e.g. Scan::Address_Scan) alongside a real JA3 match "
+      "gets more strong credit (0.5 * 0.75 = 0.375) than a medium-tier one, but "
+      "still short of a second fully-independent strong signal (1.0)",
+      h3s.strong_score == 0.375 and score_ja3_plus_strong_notice == 3.0)
+
+h3hd = NetworkIntrusionHypothesis()
+score_notice_only_highly_det = h3hd.evaluate(
+    score_evidence([ev("zeek_notice", 1, provenance="detector:zeek:notice:highly_deterministic:Intel::Notice")],
+                   now=NOW), rep(4),
+)
+check("a HIGHLY_DETERMINISTIC-tier notice (e.g. a real Intel::Notice hit) ALONE, "
+      "with no other strong signal this cycle, still earns real corroborating "
+      "weight (0.75) and can reach High (4.0) given a real (tier 4) reputation "
+      "signal too -- unlike a lone medium/weak notice, which stays at the base floor",
+      h3hd.strong_score == 0.75 and score_notice_only_highly_det == 4.0)
+
+h3hd2 = NetworkIntrusionHypothesis()
+score_notice_only_medium = h3hd2.evaluate(
+    score_evidence([ev("zeek_notice", 1, provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
+                   now=NOW), rep(4),
+)
+check("REGRESSION GUARD: a lone MEDIUM-tier notice (e.g. SSL::Invalid_Server_Cert), "
+      "with no other strong signal, stays at the base floor (2.0) -- only "
+      "highly_deterministic clears the bar to corroborate on its own",
+      score_notice_only_medium == 2.0)
 
 # --- ConnectionAbuseHypothesis: 3-way dynamic naming ---
 h = ConnectionAbuseHypothesis()
@@ -244,6 +290,34 @@ check("genuine attack-shaped evidence (malicious_ja3) present at all BLOCKS the 
       "verdict outright, even on an expected-category device against a trusted destination "
       "-- the exact guard this hypothesis exists to enforce",
       not h2.required_satisfied and score_blocked == 0.0)
+
+# BUGFIX regression (live audit, 2026-09-09): a WEAK-tier zeek_notice (routine
+# TCP-capture/protocol-edge-case noise, not attacker behavior) must NOT veto an
+# otherwise-legitimate benign verdict -- confirmed live that this safety valve used
+# to fire on ANY zeek_notice regardless of tier, and a single weak notice type alone
+# (weird:data_before_established) fired 68,575 times on .94's real network, making
+# this benign path nearly unreachable in practice.
+h2w = DeviceProfileBenignHypothesis()
+score_weak_notice_ok = h2w.evaluate(
+    score_evidence([ev("dns_rate", 30),
+                    ev("zeek_notice", 1, provenance="detector:zeek:notice:weak:weird:data_before_established")],
+                   now=NOW),
+    rep(1), device_type="smart_tv",
+)
+check("REGRESSION GUARD: a WEAK-tier zeek_notice does NOT block the benign verdict "
+      "-- routine capture/protocol noise is not competing attack evidence",
+      h2w.required_satisfied and score_weak_notice_ok > 0.0)
+
+h2m = DeviceProfileBenignHypothesis()
+score_medium_notice_blocked = h2m.evaluate(
+    score_evidence([ev("dns_rate", 30),
+                    ev("zeek_notice", 1, provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
+                   now=NOW),
+    rep(1), device_type="smart_tv",
+)
+check("a MEDIUM-tier-or-above zeek_notice (e.g. SSL::Invalid_Server_Cert) still "
+      "blocks the benign verdict, same as every other genuinely attack-shaped type",
+      not h2m.required_satisfied and score_medium_notice_blocked == 0.0)
 
 h3 = DeviceProfileBenignHypothesis()
 score_wrong_category = h3.evaluate(
