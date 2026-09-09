@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, is_cloud_cdn_provider_org
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -1349,8 +1349,47 @@ class EnginePipeline:
                         provenance="detector:zeek:local_device_discovery",
                     ))
                 
+                # BUGFIX (external architecture review, 2026-09-09, real production
+                # alert): confirmed live -- a HIGH PEER_COHORT_DEVIATION alert cited
+                # "poor external reputation score" for 35.186.224.24, a Google LLC-owned
+                # IP (is_cloud_cdn_provider_org() already recognizes "google llc" --
+                # confirmed, not a missing-keyword problem). Same false-positive shape
+                # as the c.pki.goog/Netflix incidents already fixed elsewhere (a214a2f,
+                # COORDINATED_TARGETING's own evidence-creation site specifically) but
+                # never extended to reputation evidence itself, or to classify()'s own
+                # asn_owner. Two separate, pre-existing gaps, same root fix: below,
+                # asn_owner was computed for dest_ip (this cycle's real connection --
+                # correct for the baseline-familiarity/CL-AFPE uses further down, kept
+                # unchanged), NOT reputation_target -- the two can legitimately differ
+                # (the whole point of the reputation-target-attribution fix a few lines
+                # below), so classify()'s own tier-2 trusted-infra check was being asked
+                # about the wrong destination's ownership. A separate, cheap local ASN
+                # lookup (same GeoLite2 db self.geoip_engine already has open, no
+                # network call) scoped to reputation_target specifically -- IP-only (a
+                # domain's own trust is already handled by classify()'s explicit
+                # TIER_0/1/2 domain-suffix lists, a separate, pre-existing mechanism) --
+                # computed once, reused both to gate the reputation Evidence itself
+                # (skip creating it entirely for known-trusted infra, matching a214a2f's
+                # own exemption) and passed to classify() below so rep_vector.tier
+                # itself correctly reflects tier 2 for the SAME destination reputation_
+                # target actually names, not dest_ip's unrelated ownership.
+                reputation_target_asn_owner = "Unknown"
+                if reputation_target and reputation_target != "unknown" and self.geoip_engine:
+                    try:
+                        ipaddress.ip_address(reputation_target)
+                    except (ValueError, TypeError):
+                        pass
+                    else:
+                        try:
+                            rt_asn_info = self.geoip_engine.lookup_asn(reputation_target)
+                            if rt_asn_info and getattr(rt_asn_info, "autonomous_system_organization", None):
+                                reputation_target_asn_owner = rt_asn_info.autonomous_system_organization
+                        except Exception:
+                            pass
+                reputation_target_is_trusted_infra = is_cloud_cdn_provider_org(reputation_target_asn_owner)
+
                 reputation_value = max(ti_risk, abuse_risk, vt_risk)
-                if ti_match or abuse_risk > 0.0 or vt_risk > 0.0:
+                if (ti_match or abuse_risk > 0.0 or vt_risk > 0.0) and not reputation_target_is_trusted_infra:
                     # PHASE 64 (reputation independence-scoping redesign): domain=
                     # was never populated here before -- reputation_target (set above,
                     # :841-926) is already the specific domain/IP that actually produced
@@ -1400,7 +1439,13 @@ class EnginePipeline:
                 # happened to be _select_target_domain()'s "most notable domain in the
                 # window" pick while a DIFFERENT domain this same device also queried is
                 # what actually earned the risk score).
-                rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=asn_owner)
+                #
+                # BUGFIX (same pass, above): asn_owner (dest_ip-scoped) is deliberately
+                # NOT used here anymore -- reputation_target_asn_owner (reputation_
+                # target-scoped, computed above) is passed instead, so this tier
+                # classification is asked about the SAME destination it's actually
+                # classifying, not dest_ip's unrelated ownership.
+                rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=reputation_target_asn_owner)
                 
                 # 3. Decision Engine
                 active_evidence = self.evidence_store.get_for_device(dev_id)
