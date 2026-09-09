@@ -1,4 +1,5 @@
-from typing import Dict, Any
+import threading
+from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException, Depends
 from pathlib import Path
@@ -12,6 +13,27 @@ router = APIRouter()
 
 class IPCTargetRequest(BaseModel):
     target: str = Field(..., description="Target domain or IP")
+
+# BUGFIX (live audit, 2026-09-09): _ipc_immunize_logic()/_ipc_revoke_logic() used to
+# construct a brand-new AutonomousFPEngine() on EVERY request -- unlike the per-request
+# StateManager()/IPSMitigator() pattern used elsewhere in this file (cheap, no background
+# work), AutonomousFPEngine.__init__() spawns 3 background daemon threads (including two
+# ONNX-based ML model loaders) and is never torn down, so every "Mark False Positive"/
+# "revoke" Telegram button tap leaked threads + a duplicate copy of both models into this
+# API subprocess indefinitely. Lazily built once per process instead.
+_fp_engine_singleton: Optional[AutonomousFPEngine] = None
+_fp_engine_lock = threading.Lock()
+
+def _get_fp_engine() -> AutonomousFPEngine:
+    global _fp_engine_singleton
+    if _fp_engine_singleton is None:
+        with _fp_engine_lock:
+            if _fp_engine_singleton is None:
+                state_path = CONFIG.get("state_path", "state/ids_state.json")
+                _fp_engine_singleton = AutonomousFPEngine(
+                    config=CONFIG, state_dir=str(Path(state_path).parent)
+                )
+    return _fp_engine_singleton
 
 @router.post("/api/ipc/immunize")
 def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
@@ -56,7 +78,7 @@ def _ipc_immunize_logic(action_id: str):
         hostname = entry.get("hostname", "unknown")
         alert_payload = entry.get("extra", {}).get("alert_payload", {}) or {}
 
-        fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
+        fp = _get_fp_engine()
         result = fp.mark_false_positive(alert_payload, hostname, target)
 
         # BUGFIX: mark_false_positive() now refuses hard-stop/verifiable-fact alerts
@@ -146,7 +168,7 @@ def _ipc_revoke_logic(action_id: str):
         result = {"status": "success", "action_id": action_id, "type": entry.get("type"), "target": entry.get("target")}
 
         if entry.get("type") == "immunize_domain":
-            fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
+            fp = _get_fp_engine()
             fp.revoke_immunization(entry.get("target", ""))
 
         device_id = entry.get("device_id", "")

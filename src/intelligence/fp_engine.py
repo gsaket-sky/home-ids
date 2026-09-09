@@ -2682,10 +2682,17 @@ class AutonomousFPEngine:
 
             LOGGER.info("[FP ENGINE » Stage 3] Loading BAAI/bge-small-en-v1.5 from cache: %s", cache_dir)
 
-            # Load the embedding model (ONNX-based, CPU-only, ~85 MB RAM)
+            # Load the embedding model (ONNX-based, CPU-only, ~85 MB RAM).
+            # BUGFIX (live audit, 2026-09-09): threads=1 -- without it, fastembed's own
+            # onnxruntime session defaults to an intra-op thread pool sized to nproc
+            # (8 on .94), sitting idle forever once the one-time 53-pattern embed at
+            # boot finishes. _load_lgbm_model()'s own onnxruntime session right below
+            # already pins intra_op_num_threads/inter_op_num_threads to 1 for the exact
+            # same reason -- this brings the embed loader in line with that same choice.
             model = TextEmbedding(
                 model_name="BAAI/bge-small-en-v1.5",
-                cache_dir=cache_dir
+                cache_dir=cache_dir,
+                threads=1,
             )
 
             # Build the safe vendor reference database and pre-compute embeddings
