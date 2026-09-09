@@ -2714,8 +2714,22 @@ class EnginePipeline:
                                         independence_group=fam,
                                         domain=dest if dest and dest != "(none)" else None,
                                     )
-                                    if fam not in grouped_evidence or synth_ev.value > grouped_evidence[fam].value:
-                                        grouped_evidence[fam] = synth_ev
+                                    # BUGFIX (same pass): peer_cohort_deviation is in v13's
+                                    # own NON_ATTACK_FAMILIES (hypotheses/independence.py,
+                                    # "too cheap/unvalidated to count as one of the two
+                                    # independent SOURCES the whole HIGH bar rests on" --
+                                    # third-party review, same reasoning already applied to
+                                    # local_context above) -- decision["evidence_families"]
+                                    # (this same session's own fix, just above) correctly
+                                    # never includes it. Routing it into grouped_evidence
+                                    # here would inflate fam_count PAST hee_independent_
+                                    # sources, creating a NEW families-vs-sources mismatch
+                                    # in the opposite direction from the one this whole fix
+                                    # exists to close. context_evidence (shown, never
+                                    # counted) is the correct bucket, same as local_context.
+                                    bucket = context_evidence if fam == "peer_cohort_deviation" else grouped_evidence
+                                    if fam not in bucket or synth_ev.value > bucket[fam].value:
+                                        bucket[fam] = synth_ev
                                 why_lines = [_describe_evidence(ev) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 # VERSION 12: family labels, aligned to why_lines by construction --
