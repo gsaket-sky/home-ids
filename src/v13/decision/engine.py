@@ -395,9 +395,18 @@ class DecisionEngine:
         # independent_sources counts against -- serialized (Evidence isn't JSON-safe
         # as-is) the same way winning_evidence already is, plus independence_family so
         # pipeline.py doesn't need its own type-to-family mapping to consume it.
+        # BUGFIX (live audit, 2026-09-09): provenance was never serialized here, so a
+        # zeek_notice item reaching pipeline.py's WHY-block through THIS bridge (real
+        # corroborating evidence beyond the winning hypothesis's own RELEVANT_
+        # EVIDENCE_TYPES slice) lost the real Notice::Type entirely -- confirmed live,
+        # a real PEER_COHORT_DEVIATION alert showed the generic "Zeek policy notice
+        # fired for this connection" with no note type, right alongside a DIFFERENT
+        # alert (via winning_evidence/active_evidence, which DOES carry provenance)
+        # showing the real type + tier correctly for the exact same evidence shape.
         full_attack_evidence = [
             {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features,
-             "value": e.value, "confidence": e.confidence, "independence_family": family_for(e.evidence_type)}
+             "value": e.value, "confidence": e.confidence, "independence_family": family_for(e.evidence_type),
+             "provenance": e.provenance}
             for e in attack_evidence
         ]
 

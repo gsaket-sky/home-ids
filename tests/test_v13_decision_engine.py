@@ -34,11 +34,12 @@ from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 NOW = 1_000_000.0
 
 
-def ev(evidence_type, value=1.0, timestamp=NOW, family=None, dest=NO_DESTINATION, confidence=1.0):
+def ev(evidence_type, value=1.0, timestamp=NOW, family=None, dest=NO_DESTINATION, confidence=1.0, provenance=""):
     from v13.hypotheses.independence import family_for
     return Evidence(device_id="dev1", destination_id=dest, evidence_type=evidence_type,
                       independence_family=family or family_for(evidence_type) or "general",
-                      timestamp=timestamp, source="s", value=value, confidence=confidence)
+                      timestamp=timestamp, source="s", value=value, confidence=confidence,
+                      provenance=provenance)
 
 
 def rep(tier, **kwargs):
@@ -345,6 +346,26 @@ check("each attack_evidence entry carries its own independence_family directly -
 r_ae_benign = engine.evaluate([], rep(3), now=NOW)
 check("attack_evidence is an empty list (not crashing) when there's no evidence at all",
       r_ae_benign["attack_evidence"] == [])
+
+# BUGFIX regression (live audit, 2026-09-09): attack_evidence's serialized dict used
+# to drop provenance entirely -- a zeek_notice item reaching pipeline.py's WHY-block
+# through THIS bridge (real corroborating evidence, not the winning hypothesis's own
+# slice) lost the real Notice::Type + weak/medium/strong/highly_deterministic tier
+# subtag zeek_network.py encodes there, showing the generic "Zeek policy notice fired
+# for this connection" instead -- confirmed live, the SAME evidence shape showed the
+# real note type correctly via winning_evidence/active_evidence but not via this path.
+r_ae_prov = engine.evaluate(
+    [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
+     ev("zeek_notice", value=1.0, dest="unrelated-destination.example",
+        provenance="detector:zeek:notice:medium:SSL::Invalid_Server_Cert")],
+    rep(3), now=NOW,
+)
+check("REGRESSION GUARD: attack_evidence's zeek_notice entry carries the real "
+      "provenance (note type + tier), not dropped at serialization",
+      any(w["evidence_type"] == "zeek_notice"
+          and w.get("provenance") == "detector:zeek:notice:medium:SSL::Invalid_Server_Cert"
+          for w in r_ae_prov["attack_evidence"]),
+      f"got {r_ae_prov['attack_evidence']}")
 
 # --- evidence_families/evidence_types (BUGFIX, live audit 2026-09-09, third-party
 # ChatGPT review of real production alerts): pipeline.py's persisted

@@ -238,6 +238,16 @@ _EVIDENCE_FAMILY_LABELS = {
     # reachable here before.
     "cross_device_correlation": "Cross-Device Correlation",
     "peer_cohort_deviation": "Peer-Cohort Deviation",
+    # BUGFIX (live audit, 2026-09-09): v13's INDEPENDENCE_FAMILY_MAP names zeek_notice's
+    # own family "network_behavior" (hypotheses/independence.py), a DIFFERENT string
+    # than v1's "zeek_network" independence_group above -- a zeek_notice item reaching
+    # the WHY-block via decision["attack_evidence"] (the corroborating-evidence bridge,
+    # not the primary active_evidence loop) carries the v13 name directly and fell
+    # through to the generic de-snake-cased fallback ("Network Behavior") instead of
+    # this dict's own "Network (Zeek)" label -- confirmed live, the exact same
+    # evidence shape showed two different family labels depending on which bridge
+    # reached it.
+    "network_behavior": "Network (Zeek)",
 }
 
 # BUGFIX (live audit, 2026-09-09): the 4 v13-only synthetic evidence types
@@ -2819,6 +2829,13 @@ class EnginePipeline:
                                         device=dev_id, value=float(we.get("value") or 1.0),
                                         confidence=float(we.get("confidence") or 1.0),
                                         independence_group=fam,
+                                        # BUGFIX (live audit, 2026-09-09): provenance was never
+                                        # carried through this bridge -- see decision/engine.py's
+                                        # matching full_attack_evidence fix for the full incident.
+                                        # Needed for _describe_evidence()'s zeek_notice note-type/
+                                        # tier suffix to work when a notice reaches the WHY-block
+                                        # through THIS bridge rather than active_evidence directly.
+                                        provenance=we.get("provenance") or "",
                                         domain=dest if dest and dest != "(none)" else None,
                                     )
                                     # BUGFIX (same pass): peer_cohort_deviation is in v13's
