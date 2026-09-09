@@ -263,6 +263,32 @@ r_we_benign = engine.evaluate([], rep(3), now=NOW)
 check("winning_evidence is empty (not crashing) when no attack hypothesis wins at all",
       r_we_benign["winning_evidence"] == [])
 
+# --- evidence_families/evidence_types (BUGFIX, live audit 2026-09-09, third-party
+# ChatGPT review of real production alerts): pipeline.py's persisted
+# hee_evidence_families/hee_evidence_types were ALWAYS recomputed independently from
+# active_evidence (pipeline.py's own v1 evidence store), which structurally never
+# contains v13-only synthetic evidence -- confirmed live, 34 of 121 real alerts in a
+# 24h sample showed hee_evidence_families=[] (empty) while hee_independent_sources
+# correctly showed 2-4, every one COORDINATED_TARGETING/PEER_COHORT_DEVIATION. These
+# two fields are the ground truth independent_sources itself counts against -- must
+# never be empty when independent_sources > 0.
+r_ef = engine.evaluate(
+    [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
+     ev("reputation", value=4.0, dest="evil-dga.example")],
+    rep(3), now=NOW,
+)
+check("REGRESSION GUARD: evidence_families is never empty when independent_sources > 0 "
+      "-- the exact 'HIGH with 0 evidence families' inconsistency flagged externally "
+      "against real production alerts, and evidence_families's count always matches "
+      "independent_sources exactly (same underlying set)",
+      len(r_ef["evidence_families"]) == r_ef["independent_sources"] and r_ef["independent_sources"] > 0,
+      f"got evidence_families={r_ef['evidence_families']} independent_sources={r_ef['independent_sources']}")
+
+r_ef_empty = engine.evaluate([], rep(3), now=NOW)
+check("evidence_families/evidence_types are empty lists (not crashing) when there's no evidence at all",
+      r_ef_empty["evidence_families"] == [] and r_ef_empty["evidence_types"] == []
+      and r_ef_empty["independent_sources"] == 0)
+
 # --- INVARIANT BATTERY (third-party architecture review, item #11: "enforce
 # HIGH/CRITICAL invariants in code") -- rather than trusting the branch logic by
 # convention, assert the two central rules directly against a battery of varied

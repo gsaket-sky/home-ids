@@ -331,9 +331,30 @@ class DecisionEngine:
         # hypothesis's OWN declared evidence types) gives pipeline.py exactly what it
         # needs, serialized (Evidence isn't JSON-safe as-is).
         winning_evidence = [
-            {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features}
+            {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features,
+             "value": e.value, "confidence": e.confidence}
             for e in attack_evidence if relevant_types and e.evidence_type in relevant_types
         ]
+
+        # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review): pipeline.py's
+        # persisted hee_evidence_families/hee_evidence_types have ALWAYS been recomputed
+        # independently from active_evidence (pipeline.py's own v1 evidence store) rather
+        # than read from here -- confirmed live via a real 24h extraction: 34 of 121
+        # would-send alerts show hee_evidence_families=[] (empty) while
+        # hee_independent_sources correctly shows 2-4 and attack_score 3.0-4.0, EVERY one
+        # of them a v13-only-synthetic-evidence-driven signature (COORDINATED_TARGETING/
+        # PEER_COHORT_DEVIATION -- family cross_device_correlation/peer_cohort_deviation
+        # never exists in active_evidence, same root cause f027a6f already fixed for
+        # alert_dest_ip alone). The Telegram message's own "WHY (N independent evidence
+        # families)" line reads this same buggy computation, so it displayed a HIGH/85%
+        # verdict alongside "0 independent evidence families" -- looks like (and was
+        # flagged as) an invariant violation, even though num_independent_sources/
+        # independence_families computed just above -- the ACTUAL values that gated the
+        # verdict -- were always correct. independence_families here already IS the
+        # ground truth num_independent_sources counts against -- exposing it directly
+        # instead of pipeline.py re-deriving a different, incomplete answer.
+        evidence_families = sorted(independence_families)
+        evidence_types = sorted({e.evidence_type for e in attack_evidence})
 
         return {
             "state": state,
@@ -347,4 +368,6 @@ class DecisionEngine:
             "reasoning_trail": trail,
             "decision_path": decision_path,
             "winning_evidence": winning_evidence,
+            "evidence_families": evidence_families,
+            "evidence_types": evidence_types,
         }

@@ -200,6 +200,14 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "domain": "Destination domain matches a known-malicious reputation list",
     "ip": "Destination IP matches a known-malicious reputation list",
     "mixed": "Mixed reputation signal on this connection",
+    # BUGFIX (live audit, 2026-09-09): these 4 are v13-only synthetic evidence
+    # (v13/ops/live_engine.py, coordinated_targeting/peer_deviation's own docstrings)
+    # that never existed in _EVIDENCE_PLAIN_LANGUAGE because they never existed in
+    # active_evidence at all -- see the WHY-block synthetic-evidence bridging below.
+    "coordinated_targeting": "Same destination independently reached by multiple other devices",
+    "fingerprint_campaign": "Same TLS client fingerprint (JA3/JA4) shared with other devices",
+    "dga_seed_campaign": "Same DGA-shaped domain-generation pattern shared with other devices",
+    "peer_deviation": "Distinct-destination count far above this device's own peer cohort average",
 }
 
 # VERSION 12 (G8-for-live-alerts, HEE coverage audit): human-readable labels for
@@ -224,6 +232,25 @@ _EVIDENCE_FAMILY_LABELS = {
     "local_context": "Local Context",
     "reputation": "Reputation",
     "suricata": "Signature Match",
+    # BUGFIX (live audit, 2026-09-09): v13's own finer independence-family split
+    # (hypotheses/independence.py) names these two families -- see
+    # _EVIDENCE_PLAIN_LANGUAGE's matching new entries above for why they were never
+    # reachable here before.
+    "cross_device_correlation": "Cross-Device Correlation",
+    "peer_cohort_deviation": "Peer-Cohort Deviation",
+}
+
+# BUGFIX (live audit, 2026-09-09): the 4 v13-only synthetic evidence types
+# (v13/ops/live_engine.py's _inject_graph_derived_evidence()/
+# _inject_peer_deviation_evidence()) mapped to v13's own independence-family name
+# (hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP) -- used to bridge
+# decision["winning_evidence"] entries into the WHY-block grouping loop below, since
+# these never exist in active_evidence (pipeline.py's own v1 evidence store) at all.
+_V13_SYNTHETIC_EVIDENCE_FAMILY = {
+    "coordinated_targeting": "cross_device_correlation",
+    "fingerprint_campaign": "cross_device_correlation",
+    "dga_seed_campaign": "cross_device_correlation",
+    "peer_deviation": "peer_cohort_deviation",
 }
 
 
@@ -1997,9 +2024,27 @@ class EnginePipeline:
                             "hee_hypotheses": decision.get("hypotheses", {}),
                             "hee_independent_sources": decision.get("independent_sources", 0),
                             "hee_decision_path": decision.get("decision_path", ""),
+                            # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review):
+                            # these were ALWAYS computed from active_evidence alone --
+                            # pipeline.py's own v1 evidence store, which structurally never
+                            # contains v13-only synthetic evidence (coordinated_targeting/
+                            # peer_deviation/fingerprint_campaign/dga_seed_campaign -- see
+                            # decision/engine.py's own comment on its "evidence_families"/
+                            # "evidence_types" return fields, the actual ground truth
+                            # hee_independent_sources counts against). Confirmed live: 34 of
+                            # 121 alerts in a 24h sample showed hee_evidence_families=[] while
+                            # hee_independent_sources correctly showed 2-4 -- every one a
+                            # COORDINATED_TARGETING/PEER_COHORT_DEVIATION verdict, exactly the
+                            # "HIGH with 0 evidence families" inconsistency flagged externally.
+                            # Unioned (not replaced) with decision's own values so v-current
+                            # (whose decision dict lacks these keys, .get(...,[]) degrades to
+                            # today's behavior unchanged) and any evidence type not read by
+                            # decision_engine.py's attack_evidence (e.g. local_context/
+                            # novelty_context families, deliberately excluded there) are never
+                            # lost -- purely additive, can only ADD what was missing.
                             "hee_evidence_families": sorted({
                                 ev.independence_group for ev in active_evidence if ev.independence_group
-                            }),
+                            } | set(decision.get("evidence_families", []))),
                             # PHASE 58: the actual Evidence.type names present (not just
                             # their coarser independence_group families) -- needed because
                             # family granularity is too coarse for ai_soc.py's attack-shaped-
@@ -2008,8 +2053,11 @@ class EnginePipeline:
                             # family, but only the former is attack-shaped (see
                             # hypotheses/evidence.py's ATTACK_SHAPED_EVIDENCE_TYPES). Reuses
                             # the SAME active_evidence list already in scope here, same
-                            # treatment as hee_evidence_families right above.
-                            "hee_evidence_types": sorted({ev.type for ev in active_evidence}),
+                            # treatment as hee_evidence_families right above -- same union
+                            # reasoning for the v13-synthetic-type gap.
+                            "hee_evidence_types": sorted(
+                                {ev.type for ev in active_evidence} | set(decision.get("evidence_types", []))
+                            ),
                             # Console Suricata surfacing (this session): suricata_scan.py's
                             # suricata_alerts_to_evidence() already builds a rich provenance
                             # string ("detector:suricata:{signature_id}:{category}:{signature}")
@@ -2627,6 +2675,47 @@ class EnginePipeline:
                                     bucket = context_evidence if ev.independence_group == "local_context" else grouped_evidence
                                     if ev.independence_group not in bucket or ev.value > bucket[ev.independence_group].value:
                                         bucket[ev.independence_group] = ev
+                                # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review):
+                                # active_evidence structurally never contains v13-only
+                                # synthetic evidence (coordinated_targeting/peer_deviation/
+                                # fingerprint_campaign/dga_seed_campaign -- v13/ops/
+                                # live_engine.py's own docstrings), so this WHY block was
+                                # always empty for a COORDINATED_TARGETING/PEER_COHORT_
+                                # DEVIATION-driven verdict. Confirmed live: 34 of 121 alerts
+                                # in a 24h sample, every one this exact shape, showed "HIGH"
+                                # alongside "0 independent evidence families" and zero WHY
+                                # bullets -- looked like (and was flagged externally as) an
+                                # invariant violation, though num_independent_sources itself
+                                # was always correct; only this reconstruction was
+                                # incomplete. decision["winning_evidence"] (decision/
+                                # engine.py, this same session) carries the real fired
+                                # evidence for exactly these cases -- bridged into a
+                                # matching synthetic v1 Evidence object (independence_group
+                                # set to v13's own family name; see _EVIDENCE_FAMILY_LABELS/
+                                # _EVIDENCE_PLAIN_LANGUAGE's matching new entries) so
+                                # _describe_evidence() and the grouping/sorting logic below
+                                # need no special-casing. Scoped to the winning hypothesis's
+                                # own relevant evidence (not the full independent-source
+                                # set) -- sufficient for every case actually observed live
+                                # (the winning attack was always COORDINATED_TARGETING/
+                                # PEER_COHORT_DEVIATION itself in all 34 samples), though a
+                                # v13-synthetic family corroborating a DIFFERENT winning
+                                # hypothesis would still show incompletely -- not yet seen
+                                # live, flagged for a future pass if it ever is.
+                                for we in decision.get("winning_evidence", []):
+                                    fam = _V13_SYNTHETIC_EVIDENCE_FAMILY.get(we.get("evidence_type"))
+                                    if not fam:
+                                        continue
+                                    dest = we.get("destination_id")
+                                    synth_ev = Evidence(
+                                        type=we["evidence_type"], source="v13_live_engine", timestamp=now,
+                                        device=dev_id, value=float(we.get("value") or 1.0),
+                                        confidence=float(we.get("confidence") or 1.0),
+                                        independence_group=fam,
+                                        domain=dest if dest and dest != "(none)" else None,
+                                    )
+                                    if fam not in grouped_evidence or synth_ev.value > grouped_evidence[fam].value:
+                                        grouped_evidence[fam] = synth_ev
                                 why_lines = [_describe_evidence(ev) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 # VERSION 12: family labels, aligned to why_lines by construction --
