@@ -103,6 +103,67 @@ pass also shipped, tested, and deployed:
    just raising thresholds ("Leave it as-is, just fix it properly now"). Needs one full
    peer-comparison cycle of real traffic to accumulate before `PEER_COHORT_DEVIATION`
    alerts show corrected numbers — re-verify against the next real alert.
+10. **`soc.service` OOM-crash root-caused and fixed** — user asked "is ollama job
+    working," which led to finding `soc.service` had been repeatedly OOM-killed all
+    day (confirmed via `journalctl`/`job_health.json`: `ollama_soc`/`live_llm_review`
+    both missing several scheduled runs). Two compounding causes, both fixed:
+    (a) `fp_engine.py`'s `_load_embed_model()` built its `fastembed.TextEmbedding`
+    with no thread limit, defaulting to an 8-wide (nproc) onnxruntime intra-op pool
+    for a one-time 53-string embed — `_load_lgbm_model()`, a few hundred lines away,
+    already pinned its own onnxruntime session to 1 thread for the same reason; the
+    embed loader never got the same treatment. Fixed with `threads=1`, confirmed live
+    (8 `fp_embed_loader` OS threads → 1). (b) `middleware/routers/pihole_api.py`'s IPC
+    handlers (`_ipc_immunize_logic`/`_ipc_revoke_logic`, the Telegram "Mark False
+    Positive"/"revoke" buttons) constructed a brand-new `AutonomousFPEngine()` — 3
+    daemon threads + 2 loaded ML models, never torn down — on every request. Replaced
+    with a lazy, thread-safe, process-wide singleton; verified under 10 concurrent
+    callers (exactly 1 construction). `soc.service`'s `MemoryMax` raised 1G → 2G, both
+    as a live runtime override and persisted into the unit file (`INSTALL.md`
+    updated to match).
+11. **The real OOM root cause: a scheduling collision, not just memory** — even after
+    the 2G bump, `soc.service` OOM'd again (peaked at the full 2G plus 2.4G swap).
+    `ollama_soc` (cron `30 */4 * * *`, routine ~90-100min runtime) and `live_llm_review`
+    (cron `45 */4 * * *`, only 15 minutes later) almost always overlap, since a 15-minute
+    offset can't absorb a 90+ minute job — confirmed both of that day's OOM events
+    (16:48, 20:48) landed exactly in that overlap window. Fixed by moving
+    `live_llm_review` to a full 2-hour offset (`30 2,6,10,14,18,22 * * *`) — checked
+    every other scheduled job first, none of them collide with `ollama_soc`'s slots.
+    Config-only change on `.94`'s live `config.yaml` (not tracked in git — see
+    [[project_v13_full_architecture_shift_plan]] for why that file isn't authoritative
+    from this checkout).
+12. **Multicast/broadcast addresses could become `reputation_target` via `top_domain`**
+    — found while investigating a real `PEER_COHORT_DEVIATION` alert whose "Reputation"
+    evidence pointed at `239.255.255.250` (SSDP multicast). Confirmed against `.94`'s
+    graph: 782 "reputation" evidence rows for that one address, actively still being
+    created (most recent row: seconds before the fix). Root cause: `state.rolling.
+    domains`'s keys aren't always real DNS names — a raw destination IP lands there as
+    a fallback "domain" when there's no PTR/DNS name, and a chatty multicast address can
+    easily be the most frequent such key. `_select_target_domain()` (all 3 priority
+    tiers) and pipeline.py's own separate `_rolling_domain_keys` snapshot had no
+    multicast/broadcast filtering at all, unlike `dest_ip` elsewhere in the same
+    function (`_dest_ip_is_real_host`). Fixed by applying the same
+    `is_local_or_multicast_destination()` guard at both source points; verified against
+    the real `EnginePipeline._select_target_domain()` method directly.
+13. **VeriSign's gTLD-server infrastructure not recognized as trusted** — found while
+    auditing the graph for the multicast fix above: 12 (of the 13 total) VeriSign
+    gTLD-server anycast IPs (`a.gtld-servers.net` through `m.gtld-servers.net`, the
+    `.com`/`.net` TLD root delegation infrastructure) had accumulated ~800 "reputation"
+    evidence rows, actively still growing. Confirmed via `.94`'s own GeoIP DB:
+    `autonomous_system_organization='VeriSign Global Registry Services'`. Added
+    `"verisign"` to `ReputationClassifier._SAFE_ASN_OWNER_KEYWORDS` (the same
+    dedicated-infrastructure list Telegram's own IPs already use — deliberately NOT
+    `is_cloud_cdn_provider_org()`'s multi-tenant list, since nobody rents compute on a
+    gTLD-server IP the way they can on AWS/Azure).
+14. **Retroactive graph cleanup for items 12/13 + the earlier-missed Telegram gap** —
+    same precedent as item 6's cleanup: the code fixes alone don't touch evidence
+    already sitting in the graph (86400s/24h TTL). Enumerated exact scope before
+    touching anything: 1,875 "reputation" evidence rows across 17 destinations
+    (`239.255.255.250` multicast: 788; `224.0.0.252` multicast: 4; the 13 VeriSign
+    gTLD-server IPs: 972 combined; `149.154.167.41`/`149.154.166.110` Telegram: 41
+    combined) — all confirmed still actively accumulating right up to the deploy.
+    User-approved, precisely scoped `DELETE ... WHERE evidence_type='reputation' AND
+    destination_id IN (...)` removed exactly 1,875 rows (verified via `changes()`);
+    184 legitimate reputation rows for other destinations left untouched.
 
 ---
 
