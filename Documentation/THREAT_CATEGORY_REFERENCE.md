@@ -292,6 +292,20 @@ reach HIGH by itself, no matter how high its own score climbs.
      `pipeline.py` never has to re-derive this from a differently-scoped list again. A follow-up
      pass the same day found and fixed the identical gap for 4 more signatures
      (`DNS_TUNNELING`/`DATA_EXFILTRATION`/`C2_BEACONING`/`SIGNATURE_MATCHED_THREAT`) — see §8.
+   - **Correction**: `f027a6f` fixed the DESTINATION display for these two signatures, but the
+     `hee_evidence_families`/WHY-block problem described in the paragraph above was a SEPARATE
+     bug that fix didn't reach — confirmed live via a real 24h alert pull (an external
+     architecture review's audit of 2 real alerts prompted the check): 34 of 121 real alerts
+     still showed `hee_evidence_families=[]` while `hee_independent_sources` correctly showed
+     2-4. Actually fixed 2026-09-09 (`cd3d747`, corrected same day in `7d70e10` — the first
+     version wrongly let `peer_deviation` count toward the family total, when
+     `hypotheses/independence.py`'s own `NON_ATTACK_FAMILIES` deliberately excludes it):
+     `decision/engine.py::evaluate()` now also returns `evidence_families`/`evidence_types`
+     (the literal set `independent_sources` counts against); `pipeline.py` unions these into
+     the persisted fields and bridges `winning_evidence` into the WHY-block's evidence grouping
+     for the same 4 synthetic types, routing `peer_cohort_deviation` into the existing
+     "shown, not counted" bucket (`context_evidence`, same treatment `local_context` gets).
+     Live-verified against a real post-deploy alert.
 
 This example is preserved here specifically because it demonstrates the general pattern this
 whole document exists to make legible: **a HIGH verdict routinely comes from two cheap,
