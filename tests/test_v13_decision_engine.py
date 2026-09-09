@@ -220,6 +220,28 @@ check("local_device_discovery evidence never inflates the independent-attack-sou
       "(mirrors v-current's ATTACK_EVIDENCE_FAMILIES exclusion exactly)",
       with_local_only["independent_sources"] == without_local["independent_sources"])
 
+# --- geofencing_violation (family "policy") is excluded from attack corroboration
+# counting too (BUGFIX, external architecture review, 2026-09-09) -- a policy fact
+# about a destination must not be able to silently supply the SECOND independent
+# source for an unrelated, weaker attack hypothesis. NOT the same question as the
+# geofence hard-stop's own corroboration check (that one requires attack_score>
+# benign_score too, which a bare geofencing_violation alone never satisfies since no
+# hypothesis reads that evidence type -- see the existing geofence INVARIANT tests
+# above, unaffected by this change).
+with_geofence_only = engine.evaluate(
+    [ev("zeek_lateral_scan", value=1), ev("geofencing_violation", value=1)], rep(3), now=NOW,
+)
+without_geofence = engine.evaluate([ev("zeek_lateral_scan", value=1)], rep(3), now=NOW)
+check("REGRESSION GUARD: geofencing_violation evidence never inflates the "
+      "independent-attack-source count for an UNRELATED attack hypothesis -- a "
+      "destination-policy fact is not real behavioral corroboration",
+      with_geofence_only["independent_sources"] == without_geofence["independent_sources"],
+      f"got with={with_geofence_only['independent_sources']} without={without_geofence['independent_sources']}")
+check("REGRESSION GUARD: that same unrelated attack hypothesis (single family, malicious_ja3 "
+      "alone) still stays SUSPICIOUS, not HIGH, even with a co-occurring geofencing_violation",
+      with_geofence_only["state"] != DecisionState.HIGH,
+      f"got state={with_geofence_only['state']}")
+
 # --- registry pluggability: the actual structural point of this rewrite ---
 custom_rule = HardStopRule(
     name="custom_test_rule", explanation="Custom Test Hard-Stop", confidence=1.0,

@@ -405,6 +405,22 @@ class BeaconingHypothesis(Hypothesis):
             score = 3.0
         if best >= 0.85 and self.strong_score > 0 and self.contradicting_score == 0:
             score = 4.0
+        # CAPPED (external architecture review, 2026-09-09): threat_signals.py's
+        # zeek_beaconing detector has 3 branches of very different rigor (see its own
+        # BUGFIX comment) -- only "persistent_single_target" (interval-regularity,
+        # tdr>0.75 across >=15 observations) matches the audit's own bar for genuine
+        # beacon evidence ("repeated connections + stable destination + regular
+        # intervals"). "low_and_slow"/"uniform_jitter" are real signals worth their
+        # own SUSPICIOUS-tier verdict, but neither requires any actual regularity --
+        # same "ambiguous case stays at the base floor" treatment DNS_ATTRIBUTION_GAP
+        # already gets elsewhere in this file. Matches provenance format exactly as
+        # DNSTunnelingV2Hypothesis's own subtag parsing does.
+        subtags = {
+            (e.provenance.split(":", 4)[3] if e.provenance.count(":") >= 3 else "")
+            for e in hits
+        }
+        if "persistent_single_target" not in subtags:
+            score = min(score, 2.0)
         return score
 
 

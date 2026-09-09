@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -1046,6 +1046,25 @@ class EnginePipeline:
                     else:
                         dest_ip = "unknown"
 
+            # BUGFIX (external architecture review, 2026-09-09, "Invariant 8" --
+            # destination==MULTICAST must never independently create a reputation
+            # threat): every dest_ip-gated reputation lookup below (TI/AbuseIPDB/VT)
+            # used to gate on a bare `dest_ip and dest_ip != "unknown"` check with no
+            # multicast/broadcast/link-local exclusion -- unlike every OTHER IP-touching path in
+            # this codebase (GraphStore.get_devices_targeting(),
+            # get_distinct_destination_count(), fp_engine.py's confirmed-intel guard,
+            # all already excluded this exact traffic shape, see 1ff6c97/graph/
+            # store.py's own docstring). A multicast dest_ip (mDNS 224.0.0.251/ff02::fb,
+            # SSDP 239.255.255.250, etc. -- extremely common, this device's OWN cycle
+            # destination, not a bystander) could still be enqueued against paid
+            # AbuseIPDB/VT quota and, in the theoretical case a feed ever returned
+            # garbage data for one, become `reputation_target` itself. No live
+            # incident confirmed this fired in practice (a real TI/VT/AbuseIPDB feed
+            # essentially never has data for a non-routable multicast address), but
+            # nothing here actually prevented it structurally -- closing the gap
+            # rather than relying on external feeds happening to stay silent.
+            _dest_ip_is_real_host = bool(dest_ip) and dest_ip != "unknown" and not is_local_or_multicast_destination(dest_ip)
+
             # ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
             # BUGFIX: found via a live third-party review of a real CRITICAL/"Confirmed
             # Malicious IOC" alert (c.pki.goog, Google's own certificate-revocation
@@ -1074,7 +1093,7 @@ class EnginePipeline:
                             reputation_target = domain
                         ti_match = 1
                         ti_ioc_hits_total.labels(source="threat_intel", ioc_type="domain").inc()
-                if dest_ip and dest_ip != "unknown":
+                if _dest_ip_is_real_host:
                     ip_ti_res = self.ti_engine.lookup_ip(dest_ip)
                     if ip_ti_res:
                         cur_ip_risk = float(ip_ti_res.get("confidence", 0.8) * 4.0)
@@ -1101,7 +1120,7 @@ class EnginePipeline:
             abuse_risk = 0.0
             honeypots = self.config.get("honeypot_ips", [])
             
-            if dest_ip and dest_ip != "unknown":
+            if _dest_ip_is_real_host:
                 if dest_ip in honeypots:
                     # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                     abuse_risk = 4.0
@@ -1131,7 +1150,7 @@ class EnginePipeline:
                     _best_risk_seen = vt_risk
                     reputation_target = dest_ip
             else:
-                if dest_ip and dest_ip != "unknown":
+                if _dest_ip_is_real_host:
                     self.virustotal.enqueue_ip(dest_ip)
                 if top_domain:
                     self.virustotal.enqueue_domain(top_domain)
@@ -1366,7 +1385,7 @@ class EnginePipeline:
                 # reasoning trail so a human can see "this is Telegram infrastructure"
                 # instead of the system silently having no way to know).
                 asn_owner = "Unknown"
-                if self.geoip_engine and dest_ip and dest_ip != "unknown":
+                if self.geoip_engine and _dest_ip_is_real_host:
                     try:
                         asn_info = self.geoip_engine.lookup_asn(dest_ip)
                         if asn_info and getattr(asn_info, "autonomous_system_organization", None):

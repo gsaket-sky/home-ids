@@ -173,8 +173,25 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
 # hypothesis's own verdict, but too cheap/unvalidated to count as one of the two
 # independent SOURCES the whole HIGH bar rests on -- see each family's own comment
 # above for the live incidents that found this.
+#
+# "policy" (external architecture review, 2026-09-09) joins for the identical
+# reason: geofencing_violation is "a policy fact about a destination, not
+# first-hand behavioral evidence about what the device DID" (its own comment
+# above) -- the exact same cheapness argument already applied to peer_cohort_
+# deviation/ml_anomaly, just not extended here until this review named it
+# explicitly. The geofence hard-stop's OWN corroboration check (decision/
+# engine.py's requires_corroboration, num_independent_sources>=1) is unaffected:
+# it never depended on geofencing_violation counting itself (no hypothesis reads
+# that evidence type at all, so attack_score stays 0 without a REAL attack
+# hypothesis also firing -- confirmed against both existing geofence test
+# scenarios before this change shipped). What this closes is geofencing being
+# able to silently supply the SECOND independent source for an unrelated, weaker
+# attack hypothesis via the normal (non-hard-stop) num_independent_sources>=2
+# path -- a real destination-policy fact corroborating a behaviorally-unrelated
+# finding is exactly the "unusual is not malicious" gap this whole family exists
+# to close everywhere else.
 NON_ATTACK_FAMILIES = frozenset({
-    "local_context", "novelty_context", "peer_cohort_deviation", "ml_anomaly",
+    "local_context", "novelty_context", "peer_cohort_deviation", "ml_anomaly", "policy",
 })
 
 UNKNOWN_FAMILY = "unregistered"  # visible fallback, see count_independent_families()'s own docstring

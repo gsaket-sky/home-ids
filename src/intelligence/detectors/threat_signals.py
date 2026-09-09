@@ -261,9 +261,23 @@ class ThreatSignalDetector:
             add("zeek_exfiltration", outbound_z, conf, "zeek_network",
                 f"elevated Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
                 domain=exfil_dest_ip)
-        elif outbound_bytes > 50000000 and not is_telemetry and not is_vendor_cloud_api:
+        # BUGFIX (external architecture review, 2026-09-09): this branch used to fire
+        # on raw absolute volume alone, with NO reference to the device's own
+        # baseline at all -- unlike the two branches above it, which both gate on
+        # outbound_bytes_z (a real z-score, i.e. genuinely baseline-relative). A
+        # device whose normal traffic legitimately includes large transfers (a NAS
+        # doing its own backups, a PC on a big game/OS-update download that isn't in
+        # the narrow _VENDOR_CLOUD_API_DOMAINS/telemetry allowlists) could clear 50MB
+        # on a routine day with a NEGATIVE or near-zero z-score -- i.e. this specific
+        # transfer wasn't even unusual FOR THAT DEVICE -- and still fire here. Added
+        # `outbound_z > 0` as a minimal floor: cheapest possible baseline-awareness
+        # (merely "elevated at all relative to this device's own history"), not the
+        # same rigor as the two branches above -- deliberately conservative given no
+        # live tuning data exists yet for what a stricter bar should be here
+        # specifically (see Documentation/AUDIT_REVIEW_FOLLOWUP.md).
+        elif outbound_bytes > 50000000 and outbound_z > 0 and not is_telemetry and not is_vendor_cloud_api:
             add("zeek_exfiltration", outbound_bytes, 0.55, "zeek_network",
-                f"absolute volume bytes={int(outbound_bytes)}",
+                f"absolute volume bytes={int(outbound_bytes)} Z={outbound_z:.2f}",
                 domain=exfil_dest_ip)
 
         # ── C2 beaconing periodicity ──────────────────────────────────────────────────
@@ -282,21 +296,32 @@ class ThreatSignalDetector:
         # attach a private/local IP as the destination. This is no worse than today's
         # fallback_context workaround (which already does the same thing
         # unconditionally for these two evidence types), so not a regression.
+        # BUGFIX (external architecture review, 2026-09-09): subtag= was never passed
+        # to any of these 3 branches -- BeaconingHypothesis (hypotheses/engine.py) had
+        # no way to tell "genuine interval-regularity evidence" (the tdr branch below,
+        # matching the audit's own "regular/near-regular intervals + similar byte
+        # counts" bar) apart from two much thinner signals (a raw sequence count, a
+        # raw jitter-hit count, neither requiring any actual regularity), yet all 3
+        # reached the SAME 2.0->3.0->4.0 ceiling. Tagged now the same way
+        # DNSTunnelingV2Hypothesis's own sub-signals already are (add()'s own
+        # docstring) -- BeaconingHypothesis's own comment, just below this file, caps
+        # the ceiling for the two thinner tags the same way DNS_ATTRIBUTION_GAP's
+        # ambiguous case is already capped elsewhere in this codebase.
         if beacon_c2_1h > 0 and not is_telemetry:
             add("zeek_beaconing", beacon_c2_1h, 0.7, "zeek_network",
                 f"low-and-slow c2 periodicity {int(beacon_c2_1h)} sequences",
-                domain=last_dest_ip)
+                subtag="low_and_slow", domain=last_dest_ip)
         elif beacon_tdr > 0.75 and beacon_total >= 15:
             conf = min(1.0, beacon_tdr) * (0.1 if is_telemetry else 1.0)
             if conf > 0:
                 add("zeek_beaconing", beacon_tdr, conf, "zeek_network",
                     f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}",
-                    domain=last_dest_ip)
+                    subtag="persistent_single_target", domain=last_dest_ip)
         elif c2_jitter > 0 and not is_telemetry and not _is_local_dest(last_dest_ip):
             conf = 0.3 if outbound_bytes == 0 else 0.55
             add("zeek_beaconing", c2_jitter, conf, "zeek_network",
                 f"uniform check-in jitter {int(c2_jitter)} hits",
-                domain=last_dest_ip)
+                subtag="uniform_jitter", domain=last_dest_ip)
 
         # ── TCP connection abuse / port scan ─────────────────────────────────────────
         # BUGFIX (live audit): this only ever looked at raw counts -- 165 rejected
