@@ -683,23 +683,16 @@ check("G3: an empty/None domain never crashes, returns ''",
 _h0 = _ft0 + 700
 
 # Seed two "iot" peers with a normal, LOW distinct-destination count (2 each) --
-# directly via the graph, simulating their own prior evaluation cycles.
+# directly via the graph's real-traffic table, simulating their own prior traffic.
 for peer_id, dests in (("p1a_peer1", ["p1.example.com", "p2.example.com"]),
                         ("p1a_peer2", ["p3.example.com", "p4.example.com"])):
     _f_store.update_device_metadata(peer_id, {"device_type": "iot"}, timestamp=_h0)
-    for i, d in enumerate(dests):
-        _f_store.insert_evidence(Evidence(device_id=peer_id, destination_id=d, evidence_type="dns_rate",
-                                            independence_family="dns_behavior", timestamp=_h0 + i, source="s",
-                                            value=1.0))
+    _f_store.record_device_destinations(peer_id, dests, timestamp=_h0)
 
 # The device under test: same "iot" type, but a MUCH higher destination count
 # (6 distinct, vs. the peers' average of 2 -- well past the 3x/min-5 bar)
-devN_dest_evidence = []
-for i in range(6):
-    devN_dest_evidence.append(Evidence(device_id="p1a_devN", destination_id=f"anomalous-{i}.example.com",
-                                         evidence_type="dns_rate", independence_family="dns_behavior",
-                                         timestamp=_h0 + 10 + i, source="s", value=1.0))
-    _f_store.insert_evidence(devN_dest_evidence[-1])
+_f_store.record_device_destinations(
+    "p1a_devN", [f"anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 10)
 
 devN_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 20, device="p1a_devN",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
@@ -722,10 +715,7 @@ check("H1: this device's OWN device_type was persisted onto its graph metadata "
       _f_store.get_device_metadata("p1a_devN").get("device_type") == "iot")
 
 # REGRESSION GUARD: a device with a LOW, in-line-with-peers count does NOT trigger
-devO_dest_evidence = [Evidence(device_id="p1a_devO", destination_id="normal.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=_h0 + 30, source="s", value=1.0)]
-_f_store.insert_evidence(devO_dest_evidence[0])
+_f_store.record_device_destinations("p1a_devO", ["normal.example.com"], timestamp=_h0 + 30)
 devO_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 31, device="p1a_devO",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="normal.example.com")]
@@ -750,16 +740,9 @@ check("H2: REGRESSION GUARD -- an empty device_type never triggers peer_deviatio
 for peer_id, dests in (("p1a_unk_peer1", ["u1.example.com", "u2.example.com"]),
                         ("p1a_unk_peer2", ["u3.example.com", "u4.example.com"])):
     _f_store.update_device_metadata(peer_id, {"device_type": "unknown"}, timestamp=_h0 + 45)
-    for i, d in enumerate(dests):
-        _f_store.insert_evidence(Evidence(device_id=peer_id, destination_id=d, evidence_type="dns_rate",
-                                            independence_family="dns_behavior", timestamp=_h0 + 45 + i, source="s",
-                                            value=1.0))
-devU_dest_evidence = []
-for i in range(6):
-    devU_dest_evidence.append(Evidence(device_id="p1a_devU", destination_id=f"unk-anomalous-{i}.example.com",
-                                         evidence_type="dns_rate", independence_family="dns_behavior",
-                                         timestamp=_h0 + 50 + i, source="s", value=1.0))
-    _f_store.insert_evidence(devU_dest_evidence[-1])
+    _f_store.record_device_destinations(peer_id, dests, timestamp=_h0 + 45)
+_f_store.record_device_destinations(
+    "p1a_devU", [f"unk-anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 50)
 devU_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 56, device="p1a_devU",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="unk-anomalous-5.example.com")]
@@ -773,15 +756,10 @@ check("H2: BUGFIX -- 'unknown' devices are never pooled as a cohort at all "
       _f_store.get_device_metadata("p1a_devU").get("device_type") is None)
 
 # REGRESSION GUARD: not enough peers of this type for a meaningful comparison
-devQ_dest_evidence = [Evidence(device_id="p1a_devQ_peer", destination_id="q1.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=_h0 + 50, source="s", value=1.0)]
 _f_store.update_device_metadata("p1a_devQ_peer", {"device_type": "camera"}, timestamp=_h0 + 50)
-_f_store.insert_evidence(devQ_dest_evidence[0])
-for i in range(6):
-    _f_store.insert_evidence(Evidence(device_id="p1a_devQ", destination_id=f"cam-anomalous-{i}.example.com",
-                                        evidence_type="dns_rate", independence_family="dns_behavior",
-                                        timestamp=_h0 + 51 + i, source="s", value=1.0))
+_f_store.record_device_destinations("p1a_devQ_peer", ["q1.example.com"], timestamp=_h0 + 50)
+_f_store.record_device_destinations(
+    "p1a_devQ", [f"cam-anomalous-{i}.example.com" for i in range(6)], timestamp=_h0 + 51)
 devQ_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 60, device="p1a_devQ",
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="cam-anomalous-5.example.com")]

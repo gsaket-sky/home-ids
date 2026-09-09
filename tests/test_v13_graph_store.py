@@ -547,46 +547,59 @@ check("get_devices_with_metadata_value excludes a device of a DIFFERENT type",
 check("get_devices_with_metadata_value returns [] for a value nothing matches",
       store.get_devices_with_metadata_value("device_type", "camera") == [])
 
-store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="a.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=9_100_000.0, source="s"))
-store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="b.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=9_100_010.0, source="s"))
-store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="a.example.com",
-                                 evidence_type="dns_entropy", independence_family="dns_behavior",
-                                 timestamp=9_100_020.0, source="s"))  # SAME destination again -- must not double-count
-store.insert_evidence(Evidence(device_id="n2_dev_iot1", destination_id="old.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=8_000_000.0, source="s"))  # before `since`
+store.record_device_destinations("n2_dev_iot1", ["a.example.com", "b.example.com"],
+                                  timestamp=9_100_000.0)
+store.record_device_destinations("n2_dev_iot1", ["a.example.com"],
+                                  timestamp=9_100_020.0)  # SAME destination again -- must not double-count
+store.record_device_destinations("n2_dev_iot1", ["old.example.com"],
+                                  timestamp=8_000_000.0)  # before `since`
 
 count = store.get_distinct_destination_count("n2_dev_iot1", since=9_099_000.0)
-check("get_distinct_destination_count counts DISTINCT destinations, not raw evidence "
-      "rows (3 evidence rows within the window, only 2 distinct destinations)",
+check("get_distinct_destination_count counts DISTINCT destinations, not raw traffic "
+      "records (2 real destinations seen within the window; the third was before `since`)",
       count == 2, f"got {count}")
-check("get_distinct_destination_count with no evidence at all for a device returns 0, "
+check("get_distinct_destination_count with no traffic at all for a device returns 0, "
       "not an error", store.get_distinct_destination_count("n2_never_seen", since=0.0) == 0)
 
+# BUGFIX regression (live audit, 2026-09-09): distinct-destination counting must be based
+# on real observed traffic (device_destinations), not on the evidence table -- the evidence
+# table only gets a row when SOME OTHER detector already flagged something, which is a
+# detector-biased proxy for traffic rather than traffic itself, and created a self-reinforcing
+# false-positive loop with PeerDeviationHypothesis (more noise from unrelated detectors ->
+# more evidence rows -> inflated distinct-destination count -> more PEER_COHORT_DEVIATION).
+#
 # BUGFIX regression (live audit, 2026-09-08): multicast/broadcast destinations must
 # not inflate a device's distinct-destination count -- they're ordinary LAN protocol
 # chatter every device sends, not real behavioral/destination diversity, and
 # previously fed PeerDeviationHypothesis's device-vs-cohort comparison directly.
-store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="a.example.com",
-                                 evidence_type="dns_rate", independence_family="dns_behavior",
-                                 timestamp=9_100_000.0, source="s"))
-store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="224.0.0.251",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
-                                 timestamp=9_100_010.0, source="s"))
-store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="ff02::fb",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
-                                 timestamp=9_100_020.0, source="s"))
-store.insert_evidence(Evidence(device_id="n2_dev_mc", destination_id="239.255.255.250",
-                                 evidence_type="zeek_notice", independence_family="network_behavior",
-                                 timestamp=9_100_030.0, source="s"))
+store.record_device_destinations("n2_dev_mc", ["a.example.com"], timestamp=9_100_000.0)
+store.record_device_destinations(
+    "n2_dev_mc", ["224.0.0.251", "ff02::fb", "239.255.255.250"], timestamp=9_100_020.0)
 mc_count = store.get_distinct_destination_count("n2_dev_mc", since=9_099_000.0)
 check("get_distinct_destination_count excludes multicast/broadcast destinations "
       "(1 real destination + 3 multicast group addresses -> count is 1, not 4)",
       mc_count == 1, f"got {mc_count}")
+
+# --- record_device_destinations / prune_device_destinations (real-traffic redesign, 2026-09-09) ---
+store.record_device_destinations("n2_dev_rt", ["c.example.com", "d.example.com"],
+                                  timestamp=9_200_000.0)
+store.record_device_destinations("n2_dev_rt", ["c.example.com"],
+                                  timestamp=9_300_000.0)  # re-seen later -- must bump last_seen, not duplicate
+rt_count = store.get_distinct_destination_count("n2_dev_rt", since=9_150_000.0)
+check("record_device_destinations upserts on (device_id, destination_id) -- re-recording "
+      "an already-seen destination does not create a second row",
+      rt_count == 2, f"got {rt_count}")
+rt_count_after_bump = store.get_distinct_destination_count("n2_dev_rt", since=9_250_000.0)
+check("record_device_destinations updates last_seen on re-observation -- c.example.com's "
+      "last_seen moved to 9_300_000.0 so it is still counted with a `since` after its "
+      "original first_seen but before its updated last_seen",
+      rt_count_after_bump == 1, f"got {rt_count_after_bump}")
+
+deleted = store.prune_device_destinations(older_than_days=1, now=9_300_000.0 + 2 * 86400)
+check("prune_device_destinations deletes rows older than the retention window",
+      deleted >= 2, f"got {deleted}")
+check("prune_device_destinations actually removes the pruned rows -- count drops to 0",
+      store.get_distinct_destination_count("n2_dev_rt", since=0.0) == 0)
 
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",

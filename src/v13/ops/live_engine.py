@@ -206,6 +206,32 @@ def get_graph_store() -> GraphStore:
     return _get_graph_store()
 
 
+def record_device_traffic(device_id: str, destination_ids, now: Optional[float] = None) -> None:
+    """Public entry point for pipeline.py to record THIS cycle's real destinations
+    (e.g. its own zeek_fx.get_dest_ips() output) into GraphStore.
+    device_destinations -- external architecture review, 2026-09-09: closes the
+    self-reinforcing false-positive loop where PeerDeviationHypothesis's own
+    "distinct destination count" was being read from the `evidence` table (a
+    detector-biased proxy: only destinations that ALSO triggered some other
+    evidence show up at all), not real traffic. See GraphStore.
+    get_distinct_destination_count()'s own BUGFIX comment for the full incident.
+
+    Best-effort, same "never blocks the real decision" contract as every other
+    graph write in this module -- a failure here degrades to today's behavior for
+    THIS cycle (peer-cohort baselining simply doesn't see this cycle's traffic
+    yet, not a crash), never raises."""
+    if not device_id or not destination_ids:
+        return
+    try:
+        _get_graph_store().record_device_destinations(device_id, destination_ids, timestamp=now)
+    except Exception as e:
+        LOGGER.warning(
+            "Failed to record device traffic for %r into device_destinations "
+            "(non-fatal, peer-cohort baselining degrades to not seeing this "
+            "cycle's traffic): %s", device_id, e,
+        )
+
+
 def _build_fallback_context(features: dict) -> Optional[Dict[str, str]]:
     dest_ip = str((features or {}).get("last_dest_ip", "") or "")
     if not dest_ip or dest_ip == _NO_DEST_SENTINEL:

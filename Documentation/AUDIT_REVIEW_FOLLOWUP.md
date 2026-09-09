@@ -71,6 +71,38 @@ pass also shipped, tested, and deployed:
    had been generating false positives at scale for days. User-approved, precisely
    scoped DELETE (`evidence_type="reputation"` only, only those 70 destinations)
    removed 1,466 stale rows; 1,925 legitimate (non-infra) rows left untouched.
+7. **Reputation trust-gate missed Telegram's own separate trust list**
+   (`intelligence/reputation/classifier.py`, new `is_known_safe_asn_owner()`) — item 6's
+   `core/pipeline.py` gate called the shared `utils.is_cloud_cdn_provider_org()` directly,
+   but `ReputationClassifier.classify()` internally combines that with its own narrower
+   `_SAFE_ASN_OWNER_KEYWORDS` list (just `"telegram"`) — the two checks had silently
+   drifted apart. Found live: the user pasted a real alert citing Telegram's own IP
+   (`149.154.167.41`) as "poor reputation" even after item 6 was deployed. Fixed by
+   extracting one shared method both call sites use, so they can't diverge again.
+8. **`winning_evidence` was structurally empty for every `PEER_COHORT_DEVIATION` win**
+   (`v13/decision/engine.py`) — it was built from `attack_evidence`, which excludes
+   `NON_ATTACK_FAMILIES` (including `peer_cohort_deviation` itself), so the "Talked to N
+   distinct destinations vs. peer average" Telegram line had never fired since it was
+   written. Fixed by scoping `winning_evidence` from the raw `ev_store` instead —
+   verified safe for every other consumer (`COORDINATED_TARGETING`/`DATA_EXFILTRATION`/
+   `C2_BEACONING`'s relevant types are all real attack families, unaffected).
+9. **`get_distinct_destination_count()` measured detector noise, not real traffic**
+   (`v13/graph/store.py`, `v13/ops/live_engine.py`, `core/pipeline.py`) — the metric
+   `PeerDeviationHypothesis` compares against a device's peer-cohort average queried
+   `SELECT DISTINCT destination_id FROM evidence`, but the `evidence` table only ever
+   gets a row when some OTHER detector already flagged something notable — not a record
+   of real traffic. This created a self-reinforcing false-positive loop: more noise from
+   unrelated detectors → more evidence rows → inflated distinct-destination count →
+   additional `PEER_COHORT_DEVIATION` alerts. Confirmed live: a real "laptop cohort
+   average of 0.3" and "phone cohort average of 2.2" over 7 days, both absurd for real
+   devices, and `PEER_COHORT_DEVIATION` had become ~85% of alert volume. Fixed with a new
+   `device_destinations` table (device_id, destination_id, first_seen, last_seen — one
+   UPSERTed row per pair, 30-day retention) populated directly from `pipeline.py`'s
+   already-computed per-cycle `dest_ips` (no new Zeek query), and repointed
+   `get_distinct_destination_count()` at it. User explicitly chose this over disabling or
+   just raising thresholds ("Leave it as-is, just fix it properly now"). Needs one full
+   peer-comparison cycle of real traffic to accumulate before `PEER_COHORT_DEVIATION`
+   alerts show corrected numbers — re-verify against the next real alert.
 
 ---
 

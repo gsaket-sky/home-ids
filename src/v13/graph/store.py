@@ -29,6 +29,11 @@ _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 # for any caller that doesn't go through that wiring, e.g. direct GraphStore use in
 # tests).
 DEFAULT_EVIDENCE_RETENTION_DAYS = 90
+# device_destinations' own retention (schema.sql's own documented policy, external
+# architecture review, 2026-09-09) -- shorter than evidence's 90 days since its only
+# consumer (peer-cohort baselining) only ever looks back 7 days
+# (_PEER_DEVIATION_WINDOW_SECONDS, v13/ops/live_engine.py).
+DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS = 30
 
 # get_devices_targeting()'s BUGFIX #2 / _is_shared_infrastructure(): a destination
 # touched by this fraction (or more) of the known device fleet, over this lookback,
@@ -137,6 +142,15 @@ class GraphStore:
             );
             CREATE INDEX IF NOT EXISTS idx_containment_device ON containment_actions(device_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_containment_status ON containment_actions(status);
+
+            CREATE TABLE IF NOT EXISTS device_destinations (
+                device_id      TEXT NOT NULL REFERENCES devices(device_id),
+                destination_id TEXT NOT NULL REFERENCES destinations(destination_id),
+                first_seen     REAL NOT NULL,
+                last_seen      REAL NOT NULL,
+                PRIMARY KEY (device_id, destination_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
             """
         )
         self._conn.commit()
@@ -721,6 +735,40 @@ class GraphStore:
                 out.append(r["device_id"])
         return out
 
+    def record_device_destinations(self, device_id: str, destination_ids, timestamp: Optional[float] = None) -> None:
+        """Upserts one row per (device_id, destination_id) pair into
+        device_destinations -- the REAL per-device traffic reality
+        get_distinct_destination_count() below reads, independent of whether any
+        evidence was ever created for a given destination. See that method's own
+        BUGFIX comment (external architecture review, 2026-09-09) for the incident
+        this exists to fix. Callers should pass EVERY real destination this device
+        touched this cycle (e.g. pipeline.py's own zeek_fx.get_dest_ips() output),
+        not just ones that happened to also trigger a detector -- auto-upserts the
+        device/destination rows first (same bookkeeping insert_evidence() already
+        does), so callers never have to remember the order.
+
+        Deliberately does NOT filter multicast/local destinations at write time
+        (matches get_distinct_destination_count()'s own read-time filtering, kept
+        symmetric with insert_evidence()'s write-everything/filter-on-read
+        convention) -- a future consumer wanting the unfiltered picture doesn't
+        need a second write path."""
+        ts = timestamp if timestamp is not None else time.time()
+        if not destination_ids:
+            return
+        self.upsert_device(device_id, timestamp=ts)
+        for dest_id in destination_ids:
+            if not dest_id or dest_id == NO_DESTINATION:
+                continue
+            dest_kind = "ip" if _looks_like_ip(dest_id) else "domain"
+            self.upsert_destination(dest_id, dest_kind, timestamp=ts)
+            self._conn.execute(
+                "INSERT INTO device_destinations (device_id, destination_id, first_seen, last_seen) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(device_id, destination_id) DO UPDATE SET last_seen = excluded.last_seen",
+                (device_id, dest_id, ts, ts),
+            )
+        self._maybe_commit()
+
     def get_distinct_destination_count(self, device_id: str, since: float) -> int:
         """Release 14, N2: the behavioral metric peer-cohort baselining compares
         a device against its cohort on -- how many DISTINCT destinations this
@@ -741,9 +789,24 @@ class GraphStore:
         cohort. Trades the previous single indexed COUNT(DISTINCT ...) for a fetch-
         then-filter -- acceptable per this method's own docstring reasoning (most
         devices' distinct-destination cardinality is small; this runs once per
-        device per decision cycle, not a hot inner loop)."""
+        device per decision cycle, not a hot inner loop).
+
+        BUGFIX (external architecture review, 2026-09-09): this used to query the
+        `evidence` table -- which only ever has a row when SOME detector already
+        flagged something notable about a destination -- as a proxy for "how many
+        destinations has this device really talked to." That's a sparse,
+        detector-biased count, not a real traffic measurement, and it created a
+        self-reinforcing false-positive amplifier: confirmed live, a device
+        generating heavy dns_evasion_anomaly/reputation/zeek_notice evidence (each
+        with its own destination_id) had an artificially inflated count purely as
+        a side effect of OTHER detectors firing, while quiet, evidence-free peer
+        devices showed near-zero -- a "laptop cohort average of 0.3" and "phone
+        cohort average of 2.2" over a 7-day window, both absurd for real devices.
+        Now reads device_destinations (record_device_destinations() above),
+        populated from real per-cycle traffic (pipeline.py's own
+        zeek_fx.get_dest_ips()), never from evidence-creation as a side effect."""
         rows = self._conn.execute(
-            "SELECT DISTINCT destination_id FROM evidence WHERE device_id = ? AND timestamp >= ?",
+            "SELECT DISTINCT destination_id FROM device_destinations WHERE device_id = ? AND last_seen >= ?",
             (device_id, since),
         ).fetchall()
         return sum(1 for r in rows if not is_local_or_multicast_destination(r["destination_id"]))
@@ -992,6 +1055,20 @@ class GraphStore:
                 f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
             )
             return cur.rowcount
+
+    def prune_device_destinations(self, older_than_days: float = DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
+                                    now: Optional[float] = None) -> int:
+        """Deletes device_destinations rows not touched since the cutoff -- see
+        schema.sql's own retention-policy comment for why this gets a shorter
+        window than prune_evidence()'s 90 days. No decisions/evidence reference
+        this table (it's a pure behavioral-baseline input, not part of the audit
+        trail), so unlike prune_evidence() there's no "still referenced" carve-out
+        to check -- last_seen < cutoff is sufficient on its own. Returns the
+        number of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute("DELETE FROM device_destinations WHERE last_seen < ?", (cutoff,))
+        self._maybe_commit()
+        return cur.rowcount
 
     # --- decision archival (v13 full-architecture plan, Phase 10a) -------------
 

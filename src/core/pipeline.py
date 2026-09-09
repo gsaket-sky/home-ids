@@ -1596,6 +1596,16 @@ class EnginePipeline:
 
                 # PHASE 6: union destination IPs contacted from every known address of this device.
                 dest_ips = self.zeek_fx.get_dest_ips(known_ips_snapshot)
+                # BUGFIX (external architecture review, 2026-09-09): dest_ips (just
+                # computed above) is THIS cycle's real network-traffic destinations --
+                # exactly what PeerDeviationHypothesis's own peer-cohort baseline
+                # needs and never had access to before (GraphStore.
+                # get_distinct_destination_count()'s own BUGFIX comment has the full
+                # incident: it used to read the `evidence` table, a detector-biased
+                # proxy, not real traffic). Reuses this cycle's already-computed
+                # dest_ips rather than a second Zeek query -- best-effort, never
+                # blocks the real decision (record_device_traffic()'s own contract).
+                v13_live_engine.record_device_traffic(dev_id, dest_ips, now=now)
                 if self.geoip_engine and dest_ips:
                     for d_ip in dest_ips:
                         should_export = (d_ip not in state.geo_exported_ips) or (risk >= alert_threshold)

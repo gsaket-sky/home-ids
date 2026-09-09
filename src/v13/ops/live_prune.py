@@ -33,7 +33,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from v13.config.trust_anchors import load_hardware_profile  # noqa: E402
-from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
+from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS  # noqa: E402
 
 LOGGER = logging.getLogger("live_prune")
 
@@ -62,9 +62,21 @@ def main() -> None:
     try:
         store = GraphStore(str(db_path))
         deleted = store.prune_evidence(older_than_days=retention_days)
+        # BUGFIX (external architecture review, 2026-09-09): device_destinations
+        # (GraphStore.record_device_destinations(), the peer-cohort baseline's real
+        # traffic input) gets its OWN fixed retention, not hardware-profile-scaled
+        # like evidence's -- see schema.sql's own retention-policy comment and
+        # DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS's docstring for why 30 days is
+        # already the right number regardless of hardware profile (its only
+        # consumer only ever looks back 7 days).
+        dd_deleted = store.prune_device_destinations(older_than_days=DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS)
         store.close()
-        LOGGER.info("Pruned %d evidence row(s) older than %d days from %s", deleted, retention_days, db_path)
-        write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"deleted": deleted, "retention_days": retention_days})
+        LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) older than %d days, from %s",
+                     deleted, retention_days, dd_deleted, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS, db_path)
+        write_job_health(state_dir, "live_prune", time.time() - run_start,
+                          extra={"deleted": deleted, "retention_days": retention_days,
+                                 "device_destinations_deleted": dd_deleted,
+                                 "device_destinations_retention_days": DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})

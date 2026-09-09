@@ -129,6 +129,34 @@ CREATE TABLE IF NOT EXISTS containment_actions (
 CREATE INDEX IF NOT EXISTS idx_containment_device ON containment_actions(device_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_containment_status ON containment_actions(status);
 
+-- Real per-device traffic reality, independent of whether any evidence was ever
+-- created for a given destination (external architecture review, 2026-09-09; see
+-- graph/store.py's get_distinct_destination_count() own BUGFIX comment for the full
+-- incident). That method used to query the `evidence` table -- which only ever has a
+-- row when SOME detector already flagged something notable -- as a proxy for "how
+-- many destinations has this device really talked to," the exact axis
+-- PeerDeviationHypothesis compares against a peer cohort. That's a sparse,
+-- detector-biased count, not a real traffic measurement: a device that happens to
+-- trigger MORE other (possibly false-positive) evidence ends up looking like a
+-- peer-cohort outlier purely as a side effect, regardless of its real destination
+-- diversity -- confirmed live, a device generating heavy dns_evasion_anomaly/
+-- reputation/zeek_notice evidence (each with its own destination_id) had an
+-- artificially inflated count while quiet, evidence-free peer devices showed
+-- near-zero, a self-reinforcing false-positive amplifier layered on top of whatever
+-- else was already noisy about that device.
+--
+-- One row per (device, destination) PAIR, upserted (never one row per raw
+-- connection/cycle) -- naturally bounded by real distinct-destination cardinality
+-- per device over its retention window, not per-cycle traffic volume.
+CREATE TABLE device_destinations (
+    device_id      TEXT NOT NULL REFERENCES devices(device_id),
+    destination_id TEXT NOT NULL REFERENCES destinations(destination_id),
+    first_seen     REAL NOT NULL,
+    last_seen      REAL NOT NULL,
+    PRIMARY KEY (device_id, destination_id)
+);
+CREATE INDEX idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
+
 -- Generalized edge table -- every relationship the graph needs is one row here
 -- rather than a bespoke join table per relation type. src/dst are polymorphic
 -- (kind + id), resolved by the reading code, not by foreign keys (SQLite has no
@@ -164,3 +192,7 @@ VALUES ('(none)', 'domain', 0, 0, '{"sentinel": true}');
 --   - devices/destinations: kept indefinitely (small row count, high identity value)
 --   - containment_actions: no automated retention yet (row count is inherently
 --     small -- bounded by real containment events, not per-cycle evidence volume)
+--   - device_destinations: pruned at 30 days (prune_device_destinations()) -- its
+--     only consumer (peer-cohort baselining) only ever looks back 7 days
+--     (_PEER_DEVIATION_WINDOW_SECONDS), a shorter retention than evidence's 90 days
+--     is deliberate since nothing else reads this table
