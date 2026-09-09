@@ -193,6 +193,14 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "zeek_notice_medium": "Zeek policy notice fired for this connection",
     "zeek_notice_strong": "Zeek policy notice fired for this connection",
     "zeek_notice_highly_deterministic": "Zeek policy notice fired for this connection",
+    # BUGFIX (live audit, 2026-09-10): the bare "zeek_notice" key was dropped
+    # when the 4 tiered entries above were added -- but evidence rows created
+    # BEFORE that deploy still carry the old flat evidence_type (still valid
+    # within the 24h graph window). Without this entry the base text fell
+    # through to the ugly generic fallback ("Zeek notice") instead of this
+    # sentence -- confirmed live in a real alert. Same backward-compat window
+    # as INDEPENDENCE_FAMILY_MAP's own matching fix.
+    "zeek_notice": "Zeek policy notice fired for this connection",
     "arp_spoofing": "Layer-2 ARP spoofing detected (this device's MAC address changed)",
     "arp_spoof_pending": "Possible ARP spoofing -- MAC change detected, not yet confirmed",
     "ml_anomaly": "Flagged as statistically anomalous by the ML baseline model",

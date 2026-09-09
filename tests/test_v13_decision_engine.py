@@ -368,6 +368,31 @@ check("REGRESSION GUARD: attack_evidence's zeek_notice_medium entry carries the 
           for w in r_ae_prov["attack_evidence"]),
       f"got {r_ae_prov['attack_evidence']}")
 
+# BUGFIX regression (live audit, 2026-09-10): the bare "zeek_notice" evidence_type
+# (pre-fragmentation, still valid within the 24h graph window right after the
+# 2026-09-09 deploy) used to fall through to UNKNOWN_FAMILY ("unregistered")
+# instead of its real family "network_behavior" -- confirmed live: a real alert
+# counted an old bare zeek_notice row as a SEPARATE "unregistered" independent
+# source from a different (correctly-tiered) zeek_notice item in the SAME alert
+# that's actually the same underlying vantage point, inflating independent_sources
+# with a phantom extra family.
+r_old_zn = engine.evaluate(
+    [ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
+     ev("zeek_notice", value=1.0, dest="unrelated-destination.example")],
+    rep(3), now=NOW,
+)
+check("REGRESSION GUARD: bare 'zeek_notice' (old, pre-fragmentation evidence_type) "
+      "still resolves to its real family 'network_behavior', not the "
+      "'unregistered' UNKNOWN_FAMILY fallback",
+      any(w["evidence_type"] == "zeek_notice" and w["independence_family"] == "network_behavior"
+          for w in r_old_zn["attack_evidence"]),
+      f"got {r_old_zn['attack_evidence']}")
+check("REGRESSION GUARD: that same bare 'zeek_notice' item does NOT create a "
+      "phantom extra independence family alongside a real network_behavior hit "
+      "-- both collapse into the SAME family, not two",
+      r_old_zn["evidence_families"] == ["dns_behavior", "network_behavior"],
+      f"got {r_old_zn['evidence_families']}")
+
 # --- evidence_families/evidence_types (BUGFIX, live audit 2026-09-09, third-party
 # ChatGPT review of real production alerts): pipeline.py's persisted
 # hee_evidence_families/hee_evidence_types were ALWAYS recomputed independently from

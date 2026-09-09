@@ -444,6 +444,13 @@ check("REGRESSION GUARD: old-format provenance (pre-tier, from before this fix "
       "than showing a wrong/fabricated one",
       "Invalid_Server_Cert" in old_format_description and "(medium)" not in old_format_description,
       f"got '{old_format_description}'")
+check("REGRESSION GUARD (live audit, 2026-09-10): that same bare 'zeek_notice' "
+      "evidence_type still gets the real base sentence ('Zeek policy notice fired "
+      "for this connection'), not the ugly generic de-snaked fallback ('Zeek "
+      "notice') -- confirmed live in a real alert that _EVIDENCE_PLAIN_LANGUAGE "
+      "lost its bare 'zeek_notice' key when the 4 tiered keys were added",
+      "Zeek policy notice fired for this connection" in old_format_description,
+      f"got '{old_format_description}'")
 
 # BUGFIX (explicit user request, 2026-09-09): a bare IP in a WHY-block bullet told a
 # human reader nothing about what it actually was -- _describe_evidence() now accepts

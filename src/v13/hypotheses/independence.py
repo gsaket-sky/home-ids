@@ -77,6 +77,20 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "zeek_notice_medium": "network_behavior",
     "zeek_notice_strong": "network_behavior",
     "zeek_notice_highly_deterministic": "network_behavior",
+    # BUGFIX (live audit, 2026-09-10): the bare "zeek_notice" key was dropped
+    # entirely when the 4 tiered entries above were added -- but evidence rows
+    # created BEFORE that deploy (still valid within the 24h graph window) still
+    # carry the OLD flat evidence_type, and family_for() re-derives family FRESH
+    # at evaluate() time, not from a stored value. Without this entry, old
+    # zeek_notice evidence fell through to UNKNOWN_FAMILY ("unregistered")
+    # instead of its real family -- confirmed live: a real alert counted an old
+    # zeek_notice row as a SEPARATE "unregistered" independent source, distinct
+    # from a different (correctly-tiered) zeek_notice item in the SAME alert
+    # that's actually the same underlying vantage point. Kept alongside the 4
+    # tiered entries (not instead of) purely for this backward-compat window --
+    # self-resolving as old evidence ages out, but must not silently
+    # miscount corroboration in the meantime.
+    "zeek_notice": "network_behavior",
     "zeek_lateral_scan": "network_behavior",
     "zeek_conn_abuse": "network_behavior",
     "zeek_long_conn": "network_behavior",
