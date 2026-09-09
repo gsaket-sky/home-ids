@@ -70,7 +70,19 @@ class ReputationClassifier:
         # not a brittle IP/CIDR list): a known-legitimate, publicly-documented service's
         # own infrastructure shouldn't be re-litigated against a noisy crowd-sourced
         # score every single time, regardless of what that score says on a given day.
-        self._SAFE_ASN_OWNER_KEYWORDS = ("telegram",)
+        # BUGFIX (live audit, 2026-09-09): "verisign" added -- 12 of VeriSign's own
+        # gTLD-server anycast IPs (a.gtld-servers.net through m.gtld-servers.net,
+        # the .com/.net TLD root delegation infrastructure every resolver on the
+        # internet can legitimately touch) had accumulated ~800 "reputation" evidence
+        # rows on .94's graph, actively still growing, none of them recognized as
+        # trusted. Unlike is_cloud_cdn_provider_org()'s multi-tenant cloud providers
+        # (where the "blind spot for C2 hosted on the same infrastructure" concern is
+        # real -- anyone can rent compute there), VeriSign's gTLD-server IPs are
+        # single-purpose, ICANN-designated DNS root infrastructure that only ever
+        # serves delegation responses -- the same dedicated-infrastructure character
+        # that already justified trusting Telegram's own IPs, not the shared-tenancy
+        # character this list deliberately stays conservative about.
+        self._SAFE_ASN_OWNER_KEYWORDS = ("telegram", "verisign")
 
     # BUGFIX (external architecture review, 2026-09-09): pipeline.py's own reputation-
     # Evidence-creation gate (added same day, a214a2f generalized) needed the SAME
