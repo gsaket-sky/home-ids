@@ -1,28 +1,207 @@
-# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 9.0)
+# 🛡️ Home-IDS: The Exhaustive Master Manual & Architecture Guide (Version 14)
 
 Welcome to the definitive reference documentation for **Home-IDS**.
 
-This manual covers the exact data flow of the Tri-Brain architecture, an exhaustive breakdown of every configuration parameter in `config.yaml`, the new autonomous self-calibration/override layer, a complete guide to every file in the state repository, service lifecycle management, testing protocols, and complete Prometheus telemetry mappings.
+This manual covers the v13 Evidence Graph and Hypothesis Evidence Engine (HEE) —
+the live, primary decision engine as of v13/v14 — how evidence is created and
+pruned, and exactly how a decision is reached; the older Tri-Brain architecture
+description (still accurate for CL-AFPE and the Ollama batch reviewer, and still
+present as a fallback decision path); an exhaustive breakdown of every
+configuration parameter in `config.yaml`; the autonomous self-calibration/override
+layer; a complete guide to every file in the state repository; service lifecycle
+management; testing protocols; complete Prometheus telemetry mappings; a full
+threat-category reference; and how-to guides for the Console and Grafana
+dashboards.
 
 **Every technical claim in this document was verified directly against the running source code as of this revision** — not carried forward from an earlier draft. Where an earlier version of this manual described something that doesn't actually exist in the code (an `asyncio` event loop, a learned Markov transition matrix, Fourier-transform diurnal analysis, a "weekly autotune job that recalculates `alert_threshold` from historical standard deviation"), it has been corrected or removed rather than repeated. If you are maintaining, debugging, or extending this script, every piece of knowledge here should match what `grep` finds in `src/`.
 
 ---
 
 ## 📋 Table of Contents
-1. [🌟 The Tri-Brain Architecture & Internal Data Flow](#-the-tri-brain-architecture--internal-data-flow)
-2. [⏱️ The Automation Timeline: Sequence, Cadence & Latency](#%EF%B8%8F-the-automation-timeline-sequence-cadence--latency)
-3. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
-4. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
-5. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
-6. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
-7. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
-8. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
-9. [📚 Categorized Threat Catalog & Playbooks](#-categorized-threat-catalog--playbooks)
-10. [❓ How Do I... (Task-Oriented Index)](#-how-do-i-task-oriented-index)
+1. [🧬 The v13 Evidence Graph & Decision Engine (Primary)](#-the-v13-evidence-graph--decision-engine-primary)
+2. [🌟 The Tri-Brain Architecture & Internal Data Flow](#-the-tri-brain-architecture--internal-data-flow)
+3. [⏱️ The Automation Timeline: Sequence, Cadence & Latency](#%EF%B8%8F-the-automation-timeline-sequence-cadence--latency)
+4. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
+5. [⚙️ The Comprehensive Configuration Dictionary (`config.yaml`)](#%EF%B8%8F-the-comprehensive-configuration-dictionary-configyaml)
+6. [📁 Exhaustive State & File System Reference](#-exhaustive-state--file-system-reference)
+7. [🔄 Service Lifecycle: Warm vs. Cold Restarts](#-service-lifecycle-warm-vs-cold-restarts)
+8. [🧪 Test Suite & Validation Scripts](#-test-suite--validation-scripts)
+9. [📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
+10. [📚 Threat Category Reference — Every Verdict & How It's Created](#-threat-category-reference--every-verdict--how-its-created)
+11. [🖥️ Using the Console](#%EF%B8%8F-using-the-console)
+12. [📈 Using the Grafana Dashboards](#-using-the-grafana-dashboards)
+13. [❓ How Do I... (Task-Oriented Index)](#-how-do-i-task-oriented-index)
+
+---
+
+## 🧬 The v13 Evidence Graph & Decision Engine (Primary)
+
+This section describes what actually decides a threat verdict today — `.94`'s
+`config.yaml` runs `engine: v13`, which means this is the primary path, not a
+parallel experiment. The older "Brain 1" description in the next section
+(`src/core/decision_engine.py` + `src/intelligence/hypotheses/`) still exists in
+the codebase and is still wired in, but only as a **fallback** — `pipeline.py`
+calls `v13_live_engine.evaluate(..., fallback_evaluate=self.decision_engine.evaluate)`,
+so the old engine only ever runs if v13's own evaluation raises an exception.
+
+### The central rule
+
+> **Unusual is not malicious — only corroborated evidence from genuinely
+> independent vantage points can promote a hypothesis into a threat.**
+
+Every fix made to this engine across its lifetime traces back to this one rule:
+something being statistically rare, novel, or ML-anomalous is never enough on its
+own. A verdict only escalates when multiple *independent* signals — from
+different underlying sensors, not the same signal counted twice — agree.
+
+### What "the Evidence Graph" actually is
+
+It's a SQLite database (`state/v13_graph.db`) with a small, fixed schema
+(`src/v13/graph/schema.sql`):
+
+| Table | What it holds |
+|---|---|
+| `devices` | One row per device identity, upserted (never duplicated) — `first_seen`/`last_seen` updated in place. |
+| `destinations` | One row per destination (IP or domain) ever observed, same upsert discipline, plus a cached reputation tier. |
+| `evidence` | **Append-only event log** — every single observation a detector makes becomes a NEW row here, never deduplicated. This is deliberate: the engine needs to count occurrences, measure rate/burst behavior, and judge timing regularity (e.g. beaconing needs ≥15 separate observations to judge interval consistency) — a "one row per type" model would destroy that signal entirely. |
+| `device_destinations` | One UPSERTed row per (device, destination) *pair* — real observed traffic, used specifically for the peer-cohort-deviation comparison (see below). Not the same thing as `evidence`; this table exists precisely because `evidence` is a detector-biased proxy for traffic, not traffic itself. |
+| `hypotheses` | The named hypothesis catalog (`NETWORK_INTRUSION`, `DGA_BOTNET_C2`, etc.). |
+| `decisions` | The actual verdict history — one row per published/changed decision, the durable audit trail. |
+| `containment_actions` | Block/isolate/tarpit/release actions taken, linked back to the decision that authorized them. |
+| `edges` | A generic polymorphic table connecting the above (`observed`, `targets`, `supports`, `merged_into`, `corroborates`, `trusts`). |
+
+**Identity tables vs. the event log** is the key distinction worth internalizing:
+`devices`/`destinations`/`device_destinations` are genuinely deduplicated —
+seeing the same device or destination again just updates `last_seen`. `evidence`
+is not, and isn't supposed to be — it's a timestamped log of *events*, not a
+registry of *things*.
+
+### How evidence is created
+
+Every detector in the pipeline (`intelligence/detectors/*.py`,
+`intelligence/threat_intel.py`, `v13/ops/live_engine.py`'s own synthetic
+evidence) produces the same shape:
+
+```python
+Evidence(
+    device_id="...", destination_id="...",     # or NO_DESTINATION if genuinely device-level
+    evidence_type="zeek_notice_weak",           # what specifically fired
+    independence_family="network_behavior",     # which VANTAGE POINT this came from
+    timestamp=..., source="zeek",
+    confidence=0.4, value=1.0,
+    provenance="detector:zeek:notice:weird:data_before_established",  # free-text detail for display/correlation
+)
+```
+
+`independence_family` is the load-bearing field — it's what
+`v13/hypotheses/independence.py`'s `INDEPENDENCE_FAMILY_MAP` uses to answer "is
+this a genuinely different vantage point, or just another observation of the
+same underlying phenomenon?" Two `dns_rate`/`dns_entropy` hits both come from
+`dns_behavior` — seeing both is not two independent sources, it's one family
+observed twice. A `dns_behavior` hit plus a separate `tls_fingerprint` hit *is*
+two independent sources, because they came from genuinely different sensors.
+
+A handful of families are deliberately excluded from ever counting as
+independent corroboration at all (`NON_ATTACK_FAMILIES`): `local_context`,
+`novelty_context`, `peer_cohort_deviation`, `ml_anomaly`, `policy`. These can
+still be shown as supporting *context* in an alert, but they can never by
+themselves be one of the two required independent sources for HIGH — they're
+each, in their own way, "unusual" without being a real corroborating signal
+(novelty, statistical outlier-ness, peer-deviation, and policy facts are all
+cheaper/weaker than a genuine second sensor confirming the same story).
+
+`insert_evidence()` auto-upserts the `device`/`destination` identity rows it
+references, so a detector never has to remember that bookkeeping step — but the
+`evidence` row itself is always a fresh `INSERT`, never an upsert.
+
+### How the graph is pruned (bounded, not unbounded)
+
+Every table has an explicit retention policy — this runs on Pi-class hardware,
+so unbounded growth is a real, not theoretical, concern:
+
+| What | Retention | Why |
+|---|---|---|
+| `evidence` (general) | 90 days (30 on a `pi_8gb` hardware profile) | The long-term audit-trail default — but never deletes a row still referenced by a decision newer than the cutoff (decisions are the actual audit trail; evidence they cite is kept alongside them). |
+| `evidence_type='zeek_notice_weak'` specifically | **12 hours** | Weak-tier Zeek notices (routine TCP-framing/capture-timing artifacts, not attacker behavior) contribute **zero** scoring weight to any hypothesis — confirmed live that this one evidence type had grown to 98.3% of the entire table, with zero benefit to any decision beyond the 12h window. A dedicated index (`idx_evidence_type_ts`) keeps this prune query fast even on a 200K+-row table. |
+| `device_destinations` | 30 days | Its only consumer (peer-cohort baselining) only ever looks back 7 days — 30 days is already generous. |
+| `decisions` | 1 year (180 days on `pi_8gb`), then archived (exported, not deleted) | The durable record of what the system actually concluded. |
+| `devices` / `destinations` | Indefinitely | Small row count, high identity value — these are the graph's "nouns", not its event log. |
+
+All of this runs as a scheduled job (`v13/ops/live_prune.py`, config.yaml's
+`scheduled_jobs.scheduler.live_prune`, daily by default) — never inline in the
+2-second detection loop.
+
+### How a decision is actually made
+
+`v13/decision/engine.py::DecisionEngine.evaluate()`, in this exact order:
+
+**1. Hard-stops** (checked first, first match wins — `DEFAULT_HARD_STOP_REGISTRY`):
+
+| Rule | Trigger | Verdict |
+|---|---|---|
+| `honeypot` | `features["zeek_honeypot_hits"] > 0` and device isn't in `safe_ips` | Instant **CRITICAL** / block, confidence 1.0 |
+| `arp_spoof` | Fresh `arp_spoofing` evidence | Instant **CRITICAL** / block, confidence 1.0 |
+| `geofence` | Fresh `geofencing_violation` evidence | **CRITICAL** / block (0.95) *if* ≥1 independent source also corroborates it — otherwise degrades to **HIGH** / alert, "Uncorroborated" (0.70), never silently dropped |
+| `confirmed_exploit` | Fresh `suricata_signature_match` evidence, confidence ≥0.9 | Instant **CRITICAL** / block, confidence 0.98 |
+
+**2. If no hard-stop fired, reputation tier 5** (a destination flagged by
+threat-intel/VirusTotal/AbuseIPDB at the highest tier):
+- A `verified_ioc` (curated threat-intel feed match) → **CRITICAL**, "Confirmed
+  Malicious IOC", confidence 0.99.
+- Otherwise, requires **≥2 independent evidence families** corroborating it →
+  **CRITICAL**, "Corroborated Reputation Signal", confidence 0.85 — deliberately
+  the *same* 2-family bar HIGH itself requires; CRITICAL can never be reached
+  more cheaply than HIGH.
+- Fewer than 2 families → **SUSPICIOUS** only, "Elevated Reputation Signal
+  (Unconfirmed)", confidence 0.45 — monitor, never auto-block.
+
+**3. Otherwise, hypothesis competition** — every attack `Hypothesis` and every
+benign `Hypothesis` scores independently against the evidence; the highest
+attack score competes against the highest benign score:
+- Attack wins, score ≥2.0, **≥2 independent families AND score ≥3.0** →
+  **HIGH**, confidence 0.85.
+- Attack wins, score ≥2.0, but short of that bar → **SUSPICIOUS** only,
+  confidence 0.40.
+
+**4. Otherwise** (no hypothesis explains it either way): a moderate-tier
+reputation signal alone (tier 4, a real but unconfirmed score ≥1.5) →
+**SUSPICIOUS**, "Elevated Reputation Signal (Unconfirmed)", confidence 0.45. A
+strong ML-anomaly score alone (>0.90) with nothing else → **ANOMALOUS** / log
+only, confidence 0.10 — logged, never alerted on. Otherwise → **BENIGN**.
+
+**The invariant this whole tree protects**: HIGH always implies ≥2 independent
+evidence families (or a deterministic hard-stop downgraded rather than
+escalated), and CRITICAL only ever comes from a deterministic hard-stop, a
+verified IOC, or a fully corroborated reputation signal — never a bare numeric
+score threshold in isolation. This is enforced by an actual regression test
+suite (`tests/test_v13_decision_engine.py`'s "INVARIANT" battery), not just
+documented intent.
+
+### The 24-hour correlation window (and why it isn't "24h stale")
+
+Every live decision queries up to 24 hours of history from the graph
+(`v13/ops/live_engine.py`'s `_GRAPH_QUERY_WINDOW_SECONDS`) to gather
+corroboration — but this is **not** a delay. Every pipeline cycle (~2 second
+poll) evaluates fresh, incoming evidence immediately; the 24h figure is only how
+far back the engine is *allowed to look* for supporting history, not how long it
+waits before deciding. A handful of other mechanisms use their own, different
+windows for different purposes — peer-cohort-deviation baselining looks back 7
+days (needs more history to be a stable comparison), and the "have we ever seen
+this destination before" first-contact check looks back the full 90-day evidence
+retention window.
 
 ---
 
 ## 🌟 The Tri-Brain Architecture & Internal Data Flow
+
+> **Brain 1 below (`decision_engine.py`/`intelligence/hypotheses/`) is no
+> longer the primary decision path** — it's kept live only as a fallback if the
+> v13 evaluation in the section above raises an exception. Its description here
+> is still accurate for what it does when it runs, and Brains 2 and 3 below
+> (CL-AFPE and the Ollama batch reviewer) are unchanged and still primary. Read
+> [🧬 The v13 Evidence Graph & Decision Engine](#-the-v13-evidence-graph--decision-engine-primary)
+> above first if you're trying to understand what actually decides a live
+> verdict today.
 
 Home-IDS separates real-time detection from expensive cognitive analysis so that nothing slow ever blocks the packet/DNS ingestion path.
 
@@ -737,22 +916,234 @@ The whole point of this family: turn "the system is healing/tuning itself" from 
 
 ---
 
-## 📚 Categorized Threat Catalog & Playbooks
+## 📚 Threat Category Reference — Every Verdict & How It's Created
 
-### DGA / Botnet C2
-**Detection**: `DGAHypothesis` — high entropy + digit-heavy labels, dampened for known telemetry domains. **Response**: Pi-hole sinkhole; ARP tarpit if risk crosses the tarpit floor. **Playbook**: isolate, run endpoint AV, terminate rogue processes, release via Telegram once purged.
+This is the plain-language version of `Documentation/THREAT_CATEGORY_REFERENCE.md`
+— that file has the exhaustive score ladder and exact evidence-type list per
+hypothesis (`v13/hypotheses/engine.py`), sourced directly from the live code;
+this section is "what does this alert NAME actually mean and what real-world
+behavior creates it," organized by category. Every one of these is an **attack
+hypothesis** competing against the **benign hypotheses** below it (see the
+decision tree above) — reaching one of these names is necessary but not
+sufficient for HIGH/CRITICAL; the independent-source/corroboration rules still
+apply on top.
 
-### DNS Covert Tunneling
-**Detection**: `DNSTunnelingV2Hypothesis` — long/encoded subdomain labels, TXT/NULL query abuse, suspicious-TLD concentration. **Known false-positive class**: CDN edge nodes issuing long session-token subdomains (Amazon Prime Video, `msh.amazon.co.uk`, Facebook/WhatsApp CDN nodes — all now allowlisted after being found in production traffic; see CHANGELOG). **Playbook**: if a genuinely new domain trips this, check `netstat`/`lsof` for the owning process before assuming malice — this hypothesis has a real history of false positives on legitimate CDN infrastructure.
+### Hard-stop verdicts (bypass hypothesis competition entirely)
 
-### Data Exfiltration
-**Detection**: `ExfiltrationHypothesis` — outbound byte z-score + absolute volume, dampened for curated vendor cloud APIs. **Response**: router WAN isolation. **Playbook**: keep isolated, identify the process holding the socket, rotate credentials that device had access to.
+These four are checked *before* any hypothesis scores anything — see the
+decision-tree table above for their exact trigger/verdict. In short: **Internal
+Honeypot Accessed** (touched a decoy host with no legitimate reason to ever be
+contacted), **Layer-2 ARP Spoofing Detected** (a device's IP answered from a
+different MAC address), **Geofencing Policy Violation** (contacted a destination
+in a `geofencing_countries`-blocked country), **Confirmed Exploit/Malware
+Signature** (a real Suricata IDS rule fired). Plus, outside the hard-stop
+registry itself, **Confirmed Malicious IOC** / **Corroborated Reputation
+Signal** (reputation tier 5 — a curated threat-intel/VirusTotal hit, or a very
+high crowd-sourced AbuseIPDB score corroborated by ≥2 independent families).
 
-### Internal Lateral Movement
-**Detection**: Zeek S0/REJ scan counts against multiple internal targets. **Response**: immediate ARP/NDP tarpit (this is one of the few signals that can push through to tarpit-tier containment even without hitting the raw risk-score floor). **Playbook**: identify targeted ports (445=SMB is common), power off the source device.
+### DNS-based categories
 
-### Confirmed/Corroborated Malicious Reputation
-**Detection**: reputation tier 5 — either a curated threat-intel feed hit, a real multi-vendor VirusTotal detection, or a very high (≥4.0-equivalent) AbuseIPDB score. **Not** a single moderate crowd-sourced score alone (tier 4 territory — monitor, not block; see §1's decision order). **Playbook**: check the alert's 🧭 REASONING section for exactly which source corroborated it before acting — the IP owner is shown explicitly.
+- **`DNS_TUNNELING`** — elevated query rate + high domain-name entropy +
+  unusually high ratio of never-seen-before domains, together. The classic DGA/
+  covert-channel shape: lots of queries, to random-looking names, that don't
+  repeat.
+- **`DGA_BOTNET_C2`** (`DGAHypothesis`) — a burst of DGA-shaped domain names
+  (high entropy, digit-heavy labels), optionally corroborated by elevated query
+  rate. Dampened for known telemetry/vendor domains so routine app check-ins
+  don't trip it.
+- **`DNS_COVERT_TUNNELING`** / **`DNS_EVASION`** / **`DNS_ATTRIBUTION_GAP`**
+  (`DNSEvasionHypothesis`, one hypothesis, three dynamic names by subtag) —
+  built from `dns_evasion_anomaly` evidence. `DNS_POLICY_BYPASS` when the
+  subtag shows a confirmed policy-evasion pattern (reaches HIGH normally);
+  `DNS_EVASION` when there's no matching DNS lookup history for real traffic
+  seen (also reaches HIGH); `DNS_ATTRIBUTION_GAP` for the weaker, ambiguous
+  case — this one is deliberately *capped at the base floor* even with high
+  confidence and corroboration, since "we can't attribute this" isn't itself
+  confirmed evasion. **Known false-positive class**: CDN edge nodes issuing
+  long session-token subdomains — several are allowlisted after being found in
+  production traffic (see CHANGELOG). If a genuinely new domain trips this,
+  check what process owns the connection before assuming malice.
+
+### Network-behavior categories
+
+- **`NETWORK_INTRUSION`** / **`LATERAL_MOVEMENT`** (`NetworkIntrusionHypothesis`,
+  dynamic name) — Zeek lateral-scan evidence, a malicious JA3/JA4 TLS
+  fingerprint match, an ARP/NDP MAC-flip pending-corroboration signal, or a
+  medium-or-above-tier Zeek notice (see the Zeek-notice tiers below), in various
+  combinations. Renames itself `LATERAL_MOVEMENT` specifically when a real
+  lateral scan drove the finding — the more specific, more actionable story.
+- **`CONNECTION_ABUSE`** / **`PORT_SCAN`** / **`INTERNAL_RECONNAISSANCE`**
+  (`ConnectionAbuseHypothesis`, dynamic 3-way name) — `PORT_SCAN` when a
+  port-scan-shaped signal drove it alone; `INTERNAL_RECONNAISSANCE` when an ARP
+  sweep (many distinct internal hosts touched) drove it alone;
+  `CONNECTION_ABUSE` (the general name) when both categories co-occur — a
+  broader multi-stage story. Reaching HIGH here requires genuine
+  *within-category* intensity (high confidence), not merely two weak categories
+  coinciding.
+- **Zeek notice tiers** (feeds `NETWORK_INTRUSION` and
+  `DEVICE_PROFILE_TELEMETRY`'s competing-evidence check): every Zeek
+  `notice.log`/`weird.log` signal is classified weak/medium/strong/
+  highly_deterministic (`utils.py::classify_zeek_notice()`, grounded in this
+  deployment's own real traffic — most raw `weird:*` entries are routine
+  TCP-framing/capture-timing artifacts, not attacker behavior). Weak-tier
+  notices contribute **zero** scoring weight and can never block a benign
+  verdict; only medium-or-above notices count as real corroboration.
+
+### Data-movement categories
+
+- **`DATA_EXFILTRATION`** (`ExfiltrationHypothesis`) — outbound byte volume
+  z-score above the device's own learned baseline, plus a minimum absolute
+  volume floor (`outbound_z > 0` required — a raw byte count alone is never
+  enough regardless of how large). Dampened for curated vendor cloud APIs
+  (telemetry endpoints, not real exfiltration).
+- **`C2_BEACONING`** (`BeaconingHypothesis`) — regular, low-jitter connection
+  timing to a single destination (the classic C2 check-in shape). Only the
+  strongest sub-signal (`persistent_single_target` — genuine interval
+  regularity, `tdr>0.75` across ≥15 observations) can reach HIGH/CRITICAL on
+  its own; the weaker sub-signals (`low_and_slow`/`uniform_jitter`) are capped
+  at the base floor — thinner signals, no regularity requirement met yet.
+
+### Cross-device / reputation categories
+
+- **`COORDINATED_TARGETING`** (`CoordinatedTargetingHypothesis`) — the SAME
+  destination touched by ≥3 total devices within a short window (raised from 2
+  after a third-party review — two devices coinciding on an unclassified
+  destination genuinely isn't coordination on its own). The same underlying
+  mechanism also covers a shared JA3/JA4 TLS fingerprint across ≥3 devices
+  (`fingerprint_campaign`) and a shared DGA seed-domain *shape* across ≥3
+  devices (`dga_seed_campaign`) — all score identically, just different shared
+  identifiers. Structurally-shared household infrastructure (touched by a large
+  fraction of the whole fleet) and multicast/broadcast addresses are excluded
+  from ever counting toward this.
+- **`PEER_COHORT_DEVIATION`** (`PeerDeviationHypothesis`) — a device's distinct-
+  destination count (real observed traffic, `device_destinations` table) is far
+  above its peer cohort's own average (same `device_type`, ≥2 real peers
+  required for a statistically meaningful comparison). Deliberately capped at
+  SUSPICIOUS — it can never reach HIGH on its own, unlike an established signal
+  such as `COORDINATED_TARGETING`, since this heuristic is newer and less
+  validated than the others.
+- **`SIGNATURE_MATCHED_THREAT`** (`SuricataSignatureHypothesis`) — a real
+  Suricata rule fired below the hard-stop's own 0.9-confidence bar (the
+  hard-stop already handles the high-confidence case instantly).
+
+### The benign hypotheses (what actively suppresses a verdict, and why)
+
+- **`DEVICE_PROFILE_TELEMETRY`** — an expected-high-volume device category
+  (`smart_tv`/`iot`/`gaming_console`/`nas`/`router`/`gateway`/`dns_server`)
+  showing routine elevated DNS activity against a trusted or familiar
+  destination. This is a **required gate**, not just a modifier — any genuinely
+  attack-shaped evidence present at all (medium-or-above Zeek notices included)
+  blocks this verdict outright, regardless of how strong the device-type
+  reasoning looks.
+- **`ADVERTISING_BURST`** — high DNS rate specifically against a trusted-tier
+  (tier 2) destination, i.e. ordinary ad/tracker chatter, not disguised
+  low-entropy DGA activity.
+- **`LOCAL_DEVICE_DISCOVERY`** — routine LAN discovery traffic (ARP/mDNS-style)
+  — almost always benign, logged as evidence rather than treated as a threat.
+
+See `Documentation/THREAT_CATEGORY_REFERENCE.md` for the exact score ladder
+(what specific combination reaches SUSPICIOUS vs. HIGH vs. CRITICAL) and the
+full evidence-type list per hypothesis — this section explains *what triggers
+each name*, that one explains *exactly how strong each trigger has to be*.
+
+---
+
+## 🖥️ Using the Console
+
+The console (`web/console.html`) is a single-page, no-build-step web UI served
+directly by the same FastAPI process everything else runs under —
+`http://<box-ip>:8010/console` (port from `service_ports` in `config.yaml`, the
+same port `middleware/main_api.py` serves the rest of the HTTP API on). It's
+LAN-accessible by design (the sidebar says so), not exposed to the internet.
+
+**First visit**: the console will prompt you once for an API token — this is
+the same `API_SECRET_TOKEN`/`fritz_api_token` value your Fritz!Box/Pi-hole
+integrations already use (set as an `Environment=` line in `soc.service`'s unit
+file, or in `.env`). It's stored in that browser's `localStorage` only —
+nothing is sent anywhere else, and you can change it later from the small
+link at the bottom of the sidebar ("API token set — click to change").
+
+**The six sections** (left sidebar):
+
+- **Devices** — the device roster: every known device, its current containment
+  state (tarpitted / router-isolated / neither, shown as pills), and a detail
+  view per device (click through from the roster) for investigating one
+  device's own history and taking action on it directly (isolate via router,
+  release/un-block).
+- **Threat Hunt** — ad-hoc investigation tools: pull a device's decision
+  timeline, its full evidence history, or the list of *other* devices that
+  also touched a given destination ("devices touching X") — the console-side
+  entry point for "was this really isolated" or "who else talked to this IP"
+  questions without SSHing in and querying the graph db by hand. Includes a
+  "replay decision" tool for re-running the decision engine against different
+  evidence to sanity-check a verdict.
+- **Evidence Graph** — a visual view into the graph described in the section
+  above: devices, destinations, and the evidence connecting them, browsable
+  directly rather than only through SQL.
+- **Blocking** — the Pi-hole side: which domains are currently blocked and why,
+  with the ability to unblock directly from the console (the same
+  `IPSMitigator.unblock_by_base_domain()` path the "🛡️ Mark False Positive"
+  Telegram button uses).
+- **Suricata** — signature-match status and health for the Suricata IDS
+  subsystem.
+- **Config** — a live editor for `config.yaml`'s tunable parameters, writing
+  through the same config-write-back API the autonomous self-calibration layer
+  itself uses (§3) — a change here takes effect immediately, no restart, the
+  same way an autonomous override does.
+
+Every table in the console sorts on every column (click a header) — there's no
+hidden "only some columns are sortable" behavior.
+
+## 📈 Using the Grafana Dashboards
+
+Grafana dashboards are **not auto-provisioned** — they're plain JSON exports in
+`grafana_dashboard/`, imported manually once via Grafana's own web UI
+(`http://<box-ip>:3000` → **Dashboards** → **Import**, paste or upload the
+JSON file). See `Documentation/INSTALL.md` §6 for the one-time Prometheus/Loki
+datasource setup they depend on.
+
+**The five current dashboards** (verified against each file's own panel
+titles, not assumed from the filename):
+
+1. **`1_main_overview.json`** — "How is the system doing?" the landing page:
+   active isolations, a live high-priority-alert timeline, lifetime
+   threats-blocked/alerts-triaged counters, and per-subsystem status tiles
+   (Pi-hole, Zeek, the FP-engine's ML models, router kill-switch, Layer-2
+   tarpit, external API integrations, alert queue depth). Also has its own
+   "How to read the Master Threat Ledger" panel and a "New Here? Start With
+   This" orientation panel — start here.
+2. **`2_threat_landscape.json`** — the network-wide view: a global OSINT/geo
+   map of where traffic is actually going, a live threat-event stream,
+   command-and-control/threat-intel IOC hits, malicious JA4 fingerprint hits,
+   and internal network scanning/probe activity.
+3. **`3_device_deep_dive.json`** — pick one device from a dropdown and drill
+   into just its own signals: per-device alert log, AI anomaly confidence,
+   kill-chain-phase transition anomaly, DNS query rate/entropy/z-score spikes,
+   beaconing volume score, and more — the console's "Devices" detail view's
+   time-series counterpart.
+4. **`4_autonomous_behavior.json`** — "What is this dashboard?" (it tells you):
+   HEE decision-path mix over time, self-healing activity (domains immunized
+   and sensitivity adjustments, broken down by *source* — operator vs. LLM vs.
+   autonomous), and the autotune calibration panels (effective vs. baseline
+   thresholds, calibration-pass outcomes, per-device calibrated thresholds).
+   This is the "is the self-tuning actually working, and what did it change"
+   dashboard.
+5. **`5_system_health.json`** — IPS mitigation/tarpit status, confirmed
+   threats that bypassed suppression, ML model load status, the AFPE
+   suppressed/muted log, AI reasoning/tuning transparency, and live counts of
+   active containments (L2 ARP tarpits, WAN isolations, Pi-hole blocks).
+
+A 6th dashboard (`6_transparency.json`) existed earlier and has since been
+retired (see `grafana_dashboard/_retired/`) — its content was folded into
+`4_autonomous_behavior.json`'s self-healing/autotune panels above. If you see
+older documentation referencing 6 dashboards with different numbering, this
+current 5-dashboard list (verified directly against the live files) is the
+accurate one.
+
+For the raw metric names each dashboard's panels actually query, see
+[📊 Prometheus Telemetry & Loki Observability](#-prometheus-telemetry--loki-observability)
+above — every metric there is exposed on `service_ports.metrics_port` (default
+`9105`) at `/metrics`.
 
 ---
 
