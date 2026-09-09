@@ -72,6 +72,34 @@ class ReputationClassifier:
         # score every single time, regardless of what that score says on a given day.
         self._SAFE_ASN_OWNER_KEYWORDS = ("telegram",)
 
+    # BUGFIX (external architecture review, 2026-09-09): pipeline.py's own reputation-
+    # Evidence-creation gate (added same day, a214a2f generalized) needed the SAME
+    # "is this destination known-safe infrastructure" answer classify() already
+    # computes internally below (_SAFE_ASN_OWNER_KEYWORDS OR is_cloud_cdn_provider_org)
+    # -- but had no way to ask this classifier that question directly, so it called
+    # utils.is_cloud_cdn_provider_org() alone. Confirmed live: a real alert cited "poor
+    # external reputation score" for 149.154.167.41 (Telegram's own infrastructure,
+    # AS62041) -- classify() itself would have correctly returned tier 2 for it (via
+    # _SAFE_ASN_OWNER_KEYWORDS, the exact fix the 149.154.166.110 incident above already
+    # shipped), but the EVIDENCE never got a chance to be checked against tier at all,
+    # since pipeline.py's own narrower is-this-cloud/CDN check doesn't know about
+    # Telegram. A single shared method means the evidence-creation gate and classify()'s
+    # own tier-2 check can never drift apart like this again -- the exact same class of
+    # bug _SAFE_ASN_OWNER_KEYWORDS/is_cloud_cdn_provider_org's own history (comment
+    # above) already went through once, for the identical reason (two independently-
+    # written trust checks, not sharing one source of truth).
+    def is_known_safe_asn_owner(self, asn_owner: str) -> bool:
+        """True if `asn_owner` (a GeoIP ASN organization name) matches either of this
+        classifier's own trust lists -- the exact same check classify()'s own tier-2
+        assignment uses internally, exposed so callers besides classify() (e.g.
+        pipeline.py's reputation-Evidence-creation gate) can ask the identical
+        question instead of re-deriving a narrower or different answer."""
+        owner_lower = (asn_owner or "").lower()
+        return (
+            any(kw in owner_lower for kw in self._SAFE_ASN_OWNER_KEYWORDS)
+            or is_cloud_cdn_provider_org(asn_owner)
+        )
+
     def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0, asn_owner: str = "Unknown") -> ReputationVector:
         domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
@@ -113,11 +141,12 @@ class ReputationClassifier:
         # deterministic validator overrode Ollama's (correct) benign call traced back to
         # exactly this one gap. Same trust boundary this project has already accepted
         # elsewhere, just not previously applied here.
-        owner_lower = (asn_owner or "").lower()
-        if tier == 3 and (
-            any(kw in owner_lower for kw in self._SAFE_ASN_OWNER_KEYWORDS)
-            or is_cloud_cdn_provider_org(asn_owner)
-        ):
+        # BUGFIX (external architecture review, 2026-09-09): reads through
+        # is_known_safe_asn_owner() now (defined above) instead of re-deriving the
+        # same OR-of-two-lists check inline -- see that method's own docstring/BUGFIX
+        # comment for why (pipeline.py's reputation-Evidence-creation gate needed the
+        # identical answer and had no way to ask this classifier for it directly).
+        if tier == 3 and self.is_known_safe_asn_owner(asn_owner):
             tier = 2
 
         # PHASE 8 FIX: a live alert for 149.154.166.110 (Telegram's own API infrastructure,

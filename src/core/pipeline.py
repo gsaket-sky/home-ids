@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from prometheus_client import start_http_server
 
-from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, is_cloud_cdn_provider_org
+from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
@@ -1386,7 +1386,21 @@ class EnginePipeline:
                                 reputation_target_asn_owner = rt_asn_info.autonomous_system_organization
                         except Exception:
                             pass
-                reputation_target_is_trusted_infra = is_cloud_cdn_provider_org(reputation_target_asn_owner)
+                # BUGFIX (found live, same day, after this fix's first deploy):
+                # is_cloud_cdn_provider_org() alone missed 149.154.167.41 (Telegram's
+                # own infrastructure, AS62041) -- self.rep_classifier already has its
+                # OWN separate, narrower trust list for exactly this (_SAFE_ASN_OWNER_
+                # KEYWORDS, just "telegram", the 149.154.166.110 incident's own fix,
+                # see classifier.py's own comments) that classify() below already
+                # combines with is_cloud_cdn_provider_org() internally -- but this gate
+                # was calling is_cloud_cdn_provider_org() directly instead of asking
+                # the classifier for its own combined answer, so it silently missed
+                # Telegram even though classify() itself would have correctly called
+                # tier 2. is_known_safe_asn_owner() (classifier.py, this same pass) is
+                # the exact same check classify() uses internally -- asking THAT
+                # instead means this gate and classify()'s own tier-2 assignment can
+                # never drift apart like this again.
+                reputation_target_is_trusted_infra = self.rep_classifier.is_known_safe_asn_owner(reputation_target_asn_owner)
 
                 reputation_value = max(ti_risk, abuse_risk, vt_risk)
                 if (ti_match or abuse_risk > 0.0 or vt_risk > 0.0) and not reputation_target_is_trusted_infra:
