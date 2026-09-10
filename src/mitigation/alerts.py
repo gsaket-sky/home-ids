@@ -359,6 +359,24 @@ class AlertManager:
                     msg_text = "⚠️ Alert already expired or unknown — nothing to mark."
                 else:
                     msg_text = f"⚠️ Mark-false-positive failed: HTTP {resp.status_code}"
+            elif action == "approve_tune":
+                # 2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3: `target` here is a
+                # device_id directly (not an action_id -- there's no ledger entry to
+                # look up, same "the identifier alone is enough to re-derive
+                # everything" shape the `block` branch above already uses for its own
+                # interactive-approval flow), from ollama_soc.py's IP-only-benign-
+                # verdict routing.
+                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/approve_tune_down"
+                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    if body.get("status") == "not_found":
+                        msg_text = "⚠️ Device no longer tracked — nothing to approve."
+                    else:
+                        released_note = " Also released from active containment." if body.get("released") else ""
+                        msg_text = f"✅ Approved — sensitivity loosened for this device.{released_note}"
+                else:
+                    msg_text = f"⚠️ Approve failed: HTTP {resp.status_code}"
             elif action == "revoke":
                 # PHASE 3 (closed-loop): `target` here is the action_id from a "🔔
                 # Auto-action" notification's [Revoke] button, not a domain/IP/hostname.

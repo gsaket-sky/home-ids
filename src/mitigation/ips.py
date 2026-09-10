@@ -607,16 +607,28 @@ class IPSMitigator:
             elif interactive_mode and not lateral_threat:
                 LOGGER.info("🛡️ [INTERACTIVE MODE] Router isolation for %s queued for Telegram approval.", hostname)
             elif mac_addr and mac_addr != "unknown":
+                # BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.6): _isolate_device_router()
+                # is a real requests.post() to Fritz!Box (router_webhook_timeout_seconds,
+                # default 5s) -- this used to run INSIDE self._lock, a single engine-wide
+                # RLock every OTHER mitigation operation (Pi-hole blocking, tarpit
+                # registration, release_device(), status queries) also acquires, so a
+                # slow/unresponsive Fritz!Box stalled the entire IPS engine for up to that
+                # timeout on every high-risk decision, not just router isolation.
+                # Restructured to match operator_isolate_router()'s already-correct shape
+                # (line ~676 below): check/reserve under the lock, release it, make the
+                # network call unlocked, then re-acquire only to record the result.
                 with self._lock:
-                    if mac_addr not in self._router_isolated_devices:
-                        if is_operator_released and lateral_threat:
-                            LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Router isolation re-enforced.", hostname)
-                        LOGGER.critical("Extreme risk detected. Executing hardware router isolation for MAC %s.", mac_addr)
-                        success = self._isolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason=f"Risk Score {risk_score:.1f}: {reason}")
-                        if success:
-                            graph_action_id = self._mirror_containment(
-                                dev_id, action_type="router_isolate", status="active",
-                                target=mac_addr, reason=f"Risk Score {risk_score:.1f}: {reason}")
+                    already_isolated = mac_addr in self._router_isolated_devices
+                if not already_isolated:
+                    if is_operator_released and lateral_threat:
+                        LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Router isolation re-enforced.", hostname)
+                    LOGGER.critical("Extreme risk detected. Executing hardware router isolation for MAC %s.", mac_addr)
+                    success = self._isolate_device_router(mac=mac_addr, ip=client_ip, hostname=hostname, dev_id=dev_id, reason=f"Risk Score {risk_score:.1f}: {reason}")
+                    if success:
+                        graph_action_id = self._mirror_containment(
+                            dev_id, action_type="router_isolate", status="active",
+                            target=mac_addr, reason=f"Risk Score {risk_score:.1f}: {reason}")
+                        with self._lock:
                             self._router_isolated_devices[mac_addr] = {
                                 "ip": client_ip, "hostname": hostname, "dev_id": dev_id,
                                 "_graph_action_id": graph_action_id,

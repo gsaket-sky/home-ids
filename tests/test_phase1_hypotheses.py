@@ -95,9 +95,17 @@ check("ExfiltrationHypothesis becomes the winning attack hypothesis",
 
 # Vendor-cloud-API dampening: the SAME Z-score/bytes profile against a curated vendor
 # domain (coinbase.com — in _VENDOR_CLOUD_API_DOMAINS but NOT telemetry-classified) must
-# be excluded from the full-confidence "massive burst" branch and fall through to the
-# lower-confidence elevated branch instead (confidence 0.35 vs 0.9 for a non-vendor domain
-# with identical numbers).
+# still produce zeek_exfiltration evidence, just at a DAMPENED confidence, not zero.
+# BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.4): this used to be a hard
+# `not is_vendor_cloud_api` gate on the "massive burst" branch itself -- for THIS exact
+# scenario the vendor case still produced evidence, but only by accident, via `elif`
+# fallthrough into the separate "elevated" branch a few lines below (which independently
+# dampens to 0.35) -- a vendor case that ALSO failed that second branch's own gate (e.g.
+# high absolute volume but a lower z-score) got zero evidence with no fallback left.
+# Dampening is now applied directly at the massive-burst tier itself (0.5, not 0.35 --
+# deliberately higher than the elevated tier's own dampened value, since the underlying
+# signal here is more extreme: z>5 vs z>3.5), so every tier dampens consistently instead
+# of only working via incidental fallthrough.
 exfil_probe = {"outbound_bytes_z": 6.0, "zeek_outbound_bytes": 3_000_000.0}
 ev_nonvendor = detector.detect("dev_x", exfil_probe, top_domain="random-exfil-drop.io")
 ev_vendor = detector.detect("dev_x", exfil_probe, top_domain="coinbase.com")
@@ -106,8 +114,8 @@ vendor_conf = next((e.confidence for e in ev_vendor if e.type == "zeek_exfiltrat
 check("non-vendor domain with a massive outbound burst gets full-confidence (0.9) exfiltration evidence",
       nonvendor_conf == 0.9, f"got confidence={nonvendor_conf}")
 check("curated vendor-cloud-API domain with the IDENTICAL burst profile is dampened to low "
-      "confidence (0.35), not excluded outright and not full-confidence",
-      vendor_conf == 0.35, f"got confidence={vendor_conf}")
+      "confidence (0.5), not excluded outright and not full-confidence",
+      vendor_conf == 0.5, f"got confidence={vendor_conf}")
 
 # BUGFIX (v13 full-architecture plan, Phase 9): zeek_exfiltration's add() calls never
 # passed domain= before, unlike dns_tunnel_v2's own add() calls a few lines above in

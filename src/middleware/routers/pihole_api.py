@@ -207,6 +207,49 @@ def ipc_block_domain_get(target: str, token: str = Depends(verify_token)):
         LOGGER.error("IPC block domain failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.post("/api/ipc/approve_tune_down")
+def ipc_approve_tune_down(payload: IPCTargetRequest, token: str = Depends(verify_token)):
+    return _ipc_approve_tune_down_logic(payload.target)
+
+@router.get("/api/ipc/approve_tune_down_get")
+def ipc_approve_tune_down_get(target: str, token: str = Depends(verify_token)):
+    return _ipc_approve_tune_down_logic(target)
+
+def _ipc_approve_tune_down_logic(device_id: str):
+    """Human-approval half of ollama_soc.py's IP-only-benign-verdict TUNE_DOWN
+    routing (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3): an IP-only alert the
+    LLM judges benign no longer applies _apply_sigma_shift(TUNE_DOWN) autonomously
+    -- that's exactly the shape a crafted/ambiguous payload aimed at the LLM would
+    produce, with no domain to anchor trust on. `device_id` here is the identifier
+    directly, not an action_id -- mirrors fritzbox_api.py's own /api/ipc/block
+    interactive-approval endpoint shape (no ledger entry needed, the identifier
+    alone is enough to re-derive everything -- this device's current hostname, via
+    StateManager)."""
+    LOGGER.info("Received IPC approve-tune-down request for device_id: %s", device_id)
+    try:
+        state_path = CONFIG.get("state_path", "state/ids_state.json")
+        sm = StateManager(state_path=state_path)
+        sm.load_from_disk()
+
+        if not sm.has_device(device_id):
+            return {"status": "not_found", "device_id": device_id}
+
+        with sm.lock_device(device_id) as state:
+            hostname = getattr(state, "hostname", "unknown") or "unknown"
+
+        fp = _get_fp_engine()
+        fp._apply_sigma_shift(device_id, hostname, direction="TUNE_DOWN", source="llm_pending_approval")
+
+        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        released = ips.release_device(device_id)
+
+        sm.flush_to_disk()
+        Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
+        return {"status": "success", "device_id": device_id, "released": released}
+    except Exception as e:
+        LOGGER.error("IPC approve-tune-down failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/api/ipc/release_domain_get")
 def ipc_release_domain_get(target: str, token: str = Depends(verify_token)):
     LOGGER.info("Received IPC release domain request for: %s", target)

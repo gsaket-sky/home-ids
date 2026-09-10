@@ -658,7 +658,10 @@ tmpdir2 = tempfile.mkdtemp(prefix="v13_graph_test_hwprofile_")
 
 store_pi = GraphStore(str(_PathForSysPath(tmpdir2) / "pi.db"), hardware_profile="pi_8gb")
 check("pi_8gb gets a modest cache_size bump from SQLite's own -2000 default",
-      store_pi._conn.execute("PRAGMA cache_size").fetchone()[0] == -4000)
+      # 2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.2: bumped from -4000 (4MB, closer
+      # to SQLite's own -2000 default than a real cache) to -48000 (48MB) -- see
+      # store.py's own _HARDWARE_PROFILE_CACHE_SIZE_KB comment for why.
+      store_pi._conn.execute("PRAGMA cache_size").fetchone()[0] == -48000)
 store_pi.close()
 
 store_x86 = GraphStore(str(_PathForSysPath(tmpdir2) / "x86.db"), hardware_profile="x86_16gb")

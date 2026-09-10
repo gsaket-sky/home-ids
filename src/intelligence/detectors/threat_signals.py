@@ -243,7 +243,7 @@ class ThreatSignalDetector:
         is_local_exfil_dest = _is_local_dest(exfil_dest_ip)
         if is_local_exfil_dest:
             pass
-        elif outbound_z > 5.0 and outbound_bytes > 2500000 and not is_vendor_cloud_api:
+        elif outbound_z > 5.0 and outbound_bytes > 2500000:
             # BUGFIX (v13 full-architecture plan, Phase 9): domain= was never passed
             # here, unlike the dns_tunnel_v2 blocks above -- exfil_dest_ip is already
             # computed and already used for the _is_local_dest() gate just above, so
@@ -253,7 +253,16 @@ class ThreatSignalDetector:
             # receive a real .domain at the source instead of needing
             # live_engine.py's fallback_context workaround (which stays in place as
             # a safety net regardless, not removed by this fix).
-            add("zeek_exfiltration", outbound_z, 0.9, "zeek_network",
+            #
+            # BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.4): this used to be
+            # `and not is_vendor_cloud_api` -- a hard gate producing ZERO evidence for
+            # a multi-megabyte, z>5 (wildly abnormal for this device) burst to
+            # github.com/amazonaws.com/etc., unlike the "elevated" tier just below,
+            # which already dampens confidence instead of suppressing outright. A
+            # genuinely extreme burst to one of these domains is real signal worth
+            # SOME weight, even reduced -- dampen the same way, don't zero it.
+            conf = 0.5 if is_vendor_cloud_api else 0.9
+            add("zeek_exfiltration", outbound_z, conf, "zeek_network",
                 f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
                 domain=exfil_dest_ip)
         elif outbound_z > 3.5 and outbound_bytes > 250000 and not is_telemetry:
@@ -275,8 +284,12 @@ class ThreatSignalDetector:
         # same rigor as the two branches above -- deliberately conservative given no
         # live tuning data exists yet for what a stricter bar should be here
         # specifically (see Documentation/AUDIT_REVIEW_FOLLOWUP.md).
-        elif outbound_bytes > 50000000 and outbound_z > 0 and not is_telemetry and not is_vendor_cloud_api:
-            add("zeek_exfiltration", outbound_bytes, 0.55, "zeek_network",
+        elif outbound_bytes > 50000000 and outbound_z > 0 and not is_telemetry:
+            # BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.4): same dampen-not-
+            # suppress fix as the massive-burst tier above -- this used to also hard-gate
+            # on `not is_vendor_cloud_api`.
+            conf = 0.25 if is_vendor_cloud_api else 0.55
+            add("zeek_exfiltration", outbound_bytes, conf, "zeek_network",
                 f"absolute volume bytes={int(outbound_bytes)} Z={outbound_z:.2f}",
                 domain=exfil_dest_ip)
 

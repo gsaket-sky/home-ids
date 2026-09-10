@@ -1,0 +1,185 @@
+HOME IDS — Full Senior Software Engineering, Architecture, Detection & Mitigation Audit
+(Received verbatim from the user, 2026-09-10, as "FULL_AUDIT_V14.txt". Preserved as-is
+for reference. See AUDIT_V14_REVIEW_RESPONSE.md in this same directory for the
+line-by-line verification against actual source and the resulting implementation plan
+— same discipline as AUDIT_REVIEW_FOLLOWUP.md for the prior 2026-09-09 external review.)
+
+================================================================================
+
+1. Executive Summary
+This audit reviewed the HOME IDS repository to evaluate its production readiness for deployment on a Raspberry Pi 8 GB. While the system demonstrates a sophisticated pipeline—integrating Zeek, Pi-hole, local ML baselining, Ollama-based LLM review, and an EvidenceGraph—it currently suffers from severe architectural risks and logic bugs that preclude it from being considered a safe, plug-and-play consumer product.
+
+Most critically, there are P0 logic flaws where persistence is mistaken for corroboration, resulting in autonomous Pi-hole blocks for uncorroborated single anomalies. Furthermore, geofencing violations combined with minor anomalies can autonomously trigger Layer-2 ARP tarpits, completely disconnecting legitimate home devices (like Smart TVs connecting to a foreign CDN). Finally, running local Ollama, Zeek, Scapy, and a multi-gigabyte SQLite database (with an artificially crippled 4MB cache) on a Raspberry Pi will result in rapid SD card degradation and CPU starvation.
+
+The system cannot be safely shipped in its current state.
+
+2. Architecture Assessment
+The architecture follows a decoupled pipeline model transitioning from a legacy in-memory mechanism (core/) to an EvidenceGraph-backed (v13/) architecture.
+
+Ingestion: PiHoleCollector and ZeekCollector feed raw observations.
+Evidence Construction: Detectors (e.g., threat_signals.py, zeek_network.py) construct Evidence objects mapped to specific independent families.
+Evaluation: HypothesisEngine scores attack vs. benign explanations. DecisionEngine interprets these scores into states (BENIGN, SUSPICIOUS, HIGH, CRITICAL) and assigns numerical risk scores.
+Review/Calibration: CL-AFPE and ollama_soc.py perform asynchronous review, autonomously loosening or tightening sensitivity thresholds (sigma shifts).
+Mitigation: IPSMitigator executes Pi-hole blocking, Fritz!Box router isolation, and Scapy-based ARP/NDP Layer-2 tarpits.
+Strengths: Separation of concerns is generally well-defined. The v13 EvidenceGraph provides a much-needed persistent audit trail. Weaknesses: The translation of confidence (a probability) into a linear risk score (* 10.0) that triggers hard mitigations is mathematically unsound. The LLM acts as an autonomous sensitivity adjuster, exposing the system to prompt-injection false-negatives.
+
+3. Data/Evidence Flow Assessment
+Mermaid diagram
+State Flow Issues: The flow heavily depends on accurate attribution. Although recent commits attempted to patch missing domain / dest_ip fields, if attribution fails (resulting in "unknown"), the LLM loop autonomously loosens the entire device's sensitivity instead of just the domain, bleeding state across incidents.
+
+4. Threat Detection Effectiveness
+The system optimizes for complex detection but conflates single observations with verified threats:
+
+Missing attribution: Network intrusion signals without domains fall back to the most recent connection, falsely implicating innocent domains.
+Weak Corroboration: The system frequently treats multiple alerts originating from a single Zeek event or a single packet as "independent sources," inflating scores.
+5. False-Positive Analysis
+The system fails the fundamental home-network constraint: extreme false-positive resistance.
+
+P0: Persistence Bypassing Corroboration: pipeline.py escalates a single SUSPICIOUS signal to HIGH if it persists for 10 minutes. While it correctly tags this as escalated_via_persistence = True to prevent mitigation, ips.py's mitigate() function ignores this tag and blocks the domain purely because decision_state == "HIGH". This violates the invariant that HIGH requires 2+ independent families.
+P0: Geofencing Tarpits: DecisionEngine.evaluate() assigns threat_confidence = 0.95 to a geofencing violation if it has merely one other independent signal (e.g., a minor DNS anomaly). This translates to risk_score = 9.5, instantly triggering a Layer-2 Scapy Tarpit and router isolation for the device. A Smart TV hitting a blocked country's CDN + an mDNS anomaly gets bricked.
+6. False-Negative Analysis
+LLM Prompt Injection / Device Blinding: ollama_soc.py parses LLM outputs. If the LLM classifies a target as benign but cannot extract a domain (IP-only), it triggers fp_engine._apply_sigma_shift(..., direction="TUNE_DOWN"). A clever attacker could trigger an IP-only alert with a payload designed to convince Ollama it is benign, permanently blinding the IDS to that device's subsequent attacks.
+Telemetry Allowlisting: Hardcoded telemetry allowlists suppress DNS exfiltration signals. Attackers can exfiltrate via github.com or amazonaws.com (which are in _VENDOR_CLOUD_API_DOMAINS) without triggering the hypothesis.
+7. Decision Engine Assessment
+The decision engine mixes heuristic scoring and hard stops dangerously.
+
+Hard-Stops: Signatures like Geofencing Policy Violation override the hypothesis framework to force a state.
+Risk Score Derivation: risk_score = threat_confidence * 10.0. This transforms a qualitative metric into a highly sensitive threshold where a single floating-point bump (0.85 to 0.90) crosses the line between monitoring and network decapitation (Tarpit).
+8. Zeek Assessment
+Zeek is excessively noisy for a home network.
+
+zeek_notice accounts for 98.3% of evidence rows (over 200,000 rows in days). Even with the recent 12-hour pruning logic, the continuous ingestion, feature extraction, and SQLite WAL writing of this noise exhausts CPU and SD card I/O on a Raspberry Pi.
+Weak Zeek notices are fed into the graph despite having a scoring weight of 0.0.
+9. DNS Detection Assessment
+DNS Tunneling: The system triggers on high rate (> 100) and high entropy (> 4.0). This is frequently triggered by normal DoH, DoT, or legitimate encrypted syncing. The system requires stricter sequence/encoding patterns to assert tunneling.
+DNS evasion flags devices directly querying non-Pi-hole resolvers. On a home network, many IoT devices hardcode 8.8.8.8. Flagging this as an evasion anomaly causes systemic false positives.
+10. Threat Intelligence Assessment
+VT / AbuseIPDB hits immediately contribute to reputation. However, tier=4 ("one unconfirmed signal") is often treated as sufficient context to corroborate a weak local signal, leading to a HIGH state for IPs belonging to shared hosting or CDNs.
+11. ML Assessment
+LightGBM models track device baselines.
+The baseline updating logic runs continuously on BENIGN / ANOMALOUS decisions. If an attacker beacons slowly, starting below the anomaly threshold, the baseline will absorb the beaconing as "normal" over time.
+12. LLM / Ollama Assessment
+Unsafe Autonomous Adjustments: The LLM acts as an autonomous sensitivity adjuster. If it says classification: malicious, it pushes the system to tighten sensitivity and hard-stop IPs across all devices. The LLM is acting as a final security authority, violating the prompt's architectural rule.
+13. FritzBox Reactive Capture Assessment
+Streaming & Conversion Architecture: Uses undocumented capture.lua streaming endpoints. avm_pcap_to_standard modifies proprietary headers in-memory (O(1) memory), an excellent Raspberry Pi optimization.
+Budgeting & Locking Flaws: A single _burst_lock serializes Python thread triggers, but actually triggers captures for multiple radios (ath0, ath1) in parallel threads. On low-end hardware, this parallel raw packet streaming can cause dropped packets.
+Zeek Execution: Captures are fed into an offline zeek -r run.
+14. Suricata Batch Scan Assessment
+Batch Mode Choice: Running Suricata in offline batch mode (rather than inline continuously) is an excellent choice for a constrained Pi.
+Runmode Tuning & cgroup Isolation: suricata_scan.py defaults to systemd-run --user to escape soc.service's 40% CPU quota. While functional, it introduces brittle deployment dependencies (loginctl enable-linger).
+Severity Mapping: Suricata severity 1 alerts are naively converted to a 0.95 threat_confidence, immediately invoking the has_confirmed_exploit hard-stop. This translates to automatic CRITICAL states and immediate Tarpitting, despite the noisy nature of many Emerging Threat rules.
+15. EvidenceGraph/SQLite Assessment
+P1: SQLite Cache Starvation: store.py explicitly sets PRAGMA cache_size = -4000 (4 MB) for the pi_8gb profile. A 5 GB graph database with heavy concurrent reads (Zeek ingestion, pipeline polling, API, Ollama backtesting) using a 4 MB cache will result in catastrophic disk thrashing. The Raspberry Pi SD card will fail rapidly.
+While WAL is enabled, the lack of aggressive checkpointing limits combined with high Zeek ingestion creates unbounded WAL file growth.
+16. IPS / Mitigation Assessment
+Scapy on Raspberry Pi: Running a Python Scapy packet sniffer (sniff(...) for NDP/ARP) in an infinite loop inside the pipeline is incredibly CPU-intensive. Scapy is notoriously slow in Python; using it as an active inline tarpit on a Pi 8GB will drop packets and starve the Pi.
+Dangerous Uncoordinated Locks: While RLock fixed a deadlock, executing external requests.post() calls to Fritz!Box while holding self._lock in mitigate() is a severe anti-pattern that blocks the entire IPS engine if the router is slow to respond.
+17. Raspberry Pi 8 GB Performance Assessment
+FAIL. The current architecture cannot run stably on a Raspberry Pi 8 GB.
+
+Local Ollama inference (even a small model) requires ~4-5 GB RAM and saturates the CPU.
+Scapy ARP/NDP sniffing saturates Python GIL.
+Zeek baseline takes 1-2 GB.
+SQLite thrashing due to a 4 MB cache size will choke the disk I/O.
+18. Reliability / Failure Assessment
+If the Pi-hole or Zeek goes down, the detectors receive empty lists. The baseline EWMA might shift, but it degrades safely.
+If Ollama fails, it retries safely.
+Failure in Fritz!Box: If the Fritz!Box API hangs, the mitigate() thread holding the RLock will stall the entire mitigation subsystem.
+19. Observability / Auditability Assessment
+The v13 Evidence Graph provides excellent traceability (edges linking evidence, hypotheses, and decisions). However, "unknown" domains/IPs still pollute the graph, breaking the ability to perfectly reconstruct attribution.
+20. Detailed Findings P0-P3
+[P0] IPS Engine ignores escalated_via_persistence tag, enabling uncorroborated blocking
+Location: src/core/pipeline.py (~line 1802) and src/mitigation/ips.py (~line 587)
+Problem: pipeline.py escalates a 10-minute persistent SUSPICIOUS alert to HIGH, but correctly tags it with escalated_via_persistence = True. ips.py entirely ignores this tag and applies Pi-hole blocks purely on decision_state == "HIGH".
+Why it matters: Violates the core invariant that only corroborated threats (2+ evidence families) are autonomously blocked.
+Example failure: A single weak anomaly that persists for 10 minutes silently bypasses the corroboration gate, blocking the user's internet.
+Root cause: Missing check in the ips.py severity gate for the escalated_via_persistence payload flag.
+Recommended fix: Update the severity gate: if decision_state not in ("HIGH", "CRITICAL") or decision.get("escalated_via_persistence"): return
+Priority: CRITICAL
+Confidence: HIGH
+[P0] Geofencing logic causes trivial false-positive Layer-2 Tarpitting
+Location: src/core/decision_engine.py (~line 241) and src/mitigation/ips.py (~line 628)
+Problem: A geofencing violation + 1 independent evidence source yields a threat_confidence of 0.95. ips.py triggers Layer-2 Tarpits for any risk_score >= 9.0.
+Why it matters: A smart device querying a foreign NTP/CDN server and experiencing a DNS anomaly will instantly be bricked from the home network via Layer-2 ARP manipulation.
+Example failure: Smart TV checks firmware from an Asian CDN (geofenced), and drops a DNS packet (DNS anomaly), resulting in full network disconnection.
+Root cause: Qualitative heuristics (geofence) mathematically inflating probability to 0.95, triggering strict hardware bounds originally designed for lateral movement.
+Recommended fix: Disconnect risk_score mathematics from qualitative hard-stops. Tarpits must explicitly require deterministic proof of lateral movement or active exploitation (has_confirmed_exploit), not a fuzzy geofencing score.
+Priority: CRITICAL
+Confidence: HIGH
+[P1] Suricata severity=1 treated as infallible confirmed exploit
+Location: src/intelligence/detectors/suricata_scan.py (~line 54) and src/core/decision_engine.py
+Problem: Suricata severity 1 rules are mapped to threat_confidence = 0.95, which unconditionally creates a CRITICAL hard-stop.
+Why it matters: Emerging Threats rules (like generic web signatures) are prone to false positives, which will now instantly tarpit the device.
+Example failure: A benign HTTP request payload matching a generic ET rule immediately causes full hardware isolation for the device without any local corroboration.
+Root cause: Blinding trust in a single Suricata severity level overriding the multi-family Hypothesis engine.
+Recommended fix: Downgrade Suricata severity 1 to a 0.85 confidence or require at least one local anomaly (like an internal port scan or unexpected port) before establishing CRITICAL.
+Priority: HIGH
+Confidence: HIGH
+[P1] SQLite Cache Starvation causes severe disk thrashing
+Location: src/v13/graph/store.py (~line 79)
+Problem: pi_8gb profile is artificially restricted to cache_size = -4000 (4MB).
+Why it matters: With a 5GB WAL-enabled database and constant Zeek ingestion, a 4MB cache forces constant SD card reads, leading to Pi freeze and early hardware death.
+Example failure: Pipeline latency spikes, I/O wait times hit 100%, and the system freezes.
+Root cause: Arbitrary magic number setting PRAGMA cache_size to an absurdly low 4 MB.
+Recommended fix: Increase cache_size to at least -256000 (256 MB) for Pi 8GB.
+Priority: HIGH
+Confidence: HIGH
+[P1] LLM Autonomous Tuning is a Prompt Injection Risk
+Location: src/scripts/ollama_soc.py (~lines 1548, 1606)
+Problem: LLM parsing triggers _apply_sigma_shift(TUNE_DOWN) or TUNE_UP autonomously based purely on text output.
+Why it matters: An attacker could craft DNS queries or payloads designed to convince Ollama it is benign, permanently blinding the IDS to that device's subsequent attacks.
+Example failure: Attacker uses a domain legitimate-apple-update.com that the LLM assumes is safe, lowering the device's detection sensitivity and allowing lateral movement.
+Root cause: Executing autonomous threshold changes directly derived from raw probabilistic generative text.
+Recommended fix: The LLM should only recommend tuning to a human queue, or its actions should be restricted to suppress for specific domains, NEVER altering global device sensitivity (sigma_shift).
+Priority: HIGH
+Confidence: MEDIUM
+[P2] Scapy Sniffing on Raspberry Pi CPU Exhaustion
+Location: src/mitigation/ips.py
+Problem: Running Python Scapy sniff continuously for ARP/NDP drops packets and burns CPU.
+Why it matters: Drops packets under high network load and starves the decision engine's execution loop.
+Example failure: When downloading a large file on a 1 Gbps connection, Scapy drops 90% of packets, rendering the Tarpit useless and maxing out CPU.
+Root cause: Python GIL and Scapy's native overhead are unsuited for continuous active inline monitoring on low-power ARM architecture.
+Recommended fix: Offload ARP/NDP tarpitting to arpspoof or a compiled eBPF/C utility, not a pure-Python loop.
+Priority: MEDIUM
+Confidence: HIGH
+21. Required Architectural Changes
+Decouple Tarpits from Risk Scores: Autonomous hardware/Layer-2 isolation must require explicit CRITICAL_CONFIRMED_ATTACK flags, not just a score >= 9.0.
+Remove LLM Authority: Strip ollama_soc.py of its ability to alter device sigma_shift or inject local_intel hard stops autonomously.
+Zeek Filtering: Drop weak Zeek notices before SQLite ingestion, rather than writing them and pruning them 12 hours later.
+Suricata Corroboration: Integrate Suricata signals directly into the Hypothesis Engine rather than bypassing it via a hard-stop bypass.
+22. Recommended Code Changes
+python
+
+# In src/mitigation/ips.py
+if pihole_enabled and target_domain and target_domain not in ("unknown", "-"):
+    # PROPOSED:
+    if decision_state not in ("HIGH", "CRITICAL") or st.get("escalated_via_persistence"):
+        LOGGER.debug("Pi-hole block withheld: lacks corroboration.")
+python
+
+# In src/v13/graph/store.py
+_HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
+    "pi_8gb": 256_000, # PROPOSED: 256 MB
+    "x86_16gb": 1_000_000,
+    "custom": 256_000,
+}
+23. Test/Regression Plan
+Decision Invariant Tests:
+test_persistence_does_not_block: Assert that an alert escalated to HIGH purely by time (escalated_via_persistence=True) does not trigger IPSMitigator.mitigate's Pi-hole block.
+test_geofence_tarpit: Assert that geofencing_violation + dns_rate anomaly yields HIGH but does NOT trigger tarpit_active.
+Evidence Tests: Verify is_vendor_cloud_api does not suppress explicitly generated mock exfiltration traffic.
+Performance Tests: Run the system with a 2GB dummy SQLite database on a Pi and monitor iostat.
+24. Production Readiness Score
+Architecture: 6/10
+Code quality: 7/10
+Detection quality: 5/10 (Noisy, prone to false conclusions from combined heuristics)
+False-positive resistance: 2/10 (Fails critical home network invariants)
+False-negative resistance: 6/10
+Evidence integrity: 7/10
+Decision correctness: 4/10 (Persistence/Corroboration flaw)
+IPS safety: 3/10 (Tarpits are overly aggressive and easily triggered)
+Reliability: 5/10 (Lock handling over network calls)
+Raspberry Pi suitability: 3/10 (Disk thrashing, CPU limits)
+Observability: 8/10
+Maintainability: 6/10
+Overall production readiness: 4/10 (NOT READY)

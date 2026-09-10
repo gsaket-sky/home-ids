@@ -47,6 +47,12 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
         "already_actioned": "✅ already actioned / no new action needed",
         "no_action_needed": "✅ already actioned / no new action needed",
         "deferred_query_cap": "⏳ deferred (per-run query cap reached, retrying next run)",
+        # 2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3: IP-only benign verdicts no
+        # longer auto-loosen a device's sensitivity -- surfaced here so the pending
+        # approval (this message's own reply_markup buttons, built by main()) doesn't
+        # go unnoticed the way it would if this fell into the silent "already actioned"
+        # bucket instead.
+        "queued_for_approval": "🔔 queued for your approval (tap a button below)",
     }
     by_outcome = defaultdict(list)
     for po in pattern_outcomes:
@@ -55,8 +61,8 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
     digest_lines = [f"🤖 <b>Ollama SOC run: {len(pattern_outcomes)} pattern(s) analyzed</b>", ""]
 
     # Summary counts, in a fixed order (interesting outcomes first).
-    summary_order = ["immunized", "confirmed_threat", "withheld_multi_device", "skipped",
-                      "deferred_query_cap"]
+    summary_order = ["immunized", "confirmed_threat", "queued_for_approval",
+                      "withheld_multi_device", "skipped", "deferred_query_cap"]
     quiet_count = len(by_outcome.get("already_actioned", [])) + len(by_outcome.get("no_action_needed", []))
     for oc in summary_order:
         if by_outcome.get(oc):
@@ -70,7 +76,7 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
     detail_budget = 10
     detail_worthy = [
         po
-        for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")
+        for oc in ("queued_for_approval", "immunized", "confirmed_threat", "withheld_multi_device", "skipped")
         for po in by_outcome.get(oc, [])
     ][:detail_budget]
 
@@ -98,7 +104,8 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
         )
 
     total_detail_worthy = sum(
-        len(by_outcome.get(oc, [])) for oc in ("immunized", "confirmed_threat", "withheld_multi_device", "skipped")
+        len(by_outcome.get(oc, []))
+        for oc in ("queued_for_approval", "immunized", "confirmed_threat", "withheld_multi_device", "skipped")
     )
     remaining = total_detail_worthy - included
     if remaining > 0:
@@ -115,18 +122,27 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
     return full_msg[:4096]
 
 
-def _send_telegram(config: dict, msg: str) -> None:
+def _send_telegram(config: dict, msg: str, reply_markup: dict = None) -> None:
     """Mirrors retro_hunter.py's own _send_telegram() -- same reasoning: a validated
     finding deserves the same real-time channel every other finding in this codebase
     gets, not just a line in a Markdown report nobody has a reason to open. This script
     reads config via its own flat load_config() (not the config.py CONFIG singleton
-    retro_hunter.py uses), so config is passed in rather than imported."""
+    retro_hunter.py uses), so config is passed in rather than imported.
+
+    reply_markup (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3): optional Telegram
+    inline_keyboard dict, same shape pipeline.py's own alert-sending already uses for
+    its Revoke/Approve buttons -- lets this script's once-per-run digest carry
+    approval buttons for actions this run deliberately queued instead of applying
+    autonomously (see the IP-only TUNE_DOWN routing below)."""
     token = config.get("telegram_token", "")
     chat_id = config.get("telegram_chat_id", "")
     if not token or not chat_id:
         return
     try:
-        data = json.dumps({"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}).encode("utf-8")
+        payload = {"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"https://api.telegram.org/bot{token}/sendMessage", data=data,
             headers={"Content-Type": "application/json"}, method="POST",
@@ -982,6 +998,13 @@ def main():
 
     new_transparency_logs = []
     pattern_outcomes = []
+    # AUDIT_V14_REVIEW_RESPONSE.md §2.3 (2026-09-10 policy decision): an IP-only
+    # NETWORK_INTRUSION target the LLM judges benign no longer applies
+    # _apply_sigma_shift(TUNE_DOWN) autonomously -- that's exactly the shape a
+    # crafted/ambiguous payload aimed at the LLM would produce, with no domain to
+    # anchor trust on the way the immunize branch has. Queued here and surfaced as
+    # one Telegram approval button per pattern on this run's digest instead.
+    pending_tune_approvals = []
     queries_made = 0
     cache_hits = 0
     deferred = 0
@@ -1537,34 +1560,35 @@ def main():
                 # target_domain:` gate meant neither immunize NOR skip ever ran, so
                 # action_taken never got set and the pattern could never resolve, EVEN
                 # on a first-time low-spread pass that never touched the multi-device
-                # guard at all. mark_false_positive() already has a no-domain fallback
-                # for two other signature shapes (DNS_EVASION -> immunize the raw IP,
-                # CONNECTION_ABUSE -> raise this device's own arp_sweep threshold, see
-                # fp_engine.py's PHASE 21D2 routing) -- NETWORK_INTRUSION isn't among
-                # those, so this reuses the same device-level sensitivity-loosening
-                # primitive the malicious/TUNE_UP branch below already calls, just in
-                # the opposite direction, so an IP-only pattern still has SOMETHING
-                # corrective happen and SOMETHING that marks it resolved.
-                fp_engine._apply_sigma_shift(
-                    device_id, alert_hostname, direction="TUNE_DOWN",
-                    source="llm_validated_streak" if streak_exhausted else "llm_validated_no_domain",
-                )
+                # guard at all.
+                #
+                # POLICY CHANGE (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3): this
+                # used to call _apply_sigma_shift(TUNE_DOWN) + release_device()
+                # autonomously, the same primitive the malicious/TUNE_UP branch below
+                # calls, just in the opposite direction. An IP-only target the LLM
+                # judges benign with no domain to anchor trust on (unlike the
+                # immunize branch above, which only ever touches one specific domain)
+                # is exactly the shape a crafted/ambiguous payload aimed at fooling the
+                # LLM would produce -- loosening THIS device's future sensitivity, and
+                # potentially releasing an active containment, off that one verdict
+                # alone is no longer autonomous. Queued for a human approval tap
+                # instead (middleware/routers/pihole_api.py's
+                # /api/ipc/approve_tune_down, wired to a Telegram inline button on this
+                # run's digest via pending_tune_approvals below) -- still marks the
+                # pattern resolved (action_taken=True) so it doesn't re-trigger Ollama
+                # review every run while awaiting a tap.
                 if pcache_key in cache:
                     cache[pcache_key]["action_taken"] = True
-                # PHASE 62: same release-containment-too treatment as the domain-immunize
-                # branch above -- an IP-only NETWORK_INTRUSION target is exactly the shape
-                # most likely to have already crossed the real-time tarpit bar (risk_score
-                # >=9.0) before this review ran.
-                device_released = ips_mitigator.release_device(device_id)
-                released_note = " Also released this device from any active Layer-2 tarpit/router isolation." if device_released else ""
-                if device_released:
-                    LOGGER.info(f"🔓 [OLLAMA-SOC] '{alert_hostname}' was validated benign -- released from active tarpit/router isolation.")
+                pending_tune_approvals.append({
+                    "device_id": device_id, "hostname": alert_hostname, "target": target,
+                })
                 report_lines.append(
-                    f"- **Autonomous Action Taken:** 🤖 {streak_note}No domain to immunize (IP-only "
-                    f"target `{target}`) -- loosened this device's own detection sensitivity instead.{released_note}"
+                    f"- **Autonomous Action Queued (needs approval):** 🤖 {streak_note}No domain to "
+                    f"immunize (IP-only target `{target}`) -- sensitivity-loosening for this device is "
+                    f"queued, tap Approve on this run's Telegram digest to apply it."
                 )
-                outcome = "immunized"
-                outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity loosened instead"
+                outcome = "queued_for_approval"
+                outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity-loosening queued for Telegram approval"
         elif is_valid and response_json.get('classification') == 'malicious' and not already_actioned:
             # BUGFIX (2026-08-27, third-party review): mirrors exactly what fp_engine's
             # own two hard-evidence confirmation paths already do together (Stage-1 hard-
@@ -1684,7 +1708,24 @@ def main():
     if ordered_keys:
         full_msg = build_ollama_digest_message(pattern_outcomes, report_path.name)
         if full_msg:
-            _send_telegram(config, full_msg)
+            # 2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3: one inline-keyboard row per
+            # pattern this run queued for approval instead of auto-loosening sensitivity
+            # (pending_tune_approvals, populated above) -- callback_data carries the
+            # device_id directly (same "no separate ledger entry needed, the identifier
+            # IS enough to re-derive everything" shape fritzbox_api.py's own
+            # /api/ipc/block interactive-approval flow already uses), routed by
+            # mitigation/alerts.py's Telegram callback handler to
+            # /api/ipc/approve_tune_down_get.
+            reply_markup = None
+            if pending_tune_approvals:
+                reply_markup = {"inline_keyboard": [
+                    [{
+                        "text": f"✅ Approve: loosen sensitivity for {a['hostname'] if a['hostname'] and a['hostname'] != 'unknown' else a['device_id']}",
+                        "callback_data": f"approve_tune:{a['device_id']}",
+                    }]
+                    for a in pending_tune_approvals
+                ]}
+            _send_telegram(config, full_msg, reply_markup=reply_markup)
 
     state_dir = root_dir / "state"
     _write_ollama_relay_stats(state_dir, calls_made=queries_made, cache_hits=cache_hits, deferred=deferred, run_validated=run_validated)

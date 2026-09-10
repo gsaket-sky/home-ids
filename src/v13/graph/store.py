@@ -76,7 +76,15 @@ _SHARED_INFRASTRUCTURE_DEVICE_RATIO = 0.4
 # V13_ARCHITECTURE_DEPENDENCY_MAP.md), x86_16gb/custom get more headroom to spend on
 # graph query performance since nothing else on that box is as resource-constrained.
 _HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
-    "pi_8gb": 4_000,
+    # 2026-09-10 (AUDIT_V14_REVIEW_RESPONSE.md §2.2): 4MB was closer to SQLite's own
+    # 2MB default than a real cache for a WAL-enabled graph db this box also runs
+    # Zeek/Suricata/Ollama concurrently against. 48MB is still a conservative,
+    # not-empirically-tuned first-pass bump (same honesty framing as the edge-cap
+    # constant below) -- there's no real Pi-8GB hardware to measure against yet
+    # (V13_ARCHITECTURE_DEPENDENCY_MAP.md's own hardware-topology note), so this
+    # should be re-tuned with real iostat/RSS numbers once that hardware exists,
+    # not treated as a final answer either direction.
+    "pi_8gb": 48_000,
     "x86_16gb": 16_000,
     "custom": 16_000,
 }

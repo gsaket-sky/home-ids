@@ -260,11 +260,23 @@ class DecisionEngine:
                 decision_path = "geofence_uncorroborated"
 
         elif has_confirmed_exploit:
-            state = DecisionState.CRITICAL
-            action = "block"
-            explanation = "Confirmed Exploit/Malware Signature (Suricata)"
-            threat_confidence = 0.98
-            decision_path = "hard_stop"
+            # 2026-09-10 policy decision (AUDIT_V14_REVIEW_RESPONSE.md §2.1, user's
+            # explicit choice), ported from v13/decision/engine.py's live equivalent for
+            # rollback-path parity: same corroboration-required shape as the geofence
+            # branch above -- a lone Suricata severity=1 match no longer auto-blocks on
+            # its own; a genuinely corroborated one still does.
+            if num_independent_sources >= 1 and attack_score > benign_score:
+                state = DecisionState.CRITICAL
+                action = "block"
+                explanation = "Confirmed Exploit/Malware Signature (Suricata)"
+                threat_confidence = 0.98
+                decision_path = "hard_stop"
+            else:
+                state = DecisionState.HIGH
+                action = "alert"
+                explanation = "Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)"
+                threat_confidence = 0.75
+                decision_path = "suricata_uncorroborated"
 
         elif rep.tier == 5:
             # BUGFIX (2026-08-29, Gap 1 flipped live from shadow mode after real-world

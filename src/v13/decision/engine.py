@@ -141,6 +141,22 @@ DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
         decision_path="hard_stop",
         check=lambda ev_store, features, is_safe, now: _fresh_evidence_exists(
             ev_store, "suricata_signature_match", now, _HARD_STOP_FRESHNESS_SECONDS, min_confidence=0.9),
+        # 2026-09-10 policy decision (AUDIT_V14_REVIEW_RESPONSE.md §2.1, user's explicit
+        # choice): a lone Suricata severity=1 match used to auto-CRITICAL/block with no
+        # corroboration -- unlike every other hard-stop here except geofence, a single
+        # rule match (even against a curated ruleset) can still be a noisy Emerging
+        # Threats false positive, and this rule was the one path left that could
+        # autonomously tarpit a device off ONE signal. Same corroboration shape as
+        # `geofence` above: a genuinely corroborated match (a second independent
+        # evidence family, with the hypothesis engine agreeing attack > benign) still
+        # reaches CRITICAL/block same as before; an uncorroborated one is HIGH/alert
+        # (visible to the operator, not autonomously blocking) instead of a silent
+        # auto-containment on a single rule hit.
+        requires_corroboration=True,
+        uncorroborated_state=DecisionState.HIGH,
+        uncorroborated_explanation="Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)",
+        uncorroborated_confidence=0.75,
+        uncorroborated_decision_path="suricata_uncorroborated",
     ),
 ]
 
