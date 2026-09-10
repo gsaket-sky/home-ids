@@ -41,8 +41,9 @@ def check(name, cond, detail=""):
 
 from extractors.fritzbox_capture import (
     avm_pcap_to_standard, ingest_zeek_logs, reprocess_with_zeek,
-    FritzboxCaptureError, _AVM_MAGIC, _STANDARD_MAGIC,
+    FritzboxCaptureError, _AVM_MAGIC, _STANDARD_MAGIC, login,
 )
+import extractors.fritzbox_capture as _fritzbox_capture_module
 from extractors.zeek_features import ZeekFeatureExtractor
 
 TMP = _PathForSysPath(tempfile.mkdtemp(prefix="phase23_"))
@@ -490,6 +491,41 @@ check("every burst writes a permanent history record via _append_burst_history()
       "regardless of the delete setting",
       "_append_burst_history(out_dir, summary)" in _CAPTURE_SRC)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section G: login()'s cooldown-retry path (mocked -- no real network call, unlike the
+# rest of login() which is deliberately untested here per this file's own docstring)
+# ═══════════════════════════════════════════════════════════════════════════════════
+# BUGFIX regression (live audit, 2026-09-10): if the router returned BlockTime on the
+# first challenge, login() slept and re-fetched a challenge -- but never re-checked
+# that retry for emptiness before challenge.startswith("2$"), unlike the FIRST fetch
+# a few lines above it. A router that returns an empty/None challenge on both the
+# initial AND the retried fetch (e.g. genuinely still cooling down) crashed with an
+# AttributeError instead of the intended FritzboxCaptureError.
+_orig_get_challenge = _fritzbox_capture_module._get_challenge
+_orig_sleep = _fritzbox_capture_module.time.sleep
+_fritzbox_capture_module.time.sleep = lambda *_a, **_k: None  # skip the real cooldown wait
+
+_fritzbox_capture_module._get_challenge = lambda ip, timeout: {
+    "sid": None, "challenge": None, "blocktime": "5",
+}
+try:
+    login("192.0.2.1", "user", "pass")
+    _retry_empty_challenge_raised = False
+    _retry_empty_challenge_detail = "login() returned instead of raising"
+except FritzboxCaptureError:
+    _retry_empty_challenge_raised = True
+    _retry_empty_challenge_detail = ""
+except AttributeError as e:
+    _retry_empty_challenge_raised = False
+    _retry_empty_challenge_detail = f"crashed with AttributeError instead: {e}"
+finally:
+    _fritzbox_capture_module._get_challenge = _orig_get_challenge
+    _fritzbox_capture_module.time.sleep = _orig_sleep
+
+check("THE CORE FIX: login() raises FritzboxCaptureError (not AttributeError) when the "
+      "POST-COOLDOWN RETRY also returns an empty challenge",
+      _retry_empty_challenge_raised, _retry_empty_challenge_detail)
 
 shutil.rmtree(TMP, ignore_errors=True)
 

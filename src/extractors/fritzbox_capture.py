@@ -120,6 +120,8 @@ def login(fritz_ip: str, user: str, password: str, timeout: float = 10.0) -> str
         time.sleep(wait_s)
         info = _get_challenge(fritz_ip, timeout)
         challenge = info["challenge"]
+        if not challenge:
+            raise FritzboxCaptureError(f"Fritzbox at {fritz_ip} did not return a login challenge after cooldown.")
 
     if challenge.startswith("2$"):
         response = _pbkdf2_response(challenge, password)

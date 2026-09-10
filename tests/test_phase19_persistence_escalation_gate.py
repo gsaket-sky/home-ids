@@ -95,9 +95,10 @@ check("plain (never-escalated) SUSPICIOUS is unchanged -- still withheld from co
       f"got {compute_containment_decision_state(plain_suspicious)}")
 
 
-if FAILURES:
-    print(f"\n{len(FAILURES)} Phase 19 check(s) FAILED: {FAILURES}")
-    sys.exit(1)
-else:
-    print("\nAll Phase 19 persistence-escalation severity-gate checks PASSED.")
-    sys.exit(0)
+if __name__ == "__main__":
+    if FAILURES:
+        print(f"\n{len(FAILURES)} Phase 19 check(s) FAILED: {FAILURES}")
+        sys.exit(1)
+    else:
+        print("\nAll Phase 19 persistence-escalation severity-gate checks PASSED.")
+        sys.exit(0)

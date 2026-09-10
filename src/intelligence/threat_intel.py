@@ -944,7 +944,7 @@ class VirusTotalClient:
 
     def is_malicious(self, ioc_type: str, value: str, threshold: int = 3) -> bool:
         res = self.get_result(ioc_type, value)
-        return res and res.get("last_analysis_stats", {}).get("malicious", 0) >= threshold
+        return bool(res and res.get("last_analysis_stats", {}).get("malicious", 0) >= threshold)
 
     def risk_contribution(self, ioc_type: str, value: str) -> float:
         res = self.get_result(ioc_type, value)
