@@ -476,6 +476,7 @@ verified** (test status per item below).
 | 6 | §2.6 autonomous router-isolation holds engine-wide lock across a live HTTP call | Medium — a slow/unresponsive Fritz!Box stalls Pi-hole blocking, tarpit registration, and `release_device()` fleet-wide, not just router isolation | Trivial — working fix already existed in the same file | **Done** — network call moved outside `self._lock`, mirrors `operator_isolate_router()`; `test_ips_operator_actions.py` passing unchanged |
 | — | §3.1-3.5 | Various, all accepted tradeoffs or deferred new work | — | No action this round |
 | — | §3.6 (new, not from the audit) | v13 ingest daemon never computes `outbound_bytes_z` — found while re-testing #4 | Needs scoping | Flagged, not fixed — see §3.6 |
+| 7 | §7 (new, not from the audit) — stale evidence counted as live corroboration | Medium-high — could pad `num_independent_sources` to reach HIGH on one live signal + one dead one, and the same set drives the Telegram WHY-block | Trivial (1-line, reuses existing TTL machinery) | **Done** — see §7 |
 
 Items 2 and 3 were the two places this plan couldn't just proceed
 autonomously — both are policy decisions about how much autonomous authority this
@@ -519,3 +520,61 @@ hardware target specifically still needs real hardware to validate against befor
 that specific claim can be made with confidence — nothing in this pass changes that,
 since (per §4) it was never actually blocked on code, only on hardware that doesn't
 exist yet to test on.
+
+---
+
+## §7. NEW (not from the audit, raised by the user as a follow-up): stale evidence counted as live corroboration
+
+**Claim**: "in telegram alerts and in hee independent events are taken equal to
+corroboration events, which is not true and right. the ground for alerts should be
+corroborative events and not events that happened sometime in past especially if it
+is no longer active."
+
+**Confirmed genuine, with a code-level mechanism, not a vague impression.** In
+`v13/decision/engine.py`'s `evaluate()`, `attack_score`/`benign_score` (two lines
+above the bug) are freshness-aware: `HypothesisEngine.evaluate_all()` runs every
+item through `score_evidence()` → `compute_freshness()`, which **drops** anything
+older than 600s (10 min) — except the `"reputation"` family, 86400s (24h)
+(`v13/hypotheses/engine.py:49-58,92-99`). But the SEPARATE computation of
+`num_independent_sources` — the count that gates `HIGH`/`CRITICAL`, and that
+`pipeline.py`'s Telegram WHY-block displays as `evidence_families` — used to read
+`ev_store = evidence_list`, the **raw, unfiltered** list, with the file's own
+comment admitting it: *"HypothesisEngine already applied its own TTL internally
+above"* (i.e., knew scoring was filtered, didn't apply the same filter here).
+
+For a live device, `evidence_list` isn't "this cycle's fresh evidence" — it's
+`live_engine.py`'s `_query_graph_window()` merging up to `_GRAPH_QUERY_WINDOW_SECONDS
+= 86400` (24h) of graph history with the current cycle. So a `dns_behavior` anomaly
+from 20 hours ago — correctly excluded from `attack_score` for being stale — could
+still count as one of the `>=2` independent families required to reach `HIGH`,
+alongside one genuinely fresh signal. A verdict that in reality rested on one live
+signal could read as "2 independent sources" in both the escalation gate and the
+alert text explaining it — precisely the failure mode named in the claim.
+
+**Fix applied** (`v13/decision/engine.py`): `ev_store` is now built via
+`score_evidence(evidence_list, now=now)`, reusing the exact same TTL machinery
+`evaluate_all()` already applies to scoring two lines above, rather than inventing
+separate freshness logic. This automatically fixes `partial_support`,
+`attack_evidence`, `independence_families`/`num_independent_sources`, and the
+`winning_evidence`/`full_attack_evidence`/`evidence_families` fields the Telegram
+WHY-block reads — all derived from `ev_store`. Safe for the hard-stop registry's own
+checks too (their 120s TTL is strictly tighter than the 600s/86400s bound applied
+here, so nothing a 120s check would find is ever excluded by this). No corresponding
+change needed in `core/decision_engine.py` (the rollback path) — that file never
+introduced a second, broader-window evidence source the way v13's graph merge did;
+its own `ev_store` parameter is the caller's already-TTL-filtered
+`EvidenceStore.get_for_device()` result throughout, so scoring and counting were
+never split there.
+
+**A fair counter-consideration, addressed rather than dismissed**: a strict
+"everything must be simultaneously fresh" requirement would be wrong too — it would
+break detection of patient, low-and-slow attackers who deliberately space distinct
+techniques (a beacon here, a scan there) more than a few minutes apart, which is the
+explicit point of hypotheses like `C2_BEACONING`/`COORDINATED_TARGETING`. This fix
+doesn't impose that — it applies the SAME 600s/24h TTL discipline already used for
+scoring, not a tighter concurrency requirement, so a real slow-building pattern
+still corroborates across its own natural timescale; only evidence old enough that
+scoring itself already stopped trusting it stops padding the count too.
+
+Verified against `test_v13_decision_engine.py`, `test_phase37_suricata_batch_scan.py`,
+and `test_phase54_g6_geofence_and_g7_hypothesis_naming.py` — all pass unchanged.

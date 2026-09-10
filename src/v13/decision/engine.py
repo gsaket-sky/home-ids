@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from v13.evidence.model import Evidence, NO_DESTINATION
-from v13.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, ScoredEvidence
+from v13.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, score_evidence
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
 
 # Same 120s value core/decision_engine.py's own (now-removed, 2026-09-07 cleanup)
@@ -180,11 +180,27 @@ class DecisionEngine:
         evidence_verification_required = False
         hypothesis_weight = 0.0
 
-        # ev_store here is the raw (unfiltered-by-freshness) evidence_list -- hard-stop
-        # checks and the partial-support/attack-evidence logic below all want to see
-        # everything with its OWN freshness semantics (hard-stops use their own TTL;
-        # HypothesisEngine already applied its own TTL internally above).
-        ev_store = evidence_list
+        # BUGFIX (2026-09-10, user-identified): this used to be the raw, unfiltered
+        # evidence_list. attack_score/benign_score two lines up are freshness-aware --
+        # score_evidence() inside evaluate_all() already drops anything past its TTL
+        # (600s default, 86400s for the "reputation" family) before scoring -- but
+        # num_independent_sources/attack_evidence/evidence_families below had NO
+        # freshness filter at all, so a stale item excluded from the SCORE could still
+        # count as one of the >=2 independent families required to REACH a verdict.
+        # Concretely: a dns_behavior anomaly from 20 hours ago (correctly excluded from
+        # attack_score, long past its 600s TTL) could still pad num_independent_sources
+        # to 2 alongside one genuinely fresh signal, reaching HIGH on evidence that in
+        # reality was one live signal plus one dead one -- exactly backwards from "the
+        # ground for alerts should be corroborative events, not events that happened in
+        # the past, especially if no longer active." The same unfiltered set is also
+        # what pipeline.py's Telegram WHY-block displays as "why this fired," so this
+        # fixes both the escalation gate and what the operator sees justifying it.
+        # Reuses score_evidence() -- the exact same function/TTLs evaluate_all() already
+        # applied two lines up -- rather than inventing separate freshness logic. Safe
+        # for the hard-stop checks below too: their own TTL (120s,
+        # _HARD_STOP_FRESHNESS_SECONDS) is strictly tighter than the 600s/86400s bound
+        # applied here, so nothing a 120s check would find is ever excluded by this.
+        ev_store = [scored.evidence for scored in score_evidence(evidence_list, now=now)]
 
         partial_support = [e for e in ev_store if family_for(e.evidence_type) in _PARTIAL_SUPPORT_FAMILIES]
         if partial_support:
