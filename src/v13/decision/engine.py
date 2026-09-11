@@ -34,6 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 from v13.evidence.model import Evidence, NO_DESTINATION
 from v13.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, score_evidence
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
+from utils import ZEEK_NOTICE_EVIDENCE_TYPES, ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
 # Same 120s value core/decision_engine.py's own (now-removed, 2026-09-07 cleanup)
 # shadow-only freshness constant used -- this is v13's real, LIVE equivalent.
@@ -59,6 +60,23 @@ def _safe_float(val: Any) -> float:
 
 def _safe_confidence(val: Any) -> float:
     return min(1.0, max(0.0, _safe_float(val)))
+
+
+def _is_attack_shaped(e: Evidence) -> bool:
+    """False for weak-tier zeek_notice evidence -- utils.py's
+    ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES already classifies it as
+    "contributes nothing" (NetworkIntrusionHypothesis's own scoring already
+    zeroes it out via _zeek_notice_weight(), utils.py's
+    ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"]=0.0 -- a TCP-capture/protocol-edge-case
+    artifact, not attacker behavior, per that hypothesis's own comment). Before
+    this fix, attack_evidence never checked this -- a weak notice that
+    contributed exactly zero to attack_score still counted as one of the
+    independent families required to reach HIGH. True for every other evidence
+    type -- this only ever narrows what ZEEK_NOTICE_EVIDENCE_TYPES itself
+    already covers, not a new exclusion category."""
+    if e.evidence_type in ZEEK_NOTICE_EVIDENCE_TYPES:
+        return e.evidence_type in ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
+    return True
 
 
 class DecisionState:
@@ -212,28 +230,58 @@ class DecisionEngine:
                 attack_score >= 2.0 or has_meaningful_partial_signal
             )
 
-        attack_evidence = [e for e in ev_store if family_for(e.evidence_type) not in NON_ATTACK_FAMILIES]
+        # BUGFIX (2026-09-11, user-identified): zeek_notice_weak used to count
+        # here despite _is_attack_shaped() -- see that function's own docstring.
+        attack_evidence = [
+            e for e in ev_store
+            if family_for(e.evidence_type) not in NON_ATTACK_FAMILIES and _is_attack_shaped(e)
+        ]
 
-        # Gap-64 domain-linkage redesign, ported exactly (decision_engine.py:100-129):
-        # strip a reputation-family item ONLY when it carries a destination that
-        # AFFIRMATIVELY differs from the winning attack hypothesis's own relevant
-        # evidence destinations -- never when either side lacks that info. Monotonic:
-        # can only demote, never escalate.
+        # Gap-64 domain-linkage redesign, originally ported from
+        # decision_engine.py:100-129, EXTENDED 2026-09-11 (user-identified, from a
+        # real PEER_COHORT_DEVIATION alert: 3 evidence items about 3 unrelated
+        # destinations -- one about Telegram's IP, one about Google's IP, one about
+        # a Datacamp IP -- all counted as "independent evidence families" for a
+        # verdict that isn't about any of them). Two gaps in the original version:
+        #   1. Only checked family_for(e.evidence_type) == "reputation" -- a
+        #      destination-mismatched dns_behavior/network_behavior item was never
+        #      checked at all, even though "does this evidence actually relate to
+        #      the winning hypothesis's own destination(s)?" applies just as much
+        #      to those families as to reputation.
+        #   2. Only ran under `if hyp_destinations:` -- a hypothesis whose OWN
+        #      relevant evidence structurally never carries a destination
+        #      (peer_deviation is created with destination_id=NO_DESTINATION by
+        #      construction, live_engine.py -- PEER_COHORT_DEVIATION is a pure
+        #      aggregate/volume statistic, "433 destinations vs a peer average of
+        #      29.4," not about any one destination) leaves hyp_destinations
+        #      permanently empty, so the whole check silently never engaged --
+        #      every other family's evidence, about whatever destination it
+        #      happened to be about, stayed in unfiltered. That's structurally
+        #      different from "this hypothesis's evidence just didn't attribute a
+        #      destination THIS cycle" (the original monotonic "never strip on
+        #      missing info" reasoning) -- it's "this hypothesis is never ABOUT a
+        #      destination," so there is nothing for other destination-carrying
+        #      evidence to legitimately corroborate.
+        # Fix: any evidence item carrying a real destination_id (not just
+        # reputation-family) is only trusted as real corroboration when the
+        # winning hypothesis itself supplies at least one destination to compare
+        # against, AND that destination actually matches. No destination anchor
+        # at all -> no destination-carrying evidence counts (nothing to verify
+        # relatedness against); an anchor exists -> only evidence pointing at one
+        # of those same destinations counts. Still monotonic (can only demote
+        # attack_evidence, never add to it) and never touches destination-less
+        # evidence (NO_DESTINATION items -- e.g. peer_deviation/
+        # coordinated_targeting's own relevant evidence) either way.
         winning_attack_name = hyp_results["attack"]["name"]
         relevant_types = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(winning_attack_name)
         hyp_destinations = {
             e.destination_id for e in attack_evidence
             if relevant_types and e.evidence_type in relevant_types and e.destination_id != NO_DESTINATION
         } if relevant_types else set()
-        if hyp_destinations:
-            attack_evidence = [
-                e for e in attack_evidence
-                if not (
-                    family_for(e.evidence_type) == "reputation"
-                    and e.destination_id != NO_DESTINATION
-                    and e.destination_id not in hyp_destinations
-                )
-            ]
+        attack_evidence = [
+            e for e in attack_evidence
+            if e.destination_id == NO_DESTINATION or e.destination_id in hyp_destinations
+        ]
 
         independence_families = {family_for(e.evidence_type) for e in attack_evidence}
         num_independent_sources = len(independence_families)

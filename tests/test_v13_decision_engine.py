@@ -265,10 +265,22 @@ check("a custom registry that omits arp_spoof entirely means arp_spoofing eviden
 # features), not just the hypotheses dict/reasoning_trail strings it already had --
 # see pipeline.py's own COORDINATED_TARGETING/PEER_COHORT_DEVIATION attribution
 # branches (src/core/pipeline.py) for the consuming side that motivated this.
+# UPDATED 2026-09-11 (destination-linkage generalization, see the attack_evidence
+# checks below): zeek_notice_medium's destination changed from
+# "unrelated-destination.example" to "evil-dga.example" (the DGA evidence's own
+# destination) -- the ORIGINAL version of this test asserted that a different
+# hypothesis's evidence about a genuinely UNRELATED destination should still
+# count as independent corroboration, which is exactly the bug a real
+# PEER_COHORT_DEVIATION alert exposed live (three evidence items about three
+# unrelated destinations all counted as "independent sources" for a verdict
+# about none of them). This scenario's actual point -- a different hypothesis's
+# own evidence type still counting toward attack_evidence/independent_sources,
+# just excluded from winning_evidence -- only holds when that evidence is
+# genuinely ABOUT the same real-world destination the winning evidence is.
 r_we = engine.evaluate(
     [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
      ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
-     ev("zeek_notice_medium", value=1.0, dest="unrelated-destination.example")],
+     ev("zeek_notice_medium", value=1.0, dest="evil-dga.example")],
     rep(3), now=NOW,
 )
 check("winning_evidence is populated for an attack-hypothesis-driven verdict",
@@ -328,7 +340,9 @@ check("REGRESSION GUARD: winning_evidence's peer_deviation entry carries the rea
 # scenario above: zeek_notice_medium (network_behavior) is a DIFFERENT hypothesis's own
 # evidence type (NetworkIntrusionHypothesis, not DGA_BOTNET_C2 which won here), excluded
 # from winning_evidence but MUST be present in attack_evidence since it's a real,
-# counted corroborating source (independent_sources==2, dns_behavior+network_behavior).
+# counted corroborating source (independent_sources==2, dns_behavior+network_behavior)
+# -- ABOUT THE SAME real-world destination as the winning evidence (see r_we's own
+# updated comment above; a genuinely unrelated destination is covered separately below).
 check("attack_evidence includes EVERY corroborating family, not just the winning "
       "hypothesis's own slice -- zeek_notice_medium (a DIFFERENT hypothesis's evidence type) "
       "must be present even though winning_evidence correctly excludes it",
@@ -354,9 +368,13 @@ check("attack_evidence is an empty list (not crashing) when there's no evidence 
 # subtag zeek_network.py encodes there, showing the generic "Zeek policy notice fired
 # for this connection" instead -- confirmed live, the SAME evidence shape showed the
 # real note type correctly via winning_evidence/active_evidence but not via this path.
+# UPDATED 2026-09-11: destination matches the DGA evidence's own (same reasoning
+# as r_we above) -- this test is about provenance preservation, not destination
+# matching, so the destination just needs to clear the (separately tested)
+# destination-linkage bar, not be the thing under test here.
 r_ae_prov = engine.evaluate(
     [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
-     ev("zeek_notice_medium", value=1.0, dest="unrelated-destination.example",
+     ev("zeek_notice_medium", value=1.0, dest="evil-dga.example",
         provenance="detector:zeek:notice:SSL::Invalid_Server_Cert")],
     rep(3), now=NOW,
 )
@@ -368,6 +386,90 @@ check("REGRESSION GUARD: attack_evidence's zeek_notice_medium entry carries the 
           for w in r_ae_prov["attack_evidence"]),
       f"got {r_ae_prov['attack_evidence']}")
 
+# --- destination-linkage generalization (BUGFIX, 2026-09-11, user-identified from a
+# real Telegram alert): the ORIGINAL Gap-64 fix only ever checked reputation-family
+# evidence, and only ran at all when the winning hypothesis's own evidence carried a
+# destination. Same r_we scenario as above, but zeek_notice_medium now points at a
+# genuinely DIFFERENT destination than the winning dns_dga_burst evidence -- must be
+# excluded from attack_evidence/independent_sources, not just reputation-family items.
+r_unrelated_dest = engine.evaluate(
+    [ev("dns_dga_burst", value=1.0, confidence=0.95, dest="evil-dga.example"),
+     ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
+     ev("zeek_notice_medium", value=1.0, dest="totally-unrelated-domain.example")],
+    rep(3), now=NOW,
+)
+check("a non-reputation-family item (zeek_notice_medium/network_behavior) pointing at a "
+      "genuinely UNRELATED destination is now excluded from attack_evidence too -- the "
+      "original Gap-64 fix only ever checked reputation-family items for this",
+      not any(w["evidence_type"] == "zeek_notice_medium" for w in r_unrelated_dest["attack_evidence"]),
+      f"got {r_unrelated_dest['attack_evidence']}")
+check("independent_sources correctly drops to 1 (dns_behavior alone) once the "
+      "unrelated-destination network_behavior item is excluded",
+      r_unrelated_dest["independent_sources"] == 1,
+      f"got {r_unrelated_dest['independent_sources']}")
+
+# --- destination-less winning hypothesis (BUGFIX, 2026-09-11, user-identified from a
+# real live PEER_COHORT_DEVIATION alert: 3 evidence items about 3 unrelated
+# destinations -- Telegram's IP, Google's IP, a Datacamp IP -- all counted as
+# "independent evidence families" for a verdict about none of them). peer_deviation's
+# own evidence is ALWAYS destination_id=NO_DESTINATION by construction (it's a pure
+# aggregate/volume statistic, not about any one destination) -- hyp_destinations is
+# therefore always empty for a PEER_COHORT_DEVIATION-winning cycle, which used to mean
+# the whole domain-linkage check silently never engaged at all, letting ANY other
+# family's evidence -- about whatever destination it happened to be about -- count
+# unfiltered. Fixed: no destination anchor at all now means no destination-carrying
+# evidence counts, not "everything counts."
+r_peer_unrelated = engine.evaluate(
+    [peer_dev_ev,
+     ev("dns_evasion_anomaly", value=1.0, dest="telegram-ip.example"),
+     ev("zeek_notice_medium", value=1.0, dest="google-ip.example"),
+     ev("reputation", value=4.0, dest="datacamp-ip.example")],
+    rep(3), now=NOW,
+)
+check("REAL-WORLD REGRESSION GUARD: a PEER_COHORT_DEVIATION verdict no longer counts "
+      "unrelated-destination evidence from other families toward attack_evidence -- "
+      "matches the exact live alert shape (3 unrelated destinations, 0 of them actually "
+      "explaining the peer-deviation finding) that exposed this bug",
+      len(r_peer_unrelated["attack_evidence"]) == 0,
+      f"got {r_peer_unrelated['attack_evidence']}")
+check("REAL-WORLD REGRESSION GUARD: independent_sources for that same alert drops to 0 "
+      "(peer_deviation's own family, peer_cohort_deviation, is itself in "
+      "NON_ATTACK_FAMILIES and was never counted) -- previously reported 3",
+      r_peer_unrelated["independent_sources"] == 0,
+      f"got {r_peer_unrelated['independent_sources']}")
+
+# --- weak-tier zeek_notice exclusion (BUGFIX, 2026-09-11, user-identified: "should
+# weak zeek notices count in HEE?"): NetworkIntrusionHypothesis's own scoring already
+# treats a weak-tier notice as worth exactly zero (_zeek_notice_weight(), utils.py's
+# ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"]=0.0 -- a TCP-capture/protocol-edge-case
+# artifact, not attacker behavior), but attack_evidence/independent_sources never
+# checked this, so a notice contributing NOTHING to attack_score could still pad the
+# independent-source count.
+r_weak_notice = engine.evaluate(
+    [ev("malicious_ja3", value=1.0, dest="c2.example"),
+     ev("zeek_notice_weak", value=1.0, dest="c2.example")],
+    rep(3), now=NOW,
+)
+check("a weak-tier zeek_notice does NOT count toward attack_evidence/independent_sources "
+      "even when it points at the SAME destination as the winning evidence -- it "
+      "contributes zero to the hypothesis's own score (NetworkIntrusionHypothesis's "
+      "_zeek_notice_weight()), so it must not count as corroboration either",
+      not any(w["evidence_type"] == "zeek_notice_weak" for w in r_weak_notice["attack_evidence"])
+      and r_weak_notice["independent_sources"] == 1,
+      f"got attack_evidence={r_weak_notice['attack_evidence']} independent_sources={r_weak_notice['independent_sources']}")
+
+r_medium_notice = engine.evaluate(
+    [ev("malicious_ja3", value=1.0, dest="c2.example"),
+     ev("zeek_notice_medium", value=1.0, dest="c2.example")],
+    rep(3), now=NOW,
+)
+check("REGRESSION GUARD: a MEDIUM-tier zeek_notice on the same destination still counts "
+      "normally (only weak is excluded) -- confirms this is a tier-specific fix, not a "
+      "blanket zeek_notice exclusion",
+      any(w["evidence_type"] == "zeek_notice_medium" for w in r_medium_notice["attack_evidence"])
+      and r_medium_notice["independent_sources"] == 2,
+      f"got attack_evidence={r_medium_notice['attack_evidence']} independent_sources={r_medium_notice['independent_sources']}")
+
 # BUGFIX regression (live audit, 2026-09-10): the bare "zeek_notice" evidence_type
 # (pre-fragmentation, still valid within the 24h graph window right after the
 # 2026-09-09 deploy) used to fall through to UNKNOWN_FAMILY ("unregistered")
@@ -376,9 +478,18 @@ check("REGRESSION GUARD: attack_evidence's zeek_notice_medium entry carries the 
 # source from a different (correctly-tiered) zeek_notice item in the SAME alert
 # that's actually the same underlying vantage point, inflating independent_sources
 # with a phantom extra family.
+# UPDATED 2026-09-11: destination changed from "unrelated-destination.example" to
+# NO_DESTINATION -- neither piece of evidence here belongs to any hypothesis that
+# ends up winning (dns_rate is ADVERTISING_BURST's own, a benign hypothesis; bare
+# "zeek_notice" isn't in NetworkIntrusionHypothesis's own RELEVANT_EVIDENCE_TYPES
+# -- only the 4 tiered variants are), so no attack hypothesis wins and
+# hyp_destinations has nothing to anchor against either way (this test is about
+# family-collapsing/UNKNOWN_FAMILY fallback correctness, not destination
+# matching -- matches this scenario's own "same underlying vantage point"
+# framing, a network-level observation, not about one specific destination).
 r_old_zn = engine.evaluate(
     [ev("dns_rate", value=150.0, confidence=1.0, dest=NO_DESTINATION),
-     ev("zeek_notice", value=1.0, dest="unrelated-destination.example")],
+     ev("zeek_notice", value=1.0, dest=NO_DESTINATION)],
     rep(3), now=NOW,
 )
 check("REGRESSION GUARD: bare 'zeek_notice' (old, pre-fragmentation evidence_type) "
