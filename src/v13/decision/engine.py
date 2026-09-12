@@ -29,7 +29,7 @@ accidents:
 """
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from v13.evidence.model import Evidence, NO_DESTINATION
 from v13.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, score_evidence
@@ -111,6 +111,21 @@ class HardStopRule:
     uncorroborated_explanation: str = ""
     uncorroborated_confidence: float = 0.0
     uncorroborated_decision_path: str = ""
+    # BUGFIX (2026-09-12, caught by tests/test_real_world_alert_regression.py's own
+    # Suricata scenario, no real fired alert of this shape existed to catch it live):
+    # families this rule's OWN triggering evidence belongs to -- excluded from the
+    # corroboration count checked below for THIS rule specifically, so a rule can't
+    # satisfy its own `requires_corroboration` bar just by counting the very evidence
+    # that fired it. geofence never needed this in practice (geofencing_violation's
+    # family, "policy", is already globally excluded via NON_ATTACK_FAMILIES) --
+    # but confirmed_exploit did: suricata_signature_match's family ("signature_match")
+    # is NOT globally excluded (it must still be able to corroborate a DIFFERENT
+    # hypothesis's verdict), so a lone Suricata match was trivially satisfying its
+    # own >=1-independent-source requirement by counting itself, reaching CRITICAL
+    # with zero real corroboration -- exactly the autonomy the 2026-09-10 policy
+    # decision was supposed to remove. Set explicitly for both rules rather than
+    # relying on geofence's exclusion being global-by-coincidence.
+    own_families: FrozenSet[str] = field(default_factory=frozenset)
 
 
 # Honeypot reads features["zeek_honeypot_hits"] directly (matches v-current's
@@ -151,6 +166,7 @@ DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
         uncorroborated_explanation="Geofencing Policy Violation (Uncorroborated)",
         uncorroborated_confidence=0.70,
         uncorroborated_decision_path="geofence_uncorroborated",
+        own_families=frozenset({"policy"}),
     ),
     HardStopRule(
         name="confirmed_exploit",
@@ -175,6 +191,13 @@ DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
         uncorroborated_explanation="Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)",
         uncorroborated_confidence=0.75,
         uncorroborated_decision_path="suricata_uncorroborated",
+        # BUGFIX (2026-09-12): unlike geofencing_violation, suricata_signature_match's
+        # own family ("signature_match") is NOT in NON_ATTACK_FAMILIES -- it must stay
+        # able to corroborate a DIFFERENT hypothesis's verdict -- so without this, a
+        # lone Suricata match satisfied its OWN >=1-independent-source requirement by
+        # counting itself, reaching CRITICAL with zero real corroboration. See
+        # HardStopRule.own_families's own docstring for the full incident.
+        own_families=frozenset({"signature_match"}),
     ),
 ]
 
@@ -313,7 +336,13 @@ class DecisionEngine:
             rule = hard_stop_fired
             trail.append(f"Hard-stop fired: {rule.name}")
             if rule.requires_corroboration:
-                if num_independent_sources >= 1 and attack_score > benign_score:
+                # BUGFIX (2026-09-12): exclude this rule's OWN family from the count --
+                # see HardStopRule.own_families's own docstring. Computed from
+                # independence_families (not num_independent_sources) so a rule with no
+                # own_families set (e.g. any future rule that doesn't need this) is
+                # completely unaffected -- identical to the plain count.
+                corroborating_sources = len(independence_families - rule.own_families)
+                if corroborating_sources >= 1 and attack_score > benign_score:
                     state = DecisionState.CRITICAL
                     action = "block"
                     explanation = rule.explanation

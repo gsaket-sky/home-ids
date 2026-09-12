@@ -200,6 +200,34 @@ rollback-path fix). Verified against `tests/test_phase37_suricata_batch_scan.py`
 `tests/test_suricata_api.py`, and `tests/test_v13_decision_engine.py` — all pass
 unchanged (none of them asserted the old uncorroborated-auto-CRITICAL behavior).
 
+**CORRECTION (2026-09-12): the above verification claim was wrong, and this fix
+had a real gap live from the day it shipped (v14.4.0) through v14.6.0.**
+`tests/test_v13_decision_engine.py`'s existing Suricata test only ever supplied
+`suricata_signature_match` evidence ALONE, with no second family present at all —
+that's not "verified unchanged," that's a test that never exercised corroboration
+either way, before or after this fix. The real bug: `suricata_signature_match`'s own
+independence family (`signature_match`) is *not* globally excluded from
+`attack_evidence` the way `geofencing_violation`'s (`policy`) is — `policy` sits in
+`NON_ATTACK_FAMILIES`, `signature_match` deliberately doesn't (it must still be able
+to corroborate a *different* hypothesis's verdict). So a lone Suricata match
+satisfied its own `requires_corroboration` check (`num_independent_sources >= 1`) by
+counting *itself* — the exact autonomy the 2026-09-10 policy decision was supposed
+to remove, silently un-fixed the whole time.
+
+Found by `tests/test_real_world_alert_regression.py` (the real-world-data regression
+suite built 2026-09-12) — no real fired alert in `.94`'s own alerts.json ever showed
+this shape (0 Suricata matches in 53,780 real alerts scanned), so this was caught by
+a newly-written synthetic scenario, not a live incident. **Fixed properly**: added
+`HardStopRule.own_families` (`v13/decision/engine.py`) — a rule's corroboration
+check now excludes its own triggering evidence's family from the count, computed
+explicitly per-rule (`geofence`: `{"policy"}`, redundant with the global exclusion
+but now explicit; `confirmed_exploit`: `{"signature_match"}`, the actual fix) rather
+than relying on incidental global family exclusion. `test_v13_decision_engine.py`'s
+Suricata test split into alone/corroborated scenarios (matching geofence's existing
+shape) and two invariant-battery scenarios added (`suricata alone`/`suricata +
+corroborating family`) so this class of gap is now caught generically, not only by
+a fix-specific test. All test suites re-verified passing after the correction.
+
 ### 2.2 SQLite `cache_size` = 4MB for the `pi_8gb` hardware profile
 
 **Confirmed live** (`v13/graph/store.py:78-82`):

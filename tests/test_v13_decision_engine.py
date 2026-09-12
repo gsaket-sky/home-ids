@@ -89,12 +89,36 @@ check("a fresh geofence hit ALONE (no corroboration) demotes to HIGH with the Un
       and r_geo_alone["decision_path"] == "geofence_uncorroborated")
 
 # --- confirmed_exploit: confidence threshold ---
-r_exploit_high_conf = engine.evaluate(
+# UPDATED 2026-09-12 (own_families bugfix, caught by
+# tests/test_real_world_alert_regression.py's own Suricata scenario -- no real
+# fired alert of this shape existed to catch it live): this used to assert a
+# LONE high-confidence Suricata match reaches CRITICAL directly -- but that was
+# the exact bug the 2026-09-10 "requires_corroboration" policy change was
+# supposed to prevent (user's explicit choice: alert-only, always, a second
+# independent signal required to escalate). It silently didn't, because
+# suricata_signature_match's own family ("signature_match") isn't globally
+# excluded from attack_evidence the way geofencing_violation's is -- so the
+# lone match satisfied its own >=1-independent-source bar by counting itself.
+# Now split into the two real scenarios: alone -> uncorroborated HIGH;
+# corroborated -> CRITICAL hard-stop, matching HardStopRule.own_families.
+r_exploit_high_conf_alone = engine.evaluate(
     [ev("suricata_signature_match", timestamp=NOW - 5, confidence=0.95)], rep(3), now=NOW,
 )
-check("a high-confidence (>=0.9) Suricata match hard-stops CRITICAL",
-      r_exploit_high_conf["state"] == DecisionState.CRITICAL
-      and r_exploit_high_conf["explanation"] == "Confirmed Exploit/Malware Signature (Suricata)")
+check("a high-confidence (>=0.9) Suricata match ALONE is HIGH/uncorroborated, not "
+      "autonomous CRITICAL -- the confidence bar alone was never meant to bypass "
+      "the corroboration requirement",
+      r_exploit_high_conf_alone["state"] == DecisionState.HIGH
+      and r_exploit_high_conf_alone["decision_path"] == "suricata_uncorroborated")
+
+r_exploit_high_conf_corroborated = engine.evaluate(
+    [ev("suricata_signature_match", timestamp=NOW - 5, confidence=0.95, dest="evil.example"),
+     ev("zeek_lateral_scan", timestamp=NOW - 5, dest="evil.example")],
+    rep(3), now=NOW,
+)
+check("a high-confidence (>=0.9) Suricata match WITH genuine corroboration (a "
+      "second independent family, same destination) hard-stops CRITICAL",
+      r_exploit_high_conf_corroborated["state"] == DecisionState.CRITICAL
+      and r_exploit_high_conf_corroborated["explanation"] == "Confirmed Exploit/Malware Signature (Suricata)")
 
 r_exploit_low_conf = engine.evaluate(
     [ev("suricata_signature_match", timestamp=NOW - 5, confidence=0.5)], rep(3), now=NOW,
@@ -557,6 +581,15 @@ _invariant_scenarios = [
     ("geofence + one corroborating family",
      [ev("geofencing_violation", timestamp=NOW - 5, dest="bad.example.com"),
       ev("malicious_ja3", timestamp=NOW - 5, dest="bad.example.com")], rep(3)),
+    # ADDED 2026-09-12: closes the exact gap that let a lone Suricata match
+    # self-satisfy its own requires_corroboration bar (own_families bugfix) --
+    # this scenario would have caught it generically, the same way "geofence
+    # alone" above already guards geofence's own corroboration requirement.
+    ("suricata alone, no corroboration (>=0.9 confidence)",
+     [ev("suricata_signature_match", timestamp=NOW - 5, confidence=0.95)], rep(3)),
+    ("suricata + one corroborating family",
+     [ev("suricata_signature_match", timestamp=NOW - 5, confidence=0.95, dest="bad.example.com"),
+      ev("zeek_lateral_scan", timestamp=NOW - 5, dest="bad.example.com")], rep(3)),
     ("local_device_discovery only (non-attack family)", [ev("local_device_discovery", value=1)], rep(3)),
     ("trusted tier (1) with otherwise-strong evidence",
      [ev("malicious_ja3"), ev("zeek_notice_medium")], rep(1)),
@@ -565,12 +598,15 @@ _invariant_scenarios = [
 for label, evidence, rep_vec in _invariant_scenarios:
     r = engine.evaluate(evidence, rep_vec, features={"zeek_honeypot_hits": 1} if label.startswith("fresh honeypot") else None, now=NOW)
     if r["state"] == DecisionState.HIGH:
-        # geofence_uncorroborated is a legitimate exception: it's a downgrade FROM
-        # a deterministic hard-stop fact (a confirmed GeoIP blocklist match), not
-        # an escalation via the hypothesis-driven corroboration path -- a real,
+        # geofence_uncorroborated/suricata_uncorroborated are legitimate exceptions:
+        # both are a downgrade FROM a deterministic hard-stop fact (a confirmed
+        # GeoIP blocklist match / a curated-ruleset signature match), not an
+        # escalation via the hypothesis-driven corroboration path -- a real,
         # already-verified fact standing alone is not the "unusual is not
-        # malicious" gap this invariant otherwise guards against.
-        is_deterministic_downgrade = r["decision_path"] == "geofence_uncorroborated"
+        # malicious" gap this invariant otherwise guards against. UPDATED
+        # 2026-09-12: added suricata_uncorroborated alongside geofence_uncorroborated
+        # -- both HardStopRule.requires_corroboration paths share this shape.
+        is_deterministic_downgrade = r["decision_path"] in ("geofence_uncorroborated", "suricata_uncorroborated")
         check(f"INVARIANT [{label}]: HIGH implies independent_sources >= 2, OR a "
               "deterministic hard-stop fact downgraded rather than escalated",
               r["independent_sources"] >= 2 or is_deterministic_downgrade,
