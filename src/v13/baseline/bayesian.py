@@ -103,6 +103,32 @@ class GaussianBaseline:
                     alpha=data.get("alpha", 1.0), beta=data.get("beta", 1.0), n=data.get("n", 0))
 
 
+def weaken_gaussian(model: "GaussianBaseline", retain_fraction: float = 0.1) -> "GaussianBaseline":
+    """Returns a new GaussianBaseline anchored at `model`'s CURRENT mean but
+    with much lower confidence (kappa/alpha scaled down) -- used to seed a
+    BOCPD changepoint hypothesis from "what we currently believe, but far
+    less sure of," not a flat, uninformed prior.
+
+    Fixes a real instability found via this module's own integration test:
+    a flat mu=0 changepoint hypothesis's Student-t density at a merely
+    4-sigma point can exceed a well-established (large-n, tightly-fit)
+    hypothesis's own density there by 50-100x, simply because a wide/
+    uninformed distribution spreads probability mass generously across
+    values a narrow, correctly-fit one assigns very little to -- letting
+    ordinary statistical noise masquerade as a regime change. Anchoring the
+    reset at the current estimate is also more realistic: a firmware update
+    shifts a device's behavior, it doesn't erase all prior knowledge of its
+    rough operating range. Keeps genuine sustained shifts detectable within
+    a handful of confirming cycles (the weakened hypothesis is still free to
+    drift its own mean as new data arrives) without losing to a single
+    moderately-surprising point."""
+    kappa = max(model.kappa * retain_fraction, 0.05)
+    alpha = max(model.alpha * retain_fraction, 1.0)
+    implied_var = model.beta / max(model.alpha, 1e-9)  # beta/alpha ~ the model's own current variance estimate
+    beta = max(implied_var * alpha, 1e-6)
+    return GaussianBaseline(mu=model.mu, kappa=kappa, alpha=alpha, beta=beta, n=0)
+
+
 # ---------------------------------------------------------------------------
 # BetaBaseline -- Beta-Binomial conjugate
 # ---------------------------------------------------------------------------
@@ -161,6 +187,16 @@ class BetaBaseline:
         return cls(a=data.get("a", 1.0), b=data.get("b", 1.0), n=data.get("n", 0))
 
 
+def weaken_beta(model: "BetaBaseline", retain_fraction: float = 0.1) -> "BetaBaseline":
+    """Same reset-at-current-estimate fix as weaken_gaussian, for the Beta-
+    Binomial family -- anchors at the current mean ratio with a much smaller
+    effective pseudo-count, instead of a flat uniform prior."""
+    total = max(model.a + model.b, 1e-9)
+    mean = model.a / total
+    weakened_total = max(total * retain_fraction, 2.0)
+    return BetaBaseline(a=max(mean * weakened_total, 0.5), b=max((1.0 - mean) * weakened_total, 0.5), n=0)
+
+
 # ---------------------------------------------------------------------------
 # PoissonBaseline -- Gamma-Poisson conjugate
 # ---------------------------------------------------------------------------
@@ -208,6 +244,15 @@ class PoissonBaseline:
     @classmethod
     def from_dict(cls, data: dict) -> "PoissonBaseline":
         return cls(shape=data.get("shape", 1.0), rate=data.get("rate", 1.0), n=data.get("n", 0))
+
+
+def weaken_poisson(model: "PoissonBaseline", retain_fraction: float = 0.1) -> "PoissonBaseline":
+    """Same reset-at-current-estimate fix as weaken_gaussian, for the
+    Gamma-Poisson family -- anchors at the current rate estimate with a much
+    smaller effective exposure count, instead of a flat Exponential(1) prior."""
+    mean = model.mean()
+    weakened_rate = max(model.rate * retain_fraction, 1.0)
+    return PoissonBaseline(shape=max(mean * weakened_rate, 1.0), rate=weakened_rate, n=0)
 
 
 # ---------------------------------------------------------------------------
@@ -324,22 +369,32 @@ class BOCPDTracker:
     Revisit if real deployment data shows detection lag at the changepoint
     boundary itself.
 
-    `model_factory` builds a fresh model instance for a new run-length-zero
-    hypothesis -- if hierarchical shrinkage applies (Sheet 00's cold-start
-    priors), the CALLER's closure should seed that fresh model from the
-    current population prior, not a flat default; this class treats the
-    model as opaque beyond `.update(*args)`.
+    `model_factory` builds the INITIAL (cycle-zero) model instance -- if
+    hierarchical shrinkage applies (Sheet 00's cold-start priors), the
+    CALLER's closure should seed it from the current population prior, not a
+    flat default.
     `predictive_prob_fn(model, *observation_args) -> float` scores a model's
     fit to the new observation (e.g. `lambda m, x: m.predictive_density(x)`).
+    `weaken_fn(dominant_model) -> object`, if given, seeds every SUBSEQUENT
+    changepoint hypothesis (spawned during `observe()`, not the initial one)
+    by anchoring at the CURRENT dominant model's own estimate with reduced
+    confidence, instead of calling `model_factory()` fresh each time -- see
+    bayesian.py's own `weaken_gaussian`/`weaken_beta`/`weaken_poisson` for
+    why: a flat, uninformed fresh hypothesis's wide density can otherwise
+    out-compete a well-established, tightly-fit one on nothing more than
+    ordinary statistical noise (confirmed via this module's own integration
+    test). Omit only for a model kind with no such helper.
     """
 
     def __init__(self, model_factory: Callable[[], object],
                   predictive_prob_fn: Callable[..., float],
                   hazard_rate: float = 1.0 / 250.0,
-                  max_hypotheses: int = 40):
+                  max_hypotheses: int = 40,
+                  weaken_fn: Optional[Callable[[object], object]] = None):
         self._model_factory = model_factory
         self._predictive_prob_fn = predictive_prob_fn
         self.hazard_rate = hazard_rate
+        self._weaken_fn = weaken_fn
         # BUGFIX (found via this module's own unit test): the weight-threshold
         # prune alone (_MIN_HYPOTHESIS_WEIGHT) does not bound hypothesis count
         # during a long STABLE regime -- every surviving hypothesis's model gets
@@ -371,7 +426,8 @@ class BOCPDTracker:
 
         prior_mass = sum(w for _, _, w in self._hypotheses)
         cp_weight = prior_mass * self.hazard_rate
-        grown.append((0, self._model_factory(), cp_weight))
+        fresh_model = self._weaken_fn(self.dominant_model()) if self._weaken_fn is not None else self._model_factory()
+        grown.append((0, fresh_model, cp_weight))
 
         total = total_growth_weight + cp_weight
         if total <= 0:

@@ -182,6 +182,45 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # so it can inform specific hypotheses' scoring without inflating "N
     # independent sources" on its own.
     "first_contact": "novelty_context",
+
+    # Release 15, closed-loop autotuning architecture (v13/baseline/bayesian.py,
+    # v13/baseline/engine.py). A statistical outlier is context, never proof --
+    # same posture as ml_anomaly above, for the same reason (an unvalidated
+    # model output must never silently be the second source that promotes an
+    # unrelated hypothesis to HIGH).
+    "baseline_deviation": "baseline_deviation",
+
+    # A detected BOCPD regime change (a firmware/OS update reshaping a device's
+    # traffic) is informational only -- never itself evidence of anything
+    # attack-shaped. It only ever gates how much weight a device's own
+    # new-regime data gets (baseline/engine.py's probation logic), never
+    # corroborates a hypothesis.
+    "regime_change": "regime_change",
+
+    # Markov sequence-surprise, all axes (activity-state, destination-tier,
+    # beaconing-interval). CORROBORATION DESIGN DECISION (see this file's own
+    # docstring conventions): permanently non-attack-family, with NO exception
+    # for whatever raw evidence happened to trigger the activity-state label
+    # this cycle. This is the actual fix for a self-corroboration-through-
+    # derivation risk found during a red-team pass (the Markov signal is
+    # partly DERIVED from evidence that already has its own family, e.g.
+    # peer_deviation -- the risk was a derived signal getting a fresh family
+    # and pairing with its own raw input to fake a second independent
+    # source). family_for() is looked up centrally by evidence_type alone
+    # (confirmed via direct read of decision/engine.py's own corroboration-
+    # counting, which re-derives family_for(e.evidence_type) rather than
+    # trusting whatever independence_family is stored on the Evidence
+    # instance) -- so a permanent, unconditional NON_ATTACK_FAMILIES
+    # membership closes this structurally, with no per-instance override
+    # needed or possible. The sequence classifier is itself an attack surface
+    # (an adversary could try to shape event order to look like an
+    # improbable escalation without real corroborating evidence), so it must
+    # never open a new path to inflate severity on its own -- it still acts
+    # as a severity/urgency multiplier on a verdict already corroborated some
+    # other way, just never a corroborating SOURCE itself.
+    "markov_activity_surprise": "sequence_dynamics",
+    "markov_destination_surprise": "sequence_dynamics",
+    "markov_beaconing_surprise": "sequence_dynamics",
 }
 
 # Mirrors v-current's ATTACK_EVIDENCE_FAMILIES exclusion exactly -- decision/engine.py
@@ -213,6 +252,8 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
 # to close everywhere else.
 NON_ATTACK_FAMILIES = frozenset({
     "local_context", "novelty_context", "peer_cohort_deviation", "ml_anomaly", "policy",
+    # Release 15: see each new family's own comment above for why.
+    "baseline_deviation", "regime_change", "sequence_dynamics",
 })
 
 UNKNOWN_FAMILY = "unregistered"  # visible fallback, see count_independent_families()'s own docstring

@@ -1014,6 +1014,28 @@ class GraphStore:
             out.append(d)
         return out
 
+    def get_latest_decision_for_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+        """Release 15, closed-loop autotuning architecture: the no-learning-
+        during-an-incident gate (Design Invariant 06) needs a device's
+        CURRENT state, not a windowed query -- one row, newest first, backed
+        by idx_decisions_device_ts so this is an index-order scan, not a
+        table sort. Returns None for a device with no decision history yet
+        (treated as BENIGN/no gate by callers, never as an error)."""
+        row = self._conn.execute(
+            "SELECT * FROM decisions WHERE device_id = ? ORDER BY timestamp DESC LIMIT 1",
+            (device_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        try:
+            d["mechanism_flags"] = json.loads(d.get("mechanism_flags_json") or "{}")
+            d["raw_payload"] = json.loads(d.get("raw_payload_json") or "{}")
+        except (TypeError, ValueError):
+            d["mechanism_flags"] = {}
+            d["raw_payload"] = {}
+        return d
+
     def get_recent_decisions(self, limit: int) -> List[Dict[str, Any]]:
         """The console API's graph-view endpoint's actual read pattern: the most
         recent `limit` decisions across ALL devices, newest first -- NOT "every
