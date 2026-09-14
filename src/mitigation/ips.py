@@ -1313,12 +1313,31 @@ class IPSMitigator:
 
         return released_count
     def unisolate_all(self, mac_addr: str, ip_addr: str):
-        """Completely un-isolates a device (Router + Tarpit) across MAC and IP changes[cite: 28]."""
+        """Completely un-isolates a device (Router + Tarpit) across MAC and IP changes[cite: 28].
+
+        BUGFIX (log-spam/wasted-webhook audit, found live: dozens of CRITICAL
+        "un-isolation request accepted for unknown (unknown)" / "unknown (<random
+        MAC>)" log lines, most 1-2 per identity re-resolution -- i.e. essentially
+        once per MAC-rotation event from any privacy-randomizing device on the
+        network). This method's own docstring elsewhere (identity.py's
+        _release_stale_isolation_if_merged()) claims "unisolate_all() itself is a
+        safe no-op if the old identifiers weren't actually isolated (it checks
+        membership before doing anything)" -- true for the LOCAL bookkeeping below,
+        but the real outbound HTTP call to the router used to fire unconditionally
+        whenever ips_router_enabled was set, regardless of whether mac_addr was
+        ever actually in _router_isolated_devices. Every device-identity merge/
+        re-identify (any MAC rotation, not just ones that were ever isolated) was
+        sending a real webhook POST to Fritz!Box for nothing, plus a misleading
+        CRITICAL log implying a real containment action happened. Now gated on
+        router_was_isolated, mirroring the single-target release path's own
+        existing pattern a few hundred lines up (which already checks
+        `mac_addr in self._router_isolated_devices` before calling this)."""
         target_hostname = "unknown"
         target_dev = "unknown"
         tarpit_graph_action_id = None
         router_graph_action_id = None
-        
+        router_was_isolated = False
+
         with self._lock:
             if ip_addr in self._tarpit_active_targets:
                 meta = self._tarpit_active_targets[ip_addr]
@@ -1334,6 +1353,7 @@ class IPSMitigator:
                 target_dev = meta.get("dev_id", target_dev)
                 router_graph_action_id = meta.get("_graph_action_id")
                 del self._router_isolated_devices[mac_addr]
+                router_was_isolated = True
                 LOGGER.info("🧹 Cleared Router Isolation entry for new MAC %s[cite: 28]", mac_addr)
 
         # Mirrored HERE (not via _unisolate_device_router()'s own release-mirror
@@ -1342,7 +1362,7 @@ class IPSMitigator:
         self._mirror_containment_released(tarpit_graph_action_id)
         self._mirror_containment_released(router_graph_action_id)
 
-        if bool(self.config.get("ips_router_enabled", False)):
+        if router_was_isolated and bool(self.config.get("ips_router_enabled", False)):
             self._unisolate_device_router(
                 mac=mac_addr, 
                 ip=ip_addr, 
