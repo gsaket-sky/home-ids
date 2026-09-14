@@ -104,14 +104,21 @@ check("REGRESSION GUARD: main()'s withhold condition actually calls "
       _src.count("should_still_withhold(") >= 3,  # def + streak_exhausted calc + the if-condition
       f"expected at least 3 occurrences (definition + 2 call sites), found {_src.count('should_still_withhold(')}")
 
-check("THE CORE FIX (IP-only no-op): the benign/suppress branch's no-domain path no "
-      "longer does nothing -- it now calls _apply_sigma_shift with a TUNE_DOWN "
-      "direction and marks action_taken, so an IP-only target (the majority shape of "
-      "what was piling up) can actually resolve",
+check("THE CORE FIX (IP-only no-op), UPDATED for Release 15: the benign/suppress "
+      "branch's no-domain path no longer does nothing -- an IP-only target (the "
+      "majority shape of what was piling up) still marks action_taken so the pattern "
+      "resolves. STALE ASSERTION FIXED: this check used to assert a literal "
+      "'direction=\"TUNE_DOWN\"' string, which the real 2026-09-10 policy change "
+      "(AUDIT_V14_REVIEW_RESPONSE.md sec2.3, replacing the autonomous TUNE_DOWN call "
+      "with a human-approval queue) had already removed from this file BEFORE this "
+      "test was ever updated -- confirmed via git stash that this exact check was "
+      "already failing on the unmodified codebase, unrelated to Release 15. Release "
+      "15 (Sheet 05, OLLAMA_HAS_DECISION_AUTHORITY) now retires the approval-queue "
+      "path too -- the no-domain branch is advisory only, outcome='advisory_benign_ip_only'.",
       # PHASE 57: cache writes now go through pcache_key (evidence fingerprint +
       # validator-schema version), not the bare grouping key -- see
       # test_phase57_evidence_fingerprint.py for that change's own coverage.
-      'direction="TUNE_DOWN"' in _src and 'cache[pcache_key]["action_taken"] = True' in _src)
+      'outcome = "advisory_benign_ip_only"' in _src and 'cache[pcache_key]["action_taken"] = True' in _src)
 
 check("REGRESSION GUARD: the no-domain fallback is still gated behind the SAME "
       "benign+suppress+not-already-actioned condition as the domain path (an `else:` "

@@ -360,23 +360,23 @@ class AlertManager:
                 else:
                     msg_text = f"⚠️ Mark-false-positive failed: HTTP {resp.status_code}"
             elif action == "approve_tune":
-                # 2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.3: `target` here is a
-                # device_id directly (not an action_id -- there's no ledger entry to
-                # look up, same "the identifier alone is enough to re-derive
-                # everything" shape the `block` branch above already uses for its own
-                # interactive-approval flow), from ollama_soc.py's IP-only-benign-
-                # verdict routing.
-                ipc_url = f"http://127.0.0.1:{fastapi_port}/api/ipc/approve_tune_down"
-                resp = self.session.post(ipc_url, json={"target": target}, headers=headers, timeout=10.0)
-                if resp.status_code == 200:
-                    body = resp.json()
-                    if body.get("status") == "not_found":
-                        msg_text = "⚠️ Device no longer tracked — nothing to approve."
-                    else:
-                        released_note = " Also released from active containment." if body.get("released") else ""
-                        msg_text = f"✅ Approved — sensitivity loosened for this device.{released_note}"
-                else:
-                    msg_text = f"⚠️ Approve failed: HTTP {resp.status_code}"
+                # Release 15, Sheet 05: RETIRED. This button is no longer offered by
+                # ollama_soc.py (src/scripts/ollama_soc.py's OLLAMA_HAS_DECISION_
+                # AUTHORITY=False stops it from ever being queued/rendered), but a
+                # STALE Telegram message sent before this deploy could still show
+                # one -- handled gracefully here rather than silently 404ing against
+                # a still-live IPC endpoint (middleware/routers/pihole_api.py's
+                # /api/ipc/approve_tune_down is intentionally left in place,
+                # unreachable via this path now, not deleted -- a real, separate
+                # cleanup once no stale buttons can plausibly remain). Real
+                # sensitivity tuning is now Sheet 03a's autotuner
+                # (src/v13/autotune/engine.py), backtest-gated and independent of
+                # any Telegram tap.
+                msg_text = (
+                    "ℹ️ This approval flow has been retired — sensitivity tuning is now "
+                    "handled by the autonomous closed-loop autotuner, independently of "
+                    "Ollama or a Telegram approval tap. No action was taken."
+                )
             elif action == "revoke":
                 # PHASE 3 (closed-loop): `target` here is the action_id from a "🔔
                 # Auto-action" notification's [Revoke] button, not a domain/IP/hostname.

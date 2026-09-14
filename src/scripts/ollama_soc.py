@@ -18,6 +18,26 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 _TELEGRAM_MSG_BUDGET = 3800  # headroom under Telegram's 4096-char hard limit
 
+# Release 15, closed-loop autotuning architecture, Sheet 05: Ollama demoted
+# to read-only advisory -- per explicit design decision (kept, not removed,
+# but stripped of every decision-triggering path). With this False, main()'s
+# three action branches below (benign+domain -> mark_false_positive,
+# benign+IP-only -> queue Telegram approve_tune button, malicious ->
+# record_confirmed_threat + sigma-shift TUNE_UP) still run their full
+# classification/calibration/streak/multi-device-guard logic and still
+# WRITE their narrative report_lines text -- they just skip the actual
+# fp_engine/ips_mitigator side-effecting calls, so nothing Ollama concludes
+# can change real system state. Real tuning is now Sheet 03a's autotuner
+# (src/v13/autotune/engine.py) and Sheet 03b's CL-AFPE composite trust
+# (src/v13/cl_afpe/composite_trust.py) -- independent, backtest-gated, not
+# routed through Ollama or a human Telegram tap. Deliberately a single,
+# reversible module constant rather than surgery threaded through this
+# file's own extensive, heavily-cross-referenced branching logic (PHASE
+# 13/14/16/51/52/53/60a/62/63b/67, AUDIT_V14_REVIEW_RESPONSE.md sec2.3) --
+# every one of those calibration/streak/guard mechanisms stays intact and
+# keeps informing what the report SAYS, only the ACTING is cut off.
+OLLAMA_HAS_DECISION_AUTHORITY = False
+
 
 def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) -> "str | None":
     """Builds the Telegram digest text for one ollama_soc.py run, or None if there's
@@ -53,6 +73,16 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
         # go unnoticed the way it would if this fell into the silent "already actioned"
         # bucket instead.
         "queued_for_approval": "🔔 queued for your approval (tap a button below)",
+        # Release 15, Sheet 05: OLLAMA_HAS_DECISION_AUTHORITY=False's own
+        # outcomes -- narrative only, no action taken, no button offered.
+        # Without these entries the digest would silently drop every
+        # advisory-only pattern from both the summary counts and the
+        # per-pattern detail section (neither is keyed by outcome string
+        # automatically) -- defeating the whole point of Ollama staying a
+        # visible advisory digest instead of a silent one.
+        "advisory_benign": "💬 assessed benign (advisory only, no action taken)",
+        "advisory_benign_ip_only": "💬 assessed benign, IP-only (advisory only, no action taken)",
+        "advisory_malicious": "💬 assessed malicious (advisory only, no action taken)",
     }
     by_outcome = defaultdict(list)
     for po in pattern_outcomes:
@@ -62,6 +92,7 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
 
     # Summary counts, in a fixed order (interesting outcomes first).
     summary_order = ["immunized", "confirmed_threat", "queued_for_approval",
+                      "advisory_benign", "advisory_benign_ip_only", "advisory_malicious",
                       "withheld_multi_device", "skipped", "deferred_query_cap"]
     quiet_count = len(by_outcome.get("already_actioned", [])) + len(by_outcome.get("no_action_needed", []))
     for oc in summary_order:
@@ -74,9 +105,14 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
     # Per-pattern detail for the outcomes worth a human's attention -- see this
     # function's own docstring for why this is character-budgeted, not just count-capped.
     detail_budget = 10
+    _DETAIL_WORTHY_OUTCOMES = (
+        "queued_for_approval", "immunized", "confirmed_threat",
+        "advisory_benign", "advisory_benign_ip_only", "advisory_malicious",
+        "withheld_multi_device", "skipped",
+    )
     detail_worthy = [
         po
-        for oc in ("queued_for_approval", "immunized", "confirmed_threat", "withheld_multi_device", "skipped")
+        for oc in _DETAIL_WORTHY_OUTCOMES
         for po in by_outcome.get(oc, [])
     ][:detail_budget]
 
@@ -103,10 +139,7 @@ def build_ollama_digest_message(pattern_outcomes: list, report_filename: str) ->
             f"confidence={po.get('llm_confidence')}, alerts_covered={po['alerts_covered']}"
         )
 
-    total_detail_worthy = sum(
-        len(by_outcome.get(oc, []))
-        for oc in ("queued_for_approval", "immunized", "confirmed_threat", "withheld_multi_device", "skipped")
-    )
+    total_detail_worthy = sum(len(by_outcome.get(oc, [])) for oc in _DETAIL_WORTHY_OUTCOMES)
     remaining = total_detail_worthy - included
     if remaining > 0:
         digest_lines.append(f"...and {remaining} more (see {report_filename})")
@@ -1504,54 +1537,79 @@ def main():
                         "immunization TTL adjusted %s -> %s seconds.",
                         raw_confidence, calibrated_confidence, raw_ttl, adjusted_ttl,
                     )
-                mark_result = fp_engine.mark_false_positive(
-                    representative, alert_hostname, target_domain, source="llm_validated",
-                    ttl_seconds=adjusted_ttl,
-                )
-                base_domain = mark_result.get("base_domain", "")
                 if pcache_key in cache:
                     cache[pcache_key]["action_taken"] = True
-                if base_domain:
-                    # PHASE 14: an earlier cycle may have already blocked this domain in
-                    # Pi-hole before the LLM had a chance to validate it as benign -- an
-                    # immunization alone only stops FUTURE alerts, it doesn't undo an
-                    # existing block.
-                    # PHASE 16 FIX: was an exact-match check against base_domain itself, but
-                    # Pi-hole blocks are keyed by the specific queried FQDN -- almost always a
-                    # subdomain of base_domain, not base_domain literally. unblock_by_base_domain()
-                    # sweeps every blocked entry under this base domain instead of missing all of them.
-                    released = ips_mitigator.unblock_by_base_domain(base_domain)
-                    unblocked_note = ""
-                    if released:
-                        unblocked_note = f" Released {len(released)} existing Pi-hole block(s)."
-                        LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released {len(released)} existing Pi-hole block(s): {released}")
-                    # PHASE 62 (Gap 6 item 6, tarpit): mirrors the Pi-hole unblock right
-                    # above -- "an autonomous correction should also undo containment
-                    # that's no longer warranted, not just stop future alerts" (PHASE 14's
-                    # own comment) previously only covered Pi-hole; a device that had
-                    # already crossed the real-time risk_score>=9.0 tarpit/router-isolation
-                    # bar (mitigation/ips.py) before this LLM review ran stayed trapped
-                    # even after being validated benign. release_device() already exists
-                    # (the same one the operator's manual Release button uses) and is a
-                    # safe no-op if this device isn't currently contained.
-                    device_released = ips_mitigator.release_device(device_id)
-                    if device_released:
-                        unblocked_note += " Also released this device from any active Layer-2 tarpit/router isolation."
-                        LOGGER.info(f"🔓 [OLLAMA-SOC] '{alert_hostname}' was validated benign -- released from active tarpit/router isolation.")
-                    report_lines.append(
-                        f"- **Autonomous Action Taken:** 🤖 {streak_note}Immunized `{base_domain}` in the "
-                        f"FP trust cache and logged an operator-equivalent training correction "
-                        f"(takes effect on soc.service's next restart).{unblocked_note}"
+                # Release 15, Sheet 05: OLLAMA_HAS_DECISION_AUTHORITY gates every
+                # side-effecting call below (fp_engine.mark_false_positive,
+                # Pi-hole unblock, device release) -- see that constant's own
+                # module-level docstring. The advisory-only branch below
+                # deliberately reports target_domain as-is rather than trying
+                # to independently replicate mark_false_positive()'s own
+                # base-domain extraction/refusal logic -- since nothing is
+                # actually being acted on, a purely narrative label carries
+                # none of the risk a real action based on a guessed domain
+                # would.
+                if OLLAMA_HAS_DECISION_AUTHORITY:
+                    mark_result = fp_engine.mark_false_positive(
+                        representative, alert_hostname, target_domain, source="llm_validated",
+                        ttl_seconds=adjusted_ttl,
                     )
-                    outcome = "immunized"
-                    outcome_detail = f"{streak_note}domain immunized 14 days, sensitivity loosened for this device{unblocked_note}"
+                    base_domain = mark_result.get("base_domain", "")
+                    if base_domain:
+                        # PHASE 14: an earlier cycle may have already blocked this domain in
+                        # Pi-hole before the LLM had a chance to validate it as benign -- an
+                        # immunization alone only stops FUTURE alerts, it doesn't undo an
+                        # existing block.
+                        # PHASE 16 FIX: was an exact-match check against base_domain itself, but
+                        # Pi-hole blocks are keyed by the specific queried FQDN -- almost always a
+                        # subdomain of base_domain, not base_domain literally. unblock_by_base_domain()
+                        # sweeps every blocked entry under this base domain instead of missing all of them.
+                        released = ips_mitigator.unblock_by_base_domain(base_domain)
+                        unblocked_note = ""
+                        if released:
+                            unblocked_note = f" Released {len(released)} existing Pi-hole block(s)."
+                            LOGGER.info(f"🔓 [OLLAMA-SOC] '{base_domain}' was immunized -- released {len(released)} existing Pi-hole block(s): {released}")
+                        # PHASE 62 (Gap 6 item 6, tarpit): mirrors the Pi-hole unblock right
+                        # above -- "an autonomous correction should also undo containment
+                        # that's no longer warranted, not just stop future alerts" (PHASE 14's
+                        # own comment) previously only covered Pi-hole; a device that had
+                        # already crossed the real-time risk_score>=9.0 tarpit/router-isolation
+                        # bar (mitigation/ips.py) before this LLM review ran stayed trapped
+                        # even after being validated benign. release_device() already exists
+                        # (the same one the operator's manual Release button uses) and is a
+                        # safe no-op if this device isn't currently contained.
+                        device_released = ips_mitigator.release_device(device_id)
+                        if device_released:
+                            unblocked_note += " Also released this device from any active Layer-2 tarpit/router isolation."
+                            LOGGER.info(f"🔓 [OLLAMA-SOC] '{alert_hostname}' was validated benign -- released from active tarpit/router isolation.")
+                        report_lines.append(
+                            f"- **Autonomous Action Taken:** 🤖 {streak_note}Immunized `{base_domain}` in the "
+                            f"FP trust cache and logged an operator-equivalent training correction "
+                            f"(takes effect on soc.service's next restart).{unblocked_note}"
+                        )
+                        outcome = "immunized"
+                        outcome_detail = f"{streak_note}domain immunized 14 days, sensitivity loosened for this device{unblocked_note}"
+                    else:
+                        report_lines.append(
+                            f"- **Autonomous Action Skipped:** could not safely extract a base domain "
+                            f"from `{target_domain}` — no immunization applied."
+                        )
+                        outcome = "skipped"
+                        outcome_detail = f"could not safely extract a base domain from '{target_domain}'"
                 else:
+                    # Release 15, Sheet 05: OLLAMA_HAS_DECISION_AUTHORITY is False --
+                    # advisory only. target_domain reported as-is rather than trying to
+                    # independently replicate mark_false_positive()'s own base-domain
+                    # extraction/refusal logic -- since nothing is actually being acted
+                    # on, a purely narrative label carries none of the risk a real
+                    # action based on a guessed domain would.
                     report_lines.append(
-                        f"- **Autonomous Action Skipped:** could not safely extract a base domain "
-                        f"from `{target_domain}` — no immunization applied."
+                        f"- **Advisory only, no action taken:** 🤖 {streak_note}assessed `{target_domain}` as "
+                        f"benign -- the autonomous closed-loop autotuner/CL-AFPE (Release 15) handles real "
+                        f"sensitivity tuning independently and does not read this classification."
                     )
-                    outcome = "skipped"
-                    outcome_detail = f"could not safely extract a base domain from '{target_domain}'"
+                    outcome = "advisory_benign"
+                    outcome_detail = f"{streak_note}assessed benign, advisory only -- no domain immunized, no sensitivity change"
             else:
                 # BUGFIX (2026-09-01, live report: "is Ollama ever completing all the
                 # alerts or is it just piling up"): this branch used to be a SILENT NO-OP
@@ -1579,16 +1637,31 @@ def main():
                 # review every run while awaiting a tap.
                 if pcache_key in cache:
                     cache[pcache_key]["action_taken"] = True
-                pending_tune_approvals.append({
-                    "device_id": device_id, "hostname": alert_hostname, "target": target,
-                })
-                report_lines.append(
-                    f"- **Autonomous Action Queued (needs approval):** 🤖 {streak_note}No domain to "
-                    f"immunize (IP-only target `{target}`) -- sensitivity-loosening for this device is "
-                    f"queued, tap Approve on this run's Telegram digest to apply it."
-                )
-                outcome = "queued_for_approval"
-                outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity-loosening queued for Telegram approval"
+                # Release 15, Sheet 05: OLLAMA_HAS_DECISION_AUTHORITY gates the
+                # Telegram approve_tune queue too -- with it False (the Release
+                # 15 default), nothing is queued and no button is offered;
+                # real tuning is Sheet 03a's autotuner, backtest-gated and
+                # independent of any Telegram tap. See that constant's own
+                # module-level docstring.
+                if OLLAMA_HAS_DECISION_AUTHORITY:
+                    pending_tune_approvals.append({
+                        "device_id": device_id, "hostname": alert_hostname, "target": target,
+                    })
+                    report_lines.append(
+                        f"- **Autonomous Action Queued (needs approval):** 🤖 {streak_note}No domain to "
+                        f"immunize (IP-only target `{target}`) -- sensitivity-loosening for this device is "
+                        f"queued, tap Approve on this run's Telegram digest to apply it."
+                    )
+                    outcome = "queued_for_approval"
+                    outcome_detail = f"{streak_note}no domain to immunize -- device sensitivity-loosening queued for Telegram approval"
+                else:
+                    report_lines.append(
+                        f"- **Advisory only, no action taken:** 🤖 {streak_note}assessed IP-only target "
+                        f"`{target}` as benign -- no domain to immunize, and sensitivity tuning is no "
+                        f"longer routed through Ollama or a Telegram approval tap."
+                    )
+                    outcome = "advisory_benign_ip_only"
+                    outcome_detail = f"{streak_note}assessed benign (IP-only target), advisory only -- nothing queued"
         elif is_valid and response_json.get('classification') == 'malicious' and not already_actioned:
             # BUGFIX (2026-08-27, third-party review): mirrors exactly what fp_engine's
             # own two hard-evidence confirmation paths already do together (Stage-1 hard-
@@ -1627,27 +1700,50 @@ def main():
             confirmed_intel_ttl = _apply_confidence_calibration(
                 CONFIRMED_INTEL_DEFAULT_TTL_SECONDS, raw_confidence, calibrated_malicious,
             )
-            fp_engine.record_confirmed_threat(
-                device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
-                ttl_seconds=confirmed_intel_ttl,
-            )
-            fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
             if pcache_key in cache:
                 cache[pcache_key]["action_taken"] = True
-            # PHASE 60a: a stronger, immediate label than the weak-benign TTL-survival
-            # harvest in _load_cache() -- record_confirmed_threat() above is itself the
-            # confirmation (a validator-passed "malicious" verdict that just got acted
-            # on), no need to wait for anything further to happen.
-            try:
-                calibrator.record_outcome("malicious", raw_confidence, correct=True)
-            except Exception as e:
-                LOGGER.debug(f"Confidence-calibration harvest skipped for a confirmed threat: {e}")
-            report_lines.append(
-                f"- **Autonomous Action Taken:** 🤖 Recorded as confirmed threat (local-intel + "
-                f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "
-                f"other device that touches it."
-            )
-            outcome = "confirmed_threat"
+            # Release 15, Sheet 05: OLLAMA_HAS_DECISION_AUTHORITY gates
+            # record_confirmed_threat()/_apply_sigma_shift() too -- "no
+            # confirm... output" in the plan's own wording names this exact
+            # pathway. TRADE-OFF made explicit, not hidden: with the flag
+            # False, an Ollama "malicious" classification no longer
+            # automatically hard-stops OTHER devices touching the same
+            # target -- real attacks are still caught by the deterministic
+            # evidence/decision engine (v13/decision/engine.py), which has
+            # never depended on Ollama for real-time detection; this only
+            # removes Ollama's OWN independent judgment from taking that
+            # specific secondary action. See that constant's own
+            # module-level docstring.
+            if OLLAMA_HAS_DECISION_AUTHORITY:
+                fp_engine.record_confirmed_threat(
+                    device_id, None, dest_ip, reason="LLM_VALIDATED_MALICIOUS", signature=signature,
+                    ttl_seconds=confirmed_intel_ttl,
+                )
+                fp_engine._apply_sigma_shift(device_id, alert_hostname, direction="TUNE_UP", source="llm_validated")
+                # PHASE 60a: a stronger, immediate label than the weak-benign TTL-survival
+                # harvest in _load_cache() -- record_confirmed_threat() above is itself the
+                # confirmation (a validator-passed "malicious" verdict that just got acted
+                # on), no need to wait for anything further to happen.
+                try:
+                    calibrator.record_outcome("malicious", raw_confidence, correct=True)
+                except Exception as e:
+                    LOGGER.debug(f"Confidence-calibration harvest skipped for a confirmed threat: {e}")
+                report_lines.append(
+                    f"- **Autonomous Action Taken:** 🤖 Recorded as confirmed threat (local-intel + "
+                    f"sensitivity tuned up for {alert_hostname}); this target now hard-stops for any "
+                    f"other device that touches it."
+                )
+                outcome = "confirmed_threat"
+            else:
+                report_lines.append(
+                    f"- **Advisory only, no action taken:** 🤖 assessed `{signature}` on {alert_hostname} as "
+                    f"malicious (confidence {raw_confidence:.2f}) -- not recorded as confirmed-intel or "
+                    f"tuned automatically. Real detection is the deterministic decision engine, independent "
+                    f"of this classification; the closed-loop autotuner/CL-AFPE (Release 15) handle real "
+                    f"tuning."
+                )
+                outcome = "advisory_malicious"
+                outcome_detail = f"assessed malicious (confidence {raw_confidence:.2f}), advisory only -- not recorded as confirmed-intel, no sensitivity change"
             outcome_detail = "local confirmed-intel updated (any other device touching this now hard-stops), sensitivity tightened for this device"
         elif already_actioned:
             report_lines.append("- **Autonomous Action:** already applied for this pattern on a previous run — not repeated.")
