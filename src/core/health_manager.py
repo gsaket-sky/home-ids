@@ -242,26 +242,40 @@ class HealthManager:
         available_mb = vm.available / (1024 * 1024)
         rss_pressure_floor = float(self.config.get("health_manager_rss_pressure_mb", 1024))
 
-        # BUGFIX (found live, 2026-09-14, minutes after first deploy): swap_pct/
+        # BUGFIX #1 (found live, 2026-09-14, minutes after first deploy): swap_pct/
         # sysmem_pct/available_mb used to be independent, standalone triggers --
         # confirmed live on .94 (a shared box also running Grafana/Loki/Immich/
         # n8n/OpenWebUI) that system-wide swap sat at 87% used entirely by OTHER
         # processes while THIS process had 0 bytes swapped (verified via
         # /proc/<pid>/status VmSwap) and only ~850MB RSS -- comfortably healthy.
-        # Using swap/sysmem alone would have pushed this process into
-        # CONSERVATION or CRITICAL (and, sustained, a pointless self-restart)
-        # for a memory situation it has zero responsibility for and zero
-        # ability to fix by restarting itself. System-wide signals now only
-        # count as escalation triggers once this process's OWN rss already
-        # shows it's plausibly part of the problem (at least the
-        # RESOURCE_PRESSURE floor) -- rss crossing its own tier's threshold
-        # still escalates on its own regardless of system-wide swap/sysmem.
+        # System-wide signals now only count as escalation triggers once this
+        # process's OWN rss already shows it's plausibly part of the problem (at
+        # least the RESOURCE_PRESSURE floor) -- rss crossing its own tier's
+        # threshold still escalates on its own regardless of system-wide swap/sysmem.
         system_signals_active = rss_mb >= rss_pressure_floor
 
-        if rss_mb >= float(self.config.get("health_manager_rss_critical_mb", 1843)):
-            return CRITICAL
-        if system_signals_active and (
-            swap_pct >= float(self.config.get("health_manager_swap_critical_pct", 80))
+        # BUGFIX #2 (found live, 2026-09-14, ~40 minutes after BUGFIX #1's own
+        # deploy): CRITICAL is the one tier with a destructive consequence -- a
+        # proactive self-restart -- so it must fire ONLY on evidence this process
+        # can actually do something about by restarting: its own RSS crossing its
+        # own critical threshold, or the SYSTEM being genuinely near total
+        # exhaustion (available_mb this low risks an uncontrolled kernel OOM kill
+        # of ANY process, including this one, regardless of blame -- shrinking
+        # our own footprint is a real, if partial, mitigation). swap_pct is
+        # deliberately NOT a CRITICAL trigger anymore: BUGFIX #1 still let it
+        # co-trigger CRITICAL once rss merely crossed the LOW 1024MB pressure
+        # floor -- which this process reaches within an hour of almost every
+        # restart, per this entire session's own observed pattern -- combined
+        # with .94's chronic ~80-87% swap (hours-long, from OTHER processes, not
+        # a spike). That combination fired for real: a self-restart at 15:07
+        # while rss was nowhere near its own 1843MB threshold, taking the whole
+        # engine down with zero detection coverage until manually restarted (the
+        # systemd Restart=on-failure gap this same incident also exposed --
+        # fixed separately in the unit file, Restart=always). Restarting this
+        # process does nothing to lower OTHER processes' swap usage, so swap was
+        # never the right signal for this specific action.
+        if (
+            rss_mb >= float(self.config.get("health_manager_rss_critical_mb", 1843))
             or available_mb < float(self.config.get("health_manager_min_available_mb", 512))
         ):
             return CRITICAL

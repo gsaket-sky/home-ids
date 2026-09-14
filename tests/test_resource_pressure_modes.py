@@ -179,14 +179,44 @@ def test_high_swap_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
     assert hm._classify_pressure() == hm_module.NORMAL
 
 
-def test_low_available_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
-    fake_psutil.state.update(rss_mb=850, sysmem_pct=70, swap_pct=10, available_mb=100)
-    assert hm._classify_pressure() == hm_module.NORMAL
-
-
 def test_high_sysmem_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
     fake_psutil.state.update(rss_mb=850, sysmem_pct=95, swap_pct=10, available_mb=8000)
     assert hm._classify_pressure() == hm_module.NORMAL
+
+
+# --- BUGFIX #2 regression (found live, ~40 min after BUGFIX #1's own deploy) ---
+# CRITICAL triggers a destructive, proactive self-restart -- confirmed live that
+# BUGFIX #1 above still let swap_pct co-trigger CRITICAL once rss merely crossed
+# the LOW 1024MB pressure floor (routinely reached within an hour of almost
+# every restart, per this whole session's own observations), combined with
+# .94's CHRONIC ~80-87% swap (hours-long, from other processes, not a spike).
+# That combination fired for real: a self-restart at completely normal rss
+# (nowhere near the 1843MB critical threshold), taking the whole engine down
+# with zero detection coverage. swap_pct must never reach CRITICAL again,
+# however high, and regardless of this process's own rss. available_mb DOES
+# still reach CRITICAL, deliberately UNGATED from rss now -- a genuine
+# system-wide near-OOM is worth shrinking our own footprint for regardless of
+# whose fault it is, unlike a merely-high swap percentage (which this box sat
+# at for hours today with no acute failure -- swap being high is not the same
+# as the system being about to fail).
+
+def test_low_available_alone_triggers_critical_regardless_of_rss(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=850, sysmem_pct=70, swap_pct=10, available_mb=100)
+    assert hm._classify_pressure() == hm_module.CRITICAL
+
+
+def test_high_swap_never_triggers_critical_even_with_elevated_rss(hm, fake_psutil):
+    """The exact real-world combination that caused the live incident: rss in
+    the ordinary 1024-1536MB operating range (not itself CONSERVATION-level)
+    plus chronic high swap from unrelated processes. Must cap at CONSERVATION,
+    never reach CRITICAL, no matter how high swap_pct goes."""
+    fake_psutil.state.update(rss_mb=1100, sysmem_pct=10, swap_pct=99, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.CONSERVATION
+
+
+def test_high_swap_with_conservation_level_rss_still_not_critical(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=1600, sysmem_pct=10, swap_pct=99, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.CONSERVATION
 
 
 def test_rss_crossing_its_own_tier_still_escalates_regardless_of_system_signals(hm, fake_psutil):

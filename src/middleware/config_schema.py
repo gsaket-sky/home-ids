@@ -293,7 +293,7 @@ CONFIG_SCHEMA = [
     {"s": "health_manager", "k": "health_manager_swap_conservation_pct", "t": "number", "def": 60.0,
      "desc": "System swap-used percentage that alone can also trigger CONSERVATION."},
     {"s": "health_manager", "k": "health_manager_swap_critical_pct", "t": "number", "def": 80.0,
-     "desc": "System swap-used percentage that alone can also trigger CRITICAL."},
+     "desc": "Unused as of 2026-09-14 -- swap-% no longer triggers CRITICAL at all (a chronically-high-swap box with a healthy process would self-restart for nothing; see health_manager.py's own BUGFIX #2 comment). Kept defined, not removed, in case a future redesign restores a swap-driven CRITICAL path."},
     {"s": "health_manager", "k": "health_manager_sysmem_pressure_pct", "t": "number", "def": 75.0,
      "desc": "System-wide memory-used percentage that alone can also trigger RESOURCE_PRESSURE."},
     {"s": "health_manager", "k": "health_manager_min_available_mb", "t": "number", "def": 512.0,
