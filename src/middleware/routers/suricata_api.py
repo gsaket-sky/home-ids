@@ -29,43 +29,21 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, Query
 
 from middleware.auth import verify_token, CONFIG, LOGGER
+from middleware.routers._alert_log_utils import iter_lines_reverse
 
 router = APIRouter()
 
-_MAX_TAIL_BYTES = 20 * 1024 * 1024  # bounded scan -- see module docstring
+_MAX_TAIL_BYTES = 20 * 1024 * 1024  # bounded scan -- see _alert_log_utils.py's module docstring
 _CHUNK_BYTES = 1 * 1024 * 1024
 
 
 def _iter_lines_reverse(path: Path, max_bytes: int = _MAX_TAIL_BYTES):
-    """Yields complete lines from `path`, most-recent-first, reading backward in
-    `_CHUNK_BYTES` chunks and stopping once `max_bytes` has been scanned. The very first
-    (oldest, leftmost) fragment of the scanned window is dropped -- it may be a partial
-    line whose real start lies further back than we read."""
-    size = path.stat().st_size
-    if size == 0:
-        return
-    scanned = 0
-    pos = size
-    buf = b""
-    with path.open("rb") as f:
-        while pos > 0 and scanned < max_bytes:
-            read_size = min(_CHUNK_BYTES, pos)
-            pos -= read_size
-            f.seek(pos)
-            buf = f.read(read_size) + buf
-            scanned += read_size
-            # Yield every complete line we can from the front of buf, keeping the
-            # leading (possibly-partial) fragment for the next chunk.
-            parts = buf.split(b"\n")
-            buf = parts[0]
-            for line in reversed(parts[1:]):
-                if line.strip():
-                    yield line
-    # Whatever's left in buf at pos==0 is the true first line of the scanned window --
-    # only safe to yield if we actually reached the start of the file (pos == 0 means
-    # we did), otherwise it's a partial line from mid-file and must be dropped.
-    if pos == 0 and buf.strip():
-        yield buf
+    # _CHUNK_BYTES looked up as a module global (not a default-arg snapshot) so
+    # tests/test_suricata_api.py's monkeypatch.setattr(suricata_api, "_CHUNK_BYTES", ...)
+    # -- forcing tiny chunks to exercise the partial-line-carry boundary logic --
+    # still works after this function became a thin wrapper around the shared
+    # _alert_log_utils.iter_lines_reverse().
+    return iter_lines_reverse(path, max_bytes, chunk_bytes=_CHUNK_BYTES)
 
 
 def _is_suricata_record(rec: Dict[str, Any]) -> bool:
