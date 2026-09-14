@@ -349,6 +349,17 @@ class BaselineEngine:
         if self.is_learning_paused(device_id, now):
             return None
 
+        # BUGFIX (found via the real ingest daemon's own existing test suite,
+        # not this module's own tests -- those always upserted the device
+        # first): device_baselines.device_id is a foreign key against
+        # devices(device_id). insert_evidence() upserts the device as a side
+        # effect, but a device can go a whole cycle with ZERO raw detector
+        # evidence (normal -- most cycles for most devices are quiet) while
+        # still having valid features worth baseline-scoring. Upserting here
+        # too makes this engine self-sufficient regardless of what the
+        # caller already did this cycle, not dependent on ordering.
+        self.store.upsert_device(device_id, timestamp=now)
+
         tracker, regime_id = self._load_tracker(device_id, metric, model_kind, hour)
         model_cls = _MODEL_CLASSES[model_kind]
         pre_spike_dominant = tracker.dominant_model()  # snapshot BEFORE this cycle's update -- the confirmation anchor
@@ -411,6 +422,7 @@ class BaselineEngine:
         now = now if now is not None else time.time()
         if self.is_learning_paused(device_id, now):
             return None
+        self.store.upsert_device(device_id, timestamp=now)  # same FK fix as score_metric
 
         state = derive_activity_state(evidence_types_this_cycle)
         key = (device_id, axis)

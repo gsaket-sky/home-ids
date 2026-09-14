@@ -38,8 +38,10 @@ import yaml
 _SRC_DIR = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(_SRC_DIR))
 
+from core.heartbeat import write_component_heartbeat  # noqa: E402
 from extractors.zeek_features import ZeekFeatureExtractor  # noqa: E402
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # noqa: E402
+from v13.baseline.engine import BaselineEngine  # noqa: E402
 from v13.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from v13.ingest.sources import (  # noqa: E402
     build_zeek_sources, run_detection_cycle, PiHoleLogSource, PiHoleFeatureStore,
@@ -94,6 +96,11 @@ class IngestDaemon:
         self.detector = ThreatSignalDetector()
         self.store = GraphStore(str(graph_db_path))
         self.sources = build_zeek_sources(mount_dir, cursor_dir)
+        # Release 15, closed-loop autotuning architecture, Sheet 00: per-device
+        # Bayesian/BOCPD/Markov baseline scoring, run every cycle alongside
+        # real detection -- see _score_baselines()'s own docstring.
+        self.baseline_engine = BaselineEngine(self.store)
+        self.heartbeat_state_dir = Path(ingest_cfg.get("state_dir", "state"))
         # A5: Pi-hole/DNS-behavior evidence (V13_REMAINING_WORK.md) -- a separate
         # source+store pair, not folded into self.sources, since PiHoleLogSource's
         # callback shape (ts, domain, client_ip, status, qtype) is genuinely
@@ -160,6 +167,11 @@ class IngestDaemon:
                 self.store.insert_evidence(ev)
             total_evidence += len(evidence_items)
 
+            baseline_evidence = self._score_baselines(device_ip, dns_features, evidence_items, now)
+            for ev in baseline_evidence:
+                self.store.insert_evidence(ev)
+            total_evidence += len(baseline_evidence)
+
             # A7: compute a real v13 decision from the device's ACCUMULATED graph
             # evidence (not just this cycle's fresh items) -- compute_decision()
             # queries a fresh window each call, matching v13's pure-per-cycle
@@ -185,7 +197,88 @@ class IngestDaemon:
                 LOGGER.info("Pruned %d evidence rows older than %.0f days.", deleted, self.retention_days)
             self._last_prune = now
 
+        # Health & degradation integration (closed-loop autotuning
+        # architecture plan): every new component reports a heartbeat through
+        # the existing watchdog subsystem, not a bespoke one -- lets a
+        # silently-stopped baseline update read as a stale heartbeat instead
+        # of a value nobody happened to check (the general form of the
+        # outbound_bytes_z gap this whole Sheet exists to close).
+        write_component_heartbeat(self.heartbeat_state_dir, "v13_baseline_engine",
+                                    extra={"devices_this_cycle": len(devices)})
+
         return total_evidence
+
+    def _score_baselines(self, device_id: str, dns_features: dict, evidence_items: list, now: float) -> list:
+        """Release 15 Sheet 00: per-device Bayesian (Gaussian/Beta/Poisson)
+        and Markov activity-state scoring, run every cycle alongside real
+        detection. Reuses dns_features (already computed this cycle by the
+        caller, via PiHoleFeatureStore.compute_features() -- extractors/
+        dns_features.py's real FeatureExtractor.compute(), not reimplemented)
+        and one extra ZeekFeatureExtractor.get_features() call for
+        zeek_outbound_bytes (cheap, in-memory rolling-window read, matching
+        this codebase's own established feature-extraction cost profile).
+
+        Any exception here is caught and logged, never allowed to take down
+        the ingest loop -- matches this daemon's own detector-resilience
+        convention (see this module's own docstring / run()'s try/except).
+
+        HONEST FOLLOW-UP, not hidden: the Beta-Binomial metrics (nxdomain/
+        blocked ratio) are scored with a fixed trials=1.0 per cycle rather
+        than the real per-cycle event count, since dns_features doesn't
+        expose that raw count alongside the ratio -- a real, flagged
+        simplification, not a silent approximation. `risk` (Sheet 0's fifth
+        Gaussian metric) is not scored here at all: it depends on this same
+        cycle's DECISION, which is computed AFTER this method runs
+        (compute_decision(), later in _run_cycle) -- scoring it would need a
+        second pass wired into that call site instead, left as follow-up
+        work rather than force a circular dependency here.
+        """
+        try:
+            hour = time.localtime(now).tm_hour
+            new_evidence = []
+
+            zeek_features = self.extractor.get_features(device_id)
+            gaussian_inputs = {
+                "query_rate": dns_features.get("query_rate"),
+                "entropy_avg": dns_features.get("entropy_avg"),
+                "unique_domains": dns_features.get("unique_domains"),
+                "outbound_bytes": zeek_features.get("zeek_outbound_bytes"),
+            }
+            for metric, value in gaussian_inputs.items():
+                if value is None:
+                    continue
+                ev = self.baseline_engine.score_metric(device_id, metric, "gaussian", (float(value),), hour, now=now)
+                if ev is not None:
+                    new_evidence.append(ev)
+
+            beta_inputs = {
+                "nxdomain_ratio": dns_features.get("nxdomain_ratio"),
+                "blocked_ratio": dns_features.get("blocked_ratio"),
+            }
+            for metric, ratio in beta_inputs.items():
+                if ratio is None:
+                    continue
+                ev = self.baseline_engine.score_metric(device_id, metric, "beta", (float(ratio), 1.0), hour, now=now)
+                if ev is not None:
+                    new_evidence.append(ev)
+
+            dga_count = sum(1 for e in evidence_items if e.evidence_type == "dns_dga_burst")
+            honeypot_count = sum(1 for e in evidence_items if e.evidence_type == "honeypot_access")
+            poisson_inputs = {"dga_hits": dga_count, "honeypot_touches": honeypot_count}
+            for metric, count in poisson_inputs.items():
+                ev = self.baseline_engine.score_metric(device_id, metric, "poisson", (float(count),), hour, now=now)
+                if ev is not None:
+                    new_evidence.append(ev)
+
+            activity_types = [e.evidence_type for e in evidence_items]
+            markov_ev = self.baseline_engine.score_activity_transition(device_id, activity_types, now=now)
+            if markov_ev is not None:
+                new_evidence.append(markov_ev)
+
+            return new_evidence
+        except Exception:
+            LOGGER.exception("Baseline scoring failed for %s (non-fatal, continuing)", device_id)
+            return []
 
     def run(self) -> None:
         LOGGER.info("IngestDaemon starting main loop (poll_interval=%.1fs).", self.poll_interval)
