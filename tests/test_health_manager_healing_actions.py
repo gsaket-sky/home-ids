@@ -1,0 +1,144 @@
+"""
+Tests for core/healing_actions.py. Uses a lightweight SimpleNamespace standing
+in for HealthManager (healing_actions.py only ever reads/writes a handful of
+its attributes, doesn't need a real instance) -- direct-call style, matching
+the rest of this session's tests. sys.exit is monkeypatched throughout so this
+never actually exits the test process.
+"""
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from core import healing_actions  # noqa: E402
+
+
+class FakeAlertManager:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, message, **kwargs):
+        self.sent.append(message)
+
+
+def _fake_hm(**overrides):
+    base = dict(
+        alert_manager=FakeAlertManager(),
+        config=SimpleNamespace(get=lambda k, d=None: d),
+        fastapi_proc=None,
+        fastapi_log_file=None,
+        scheduler_proc=None,
+        scheduler_log_file=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+# --- restart_own_process ----------------------------------------------------------
+
+def test_restart_own_process_alerts_before_exiting(monkeypatch):
+    exits = []
+    monkeypatch.setattr(healing_actions.sys, "exit", lambda code=0: exits.append(code))
+    hm = _fake_hm()
+    healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert exits == [1]
+    assert len(hm.alert_manager.sent) == 1
+    assert "pipeline_main_loop" in hm.alert_manager.sent[0]
+
+
+def test_restart_own_process_survives_no_alert_manager(monkeypatch):
+    """alert_manager=None must not raise -- a health manager built before the
+    pipeline finished constructing its own AlertManager shouldn't crash the
+    one recovery lever that matters most."""
+    monkeypatch.setattr(healing_actions.sys, "exit", lambda code=0: None)
+    hm = _fake_hm(alert_manager=None)
+    healing_actions.restart_own_process(hm, "resource_pressure")  # must not raise
+
+
+# --- restart_fastapi_subprocess ----------------------------------------------------
+
+def test_restart_fastapi_subprocess_terminates_old_and_launches_new(monkeypatch):
+    terminated = []
+    old_proc = SimpleNamespace(poll=lambda: None, terminate=lambda: terminated.append(True), wait=lambda timeout=None: None)
+    new_proc = SimpleNamespace(pid=999)
+    monkeypatch.setattr(healing_actions.subprocess_launchers, "start_fastapi_subprocess", lambda config: (new_proc, "new_log_handle"))
+
+    hm = _fake_hm(fastapi_proc=old_proc, fastapi_log_file=None)
+    success, detail = healing_actions.restart_fastapi_subprocess(hm, "api_subprocess")
+
+    assert terminated == [True]
+    assert success is True
+    assert hm.fastapi_proc is new_proc
+    assert hm.fastapi_log_file == "new_log_handle"
+    assert "999" in detail
+
+
+def test_restart_fastapi_subprocess_skips_terminate_if_already_exited(monkeypatch):
+    terminated = []
+    old_proc = SimpleNamespace(poll=lambda: 0, terminate=lambda: terminated.append(True))  # poll() != None -> already exited
+    new_proc = SimpleNamespace(pid=1000)
+    monkeypatch.setattr(healing_actions.subprocess_launchers, "start_fastapi_subprocess", lambda config: (new_proc, None))
+
+    hm = _fake_hm(fastapi_proc=old_proc)
+    healing_actions.restart_fastapi_subprocess(hm, "api_subprocess")
+    assert terminated == []
+
+
+def test_restart_fastapi_subprocess_reports_failure_when_relaunch_fails(monkeypatch):
+    monkeypatch.setattr(healing_actions.subprocess_launchers, "start_fastapi_subprocess", lambda config: (None, None))
+    hm = _fake_hm()
+    success, detail = healing_actions.restart_fastapi_subprocess(hm, "api_subprocess")
+    assert success is False
+    assert hm.fastapi_proc is None
+
+
+# --- restart_scheduler_subprocess --------------------------------------------------
+
+def test_restart_scheduler_subprocess_terminates_old_and_launches_new(monkeypatch):
+    terminated = []
+    old_proc = SimpleNamespace(poll=lambda: None, terminate=lambda: terminated.append(True), wait=lambda timeout=None: None)
+    new_proc = SimpleNamespace(pid=2000)
+    monkeypatch.setattr(healing_actions.subprocess_launchers, "start_scheduler_subprocess", lambda: (new_proc, "log2"))
+
+    hm = _fake_hm(scheduler_proc=old_proc)
+    success, detail = healing_actions.restart_scheduler_subprocess(hm, "scheduler_subprocess")
+
+    assert terminated == [True]
+    assert success is True
+    assert hm.scheduler_proc is new_proc
+    assert hm.scheduler_log_file == "log2"
+
+
+def test_restart_scheduler_subprocess_reports_failure_when_relaunch_fails(monkeypatch):
+    monkeypatch.setattr(healing_actions.subprocess_launchers, "start_scheduler_subprocess", lambda: (None, None))
+    hm = _fake_hm()
+    success, detail = healing_actions.restart_scheduler_subprocess(hm, "scheduler_subprocess")
+    assert success is False
+
+
+# --- ACTIONS catalog: structural enforcement of the alert-only design -------------
+
+def test_actions_catalog_has_no_entry_for_externally_managed_components():
+    """zeek/suricata/pihole/threat-intel feeds are deliberately alert-only --
+    this asserts the design decision structurally, not just by convention, so a
+    future PR can't silently reintroduce an auto-restart for something this
+    process has no systemctl permission to touch."""
+    for component in ("zeek", "suricata", "pihole"):
+        assert component not in healing_actions.ACTIONS
+
+
+def test_actions_catalog_covers_every_real_recovery_lever():
+    expected = {
+        "pipeline_main_loop", "identity_reconcile_worker", "ti_refresh",
+        "resource_pressure", "api_subprocess", "scheduler_subprocess",
+    }
+    assert set(healing_actions.ACTIONS.keys()) == expected
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

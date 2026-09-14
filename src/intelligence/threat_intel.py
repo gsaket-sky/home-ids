@@ -32,6 +32,7 @@ from metrics import pihole_gravity_queries_total, pihole_gravity_last_success_ti
 
 from utils import etld1
 from intelligence import feed_health
+from core.heartbeat import HEARTBEATS
 
 LOGGER = logging.getLogger("home_ids.ti")
 
@@ -68,6 +69,13 @@ class ThreatIntel:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.otx_api_key = otx_api_key
         self.refresh_interval = refresh_interval
+        # BUGFIX (health manager, resource-pressure degradation): otx_api_key is a
+        # _STATIC_KEYS entry (config.py) -- immune to the live config-override
+        # channel -- so an in-process flag directly on this already-constructed
+        # object is the only lever HealthManager has to pause TI enrichment under
+        # memory pressure. Checked in _refresh_loop() below; never touches the
+        # cache itself, so un-pausing just resumes normal refreshes.
+        self.paused = False
 
         # PHASE (live audit): Pi-hole gravity/blocklist lookup -- your OWN Pi-hole
         # already maintains a regularly-updated ad/tracker classification (its gravity
@@ -295,11 +303,17 @@ class ThreatIntel:
         time.sleep(10)
         LOGGER.debug("TI Refresh loop active.")
         while True:
-            try: 
-                self._refresh_all()
-                self._refresh_tranco_trust_list()
-            except Exception as e: 
-                LOGGER.error("TI Refresh cycle encountered an exception: %s", e)
+            # BUGFIX (health manager, resource-pressure degradation): skip the actual
+            # fetch when paused, but still beat the heartbeat below -- a paused-but-
+            # alive thread is healthy, not stuck, and HealthManager needs to be able
+            # to tell those two apart.
+            if not self.paused:
+                try:
+                    self._refresh_all()
+                    self._refresh_tranco_trust_list()
+                except Exception as e:
+                    LOGGER.error("TI Refresh cycle encountered an exception: %s", e)
+            HEARTBEATS.beat("ti_refresh", health_state="healthy")
             LOGGER.debug("TI Refresh loop sleeping for %d seconds.", self.refresh_interval)
             time.sleep(self.refresh_interval)
 
@@ -671,7 +685,10 @@ class AbuseIPDB:
         self._today_date = ""
         self._quota_exhausted_until = 0.0
         self._lock = threading.RLock()
-        
+        # BUGFIX (health manager, resource-pressure degradation): see ThreatIntel's
+        # own self.paused comment above -- abuseipdb_api_key is also _STATIC_KEYS.
+        self.paused = False
+
         LOGGER.debug("AbuseIPDB wrapper initialized.")
         self._load_cache()
         self._load_live_cache()
@@ -684,7 +701,7 @@ class AbuseIPDB:
             threading.Thread(target=self._live_worker_loop, daemon=True, name="abuseipdb-live").start()
 
     def enqueue_ip(self, ip: str, priority: int = 5) -> None:
-        if not self.api_key or not ip or ip == "unknown": return
+        if self.paused or not self.api_key or not ip or ip == "unknown": return
         try:
             if not ipaddress.ip_address(ip).is_global: return
         except ValueError:
@@ -805,10 +822,11 @@ class AbuseIPDB:
     def _refresh_loop(self) -> None:
         time.sleep(15)
         while True:
-            try: 
-                self._refresh()
-            except Exception as exc: 
-                LOGGER.error("AbuseIPDB refresh loop encountered an exception: %s", exc)
+            if not self.paused:
+                try:
+                    self._refresh()
+                except Exception as exc:
+                    LOGGER.error("AbuseIPDB refresh loop encountered an exception: %s", exc)
             time.sleep(self.refresh_interval)
             
     def _refresh(self) -> None:
@@ -899,7 +917,10 @@ class VirusTotalClient:
         self._last_req = 0.0
         self._today_count = 0
         self._today_date = ""
-        
+        # BUGFIX (health manager, resource-pressure degradation): see ThreatIntel's
+        # own self.paused comment above -- virustotal_api_key is also _STATIC_KEYS.
+        self.paused = False
+
         LOGGER.debug("VirusTotalClient wrapper initialized.")
         self._load_cache()
         if api_key: 
@@ -907,7 +928,7 @@ class VirusTotalClient:
             threading.Thread(target=self._worker_loop, daemon=True, name="vt-worker").start()
 
     def enqueue_domain(self, domain: str, priority: int = 5) -> None:
-        if not self.api_key or not domain or domain == "unknown": 
+        if self.paused or not self.api_key or not domain or domain == "unknown": 
             return
         k = f"domain:{domain}"
         with self._lock:
@@ -919,7 +940,7 @@ class VirusTotalClient:
                 LOGGER.debug("Enqueued domain for VT analysis: %s", domain)
 
     def enqueue_ip(self, ip: str, priority: int = 5) -> None:
-        if not self.api_key or not ip or ip == "unknown": return
+        if self.paused or not self.api_key or not ip or ip == "unknown": return
         try:
             import ipaddress
             if not ipaddress.ip_address(ip).is_global: return

@@ -27,6 +27,7 @@ from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
 from core.identity import DeviceIdentityManager
+from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
 from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
@@ -753,9 +754,11 @@ class EnginePipeline:
             first_pass = False
             try:
                 self._identity_reconcile_pass()
+                HEARTBEATS.beat("identity_reconcile_worker", health_state="healthy")
             except Exception as exc:
                 LOGGER.error("Identity reconcile worker pass failed (non-fatal, will retry next interval): %s",
                              exc, exc_info=True)
+                HEARTBEATS.beat("identity_reconcile_worker", health_state="degraded")
 
     def _identity_reconcile_pass(self) -> int:
         """One reconciliation pass -- factored out of _identity_reconcile_worker()'s
@@ -825,10 +828,20 @@ class EnginePipeline:
             except Exception as exc:
                 LOGGER.error("Unhandled error during pipeline step execution: %s", exc, exc_info=True)
             elapsed = time.time() - start_time
-            time.sleep(max(0.05, float(self.config.get("poll_interval", 2.0)) - elapsed))
+            # BUGFIX (health manager, CONSERVATION-tier degradation): under sustained
+            # resource pressure, HealthManager sets this attribute (never touches
+            # poll_interval itself, so the normal-path behavior above is unchanged) to
+            # slow the loop down and ease CPU/allocation pressure until pressure clears.
+            poll_interval = max(float(self.config.get("poll_interval", 2.0)), float(getattr(self, "_health_pressure_poll_floor", None) or 0.0))
+            time.sleep(max(0.05, poll_interval - elapsed))
 
     def _step(self, now: float, window_seconds: int, alert_threshold: float) -> None:
         LOGGER.debug("Starting pipeline processing step at %f", now)
+        # BUGFIX (health manager): lets HealthManager (a separate daemon thread in
+        # this same process, started from main.py) detect a hung/stuck main loop --
+        # a step that stops calling _step() entirely (deadlock, an infinite loop in
+        # a detector) would otherwise be invisible until something else noticed.
+        HEARTBEATS.beat("pipeline_main_loop", queue_depth=self.alert_manager.q.qsize() if self.alert_manager else None)
         ips_pihole_status.set(1.0 if self.config.get("ips_pihole_enabled", True) else 0.0)
         ips_router_status.set(1.0 if self.config.get("ips_router_enabled", False) else 0.0)
         ips_tarpit_status.set(1.0 if self.config.get("ips_tarpit_enabled", True) else 0.0)

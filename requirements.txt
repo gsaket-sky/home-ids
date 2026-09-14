@@ -29,6 +29,11 @@ urllib3>=1.26.0      # mitigation/alerts.py imports urllib3.util.retry.Retry dir
 pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py /
                       # scripts/retro_hunter.py read config.yaml
 
+# Added 2026-09-14 for core/health_manager.py's resource-pressure state machine
+# (RSS/system-memory/swap monitoring) -- zero prior usage of psutil anywhere in this
+# codebase before this. See Documentation/HEALTH_MANAGER_DEPENDENCY_MAP.md.
+psutil>=5.9.0
+
 # Added 2026-08-29: infer_device_type()'s mac_vendor parameter existed but no caller
 # ever populated it -- utils.get_mac_vendor() wires it up via manuf (bundles
 # Wireshark's maintained OUI database, pure offline lookup, update=False default so no

@@ -1,0 +1,270 @@
+"""
+Tests for core/health_manager.py's resource-pressure state machine (NORMAL ->
+RESOURCE_PRESSURE -> CONSERVATION -> CRITICAL) -- the direct fix for the
+2026-09-14 OOM incident this subsystem was built in response to.
+
+psutil itself is fully monkeypatched (core.health_manager.psutil replaced with
+a fake exposing Process()/virtual_memory()/swap_memory()) so these tests never
+depend on the real machine's actual memory state.
+"""
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+SRC_DIR = Path(__file__).resolve().parent.parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from core import health_manager as hm_module  # noqa: E402
+from core.health_manager import HealthManager  # noqa: E402
+
+
+# --- fake psutil -----------------------------------------------------------------
+
+class _MemInfo:
+    def __init__(self, rss_mb):
+        self.rss = rss_mb * 1024 * 1024
+
+
+class _FakeProcess:
+    def __init__(self, state):
+        self._state = state
+
+    def memory_info(self):
+        return _MemInfo(self._state["rss_mb"])
+
+
+class _VM:
+    def __init__(self, percent, available_mb):
+        self.percent = percent
+        self.available = available_mb * 1024 * 1024
+
+
+class _Swap:
+    def __init__(self, percent):
+        self.percent = percent
+
+
+class FakePsutil:
+    def __init__(self):
+        self.state = {"rss_mb": 100.0, "sysmem_pct": 10.0, "swap_pct": 0.0, "available_mb": 8000.0}
+
+    def Process(self):
+        return _FakeProcess(self.state)
+
+    def virtual_memory(self):
+        return _VM(self.state["sysmem_pct"], self.state["available_mb"])
+
+    def swap_memory(self):
+        return _Swap(self.state["swap_pct"])
+
+
+@pytest.fixture
+def fake_psutil(monkeypatch):
+    fp = FakePsutil()
+    monkeypatch.setattr(hm_module, "psutil", fp)
+    return fp
+
+
+# --- fake config with a real-ish override file, so _set/_clear_config_override -----
+# exercise the actual read-modify-write path against a real tmp_path file.
+
+class FakeConfig:
+    def __init__(self, tmp_path, **overrides):
+        self._data = {
+            "health_manager_rss_pressure_mb": 1024.0,
+            "health_manager_rss_conservation_mb": 1536.0,
+            "health_manager_rss_critical_mb": 1843.0,
+            "health_manager_swap_pressure_pct": 40.0,
+            "health_manager_swap_conservation_pct": 60.0,
+            "health_manager_swap_critical_pct": 80.0,
+            "health_manager_sysmem_pressure_pct": 75.0,
+            "health_manager_min_available_mb": 512.0,
+            "health_manager_critical_sustain_checks": 3,
+            "health_manager_auto_recovery_enabled": True,
+            "telegram_enabled": True,
+        }
+        self._data.update(overrides)
+        self._overrides_path = tmp_path / "config_overrides.json"
+        self.load_overrides_calls = 0
+        self.reverted = []
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+    def _load_overrides(self):
+        self.load_overrides_calls += 1
+        if self._overrides_path.exists():
+            data = json.loads(self._overrides_path.read_text(encoding="utf-8"))
+            for k, entry in data.items():
+                self._data[k] = entry["value"]
+
+    def revert_override(self, key, value):
+        self.reverted.append((key, value))
+        self._data[key] = value
+
+
+class FakeAlertManager:
+    def __init__(self):
+        self.sent = []
+
+    def send(self, message, **kwargs):
+        self.sent.append(message)
+
+
+class FakeClient:
+    def __init__(self):
+        self.paused = False
+
+
+class FakePipeline:
+    def __init__(self):
+        self.ti_engine = FakeClient()
+        self.abuseipdb = FakeClient()
+        self.virustotal = FakeClient()
+        self._health_pressure_poll_floor = None
+
+
+@pytest.fixture
+def hm(fake_psutil, tmp_path):
+    h = HealthManager(
+        config=FakeConfig(tmp_path),
+        alert_manager=FakeAlertManager(),
+        pipeline=FakePipeline(),
+        state_dir=str(tmp_path),
+    )
+    return h
+
+
+# --- classification ---------------------------------------------------------------
+
+def test_classify_normal_below_all_thresholds(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=500, sysmem_pct=50, swap_pct=10, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_classify_resource_pressure_on_rss_alone(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=1100, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.RESOURCE_PRESSURE
+
+
+def test_classify_conservation_on_swap_alone(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=65, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.CONSERVATION
+
+
+def test_classify_critical_on_low_available_alone(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=0, available_mb=100)
+    assert hm._classify_pressure() == hm_module.CRITICAL
+
+
+def test_classify_critical_beats_conservation_beats_pressure(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=10, swap_pct=0, available_mb=8000)  # rss triggers all 3 -- highest wins
+    assert hm._classify_pressure() == hm_module.CRITICAL
+
+
+# --- level-specific actions --------------------------------------------------------
+
+def test_resource_pressure_level_pauses_ti_clients(hm):
+    hm._apply_pressure_level(hm_module.RESOURCE_PRESSURE)
+    assert hm.pipeline.ti_engine.paused is True
+    assert hm.pipeline.abuseipdb.paused is True
+    assert hm.pipeline.virustotal.paused is True
+
+
+def test_normal_level_unpauses_ti_clients(hm):
+    hm._apply_pressure_level(hm_module.RESOURCE_PRESSURE)
+    hm._apply_pressure_level(hm_module.NORMAL)
+    assert hm.pipeline.ti_engine.paused is False
+    assert hm.pipeline.abuseipdb.paused is False
+    assert hm.pipeline.virustotal.paused is False
+
+
+def test_conservation_sets_config_overrides_via_live_channel(hm):
+    hm._apply_pressure_level(hm_module.CONSERVATION)
+    for key in hm_module._CONSERVATION_OVERRIDE_KEYS:
+        assert hm.config.get(key) is False
+    assert hm.config.load_overrides_calls == len(hm_module._CONSERVATION_OVERRIDE_KEYS)
+    # the override file itself was actually written, not just in-memory
+    on_disk = json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))
+    for key in hm_module._CONSERVATION_OVERRIDE_KEYS:
+        assert on_disk[key]["value"] is False
+        assert on_disk[key]["set_by"] == "health_manager"
+
+
+def test_conservation_sets_poll_floor(hm):
+    hm._apply_pressure_level(hm_module.CONSERVATION)
+    assert hm.pipeline._health_pressure_poll_floor == 10.0
+
+
+def test_deescalating_from_conservation_clears_overrides_and_poll_floor(hm):
+    hm._apply_pressure_level(hm_module.CONSERVATION)
+    hm._apply_pressure_level(hm_module.RESOURCE_PRESSURE)  # one tier down
+    assert hm.pipeline._health_pressure_poll_floor is None
+    assert len(hm.config.reverted) == len(hm_module._CONSERVATION_OVERRIDE_KEYS)
+    # TI still paused at RESOURCE_PRESSURE -- only the CONSERVATION-specific levers cleared
+    assert hm.pipeline.ti_engine.paused is True
+
+
+# --- sustained-CRITICAL self-restart -----------------------------------------------
+
+def test_single_critical_spike_does_not_restart(hm, fake_psutil, monkeypatch):
+    calls = []
+    monkeypatch.setitem(hm_module.ACTIONS, "resource_pressure", lambda h, c: (calls.append(c), (True, "x"))[1])
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=95, swap_pct=90, available_mb=50)
+    hm._evaluate_resource_pressure()
+    assert calls == []
+
+
+def test_sustained_critical_triggers_self_restart_after_configured_streak(hm, fake_psutil, monkeypatch):
+    calls = []
+    monkeypatch.setitem(hm_module.ACTIONS, "resource_pressure", lambda h, c: (calls.append(c), (True, "x"))[1])
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=95, swap_pct=90, available_mb=50)
+    hm._evaluate_resource_pressure()  # 1
+    hm._evaluate_resource_pressure()  # 2
+    assert calls == []
+    hm._evaluate_resource_pressure()  # 3 -- health_manager_critical_sustain_checks default
+    assert calls == ["resource_pressure"]
+
+
+def test_critical_streak_resets_if_pressure_drops(hm, fake_psutil, monkeypatch):
+    calls = []
+    monkeypatch.setitem(hm_module.ACTIONS, "resource_pressure", lambda h, c: (calls.append(c), (True, "x"))[1])
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=95, swap_pct=90, available_mb=50)
+    hm._evaluate_resource_pressure()  # 1
+    hm._evaluate_resource_pressure()  # 2
+    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=0, available_mb=8000)  # back to NORMAL
+    hm._evaluate_resource_pressure()
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=95, swap_pct=90, available_mb=50)
+    hm._evaluate_resource_pressure()  # 1 again, not 3 -- streak must have reset
+    hm._evaluate_resource_pressure()  # 2
+    assert calls == []
+
+
+def test_disabled_auto_recovery_never_self_restarts_even_when_sustained(hm, fake_psutil, monkeypatch, tmp_path):
+    hm.config._data["health_manager_auto_recovery_enabled"] = False
+    calls = []
+    monkeypatch.setitem(hm_module.ACTIONS, "resource_pressure", lambda h, c: (calls.append(c), (True, "x"))[1])
+    fake_psutil.state.update(rss_mb=2000, sysmem_pct=95, swap_pct=90, available_mb=50)
+    for _ in range(5):
+        hm._evaluate_resource_pressure()
+    assert calls == []
+
+
+# --- alerting cadence ---------------------------------------------------------------
+
+def test_entering_resource_pressure_alerts_exactly_once(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=1100, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    hm._evaluate_resource_pressure()
+    hm._evaluate_resource_pressure()
+    hm._evaluate_resource_pressure()
+    assert hm.alert_manager.sent.count(hm.alert_manager.sent[0] if hm.alert_manager.sent else None) <= 1
+    # exactly one pressure-transition alert total across 3 identical cycles
+    pressure_alerts = [m for m in hm.alert_manager.sent if "resource pressure" in m.lower()]
+    assert len(pressure_alerts) == 1
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-v"]))

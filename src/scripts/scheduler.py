@@ -10,6 +10,7 @@ import yaml
 
 # Ensures the script can resolve modules from the src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent))
+from core.heartbeat import write_component_heartbeat  # noqa: E402 -- needs the sys.path.append above first
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
@@ -78,6 +79,7 @@ def main():
     while True:
         now = datetime.now()
         now_str = now.strftime("%Y-%m-%d %H:%M")
+        jobs_dispatched_this_tick = 0
         
         config = load_config()  # already flat -- merged across every config.yaml category
 
@@ -89,6 +91,7 @@ def main():
                 script_path = scripts_dir / "train_fp_classifier.py"
                 subprocess.Popen([sys.executable, str(script_path)])
                 last_run["autotune"] = now_str
+                jobs_dispatched_this_tick += 1
 
         # 2. Check new granular scheduler
         scheduler_cfg = config.get("scheduler", {})
@@ -119,7 +122,23 @@ def main():
                             f"or create the missing file)."
                         )
                     last_run[script_name] = now_str
-                    
+                    jobs_dispatched_this_tick += 1
+
+        # BUGFIX (health manager): self-reports this process's own liveness once per
+        # minute-tick, since it's a separate OS process from the main pipeline that
+        # would otherwise have no way to know this daemon is still alive/dispatching --
+        # see core/heartbeat.py's module docstring for why this is a file, not shared
+        # memory. Written at the end of the tick (not the start) so it can include how
+        # many jobs this tick actually dispatched.
+        try:
+            state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
+            write_component_heartbeat(
+                state_dir, "scheduler_subprocess",
+                extra={"pid": os.getpid(), "events_processed": jobs_dispatched_this_tick},
+            )
+        except Exception:
+            pass
+
         # Sleep until the next minute begins
         time.sleep(60 - datetime.now().second)
 

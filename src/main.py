@@ -38,6 +38,8 @@ warnings.showwarning = _no_warning
 from config import CONFIG
 from core.state_guard import StateManager
 from core.pipeline import EnginePipeline
+from core import subprocess_launchers
+from core.health_manager import HealthManager
 from extractors.dns_features import PiHoleCollector
 from intelligence.threat_intel import ThreatIntel
 from intelligence.geoip import GeoIPEngine
@@ -134,31 +136,10 @@ def main():
             "🔌 Starting internal FastAPI Router Webhook daemon on %s:%d...",
             fastapi_bind_host, fastapi_port,
         )
-        try:
-            # ARCHITECTURAL FIX: Pipe Uvicorn stdout/stderr to a dedicated log file 
-            # instead of DEVNULL so GET /hosts and access pings can be tracked.
-            webhook_log_path = Path("state/fritz_webhook.log")
-            webhook_log_path.parent.mkdir(parents=True, exist_ok=True)
-            webhook_log_file = open(webhook_log_path, "a")  # noqa: WPS515
-
-            src_dir = str(Path(__file__).resolve().parent)  # AUDIT FIX #11: use --app-dir for CWD-independent import resolution
-            fastapi_proc = subprocess.Popen(
-                [
-                    sys.executable, "-m", "uvicorn",
-                    "middleware.main_api:app",
-                    "--host", fastapi_bind_host,
-                    "--port", str(fastapi_port),
-                    "--app-dir", src_dir,
-                ],
-                stdout=webhook_log_file,
-                stderr=subprocess.STDOUT
-            )
-            LOGGER.debug("FastAPI Router Webhook daemon started (PID: %s). Logs → %s", fastapi_proc.pid, webhook_log_path)
-        except Exception as e:
-            LOGGER.error("⚠️ Failed to start internal FastAPI daemon: %s", e)
-            if webhook_log_file and not webhook_log_file.closed:
-                webhook_log_file.close()
-                webhook_log_file = None
+        # BUGFIX (health manager): extracted into core/subprocess_launchers.py so this
+        # exact spawn logic can be reused by HealthManager's own restart_fastapi_subprocess
+        # recovery action, instead of two copies that can drift apart. Behavior unchanged.
+        fastapi_proc, webhook_log_file = subprocess_launchers.start_fastapi_subprocess(CONFIG)
     else:
         LOGGER.debug("Router webhook daemon disabled in configuration. Skipping FastAPI startup.")
 
@@ -236,70 +217,73 @@ def main():
     )
 
     LOGGER.debug("Booting Centralized Background Scheduler (subprocess)...")
-    scheduler_log_file = None
-    try:
-        # PHASE 9 FIX: this used to redirect to DEVNULL, silently discarding not just
-        # scheduler.py's own dispatch logs but — since scripts.scheduler launches
-        # ollama_soc.py/retro_hunter.py/top_domains_report.py/train_fp_classifier.py via a
-        # plain subprocess.Popen(...) with no stdout/stderr override of its own — EVERY
-        # log line those four scripts ever produce too, since a child with no explicit
-        # redirect inherits its parent's actual file descriptors, and scheduler.py's fd 1/2
-        # were already pointed at the null device. Concretely: retro_hunter.py's sole
-        # channel for reporting a genuine zero-day match is `LOGGER.critical(...)` — that
-        # was going straight into the void, unrecoverable, no journalctl line, no file, no
-        # notification. Same fix already applied to the FastAPI subprocess a few lines up
-        # (`webhook_log_file`) — this was the one process-spawn site that fix didn't reach.
-        scheduler_log_path = Path("state/scheduler.log")
-        scheduler_log_path.parent.mkdir(parents=True, exist_ok=True)
-        scheduler_log_file = open(scheduler_log_path, "a")  # noqa: WPS515
+    # BUGFIX (health manager): extracted into core/subprocess_launchers.py, same reasoning
+    # as the FastAPI daemon above -- shared with HealthManager's restart_scheduler_subprocess
+    # recovery action. PHASE 9 FIX's log-piping behavior (previously explained here inline)
+    # is preserved verbatim inside that shared helper.
+    scheduler_proc, scheduler_log_file = subprocess_launchers.start_scheduler_subprocess()
 
-        scheduler_path = Path(__file__).resolve().parent / "scripts" / "scheduler.py"
-        scheduler_proc = subprocess.Popen(
-            [sys.executable, str(scheduler_path)],
-            stdout=scheduler_log_file,
-            stderr=subprocess.STDOUT
-        )
-        LOGGER.debug(f"Scheduler daemon started (PID: {scheduler_proc.pid}). Logs → {scheduler_log_path}")
-    except Exception as e:
-        LOGGER.error("⚠️ Failed to start scheduler daemon: %s", e)
-        if scheduler_log_file and not scheduler_log_file.closed:
-            scheduler_log_file.close()
-            scheduler_log_file = None
+    LOGGER.debug("Starting Health Manager (watchdog + resource-pressure degradation)...")
+    health_manager = HealthManager(
+        config=CONFIG,
+        alert_manager=pipeline.alert_manager,
+        pipeline=pipeline,
+        state_dir=str(Path(state_path).parent),
+        fastapi_proc=fastapi_proc,
+        fastapi_log_file=webhook_log_file,
+        scheduler_proc=scheduler_proc,
+        scheduler_log_file=scheduler_log_file,
+        ips_mitigator=ips_mitigator,
+    )
+    health_manager.start()
 
     # =====================================================================
     # 5. SIGNAL HANDLING (Graceful Shutdown)
     # =====================================================================
     def shutdown_handler(signum, frame):
         LOGGER.info("🛑 Received termination signal (SIGINT/SIGTERM). Shutting down pipeline safely...")
-        if fastapi_proc and fastapi_proc.poll() is None:
+        health_manager.stop()
+        # BUGFIX (health manager): reads health_manager.fastapi_proc/scheduler_proc
+        # (not the original fastapi_proc/scheduler_proc locals closed over above) --
+        # if HealthManager ever restarted either subprocess via its own healing
+        # actions, those locals go stale (they're never reassigned), and shutting
+        # down against them would terminate an already-dead handle while orphaning
+        # the actually-running replacement. health_manager.* is the single source
+        # of truth for "the current subprocess handle" after construction.
+        current_fastapi_proc = health_manager.fastapi_proc
+        current_webhook_log_file = health_manager.fastapi_log_file
+        current_scheduler_proc = health_manager.scheduler_proc
+        current_scheduler_log_file = health_manager.scheduler_log_file
+
+        if current_fastapi_proc and current_fastapi_proc.poll() is None:
             LOGGER.info("🛑 Terminating internal FastAPI daemon...")
-            fastapi_proc.terminate()
+            current_fastapi_proc.terminate()
             try:
-                fastapi_proc.wait(timeout=3)
+                current_fastapi_proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 LOGGER.warning("⚠️ FastAPI daemon did not exit in 3s; killing process forcibly.")
-                fastapi_proc.kill()
+                current_fastapi_proc.kill()
                 try:
-                    fastapi_proc.wait(timeout=1)
+                    current_fastapi_proc.wait(timeout=1)
                 except Exception:
                     pass
             LOGGER.debug("FastAPI daemon terminated.")
-        if webhook_log_file and not webhook_log_file.closed:
+        if current_webhook_log_file and not current_webhook_log_file.closed:
             try:
-                webhook_log_file.close()
+                current_webhook_log_file.close()
             except Exception:
                 pass
                 
-        if scheduler_proc and scheduler_proc.poll() is None:
+        if current_scheduler_proc and current_scheduler_proc.poll() is None:
             LOGGER.info("🛑 Terminating scheduler daemon...")
-            scheduler_proc.terminate()
+            current_scheduler_proc.terminate()
             try:
-                scheduler_proc.wait(timeout=2)
+                current_scheduler_proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                scheduler_proc.kill()
-        if scheduler_log_file and not scheduler_log_file.closed:
+                current_scheduler_proc.kill()
+        if current_scheduler_log_file and not current_scheduler_log_file.closed:
             try:
-                scheduler_log_file.close()
+                current_scheduler_log_file.close()
             except Exception:
                 pass
         pipeline.stop()
