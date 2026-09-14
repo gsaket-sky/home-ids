@@ -187,6 +187,113 @@ CREATE INDEX idx_edges_src ON edges(src_kind, src_id);
 CREATE INDEX idx_edges_dst ON edges(dst_kind, dst_id);
 CREATE INDEX idx_edges_relation ON edges(relation);
 
+-- Closed-loop autotuning architecture (Release 15). One row per (device, metric,
+-- hour-of-day, regime) -- the Bayesian conjugate posterior + BOCPD run-length state
+-- that replaces v-current's plain EWMABaseline for this metric/hour. regime_id
+-- increments on a detected changepoint; prior-regime rows are retained (not
+-- overwritten) for reset/undo traceability, not deleted on promotion.
+CREATE TABLE IF NOT EXISTS device_baselines (
+    device_id            TEXT NOT NULL REFERENCES devices(device_id),
+    metric                TEXT NOT NULL,        -- e.g. 'query_rate', 'outbound_bytes', 'activity_state'
+    hour                  INTEGER NOT NULL,      -- 0-23, diurnal bucket
+    regime_id             INTEGER NOT NULL DEFAULT 0,
+    model_kind            TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson','markov')),
+    posterior_params_json TEXT NOT NULL DEFAULT '{}',
+    run_length_json        TEXT NOT NULL DEFAULT '{}',  -- BOCPD live hypothesis weights, pruned each cycle
+    n                     INTEGER NOT NULL DEFAULT 0,
+    updated_at             REAL NOT NULL,
+    PRIMARY KEY (device_id, metric, hour, regime_id)
+);
+CREATE INDEX IF NOT EXISTS idx_device_baselines_lookup ON device_baselines(device_id, metric);
+
+-- Population-level priors for cold start, keyed by device_type (not device_id).
+-- Only devices with a currently-clean backtest history may contribute (Sheet 00's
+-- self-review fix #1) -- contributed_by_json records which device_ids fed this
+-- prior, for the same reason: so a later-found-compromised contributor can be
+-- identified and the prior rebuilt without them.
+CREATE TABLE IF NOT EXISTS population_priors (
+    device_type           TEXT NOT NULL,
+    metric                TEXT NOT NULL,
+    hour                  INTEGER NOT NULL,
+    model_kind            TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson','markov')),
+    posterior_params_json TEXT NOT NULL DEFAULT '{}',
+    contributed_by_json    TEXT NOT NULL DEFAULT '[]',
+    updated_at             REAL NOT NULL,
+    PRIMARY KEY (device_type, metric, hour)
+);
+
+-- CL-AFPE's trust key (Sheet 03) -- the six-dimensional composite key, a dedicated
+-- table rather than the generic `edges` table, matching this file's own established
+-- "generic edges + dedicated concept table" split (same reasoning already applied to
+-- containment_actions above). Sparse: only observed tuples get a row.
+CREATE TABLE IF NOT EXISTS cl_afpe_trust (
+    device_id              TEXT NOT NULL REFERENCES devices(device_id),
+    behavior_fingerprint    TEXT NOT NULL,   -- Sheet 00's activity-state + surprise-magnitude bucket
+    destination_class       TEXT NOT NULL,   -- CDN/ad-tech/cloud-storage/unclassified-foreign/...
+    hypothesis_id           TEXT NOT NULL REFERENCES hypotheses(hypothesis_id),
+    evidence_family          TEXT NOT NULL,
+    regime_id                INTEGER NOT NULL DEFAULT 0,
+    trust_value              REAL NOT NULL DEFAULT 0.0,
+    n                        INTEGER NOT NULL DEFAULT 0,
+    last_updated              REAL NOT NULL,
+    snapshot_id               TEXT,           -- FK-by-convention to baseline_snapshots.snapshot_id
+    PRIMARY KEY (device_id, behavior_fingerprint, destination_class, hypothesis_id, evidence_family, regime_id)
+);
+CREATE INDEX IF NOT EXISTS idx_cl_afpe_trust_device ON cl_afpe_trust(device_id);
+
+-- Autotuner's own versioned parameter history (Sheet 03) -- every threshold change,
+-- bounded-step, canaried, backtest-gated. snapshot_id links back to the exact
+-- baseline_snapshots row that was live when this change was proposed.
+CREATE TABLE IF NOT EXISTS threshold_history (
+    change_id       TEXT PRIMARY KEY,
+    device_id       TEXT REFERENCES devices(device_id),  -- NULL for a fleet/cohort-level parameter
+    parameter        TEXT NOT NULL,
+    old_value        REAL,
+    new_value        REAL,
+    proposed_at      REAL NOT NULL,
+    canary_until     REAL,
+    promoted_at      REAL,
+    rolled_back_at   REAL,
+    reason           TEXT,
+    backtest_run_id  TEXT,                                 -- FK-by-convention to backtest_runs.run_id
+    snapshot_id      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_threshold_history_device ON threshold_history(device_id, proposed_at);
+
+-- Per-device/cohort versioned snapshots (Sheet 04) -- taken before every regime
+-- promotion, autotune batch, and CL-AFPE suppression decision, plus periodic/manual.
+-- Retention (self-review fix #3): full-resolution 30 days, thinned to weekly after,
+-- with pre_regime_change/manual snapshots exempt from thinning -- enforced by the
+-- pruning job, not this schema, same split as evidence's own retention policy.
+CREATE TABLE IF NOT EXISTS baseline_snapshots (
+    snapshot_id            TEXT PRIMARY KEY,
+    device_id               TEXT NOT NULL REFERENCES devices(device_id),
+    taken_at                 REAL NOT NULL,
+    reason                   TEXT NOT NULL CHECK (reason IN
+                                ('scheduled','pre_regime_change','pre_autotune_batch','pre_cl_afpe_suppression','manual')),
+    posterior_params_json    TEXT NOT NULL DEFAULT '{}',
+    threshold_params_json     TEXT NOT NULL DEFAULT '{}',
+    cl_afpe_trust_json        TEXT NOT NULL DEFAULT '{}',
+    label                     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_baseline_snapshots_device ON baseline_snapshots(device_id, taken_at);
+
+-- Nightly backtest harness output (Sheet 02) -- the audit trail and the autotuner's
+-- own gating input. golden_set/synthetic results are stored as JSON summaries
+-- (pass/fail counts + which devices/classes were actually covered, since coverage
+-- itself can be degraded under resource pressure -- Health & degradation section).
+CREATE TABLE IF NOT EXISTS backtest_runs (
+    run_id                  TEXT PRIMARY KEY,
+    started_at               REAL NOT NULL,
+    finished_at               REAL,
+    golden_set_result_json    TEXT NOT NULL DEFAULT '{}',
+    synthetic_result_json     TEXT NOT NULL DEFAULT '{}',
+    drift_result_json         TEXT NOT NULL DEFAULT '{}',
+    coverage_json             TEXT NOT NULL DEFAULT '{}',   -- degraded-coverage bookkeeping
+    overall_pass              INTEGER NOT NULL DEFAULT 0    -- 0/1, the autotuner's actual gate
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
+
 -- Seed row: the explicit "no real target" sentinel evidence rows use instead of NULL.
 INSERT INTO destinations (destination_id, kind, first_seen, last_seen, metadata_json)
 VALUES ('(none)', 'domain', 0, 0, '{"sentinel": true}');

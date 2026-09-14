@@ -179,6 +179,90 @@ class GraphStore:
             CREATE INDEX IF NOT EXISTS idx_evidence_type_ts ON evidence(evidence_type, timestamp);
 
             CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
+
+            -- Release 15, closed-loop autotuning architecture -- kept in exact sync
+            -- with schema.sql's own copies of these six statements; extend both
+            -- together, never just one.
+            CREATE TABLE IF NOT EXISTS device_baselines (
+                device_id            TEXT NOT NULL REFERENCES devices(device_id),
+                metric                TEXT NOT NULL,
+                hour                  INTEGER NOT NULL,
+                regime_id             INTEGER NOT NULL DEFAULT 0,
+                model_kind            TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson','markov')),
+                posterior_params_json TEXT NOT NULL DEFAULT '{}',
+                run_length_json        TEXT NOT NULL DEFAULT '{}',
+                n                     INTEGER NOT NULL DEFAULT 0,
+                updated_at             REAL NOT NULL,
+                PRIMARY KEY (device_id, metric, hour, regime_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_device_baselines_lookup ON device_baselines(device_id, metric);
+
+            CREATE TABLE IF NOT EXISTS population_priors (
+                device_type           TEXT NOT NULL,
+                metric                TEXT NOT NULL,
+                hour                  INTEGER NOT NULL,
+                model_kind            TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson','markov')),
+                posterior_params_json TEXT NOT NULL DEFAULT '{}',
+                contributed_by_json    TEXT NOT NULL DEFAULT '[]',
+                updated_at             REAL NOT NULL,
+                PRIMARY KEY (device_type, metric, hour)
+            );
+
+            CREATE TABLE IF NOT EXISTS cl_afpe_trust (
+                device_id              TEXT NOT NULL REFERENCES devices(device_id),
+                behavior_fingerprint    TEXT NOT NULL,
+                destination_class       TEXT NOT NULL,
+                hypothesis_id           TEXT NOT NULL REFERENCES hypotheses(hypothesis_id),
+                evidence_family          TEXT NOT NULL,
+                regime_id                INTEGER NOT NULL DEFAULT 0,
+                trust_value              REAL NOT NULL DEFAULT 0.0,
+                n                        INTEGER NOT NULL DEFAULT 0,
+                last_updated              REAL NOT NULL,
+                snapshot_id               TEXT,
+                PRIMARY KEY (device_id, behavior_fingerprint, destination_class, hypothesis_id, evidence_family, regime_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cl_afpe_trust_device ON cl_afpe_trust(device_id);
+
+            CREATE TABLE IF NOT EXISTS threshold_history (
+                change_id       TEXT PRIMARY KEY,
+                device_id       TEXT REFERENCES devices(device_id),
+                parameter        TEXT NOT NULL,
+                old_value        REAL,
+                new_value        REAL,
+                proposed_at      REAL NOT NULL,
+                canary_until     REAL,
+                promoted_at      REAL,
+                rolled_back_at   REAL,
+                reason           TEXT,
+                backtest_run_id  TEXT,
+                snapshot_id      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_threshold_history_device ON threshold_history(device_id, proposed_at);
+
+            CREATE TABLE IF NOT EXISTS baseline_snapshots (
+                snapshot_id            TEXT PRIMARY KEY,
+                device_id               TEXT NOT NULL REFERENCES devices(device_id),
+                taken_at                 REAL NOT NULL,
+                reason                   TEXT NOT NULL CHECK (reason IN
+                                            ('scheduled','pre_regime_change','pre_autotune_batch','pre_cl_afpe_suppression','manual')),
+                posterior_params_json    TEXT NOT NULL DEFAULT '{}',
+                threshold_params_json     TEXT NOT NULL DEFAULT '{}',
+                cl_afpe_trust_json        TEXT NOT NULL DEFAULT '{}',
+                label                     TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_baseline_snapshots_device ON baseline_snapshots(device_id, taken_at);
+
+            CREATE TABLE IF NOT EXISTS backtest_runs (
+                run_id                  TEXT PRIMARY KEY,
+                started_at               REAL NOT NULL,
+                finished_at               REAL,
+                golden_set_result_json    TEXT NOT NULL DEFAULT '{}',
+                synthetic_result_json     TEXT NOT NULL DEFAULT '{}',
+                drift_result_json         TEXT NOT NULL DEFAULT '{}',
+                coverage_json             TEXT NOT NULL DEFAULT '{}',
+                overall_pass              INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
             """
         )
         self._conn.commit()
