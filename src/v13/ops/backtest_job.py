@@ -20,10 +20,11 @@ of parsed-stdout detail instead of structured per-check results. A real
 refactor into an importable library remains legitimate future work, done
 carefully and separately, not bundled into this commit.
 
-Not yet wired into config.yaml's scheduled_jobs / scripts/scheduler.py --
-that wiring is real, separate follow-up work (this module is written to be
-callable either as a scheduled subprocess via its own __main__, or directly
-imported and called, matching every other v13/ops/*.py module's shape).
+Wired into config.yaml's scheduled_jobs.scheduler.backtest_job (Release 15
+follow-up), nightly at 3:30am, same "script" override pattern every other
+v13/ops/*.py scheduled job uses. This module is written to be callable
+either as a scheduled subprocess via its own __main__, or directly imported
+and called, matching every other v13/ops/*.py module's shape.
 """
 import argparse
 import json
@@ -35,6 +36,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from v13.autotune.engine import compute_drift_result
 from v13.graph.store import GraphStore
 from v13.synthetic.injector import sweep
 
@@ -116,11 +118,17 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     backtest_runs and returns the summary Sheet 03's autotuner (not yet
     built) gates on.
 
-    HONEST GAP: the drift_result_json column exists and is written as an
-    empty placeholder ({}) -- Sheet 00's posterior-trajectory drift check
-    ("flag a cycle where thresholds trend toward everything-benign without a
-    matching real explanation") is real, separate future work, not built in
-    this pass."""
+    Drift check (Sheet 00's posterior-trajectory drift check, this module's
+    own former honest gap -- drift_result_json used to be written as an
+    empty {} placeholder every run): v13.autotune.engine.compute_drift_result()
+    flags a tunable parameter whose promoted changes trend monotonically
+    toward "everything looks more benign" with no matching regime_change to
+    explain it. Deliberately NOT folded into `overall_pass` -- a real,
+    considered scope limit, not an oversight: drift is a slower-moving,
+    op-review-worthy signal (does this device's tuning trajectory make
+    sense in hindsight), not a fast pass/fail correctness gate the way the
+    golden-set/synthetic checks are -- surfaced in drift_result_json for an
+    operator (or a future, separate alerting hook) to act on."""
     now = now if now is not None else time.time()
     run_id = uuid.uuid4().hex
     started_at = now
@@ -133,6 +141,7 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
         ).fetchall()
         device_ids = [r["device_id"] for r in rows]
     synthetic = run_synthetic_sweep(store, device_ids, max_devices=max_devices, now=now)
+    drift = compute_drift_result(store, now=now)
 
     overall_pass = golden["passed"] and synthetic["passed"]
 
@@ -140,13 +149,13 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
         "INSERT INTO backtest_runs "
         "(run_id, started_at, finished_at, golden_set_result_json, synthetic_result_json, "
         "drift_result_json, coverage_json, overall_pass) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_id, started_at, time.time(), json.dumps(golden), json.dumps(synthetic), json.dumps({}),
+        (run_id, started_at, time.time(), json.dumps(golden), json.dumps(synthetic), json.dumps(drift),
          json.dumps({"devices_covered": len(synthetic["devices_covered"]), "devices_total": synthetic["devices_total"]}),
          1 if overall_pass else 0),
     )
     store._maybe_commit()
 
-    return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "overall_pass": overall_pass}
+    return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift, "overall_pass": overall_pass}
 
 
 def main() -> None:
@@ -164,6 +173,11 @@ def main() -> None:
         result["synthetic"]["avg_detection_rate"],
         len(result["synthetic"]["devices_covered"]), result["synthetic"]["devices_total"],
     )
+    if result["drift"]["drift_detected"]:
+        # Never gates overall_pass (see run_backtest()'s own docstring) --
+        # logged at WARNING so it's visible to an operator without being a
+        # scheduled-job failure.
+        LOGGER.warning("Posterior-trajectory drift detected: %s", result["drift"]["findings"])
     if not result["overall_pass"]:
         raise SystemExit(1)
 

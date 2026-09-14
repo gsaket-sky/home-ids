@@ -32,7 +32,7 @@ import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from v13.graph.store import GraphStore
 
@@ -51,6 +51,22 @@ TUNABLE_PARAMETERS: Dict[str, Dict[str, float]] = {
 # established honesty framing).
 _DEFAULT_CANARY_SECONDS = 6 * 3600.0  # shadow-apply for N cycles before promotion is eligible
 _COOLDOWN_SECONDS = 3600.0  # minimum gap between proposals for the SAME parameter+device
+
+# Sheet 02 follow-up (closes that module's own former honest gap: backtest_job.py's
+# run_backtest() used to write drift_result_json as an empty {} placeholder) -- which
+# direction of movement for each tunable parameter means "systematically LESS
+# sensitive / everything starts looking more benign." +1 = an INCREASING value is
+# the less-sensitive direction, -1 = DECREASING is. Kept next to TUNABLE_PARAMETERS
+# (not derived from it) since "which direction is less sensitive" is a semantic fact
+# about each parameter's real-world meaning, not something inferable from its bounds.
+_LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
+    "reputation_tier_suspicious_floor": 1,   # higher floor -> harder for a destination to reach tier 4
+    "reputation_tier_high_floor": 1,         # higher floor -> harder for a destination to reach tier 5
+    "bocpd_hazard_rate": -1,                 # lower hazard -> assumes regimes last longer, slower to flag a real change
+    "hard_stop_candidate_sensitivity": 1,    # higher bar -> requires more confidence to even be a hard-stop candidate
+}
+_MIN_PROMOTIONS_FOR_TREND = 3  # first-pass, not-yet-empirically-tuned (same honesty framing)
+_DEFAULT_DRIFT_LOOKBACK_SECONDS = 7 * 86400.0
 
 
 @dataclass
@@ -207,3 +223,93 @@ class AutotuneEngine:
             if self.rollback_change(row["change_id"], reason, now=now):
                 count += 1
         return count
+
+
+# ---------------------------------------------------------- Sheet 00/02 posterior-trajectory drift check
+
+def _is_monotonic_less_sensitive(values: List[float], direction: int) -> bool:
+    """True if `values` (chronological order) moved STRICTLY, monotonically
+    in the less-sensitive `direction` (+1 increasing, -1 decreasing) across
+    its whole span -- a single reversal anywhere breaks the trend (this is
+    meant to catch a sustained drift, not ordinary back-and-forth tuning
+    noise around a stable point)."""
+    if len(values) < 2:
+        return False
+    pairs = list(zip(values, values[1:]))
+    if direction > 0:
+        return all(b >= a for a, b in pairs) and values[-1] > values[0]
+    return all(b <= a for a, b in pairs) and values[-1] < values[0]
+
+
+def _has_regime_change_explanation(store: GraphStore, device_ids: List[str], since: float, until: float) -> bool:
+    """True if a real `regime_change` evidence item exists in [since, until]
+    for one of `device_ids` (or, when `device_ids` is empty -- a
+    device-independent/global tunable's own drift -- anywhere at all) --
+    the "matching real explanation" (e.g. a firmware/OS update) a drift
+    finding needs in order to NOT be flagged as unexplained."""
+    if not device_ids:
+        row = store._conn.execute(
+            "SELECT 1 FROM evidence WHERE evidence_type='regime_change' AND timestamp >= ? AND timestamp <= ? LIMIT 1",
+            (since, until),
+        ).fetchone()
+        return row is not None
+    placeholders = ",".join("?" * len(device_ids))
+    row = store._conn.execute(
+        f"SELECT 1 FROM evidence WHERE evidence_type='regime_change' AND device_id IN ({placeholders}) "
+        "AND timestamp >= ? AND timestamp <= ? LIMIT 1",
+        (*device_ids, since, until),
+    ).fetchone()
+    return row is not None
+
+
+def compute_drift_result(store: GraphStore, lookback_seconds: float = _DEFAULT_DRIFT_LOOKBACK_SECONDS,
+                           now: Optional[float] = None) -> Dict[str, Any]:
+    """Sheet 00's posterior-trajectory drift check ("flag a cycle where
+    thresholds trend toward everything-benign without a matching real
+    explanation") -- Sheet 02's own former honest gap: run_backtest() used
+    to persist drift_result_json as an empty {} placeholder every run.
+
+    For each TUNABLE_PARAMETERS entry, groups PROMOTED (never canary-only --
+    those aren't live yet) changes within `lookback_seconds` by device_id
+    (None = a device-independent/global change, its own group), and flags a
+    group whose values moved strictly, monotonically toward
+    _LESS_SENSITIVE_DIRECTION across at least _MIN_PROMOTIONS_FOR_TREND
+    promotions -- UNLESS a real regime_change evidence item for that same
+    device (or anywhere, for a global change) in the same window explains
+    it. A genuine firmware/OS-update-driven regime shift is a legitimate
+    reason for thresholds to relax repeatedly; an unexplained one is exactly
+    the "quietly getting less sensitive for no real reason" failure mode
+    this check exists to catch -- run_backtest()'s own `overall_pass` does
+    NOT gate on this (a real, deliberate scope limit: drift is a flag for
+    operator review, not yet wired as its own pass/fail bar -- see this
+    function's caller)."""
+    now = now if now is not None else time.time()
+    since = now - lookback_seconds
+    findings: List[Dict[str, Any]] = []
+
+    for parameter, direction in _LESS_SENSITIVE_DIRECTION.items():
+        rows = store._conn.execute(
+            "SELECT device_id, new_value, promoted_at FROM threshold_history WHERE parameter=? "
+            "AND promoted_at IS NOT NULL AND promoted_at >= ? AND rolled_back_at IS NULL "
+            "ORDER BY promoted_at ASC",
+            (parameter, since),
+        ).fetchall()
+
+        by_device: Dict[Optional[str], List[float]] = {}
+        for row in rows:
+            by_device.setdefault(row["device_id"], []).append(float(row["new_value"]))
+
+        for device_id, values in by_device.items():
+            if len(values) < _MIN_PROMOTIONS_FOR_TREND:
+                continue
+            if not _is_monotonic_less_sensitive(values, direction):
+                continue
+            scope_devices = [device_id] if device_id is not None else []
+            if _has_regime_change_explanation(store, scope_devices, since, now):
+                continue
+            findings.append({
+                "parameter": parameter, "device_id": device_id, "promotions": len(values),
+                "first_value": values[0], "last_value": values[-1],
+            })
+
+    return {"drift_detected": bool(findings), "findings": findings, "lookback_seconds": lookback_seconds}

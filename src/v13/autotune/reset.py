@@ -16,6 +16,67 @@ from v13.graph.store import GraphStore
 
 _VALID_REASONS = frozenset({"scheduled", "pre_regime_change", "pre_autotune_batch", "pre_cl_afpe_suppression", "manual"})
 
+# Same three cross-device-correlation evidence types compute_reset_blast_radius()
+# already scans for -- the only evidence_types whose OWN semantics point back at
+# a device other than the one they're attributed to (features_json names the
+# correlated devices; evidence.device_id is just "which device this row was
+# recorded against"). Kept as one module constant so the sole_cause check below
+# and the existing blast-radius scan can never drift apart on what counts.
+_CROSS_DEVICE_CORRELATION_TYPES = ("coordinated_targeting", "fingerprint_campaign", "dga_seed_campaign")
+
+
+def _full_evidence_ids_for_decision(store: GraphStore, decision_id: str) -> List[str]:
+    """The COMPLETE evidence_id set that supported `decision_id`, not the
+    capped-and-edge-represented one -- GraphStore.insert_decision() caps
+    'supports' edges at a hardware-profile-driven limit (a real production
+    decision was found with 56,073 such edges) and stashes the full,
+    uncapped list in raw_payload_json['_all_evidence_ids'] ONLY when the cap
+    was actually exceeded (insert_decision()'s own docstring). Reading edges
+    directly when that key is absent is still correct in that case -- the
+    edge set IS the full set whenever nothing was capped."""
+    row = store._conn.execute(
+        "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (decision_id,),
+    ).fetchone()
+    if row is not None:
+        payload = json.loads(row["raw_payload_json"] or "{}")
+        full_ids = payload.get("_all_evidence_ids")
+        if full_ids:
+            return list(full_ids)
+    edge_rows = store._conn.execute(
+        "SELECT src_id FROM edges WHERE dst_kind='decision' AND dst_id=? AND relation='supports' AND src_kind='evidence'",
+        (decision_id,),
+    ).fetchall()
+    return [r["src_id"] for r in edge_rows]
+
+
+def _decision_is_sole_cause(store: GraphStore, decision_id: str, device_id: str) -> bool:
+    """True only if `device_id` resetting its own state would leave THIS
+    decision with zero remaining supporting evidence -- i.e. every evidence
+    item in its full (uncapped) supporting set is a cross-device-correlation
+    item that actually names `device_id`. A single item that is either a
+    non-correlation type (that device's own independent signal, untouched by
+    resetting a DIFFERENT device) or a correlation item that doesn't even
+    mention `device_id` disqualifies it -- this decision would still have
+    real support left after the reset, so it's `contributing` at most, never
+    `sole_cause`. An empty evidence set is conservatively NOT sole_cause
+    (nothing to attribute)."""
+    evidence_ids = _full_evidence_ids_for_decision(store, decision_id)
+    if not evidence_ids:
+        return False
+    placeholders = ",".join("?" * len(evidence_ids))
+    rows = store._conn.execute(
+        f"SELECT evidence_type, features_json FROM evidence WHERE evidence_id IN ({placeholders})",
+        evidence_ids,
+    ).fetchall()
+    if not rows:
+        return False
+    for row in rows:
+        if row["evidence_type"] not in _CROSS_DEVICE_CORRELATION_TYPES:
+            return False
+        if device_id not in (row["features_json"] or ""):
+            return False
+    return True
+
 
 def take_snapshot(store: GraphStore, device_id: str, reason: str, label: Optional[str] = None,
                     now: Optional[float] = None) -> str:
@@ -85,19 +146,26 @@ def compute_reset_blast_radius(store: GraphStore, device_id: str, since_ts: floa
     hypotheses/independence.py's own cross_device_correlation family) since
     `since_ts`, the two real pathways one device's state can affect another.
 
-    HONEST SCOPE NOTE: this is a first-pass heuristic (this codebase's own
-    established honesty framing), not a full causal-graph traversal. It
-    finds OTHER devices' evidence whose features_json mentions this
+    Finds OTHER devices' evidence whose features_json mentions this
     device_id as a string -- real and useful (cross-device-correlation
     evidence types are exactly the ones the plan's own design already
-    scoped as the blast-radius mechanism), but does not attempt the deeper
-    "was this device's OWN threshold state a necessary cause of a specific
-    downstream containment action" causal question. Every finding here is
-    classified as `contributing` (flagged for explicit operator review),
-    never auto-classified as `sole_cause` -- a stronger, real sole-cause
-    classification (e.g. a downstream decision whose ENTIRE supporting-
-    evidence set traces only to this device) is real, separate follow-up
-    work, not claimed here.
+    scoped as the blast-radius mechanism).
+
+    sole_cause CLASSIFICATION (closes this method's former honest gap): a
+    downstream decision is classified `sole_cause` only when its COMPLETE
+    supporting-evidence set (the uncapped list, not just the capped
+    'supports' edges -- see _full_evidence_ids_for_decision()) consists
+    ENTIRELY of cross-device-correlation evidence that actually names this
+    device_id -- i.e. resetting this device's own state would leave that
+    decision with zero remaining support. A decision with even one item of
+    its own independent evidence (a non-correlation signal, or a
+    correlation item that doesn't mention this device_id) stays classified
+    `contributing` only -- still real and useful (flagged for operator
+    review), just not strong enough to auto-release. Still a bounded
+    heuristic, not a full causal-graph traversal: it answers "does every
+    piece of evidence trace to this device," not the deeper "would the
+    VERDICT itself have been different" counterfactual -- but it is a real,
+    checkable fact about the evidence graph, not a placeholder.
     """
     other_device_evidence = store._conn.execute(
         "SELECT evidence_id, device_id, evidence_type FROM evidence WHERE "
@@ -109,6 +177,8 @@ def compute_reset_blast_radius(store: GraphStore, device_id: str, since_ts: floa
     affected_device_ids = sorted({r["device_id"] for r in other_device_evidence})
     contributing_decisions: List[Dict[str, Any]] = []
     contributing_containment: List[Dict[str, Any]] = []
+    sole_cause_containment: List[Dict[str, Any]] = []
+    seen_decision_ids: set = set()
 
     for ev_row in other_device_evidence:
         edges = store._conn.execute(
@@ -129,13 +199,18 @@ def compute_reset_blast_radius(store: GraphStore, device_id: str, since_ts: floa
                 ).fetchall()
                 contributing_containment.extend(dict(r) for r in containment_rows)
 
+                if decision["decision_id"] not in seen_decision_ids:
+                    seen_decision_ids.add(decision["decision_id"])
+                    if _decision_is_sole_cause(store, decision["decision_id"], device_id):
+                        sole_cause_containment.extend(dict(r) for r in containment_rows)
+
     return {
         "device_id": device_id,
         "since_ts": since_ts,
         "affected_device_ids": affected_device_ids,
         "contributing_decisions": contributing_decisions,
         "contributing_containment_actions": contributing_containment,
-        "sole_cause_containment_actions": [],  # see docstring -- real, separate future work
+        "sole_cause_containment_actions": sole_cause_containment,
     }
 
 
@@ -144,12 +219,15 @@ def reset_device(store: GraphStore, device_id: str, target_snapshot_id: str,
     """Restores `device_id`'s own baseline/threshold/trust state to
     `target_snapshot_id`. This is an OPERATOR-INVOKED admin action (the
     plan's own explicit framing), never called autonomously by any of this
-    plan's closed loops. `undo_scope='sole_cause_only'` (default) currently
-    releases nothing beyond the device's own state (compute_reset_
-    blast_radius() doesn't yet classify anything as sole_cause -- see its
-    own docstring); `undo_scope='include_contributing'` additionally
-    releases every containment action compute_reset_blast_radius() flagged
-    as contributing, an explicit wider action the caller opts into."""
+    plan's closed loops. `undo_scope='sole_cause_only'` (default) additionally
+    releases every containment action compute_reset_blast_radius() classifies
+    as `sole_cause` for this device (this device's own reset state was the
+    decision's ENTIRE supporting-evidence set -- see that function's own
+    docstring for the exact classification); `undo_scope='include_contributing'`
+    additionally releases every `contributing`-classified action too (a
+    decision this device merely helped support, alongside independent
+    evidence of its own) -- an explicit wider action the caller opts into,
+    since those decisions may still hold even after this device's reset."""
     if undo_scope not in ("sole_cause_only", "include_contributing"):
         raise ValueError(f"undo_scope must be 'sole_cause_only' or 'include_contributing', got {undo_scope!r}")
     snapshot = get_snapshot(store, target_snapshot_id)
@@ -193,14 +271,22 @@ def reset_device(store: GraphStore, device_id: str, target_snapshot_id: str,
             )
 
     released_containment: List[str] = []
+    blast_radius = compute_reset_blast_radius(store, device_id, since_ts=snapshot["taken_at"])
+    actions_to_release = list(blast_radius["sole_cause_containment_actions"])
     if undo_scope == "include_contributing":
-        blast_radius = compute_reset_blast_radius(store, device_id, since_ts=snapshot["taken_at"])
-        for action in blast_radius["contributing_containment_actions"]:
-            store._conn.execute(
-                "UPDATE containment_actions SET status='released', released_at=? WHERE action_id=? AND status='active'",
-                (now, action["action_id"]),
-            )
-            released_containment.append(action["action_id"])
+        # sole_cause is always a subset of contributing (every sole_cause
+        # finding above also appended to contributing_containment) -- union
+        # via action_id so a sole_cause action isn't double-processed.
+        seen_action_ids = {a["action_id"] for a in actions_to_release}
+        actions_to_release.extend(
+            a for a in blast_radius["contributing_containment_actions"] if a["action_id"] not in seen_action_ids
+        )
+    for action in actions_to_release:
+        store._conn.execute(
+            "UPDATE containment_actions SET status='released', released_at=? WHERE action_id=? AND status='active'",
+            (now, action["action_id"]),
+        )
+        released_containment.append(action["action_id"])
 
     store._maybe_commit()
     return {

@@ -937,6 +937,23 @@ scheduled_jobs:
       cron: "*/15 * * * *"
       script: "../v13/ops/cl_afpe_flip_monitor.py"
 
+    # Release 15, closed-loop autotuning architecture, Sheet 02 -- nightly
+    # backtest (tests/test_real_world_alert_regression.py's real-incident
+    # golden set, zero tolerance, + Sheet 01's synthetic attack-injection
+    # sweep) whose pass/fail is Sheet 03a's autotuner's own gate: propose_
+    # change() refuses to even create a threshold_history proposal without a
+    # passing backtest_run_id (v13/autotune/engine.py). 3:30am -- clear of
+    # autotune_schedule_cron (3am) and live_prune (3:15am), the two nearest
+    # neighbors in this file. Lives in src/v13/ops/, not scripts/, hence the
+    # "script" override below (same pattern as every other v13/ops/ job here).
+    # Previously NOT wired here at all (backtest_job.py's own module
+    # docstring flagged this as real, separate follow-up work) -- this entry
+    # closes that gap.
+    backtest_job:
+      enabled: true
+      cron: "30 3 * * *"
+      script: "../v13/ops/backtest_job.py"
+
 
 # =============================================================================
 # engine — v13 fast-cutover rollback switch (Documentation/

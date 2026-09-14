@@ -31,7 +31,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Set, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 import yaml
 
@@ -116,6 +116,16 @@ class IngestDaemon:
         # once (an acceptable one-time redundant row, not an unbounded-growth
         # risk, since restarts aren't frequent).
         self._last_decision_key: Dict[str, Tuple[str, str]] = {}
+        # Release 15 follow-up (Sheet 00's own honest gap, closed here): `risk`
+        # (the fifth Gaussian baseline metric) needs THIS cycle's decision, which
+        # is only computed AFTER _score_baselines() runs -- see _score_baselines()'s
+        # docstring for why scoring it live would force a circular dependency.
+        # One-cycle-lagged instead: each cycle's freshly-computed attack score
+        # (same risk_score definition insert_decision() already persists) is
+        # cached here and fed into the NEXT cycle's risk baseline scoring --
+        # a ~poll_interval-seconds lag (2s by default), an honest, documented
+        # trade-off rather than a silent approximation.
+        self._last_risk_score: Dict[str, float] = {}
 
         self._running = True
         self._last_prune = time.time()
@@ -167,7 +177,10 @@ class IngestDaemon:
                 self.store.insert_evidence(ev)
             total_evidence += len(evidence_items)
 
-            baseline_evidence = self._score_baselines(device_ip, dns_features, evidence_items, now)
+            baseline_evidence = self._score_baselines(
+                device_ip, dns_features, evidence_items, now,
+                risk_input=self._last_risk_score.get(device_ip),
+            )
             for ev in baseline_evidence:
                 self.store.insert_evidence(ev)
             total_evidence += len(baseline_evidence)
@@ -184,6 +197,12 @@ class IngestDaemon:
                                         only_persist_if_changed_from=last_key)
             if result is not None:
                 decision, decision_id = result
+                # Feeds the NEXT cycle's `risk` baseline metric (see
+                # _score_baselines()'s risk_input param) -- computed fresh every
+                # cycle regardless of persistence, matching insert_decision()'s
+                # own risk_score definition (hypotheses.attack.score).
+                self._last_risk_score[device_ip] = float(
+                    decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0)
                 if decision_id is not None:
                     self._last_decision_key[device_ip] = (decision["state"], decision["decision_path"])
                     if decision["state"] != "BENIGN":
@@ -208,7 +227,8 @@ class IngestDaemon:
 
         return total_evidence
 
-    def _score_baselines(self, device_id: str, dns_features: dict, evidence_items: list, now: float) -> list:
+    def _score_baselines(self, device_id: str, dns_features: dict, evidence_items: list, now: float,
+                           risk_input: Optional[float] = None) -> list:
         """Release 15 Sheet 00: per-device Bayesian (Gaussian/Beta/Poisson)
         and Markov activity-state scoring, run every cycle alongside real
         detection. Reuses dns_features (already computed this cycle by the
@@ -222,16 +242,22 @@ class IngestDaemon:
         the ingest loop -- matches this daemon's own detector-resilience
         convention (see this module's own docstring / run()'s try/except).
 
-        HONEST FOLLOW-UP, not hidden: the Beta-Binomial metrics (nxdomain/
-        blocked ratio) are scored with a fixed trials=1.0 per cycle rather
-        than the real per-cycle event count, since dns_features doesn't
-        expose that raw count alongside the ratio -- a real, flagged
-        simplification, not a silent approximation. `risk` (Sheet 0's fifth
-        Gaussian metric) is not scored here at all: it depends on this same
-        cycle's DECISION, which is computed AFTER this method runs
-        (compute_decision(), later in _run_cycle) -- scoring it would need a
-        second pass wired into that call site instead, left as follow-up
-        work rather than force a circular dependency here.
+        Beta-Binomial metrics (nxdomain/blocked ratio) are scored with the
+        REAL per-cycle event count as `trials` (dns_features["total"] --
+        extractors/dns_features.py's own compute() already exposes this,
+        found on re-check; the earlier claim that it didn't was wrong) rather
+        than a fixed trials=1.0 -- skipped outright when total<=0 (an empty
+        window carries no real Binomial observation to update on).
+
+        `risk` (Sheet 0's fifth Gaussian metric) is scored via `risk_input`,
+        the caller's own one-cycle-LAGGED attack score (this same device's
+        PREVIOUS cycle's decision, cached in IngestDaemon._last_risk_score) --
+        it depends on this same cycle's decision, which is only computed
+        AFTER this method returns (compute_decision(), later in
+        _run_cycle()), so scoring it live would force a circular dependency.
+        A one-poll-interval lag (2s by default) is an honest, documented
+        trade-off, not a silent approximation -- skipped (like every other
+        Gaussian input) on a device's first cycle, when risk_input is None.
         """
         try:
             hour = time.localtime(now).tm_hour
@@ -243,6 +269,7 @@ class IngestDaemon:
                 "entropy_avg": dns_features.get("entropy_avg"),
                 "unique_domains": dns_features.get("unique_domains"),
                 "outbound_bytes": zeek_features.get("zeek_outbound_bytes"),
+                "risk": risk_input,
             }
             for metric, value in gaussian_inputs.items():
                 if value is None:
@@ -255,12 +282,16 @@ class IngestDaemon:
                 "nxdomain_ratio": dns_features.get("nxdomain_ratio"),
                 "blocked_ratio": dns_features.get("blocked_ratio"),
             }
-            for metric, ratio in beta_inputs.items():
-                if ratio is None:
-                    continue
-                ev = self.baseline_engine.score_metric(device_id, metric, "beta", (float(ratio), 1.0), hour, now=now)
-                if ev is not None:
-                    new_evidence.append(ev)
+            trials = float(dns_features.get("total", 0.0) or 0.0)
+            if trials > 0:
+                for metric, ratio in beta_inputs.items():
+                    if ratio is None:
+                        continue
+                    successes = float(ratio) * trials
+                    ev = self.baseline_engine.score_metric(
+                        device_id, metric, "beta", (successes, trials), hour, now=now)
+                    if ev is not None:
+                        new_evidence.append(ev)
 
             dga_count = sum(1 for e in evidence_items if e.evidence_type == "dns_dga_burst")
             honeypot_count = sum(1 for e in evidence_items if e.evidence_type == "honeypot_access")

@@ -160,6 +160,98 @@ check("compute_reset_blast_radius: finds the real downstream decision on that de
 check("compute_reset_blast_radius: finds the real active containment action "
       "tied to that decision",
       any(a["action_id"] == "act1" for a in blast["contributing_containment_actions"]))
+check("compute_reset_blast_radius: a decision whose ENTIRE evidence set is a "
+      "single correlation item naming the reset device classifies as sole_cause "
+      "(closes this function's former honest gap -- used to always be [])",
+      any(a["action_id"] == "act1" for a in blast["sole_cause_containment_actions"]),
+      f"got {blast['sole_cause_containment_actions']}")
+
+# =============================================================================
+# sole_cause is a REAL discriminator, not "everything contributing is sole_cause"
+# -- a decision that also rests on independent, non-correlation evidence of its
+# own must NOT be classified sole_cause, since resetting the OTHER device alone
+# wouldn't remove that independent support.
+# =============================================================================
+device_partial = "dev_reset_target_partial"
+store.upsert_device(device_partial, device_type="laptop", timestamp=NOW)
+snap_partial_id = reset_mod.take_snapshot(store, device_partial, "manual", now=NOW + 490)
+victim2 = "dev_victim2"
+store.upsert_device(victim2, device_type="laptop", timestamp=NOW)
+coord_ev2 = Evidence(
+    device_id=victim2, destination_id="198.51.100.10", evidence_type="coordinated_targeting",
+    independence_family="cross_device_correlation", timestamp=NOW + 500, source="test", confidence=0.8, value=1.0,
+    features={"corroborating_device": device_partial},
+)
+independent_ev = Evidence(
+    device_id=victim2, destination_id="198.51.100.11", evidence_type="dns_behavior",
+    independence_family="dns_behavior", timestamp=NOW + 500, source="test", confidence=0.8, value=1.0,
+    features={},
+)
+store.insert_evidence(coord_ev2)
+store.insert_evidence(independent_ev)
+decision2_id = store.insert_decision(
+    device_id=victim2, timestamp=NOW + 501, state="HIGH", decision_path="hypothesis_high",
+    confidence=0.8, risk_score=8.0, evidence_ids=[coord_ev2.evidence_id, independent_ev.evidence_id],
+)
+store._conn.execute(
+    "INSERT INTO containment_actions (action_id, device_id, decision_id, action_type, target, status, timestamp) "
+    "VALUES ('act2', ?, ?, 'dns_block', '198.51.100.10', 'active', ?)",
+    (victim2, decision2_id, NOW + 502),
+)
+store._conn.commit()
+
+blast_partial = reset_mod.compute_reset_blast_radius(store, device_partial, since_ts=NOW)
+check("compute_reset_blast_radius: still classifies the decision as contributing",
+      any(a["action_id"] == "act2" for a in blast_partial["contributing_containment_actions"]))
+check("compute_reset_blast_radius: does NOT classify it as sole_cause -- an "
+      "independent dns_behavior item also supports this decision, unaffected "
+      "by resetting a DIFFERENT device",
+      not any(a["action_id"] == "act2" for a in blast_partial["sole_cause_containment_actions"]),
+      f"got {blast_partial['sole_cause_containment_actions']}")
+
+result_partial = reset_mod.reset_device(store, device_partial, snap_partial_id, now=NOW + 600)
+check("reset_device: DEFAULT undo_scope ('sole_cause_only') does NOT release a "
+      "merely-contributing action -- only include_contributing opts into that",
+      "act2" not in result_partial["released_containment_action_ids"])
+act2_row = store._conn.execute("SELECT status FROM containment_actions WHERE action_id='act2'").fetchone()
+check("reset_device: the merely-contributing containment action is still active",
+      act2_row["status"] == "active")
+
+# =============================================================================
+# reset_device DEFAULT scope ('sole_cause_only') actually auto-releases a real
+# sole_cause finding -- the act1 scenario above only exercised include_contributing.
+# =============================================================================
+device_sole = "dev_reset_target_sole"
+store.upsert_device(device_sole, device_type="laptop", timestamp=NOW)
+snap_sole_id = reset_mod.take_snapshot(store, device_sole, "manual", now=NOW + 490)
+victim3 = "dev_victim3"
+store.upsert_device(victim3, device_type="laptop", timestamp=NOW)
+coord_ev3 = Evidence(
+    device_id=victim3, destination_id="198.51.100.12", evidence_type="coordinated_targeting",
+    independence_family="cross_device_correlation", timestamp=NOW + 500, source="test", confidence=0.8, value=1.0,
+    features={"corroborating_device": device_sole},
+)
+store.insert_evidence(coord_ev3)
+decision3_id = store.insert_decision(
+    device_id=victim3, timestamp=NOW + 501, state="HIGH", decision_path="hard_stop",
+    confidence=0.8, risk_score=8.0, evidence_ids=[coord_ev3.evidence_id],
+)
+store._conn.execute(
+    "INSERT INTO containment_actions (action_id, device_id, decision_id, action_type, target, status, timestamp) "
+    "VALUES ('act3', ?, ?, 'dns_block', '198.51.100.12', 'active', ?)",
+    (victim3, decision3_id, NOW + 502),
+)
+store._conn.commit()
+
+result_sole = reset_mod.reset_device(store, device_sole, snap_sole_id, now=NOW + 600)
+check("reset_device: DEFAULT undo_scope ('sole_cause_only') auto-releases a "
+      "real sole_cause finding, no include_contributing opt-in needed",
+      "act3" in result_sole["released_containment_action_ids"],
+      f"got {result_sole['released_containment_action_ids']}")
+act3_row = store._conn.execute("SELECT status FROM containment_actions WHERE action_id='act3'").fetchone()
+check("reset_device: the sole_cause containment action is actually released "
+      "in the graph, not just reported",
+      act3_row["status"] == "released")
 
 # =============================================================================
 # reset_device with include_contributing -- actually releases containment

@@ -28,7 +28,8 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from v13.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS  # noqa: E402
+from v13.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, compute_drift_result  # noqa: E402
+from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
 
 NOW = 1_800_000_000.0
@@ -159,6 +160,68 @@ rolled_back_count = engine.rollback_all_unconfirmed_for_backtest("bt_regression"
 check("rollback_all_unconfirmed_for_backtest: rolls back every still-in-canary "
       "change tied to a regressing backtest run, the same cycle it's detected",
       rolled_back_count == 1, f"got {rolled_back_count}")
+
+
+# =============================================================================
+# compute_drift_result -- Sheet 00's posterior-trajectory drift check (Sheet
+# 02's own former honest gap: drift_result_json used to always be {})
+# =============================================================================
+def _promote_directly(store, device_id, parameter, new_value, promoted_at):
+    """Bypasses propose/canary/promote (already covered above) -- inserts a
+    PROMOTED threshold_history row directly, the only state compute_drift_
+    result() reads."""
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'test')",
+        (f"drift_{device_id}_{promoted_at}", device_id, parameter, new_value - 0.5, new_value,
+         promoted_at, promoted_at, promoted_at),
+    )
+    store._maybe_commit()
+
+
+DRIFT_NOW = NOW + 100000
+device_drift_flagged = "dev_drift_unexplained"
+store.upsert_device(device_drift_flagged, device_type="laptop", timestamp=DRIFT_NOW)
+for i, val in enumerate((2.0, 2.5, 3.0)):
+    _promote_directly(store, device_drift_flagged, "reputation_tier_suspicious_floor", val, DRIFT_NOW + i * 3600)
+
+device_drift_explained = "dev_drift_explained"
+store.upsert_device(device_drift_explained, device_type="laptop", timestamp=DRIFT_NOW)
+for i, val in enumerate((2.0, 2.5, 3.0)):
+    _promote_directly(store, device_drift_explained, "reputation_tier_suspicious_floor", val, DRIFT_NOW + i * 3600)
+store.insert_evidence(Evidence(
+    device_id=device_drift_explained, destination_id=NO_DESTINATION, evidence_type="regime_change",
+    independence_family="regime_change", timestamp=DRIFT_NOW + 3600, source="test", confidence=0.8, value=1.0,
+    features={},
+))
+
+device_drift_noisy = "dev_drift_noisy"
+store.upsert_device(device_drift_noisy, device_type="laptop", timestamp=DRIFT_NOW)
+for i, val in enumerate((2.0, 3.0, 2.2)):  # up then down -- not a sustained trend
+    _promote_directly(store, device_drift_noisy, "reputation_tier_suspicious_floor", val, DRIFT_NOW + i * 3600)
+
+device_drift_sparse = "dev_drift_sparse"
+store.upsert_device(device_drift_sparse, device_type="laptop", timestamp=DRIFT_NOW)
+for i, val in enumerate((2.0, 3.0)):  # only 2 promotions -- below _MIN_PROMOTIONS_FOR_TREND
+    _promote_directly(store, device_drift_sparse, "reputation_tier_suspicious_floor", val, DRIFT_NOW + i * 3600)
+
+drift = compute_drift_result(store, now=DRIFT_NOW + 7200)
+flagged_devices = {f["device_id"] for f in drift["findings"] if f["parameter"] == "reputation_tier_suspicious_floor"}
+
+check("compute_drift_result: flags a monotonic, unexplained trend toward "
+      "less sensitive (rising suspicious_floor, no matching regime_change)",
+      device_drift_flagged in flagged_devices, f"got {flagged_devices}")
+check("compute_drift_result: a regime_change evidence item in the same window "
+      "explains an otherwise-identical trend -- not flagged",
+      device_drift_explained not in flagged_devices, f"got {flagged_devices}")
+check("compute_drift_result: a non-monotonic (up-then-down) sequence is not a "
+      "sustained trend -- not flagged even though unexplained",
+      device_drift_noisy not in flagged_devices, f"got {flagged_devices}")
+check("compute_drift_result: fewer than _MIN_PROMOTIONS_FOR_TREND promotions is "
+      "not enough evidence of a trend -- not flagged",
+      device_drift_sparse not in flagged_devices, f"got {flagged_devices}")
+check("compute_drift_result: drift_detected is True when any finding exists",
+      drift["drift_detected"] is True)
 
 
 print()

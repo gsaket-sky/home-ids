@@ -32,6 +32,7 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
+from v13.autotune.engine import AutotuneEngine  # noqa: E402
 from v13.baseline.engine import BaselineEngine, derive_activity_state  # noqa: E402
 from v13.evidence.model import NO_DESTINATION  # noqa: E402
 from v13.graph.store import GraphStore  # noqa: E402
@@ -205,6 +206,109 @@ check("score_metric: a brand-new device of a known type, scored against a value 
       "flying blind the way a flat default prior would",
       seed_result is None or seed_result.value < 3.0,
       f"got {seed_result.value if seed_result else 'None (no evidence -- also fine, means low surprise)'}")
+
+
+# =============================================================================
+# score_metric -- beta/poisson model kinds (REGRESSION: these two model kinds
+# had ZERO coverage through score_metric() before this -- only "gaussian" was
+# ever exercised above. That gap is exactly how a real bug shipped unnoticed:
+# score_metric(..., "beta", (ratio, trials), ...) crashed with a TypeError on
+# every single call once trials != 1.0 (and, before this fix, ALWAYS crashed
+# at the fit step regardless of trials, via a 1-arg fit lambda invoked with
+# 2 args) -- silently swallowed by daemon.py's per-device try/except, which
+# discarded that whole cycle's gaussian/poisson/markov evidence too, not just
+# beta's. Covers both model kinds end-to-end here so a future regression in
+# either fails loudly in this suite instead of silently in production.
+# =============================================================================
+device_beta = "dev_beta_scoring"
+store.upsert_device(device_beta, device_type="laptop", timestamp=NOW)
+beta_results = []
+for i in range(40):
+    trials = 20.0
+    true_ratio = 0.10
+    successes = sum(1 for _ in range(int(trials)) if random.random() < true_ratio)
+    beta_results.append(
+        engine.score_metric(device_beta, "blocked_ratio", "beta", (float(successes), trials), hour=9, now=NOW + i)
+    )
+check("score_metric('beta', ...): real per-cycle trial counts (>1.0) do not raise "
+      "-- the exact shape (successes, trials) daemon.py now passes once real "
+      "event counts are wired in, not the old hardcoded (ratio, 1.0)",
+      all(r is None or hasattr(r, "evidence_type") for r in beta_results))
+beta_row = store._conn.execute(
+    "SELECT n FROM device_baselines WHERE device_id=? AND metric='blocked_ratio'", (device_beta,),
+).fetchone()
+check("score_metric('beta', ...): posterior state actually persisted (n>0), "
+      "confirming update() ran on real successes/trials, not just the fit step",
+      beta_row is not None and beta_row["n"] > 0, f"row={dict(beta_row) if beta_row else None}")
+
+# A sustained shift in the underlying ratio should still confirm as a regime
+# change for beta metrics, same as the gaussian case above -- proves the
+# changepoint path's own surprise-conversion fix (_surprise_args_for) works,
+# not just the fit-step fix.
+beta_shift_results = []
+for i in range(10):
+    trials = 20.0
+    successes = sum(1 for _ in range(int(trials)) if random.random() < 0.85)
+    beta_shift_results.append(
+        engine.score_metric(device_beta, "blocked_ratio", "beta", (float(successes), trials), hour=9, now=NOW + 100 + i)
+    )
+check("score_metric('beta', ...): a sustained shift in the ratio still confirms "
+      "as a regime_change (changepoint confirmation's own surprise conversion "
+      "for beta works, not just the fit step)",
+      any(r is not None and r.evidence_type == "regime_change" for r in beta_shift_results),
+      f"got {[r.evidence_type if r else None for r in beta_shift_results]}")
+
+device_poisson = "dev_poisson_scoring"
+store.upsert_device(device_poisson, device_type="laptop", timestamp=NOW)
+poisson_results = [
+    engine.score_metric(device_poisson, "dga_hits", "poisson", (float(random.choice([0, 0, 0, 1])),), hour=9, now=NOW + i)
+    for i in range(30)
+]
+check("score_metric('poisson', ...): runs end-to-end with no crash (single-scalar "
+      "observation_args -- unaffected by the beta fit/surprise fix, covered here "
+      "for completeness since it shared the same previously-untested code path)",
+      all(r is None or hasattr(r, "evidence_type") for r in poisson_results))
+
+# =============================================================================
+# Sheet 03a live wiring: a PROMOTED bocpd_hazard_rate actually reaches the real
+# BOCPDTracker construction, not just AutotuneEngine's own audit trail (closes
+# that module's own former honest gap for this one parameter).
+# =============================================================================
+device_hazard = "dev_hazard_wiring"
+store.upsert_device(device_hazard, device_type="laptop", timestamp=NOW)
+autotune_for_test = AutotuneEngine(store)
+_insert_bt = store._conn.execute(
+    "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES ('bt_hazard', ?, ?, 1)",
+    (NOW, NOW),
+)
+store._maybe_commit()
+custom_hazard = 1.0 / 150.0  # far from _DEFAULT_HAZARD_RATE (1/500) -- easy to tell apart
+proposal = autotune_for_test.propose_change(
+    "bocpd_hazard_rate", custom_hazard, "test", device_id=device_hazard,
+    backtest_run_id="bt_hazard", now=NOW,
+)
+store._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (NOW, proposal.change_id))
+store._maybe_commit()
+
+# A FRESH BaselineEngine (empty tracker cache) against the SAME store --
+# _load_tracker() reads get_active_value() on cache-miss, so this is exactly
+# the real "device warms up after a promotion already landed" path.
+fresh_engine = BaselineEngine(store)
+fresh_engine.score_metric(device_hazard, "query_rate", "gaussian", (50.0,), hour=10, now=NOW + 1)
+loaded_tracker = fresh_engine._trackers[(device_hazard, "query_rate", 10)]
+check("Sheet 03a live wiring: a promoted bocpd_hazard_rate reaches the real "
+      "BOCPDTracker's own hazard_rate, not just threshold_history's audit trail",
+      abs(loaded_tracker.hazard_rate - custom_hazard) < 1e-9,
+      f"got {loaded_tracker.hazard_rate}, expected {custom_hazard}")
+
+device_no_promotion = "dev_hazard_default"
+store.upsert_device(device_no_promotion, device_type="laptop", timestamp=NOW)
+fresh_engine.score_metric(device_no_promotion, "query_rate", "gaussian", (50.0,), hour=10, now=NOW + 1)
+default_tracker = fresh_engine._trackers[(device_no_promotion, "query_rate", 10)]
+check("Sheet 03a live wiring: a device with NO promoted hazard_rate still gets "
+      "the original _DEFAULT_HAZARD_RATE -- inert by construction until an "
+      "autotuner change is actually promoted for that specific device",
+      abs(default_tracker.hazard_rate - custom_hazard) > 1e-9)
 
 
 print()

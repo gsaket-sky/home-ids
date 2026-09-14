@@ -16,6 +16,7 @@ import json
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from v13.autotune.engine import AutotuneEngine
 from v13.baseline.bayesian import (
     BetaBaseline, BOCPDTracker, GaussianBaseline, MarkovBaseline, PoissonBaseline,
     weaken_beta, weaken_gaussian, weaken_poisson,
@@ -143,10 +144,39 @@ def _fit_fn_for(model_kind: str):
     if model_kind == "gaussian":
         return lambda model, x: model.predictive_density(x)
     if model_kind == "beta":
-        return lambda model, ratio: model.predictive_density(ratio)
+        # BUGFIX (found while wiring real per-cycle trial counts, Release 15
+        # follow-up): observation_args for beta is (successes, trials) --
+        # BetaBaseline.update()'s own tested contract (test_v13_bayesian_
+        # baseline.py) -- not (ratio,). The old 1-arg lambda here crashed
+        # with a TypeError on every single beta-metric cycle (confirmed live:
+        # `model.predictive_density(ratio)` called via `fit_fn(model,
+        # *observation_args)` with a 2-element observation_args always raised
+        # "takes 2 positional arguments but 3 were given"), silently
+        # swallowed by daemon.py's per-device try/except -- which discarded
+        # not just the beta evidence but the WHOLE cycle's already-computed
+        # gaussian/poisson/markov evidence for that device too, every cycle
+        # nxdomain_ratio/blocked_ratio had data. predictive_density() itself
+        # is on the RATIO scale (compares against the posterior mean, a
+        # probability) -- convert here rather than changing that already-
+        # tested method's signature.
+        return lambda model, successes, trials: model.predictive_density(successes / max(trials, 1e-9), trials)
     if model_kind == "poisson":
         return lambda model, count: model.predictive_density(count)
     raise ValueError(f"unknown model_kind: {model_kind}")
+
+
+def _surprise_args_for(model_kind: str, observation_args: Tuple) -> Tuple:
+    """Same ratio-scale conversion as _fit_fn_for's beta branch, for the two
+    call sites below that invoke a model's own .surprise() generically
+    against observation_args -- BetaBaseline.surprise() takes a ratio (its
+    own tested contract), while this engine's beta observation_args carries
+    (successes, trials) for update()'s sake. Gaussian/Poisson pass through
+    unchanged (their surprise() already takes the same single scalar
+    observation_args already carries)."""
+    if model_kind == "beta":
+        successes, trials = observation_args
+        return (successes / max(trials, 1e-9),)
+    return observation_args
 
 
 class BaselineEngine:
@@ -156,6 +186,16 @@ class BaselineEngine:
 
     def __init__(self, store: GraphStore):
         self.store = store
+        # Release 15 Sheet 03a live wiring (closes that module's own former
+        # honest gap: "not yet wired to make v13/decision/engine.py actually
+        # READ these promoted values"): bocpd_hazard_rate is the one
+        # TUNABLE_PARAMETERS entry this engine itself owns the meaning of.
+        # get_active_value() falls back to _DEFAULT_HAZARD_RATE (this
+        # module's own prior constant, unchanged) until an autotuner
+        # proposal for this parameter is actually canary-confirmed and
+        # promoted -- inert by construction until that happens, never a
+        # behavior change on its own.
+        self.autotune = AutotuneEngine(store)
         # In-memory cache of live BOCPDTracker objects, keyed by
         # (device_id, metric, hour) -- avoids reconstructing the whole
         # hypothesis list from JSON every cycle for a device active every
@@ -216,6 +256,17 @@ class BaselineEngine:
 
         model_cls = _MODEL_CLASSES[model_kind]
         fit_fn = _fit_fn_for(model_kind)
+        # Read once per cache-miss (tracker construction), not every cycle --
+        # matches get_active_value()'s own cost profile (one indexed SELECT
+        # against the small, append-only threshold_history table) and this
+        # engine's own "cached in-memory for the process lifetime" tracker
+        # model. HONEST LIMITATION: a hazard_rate promoted AFTER this device/
+        # metric/hour's tracker is already warm in THIS process does not take
+        # effect until the tracker is next reconstructed (process restart, or
+        # this key evicted) -- live cache invalidation on promotion is real,
+        # separate follow-up; not a silent gap (see this comment).
+        hazard_rate = self.autotune.get_active_value(
+            "bocpd_hazard_rate", device_id, default=_DEFAULT_HAZARD_RATE)
 
         if row is not None:
             regime_id = int(row["regime_id"])
@@ -223,7 +274,7 @@ class BaselineEngine:
             if run_length_state:
                 tracker = BOCPDTracker(
                     model_factory=lambda: self._seeded_model(device_id, metric, model_kind, hour, model_cls),
-                    predictive_prob_fn=fit_fn, hazard_rate=_DEFAULT_HAZARD_RATE,
+                    predictive_prob_fn=fit_fn, hazard_rate=hazard_rate,
                     weaken_fn=_WEAKEN_FNS.get(model_kind),
                 )
                 tracker._hypotheses = [
@@ -239,7 +290,7 @@ class BaselineEngine:
         # no separate override needed here.
         tracker = BOCPDTracker(
             model_factory=lambda: self._seeded_model(device_id, metric, model_kind, hour, model_cls),
-            predictive_prob_fn=fit_fn, hazard_rate=_DEFAULT_HAZARD_RATE,
+            predictive_prob_fn=fit_fn, hazard_rate=hazard_rate,
             weaken_fn=_WEAKEN_FNS.get(model_kind),
         )
         self._trackers[key] = tracker
@@ -302,7 +353,8 @@ class BaselineEngine:
         self.store._maybe_commit()
 
     def _evaluate_changepoint_candidate(self, key: Tuple[str, str, int], cp_mass: float,
-                                           pre_spike_dominant, model_cls, observation_args: Tuple) -> bool:
+                                           pre_spike_dominant, model_cls, observation_args: Tuple,
+                                           model_kind: str) -> bool:
         """Two-stage changepoint confirmation -- see _CHANGEPOINT_CONFIRM_*'s
         own comment for the two real failure modes this design replaced.
         Returns True only once, on the cycle a pending check actually
@@ -319,7 +371,7 @@ class BaselineEngine:
             pending = {"anchor": model_cls.from_dict(pre_spike_dominant.to_dict()), "surprises": []}
             self._changepoint_pending[key] = pending
 
-        pending["surprises"].append(pending["anchor"].surprise(*observation_args))
+        pending["surprises"].append(pending["anchor"].surprise(*_surprise_args_for(model_kind, observation_args)))
         if len(pending["surprises"]) < _CHANGEPOINT_CONFIRM_SAMPLES:
             return False
 
@@ -368,7 +420,7 @@ class BaselineEngine:
         self._last_observed_at[device_id] = now
 
         changepoint_confirmed = self._evaluate_changepoint_candidate(
-            (device_id, metric, hour), cp_mass, pre_spike_dominant, model_cls, observation_args,
+            (device_id, metric, hour), cp_mass, pre_spike_dominant, model_cls, observation_args, model_kind,
         )
         if changepoint_confirmed:
             regime_id += 1
@@ -376,7 +428,8 @@ class BaselineEngine:
         self._save_tracker(device_id, metric, model_kind, hour, tracker, regime_id, now)
 
         dominant = tracker.dominant_model()
-        surprise = dominant.surprise(*observation_args) if hasattr(dominant, "surprise") else 0.0
+        surprise = (dominant.surprise(*_surprise_args_for(model_kind, observation_args))
+                     if hasattr(dominant, "surprise") else 0.0)
 
         if changepoint_confirmed:
             return Evidence(
