@@ -22,6 +22,30 @@ response size. Capped to the most RECENT edges per decision (by edge timestamp),
 arbitrary/opaque confidence-based subset -- "the latest evidence that fed this verdict"
 is the honest, explainable thing to show when there's more than fits.
 
+BUGFIX (query time, found live 2026-09-14): this endpoint used to issue one
+count_edges()/get_edges() pair PER decision (50 separate round-trips for limit=25)
+plus one get_destination() PER destination (~34 more) -- 84+ small queries against a
+SQLite connection that's read-only against a database the main pipeline is
+concurrently, heavily writing to. Each round-trip is a chance to land inside a
+writer's transaction/checkpoint window and stall on Python sqlite3's default 5s
+busy_timeout; confirmed live, the same logic ran in 0.08s standalone (no concurrent
+writer) vs 0.96s-3.5s through the actual live API under real write load. Now uses
+GraphStore's batched get_edges_capped_per_dst()/count_edges_grouped_by_dst()/
+get_destinations_by_ids() -- 3 queries total regardless of how many decisions/
+destinations are involved.
+
+BUGFIX (graph readability, found live 2026-09-14, user report: "similar entries...
+different timestamp"): confirmed against .94's real data that 147 of 230 evidence
+nodes in a typical limit=25 response (64%) were just zeek_notice_weak/
+zeek_notice_medium repeated for the same device -- the same recurring signal,
+timestamped differently, rendered as separate nodes with no extra information the
+type/family/destination/device doesn't already carry. Evidence is now grouped by
+(device_id, evidence_type, independence_family, destination_id) into one compressed
+node per group when more than one member exists, carrying a `count` and the
+newest/oldest member's timestamps -- a single non-repeated evidence item is
+unaffected (same shape as before, no `count` field). This also shrinks response size
+proportionally, on top of the query-time fix above.
+
 Node/edge layout (x/y positions) is NOT computed here -- the console's existing
 client-side layout logic (grouping by kind into columns) already does that; this
 endpoint returns plain kind/label/sub/relation data for it to consume.
@@ -45,28 +69,19 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
         if store is None:
             return {"nodes": [], "edges": [], "decision_count": 0}
 
-        # BUGFIX (console Evidence Graph tab loading slowly/timing out over a
-        # client): get_decisions_since(0.0) pulled and JSON-deserialized EVERY
-        # decision ever recorded just to Python-sort and keep the newest `limit` --
-        # the same fetch-all-then-truncate anti-pattern this file's own docstring
-        # already flags for edges, just not caught here. get_recent_decisions()
-        # pushes ORDER BY timestamp DESC LIMIT into SQL instead (idx_decisions_timestamp).
         decisions = store.get_recent_decisions(limit)
         decision_ids = [d["decision_id"] for d in decisions]
         device_ids = sorted({d["device_id"] for d in decisions})
 
-        evidence_edges = []
-        edge_totals_by_decision = {}
-        for did in decision_ids:
-            edge_totals_by_decision[did] = store.count_edges(dst_kind="decision", dst_id=did)
-            per_decision = store.get_edges(dst_kind="decision", dst_id=did, limit_most_recent=EVIDENCE_PER_DECISION_CAP)
-            evidence_edges.extend(per_decision)
+        edge_totals_by_decision = store.count_edges_grouped_by_dst("decision", decision_ids)
+        evidence_edges = store.get_edges_capped_per_dst("decision", decision_ids, EVIDENCE_PER_DECISION_CAP)
+
         evidence_ids = sorted({e["src_id"] for e in evidence_edges if e["src_kind"] == "evidence"})
         evidence_list = store.get_evidence_by_ids(evidence_ids)
         evidence_by_id = {e.evidence_id: e for e in evidence_list}
 
         destination_ids = sorted({e.destination_id for e in evidence_list})
-        destinations = {did: store.get_destination(did) for did in destination_ids}
+        destinations = store.get_destinations_by_ids(destination_ids)
 
     sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
     sm.load_from_disk()
@@ -85,22 +100,49 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "sub": device_id,
         })
 
-    for eid, ev in evidence_by_id.items():
-        type_label, type_description = label_evidence_type(ev.evidence_type)
-        nodes.append({
-            "id": f"evidence:{eid}", "kind": "evidence",
-            "label": ev.evidence_type, "sub": ev.independence_family,
-            "confidence": ev.confidence, "timestamp": ev.timestamp, "source": ev.source,
+    # --- group near-duplicate evidence into single compressed nodes -----------
+    # See module docstring's second BUGFIX note. Grouping key deliberately
+    # excludes timestamp/confidence -- those are exactly the fields that differ
+    # between repeats of "the same thing happening again."
+    groups: dict = {}
+    for ev in evidence_by_id.values():
+        key = (ev.device_id, ev.evidence_type, ev.independence_family, ev.destination_id)
+        groups.setdefault(key, []).append(ev)
+
+    evidence_id_to_node_id = {}
+    for (device_id, evidence_type, family, destination_id), members in groups.items():
+        members.sort(key=lambda e: e.timestamp)
+        newest = members[-1]
+        is_grouped = len(members) > 1
+        node_id = (
+            f"evidence-group:{device_id}|{evidence_type}|{family}|{destination_id}"
+            if is_grouped else f"evidence:{newest.evidence_id}"
+        )
+        for m in members:
+            evidence_id_to_node_id[m.evidence_id] = node_id
+
+        type_label, type_description = label_evidence_type(evidence_type)
+        node = {
+            "id": node_id, "kind": "evidence",
+            "label": evidence_type, "sub": family,
+            "confidence": max(m.confidence for m in members),
+            "timestamp": newest.timestamp,
+            "source": newest.source,
             "type_label": type_label, "type_description": type_description,
             # console's column layout clusters each kind's rows by source device
             # so related nodes land on nearby y -- needs the raw device_id, not
             # just the "observed" edge, so it doesn't have to reverse-traverse
             # edges to figure out which device a node belongs to.
-            "device_id": ev.device_id,
-        })
-        edges.append({"from": f"device:{ev.device_id}", "to": f"evidence:{eid}", "relation": "observed"})
-        if ev.destination_id != "(none)":
-            edges.append({"from": f"evidence:{eid}", "to": f"destination:{ev.destination_id}", "relation": "targets"})
+            "device_id": device_id,
+        }
+        if is_grouped:
+            node["count"] = len(members)
+            node["first_timestamp"] = members[0].timestamp
+        nodes.append(node)
+
+        edges.append({"from": f"device:{device_id}", "to": node_id, "relation": "observed"})
+        if destination_id != "(none)":
+            edges.append({"from": node_id, "to": f"destination:{destination_id}", "relation": "targets"})
 
     for did, dest in destinations.items():
         if dest is None or did == "(none)":
@@ -122,9 +164,24 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "device_id": d["device_id"],
         })
 
+    # evidence->decision edges, rewritten to point at each evidence item's
+    # (possibly grouped) node id, deduping repeats of the exact same
+    # (node, decision, relation) triple that grouping alone would otherwise
+    # produce -- e.g. 40 individually-timestamped zeek_notice_weak edges all
+    # supporting the SAME decision collapse to one edge, not 40 overlapping
+    # lines. Distinct relations (supports vs contradicts) to the same decision
+    # are kept separate -- that's real structural information, not a repeat.
+    seen_decision_edges = set()
     for e in evidence_edges:
         if e["src_kind"] != "evidence":
             continue
-        edges.append({"from": f"evidence:{e['src_id']}", "to": f"decision:{e['dst_id']}", "relation": e["relation"]})
+        node_id = evidence_id_to_node_id.get(e["src_id"])
+        if node_id is None:
+            continue
+        key = (node_id, e["dst_id"], e["relation"])
+        if key in seen_decision_edges:
+            continue
+        seen_decision_edges.add(key)
+        edges.append({"from": node_id, "to": f"decision:{e['dst_id']}", "relation": e["relation"]})
 
     return {"nodes": nodes, "edges": edges, "decision_count": len(decisions)}

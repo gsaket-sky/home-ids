@@ -1056,6 +1056,82 @@ class GraphStore:
         row = self._conn.execute(f"SELECT COUNT(*) c FROM edges {where}", params).fetchone()
         return int(row["c"])
 
+    def get_edges_capped_per_dst(self, dst_kind: str, dst_ids: List[str], limit_most_recent: int) -> List[Dict[str, Any]]:
+        """Batched counterpart to get_edges(dst_kind=, dst_id=, limit_most_recent=)
+        called in a loop -- ONE query for N dst_ids instead of N, each still capped
+        to its own `limit_most_recent` most-recent edges (a window function, not a
+        flat LIMIT, so one busy dst_id with thousands of edges can't crowd out a
+        quiet one sharing the same query).
+
+        Added for the console API's graph-view endpoint: with 25 decisions that used
+        to mean 25 separate get_edges() calls plus 25 separate count_edges() calls
+        (see count_edges_grouped_by_dst() below) -- 50 round-trips through a SQLite
+        connection that's read-only against a database the main pipeline is
+        concurrently, heavily writing to (WAL mode allows this without blocking, but
+        Python's sqlite3 default 5s busy_timeout means each individual round-trip can
+        still stall waiting for a writer's transaction/checkpoint). Confirmed live:
+        the same endpoint's real response time on .94 ranged 0.96s-3.5s across
+        back-to-back calls under real write load, vs 0.08s for the identical logic
+        run standalone with no concurrent writer -- fewer round-trips means fewer
+        chances to land inside a writer's transaction window, not just less query
+        planning overhead.
+
+        Empty dst_ids returns [] without touching the database (SQLite's `IN ()`
+        with zero placeholders is invalid SQL, not just slow)."""
+        import json
+        if not dst_ids:
+            return []
+        placeholders = ",".join("?" for _ in dst_ids)
+        query = f"""
+            SELECT * FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY dst_id ORDER BY timestamp DESC) AS rn
+                FROM edges
+                WHERE dst_kind = ? AND dst_id IN ({placeholders})
+            )
+            WHERE rn <= ?
+            ORDER BY dst_id, timestamp DESC
+        """
+        params = [dst_kind] + list(dst_ids) + [limit_most_recent]
+        rows = self._conn.execute(query, params).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.pop("rn", None)
+            try:
+                d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+            except Exception:
+                d["metadata"] = {}
+            out.append(d)
+        return out
+
+    def count_edges_grouped_by_dst(self, dst_kind: str, dst_ids: List[str]) -> Dict[str, int]:
+        """Batched counterpart to count_edges(dst_kind=, dst_id=) called in a loop --
+        see get_edges_capped_per_dst()'s own docstring for why this matters (fewer
+        round-trips against a database under concurrent write load). Returns
+        {dst_id: count}; a dst_id with zero matching edges is simply absent from the
+        result rather than present with 0 -- callers already use dict.get(id, 0)."""
+        if not dst_ids:
+            return {}
+        placeholders = ",".join("?" for _ in dst_ids)
+        rows = self._conn.execute(
+            f"SELECT dst_id, COUNT(*) c FROM edges WHERE dst_kind = ? AND dst_id IN ({placeholders}) GROUP BY dst_id",
+            [dst_kind] + list(dst_ids),
+        ).fetchall()
+        return {r["dst_id"]: int(r["c"]) for r in rows}
+
+    def get_destinations_by_ids(self, destination_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Batched counterpart to get_destination() called in a loop -- same
+        round-trip-reduction reasoning as get_edges_capped_per_dst() above. Returns
+        {destination_id: row}; a destination_id that doesn't exist is simply absent."""
+        if not destination_ids:
+            return {}
+        placeholders = ",".join("?" for _ in destination_ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM destinations WHERE destination_id IN ({placeholders})",
+            list(destination_ids),
+        ).fetchall()
+        return {r["destination_id"]: dict(r) for r in rows}
+
     def delete_edge(self, edge_id: int) -> None:
         self._conn.execute("DELETE FROM edges WHERE edge_id = ?", (edge_id,))
         self._maybe_commit()

@@ -1181,7 +1181,7 @@ function renderHealthView(){
 }
 
 function renderGraphView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
+  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -1209,7 +1209,7 @@ function renderGraphView(){
       return (e.from===state.graphSelected && e.to===n.id) || (e.to===state.graphSelected && e.from===n.id);
     });
     var sw = n.id===state.graphSelected ? 3 : 1;
-    var label = n.kind === 'evidence' ? (n.type_label || n.label) : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
+    var label = n.kind === 'evidence' ? (n.type_label || n.label) + (n.count ? ' ×'+n.count : '') : (n.label && n.label.length > 26 ? n.label.slice(0,24)+'…' : n.label);
     var multiSel = !!state.graphMultiSelected[n.id];
     var ring = multiSel ? '<circle cx="'+n.x+'" cy="'+n.y+'" r="'+(n.r+5)+'" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="3,2"></circle>' : '';
     return '<g class="node-group'+(multiSel?' multi-selected':'')+'" data-node-id="'+n.id+'" style="opacity:'+(connected?1:0.22)+';">'
@@ -1239,7 +1239,14 @@ function renderGraphView(){
       fields = [['device_id', n.sub], ['hostname', n.label]];
     } else if (n.kind==='evidence') {
       fields = [['what happened', (n.type_label || n.label) + (n.type_description ? ' — ' + n.type_description : '')],
-                ['raw type', n.label], ['family',n.sub],['confidence',n.confidence],['source',n.source],['timestamp', fmtTime(n.timestamp)]];
+                ['raw type', n.label], ['family',n.sub],['confidence',n.confidence],['source',n.source]];
+      if (n.count) {
+        fields.push(['occurrences', n.count + ' — compressed from ' + n.count + ' near-identical entries (same device/type/family/destination)']);
+        fields.push(['first seen', fmtTime(n.first_timestamp)]);
+        fields.push(['most recent', fmtTime(n.timestamp)]);
+      } else {
+        fields.push(['timestamp', fmtTime(n.timestamp)]);
+      }
     } else if (n.kind==='destination') {
       fields = [['kind',n.sub],['label',n.label]];
     } else {
@@ -1328,6 +1335,18 @@ function attachGraphInteraction(){
   canvas._interactionAttached = true;
 
   canvas.addEventListener('pointerdown', function(e){
+    // BUGFIX (legend/zoom-control kind toggles not clickable, found live): this
+    // handler used to call canvas.setPointerCapture() and fall through to the
+    // background-pan branch below for ANY pointerdown inside #graphCanvas that
+    // wasn't on a graph node -- including the legend (device/evidence/
+    // destination/decision toggles) and the zoom-control buttons, both of which
+    // live inside the SAME div (.graph-legend, used for both -- see
+    // renderGraphView()'s own `legend`/`zoomControls` vars) rather than
+    // somewhere outside the pan-handled area. Pointer capture redirects where
+    // the FOLLOWING pointerup/click resolve, which broke the legend's own
+    // onclick handlers. Bail out before touching capture/pan/drag state for
+    // anything that's UI chrome, not the graph canvas itself.
+    if (e.target.closest('.graph-legend')) return;
     var nodeGroup = e.target.closest('[data-node-id]');
     var startX = e.clientX, startY = e.clientY;
     var moved = false;
