@@ -107,6 +107,11 @@ CREATE TABLE decisions (
     raw_payload_json        TEXT NOT NULL DEFAULT '{}'  -- full decision detail, for the comparator/divergence log
 );
 CREATE INDEX idx_decisions_device_ts ON decisions(device_id, timestamp);
+-- Global "most recent N decisions across all devices" (the console's Evidence
+-- Graph tab) can't use idx_decisions_device_ts above -- that index is scoped
+-- per-device. Without this, ORDER BY timestamp DESC LIMIT N on the whole table
+-- forces a full scan+sort every time the tab loads.
+CREATE INDEX idx_decisions_timestamp ON decisions(timestamp);
 
 -- v13 full-architecture plan, IPS containment unification: a write-only AUDIT
 -- MIRROR of src/mitigation/ips.py's real containment state (StateManager's own

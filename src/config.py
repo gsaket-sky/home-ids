@@ -248,6 +248,11 @@ class LiveConfig:
         # yet at this point in __init__.
         self._overrides_path = self.file_path.parent / "state" / "config_overrides.json"
         self._last_overrides_loaded = 0.0
+        # BUGFIX (console hot-reload gap): tracks {key: baseline} for every override this
+        # instance currently has applied FROM THE FILE, so the next poll can tell "this key
+        # is still in the file" apart from "this key was just removed" -- see
+        # _load_overrides()'s own comment for why this matters across process boundaries.
+        self._active_file_overrides: dict = {}
 
         env_path = self.file_path.parent / self._config.get("env_file", ".env")
         load_env_file(env_path)
@@ -378,18 +383,36 @@ class LiveConfig:
         Self-contained locking (acquires self._lock itself) -- callers must NOT already
         hold self._lock, since it's a plain non-reentrant threading.Lock and a second
         acquire from the same thread would deadlock.
+
+        BUGFIX (console hot-reload gap, found live: reverting a config override in the
+        console UI updated the console/API process's own CONFIG instantly, but the actual
+        detection engine -- a SEPARATE OS process (main.py spawns middleware.main_api:app
+        via subprocess.Popen, each with its own LiveConfig singleton) -- kept running on the
+        stale overridden value indefinitely, only picking up config.yaml/override ADDITIONS
+        via its 10s watcher poll (EnginePipeline.__init__ -> start_watcher()), never a
+        removal, until a full service restart. This method used to only ever APPLY entries
+        present in the file; config_api.py's DELETE endpoint could revert its OWN process's
+        CONFIG (revert_override(), below) but had no way to reach any other process's
+        instance except through this same file both sides already poll. Fixed by tracking
+        which keys THIS instance applied from the file last time (_active_file_overrides)
+        and reverting any that disappeared since, using the very baseline the override
+        entry itself carried -- no new file or cross-process signal needed, since a revert
+        is now just as observable from the file as a set already was.
         """
         if not self._overrides_path.exists():
-            return
-        try:
-            mtime = self._overrides_path.stat().st_mtime
-            raw = json.loads(self._overrides_path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            LOGGER.warning("Failed to parse config overrides file %s: %s", self._overrides_path, exc)
-            return
+            raw = {}
+        else:
+            try:
+                mtime = self._overrides_path.stat().st_mtime
+                raw = json.loads(self._overrides_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                LOGGER.warning("Failed to parse config overrides file %s: %s", self._overrides_path, exc)
+                return
 
         applied = {}
+        reverted = {}
         with self._lock:
+            current_keys = set()
             for key, entry in raw.items():
                 if not isinstance(entry, dict) or "value" not in entry:
                     continue
@@ -399,27 +422,47 @@ class LiveConfig:
                         "scoped to live-reloadable keys only.", key
                     )
                     continue
+                current_keys.add(key)
                 value = entry["value"]
                 if self._config.get(key) != value:
                     self._config[key] = value
                     applied[key] = value
+                self._active_file_overrides[key] = entry.get("baseline")
 
-        self._last_overrides_loaded = mtime
+            # Any key THIS instance previously applied from the file that's no longer in
+            # it was removed elsewhere (another process's DELETE, or a hand-edit) --
+            # revert it to the baseline that override entry itself recorded.
+            removed_keys = set(self._active_file_overrides) - current_keys
+            for key in removed_keys:
+                baseline = self._active_file_overrides.pop(key)
+                if baseline is not None and self._config.get(key) != baseline:
+                    self._config[key] = baseline
+                    reverted[key] = baseline
+
+        self._last_overrides_loaded = mtime if self._overrides_path.exists() else time.time()
         if applied:
             LOGGER.info("🔧 Applied %d autonomous config override(s): %s", len(applied), applied)
-            if self._notify_cb:
-                self._notify_cb(applied)
+        if reverted:
+            LOGGER.info("↩️ Reverted %d config override(s) removed from %s: %s", len(reverted), self._overrides_path, reverted)
+        if (applied or reverted) and self._notify_cb:
+            self._notify_cb({**reverted, **applied})
 
     def revert_override(self, key: str, value) -> None:
-        """Pushes `key` back to its config.yaml baseline value immediately, in-memory,
-        without waiting for a restart. Needed because _load_overrides() above only ever
-        APPLIES entries present in state/config_overrides.json -- it has no way to notice
-        an entry was just REMOVED and undo its effect, since config.yaml itself never
-        changed (so the mtime-driven _load() re-read never fires). Callers (the config
-        API's DELETE endpoint) are expected to pass the removed override entry's own
-        "baseline" field as `value`. Never touches _STATIC_KEYS -- same restriction as
-        _load_overrides(), enforced by the caller not exposing static keys as revertible
-        in the first place, not re-checked here.
+        """Pushes `key` back to its config.yaml baseline value immediately, in-memory, in
+        THIS process, without waiting for its own next watcher poll. Called directly by
+        the config API's DELETE endpoint right after it removes the entry from
+        state/config_overrides.json, so the process handling that HTTP request reflects
+        the revert with zero latency instead of waiting up to its own poll interval.
+        Callers pass the removed override entry's own "baseline" field as `value`. Never
+        touches _STATIC_KEYS -- same restriction as _load_overrides(), enforced by the
+        caller not exposing static keys as revertible in the first place, not re-checked
+        here.
+
+        This does NOT, by itself, reach any OTHER process's LiveConfig instance (e.g. the
+        detection engine, running as its own OS process with its own instance) -- that
+        happens separately, the next time each instance's own watcher polls the shared
+        overrides file and _load_overrides() notices the key is gone (see that method's
+        own bugfix note for why this used to never happen for removals).
 
         Fires _notify_cb the same way _load_overrides() does -- a revert is as much a
         "this key's effective value just changed" event as an apply is (e.g. main.py's
@@ -429,6 +472,7 @@ class LiveConfig:
         with self._lock:
             changed = self._config.get(key) != value
             self._config[key] = value
+            self._active_file_overrides.pop(key, None)
         if changed and self._notify_cb:
             self._notify_cb({key: value})
 

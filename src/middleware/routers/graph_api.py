@@ -45,7 +45,13 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
         if store is None:
             return {"nodes": [], "edges": [], "decision_count": 0}
 
-        decisions = sorted(store.get_decisions_since(0.0), key=lambda d: d["timestamp"], reverse=True)[:limit]
+        # BUGFIX (console Evidence Graph tab loading slowly/timing out over a
+        # client): get_decisions_since(0.0) pulled and JSON-deserialized EVERY
+        # decision ever recorded just to Python-sort and keep the newest `limit` --
+        # the same fetch-all-then-truncate anti-pattern this file's own docstring
+        # already flags for edges, just not caught here. get_recent_decisions()
+        # pushes ORDER BY timestamp DESC LIMIT into SQL instead (idx_decisions_timestamp).
+        decisions = store.get_recent_decisions(limit)
         decision_ids = [d["decision_id"] for d in decisions]
         device_ids = sorted({d["device_id"] for d in decisions})
 
@@ -86,6 +92,11 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "label": ev.evidence_type, "sub": ev.independence_family,
             "confidence": ev.confidence, "timestamp": ev.timestamp, "source": ev.source,
             "type_label": type_label, "type_description": type_description,
+            # console's column layout clusters each kind's rows by source device
+            # so related nodes land on nearby y -- needs the raw device_id, not
+            # just the "observed" edge, so it doesn't have to reverse-traverse
+            # edges to figure out which device a node belongs to.
+            "device_id": ev.device_id,
         })
         edges.append({"from": f"device:{ev.device_id}", "to": f"evidence:{eid}", "relation": "observed"})
         if ev.destination_id != "(none)":
@@ -107,6 +118,8 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "winning_hypothesis_label": winning_label, "winning_hypothesis_description": winning_description,
             "evidence_total": total_edges,
             "evidence_truncated": total_edges > EVIDENCE_PER_DECISION_CAP,
+            # see evidence node's own comment above -- same device-clustering reason.
+            "device_id": d["device_id"],
         })
 
     for e in evidence_edges:

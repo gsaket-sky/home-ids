@@ -177,6 +177,8 @@ class GraphStore:
             CREATE INDEX IF NOT EXISTS idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
 
             CREATE INDEX IF NOT EXISTS idx_evidence_type_ts ON evidence(evidence_type, timestamp);
+
+            CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
             """
         )
         self._conn.commit()
@@ -920,6 +922,30 @@ class GraphStore:
                 "SELECT * FROM decisions WHERE timestamp >= ? ORDER BY timestamp",
                 (since,),
             ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["raw_payload"] = json.loads(d.pop("raw_payload_json") or "{}")
+            d["mechanism_flags"] = json.loads(d.pop("mechanism_flags_json") or "{}")
+            out.append(d)
+        return out
+
+    def get_recent_decisions(self, limit: int) -> List[Dict[str, Any]]:
+        """The console API's graph-view endpoint's actual read pattern: the most
+        recent `limit` decisions across ALL devices, newest first -- NOT "every
+        decision ever made, sorted and truncated in Python" (that used to be
+        `get_decisions_since(0.0)`, which pulls the whole table -- including a
+        JSON-deserialize of raw_payload_json/mechanism_flags_json for every single
+        row -- just to keep the newest 25; on a live deployment with weeks of
+        continuous decisions this is the same "fetch-all-then-truncate" anti-pattern
+        already fixed for edges via get_edges(limit_most_recent=...), just not
+        caught here yet). `ORDER BY timestamp DESC LIMIT ?` pushed into SQL, backed
+        by idx_decisions_timestamp (schema.sql) so it's an index-order scan, not a
+        full-table sort."""
+        rows = self._conn.execute(
+            "SELECT * FROM decisions ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         out = []
         for r in rows:
             d = dict(r)

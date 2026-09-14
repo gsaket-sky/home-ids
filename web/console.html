@@ -382,70 +382,70 @@ async function runHuntQuery(){
   }
 }
 
+// Strict columnar layout: one fixed x per node kind, stacked top-to-bottom with a
+// guaranteed minimum gap so nodes never overlap regardless of graph size. Replaces
+// an earlier force-directed relaxation (mutual repulsion + edge springs + a weak
+// pull back toward the column) that was meant to declutter the graph organically,
+// but let x drift nodes across column boundaries and let y collide within a
+// column on any but the smallest graphs -- exactly the "everything is just
+// overlapped" complaint this replaces. Ordering within each column is not
+// arbitrary: devices sort alphabetically (the "spine" every other column aligns
+// to), and evidence/decisions sort by their OWN device's position in that spine
+// first, then newest-first -- so a device's evidence and decisions land on
+// nearby rows instead of scattered across the whole column, keeping edges short
+// and mostly horizontal instead of criss-crossing the whole canvas.
 function computeGraphLayout(nodes, edges){
   var colX = { device: 110, evidence: 460, destination: 980, decision: 1400 };
-  var counters = { device: 0, evidence: 0, destination: 0, decision: 0 };
+  var radius = { decision: 11, device: 12, destination: 10, evidence: 7 };
+  // Minimum gap between adjacent circle EDGES in the same column (not centers) --
+  // sized to clear the two-line label ("type" + "sub", drawn beside the node, see
+  // renderGraphView) so labels don't overlap between one row and the next even
+  // when node radius alone wouldn't need that much room. Evidence rows can run
+  // into the hundreds, so they're deliberately the tightest packing.
+  var minGap = { decision: 22, device: 22, destination: 22, evidence: 14 };
+
+  var byKind = { device: [], evidence: [], destination: [], decision: [] };
+  nodes.forEach(function(n){ (byKind[n.kind] || (byKind[n.kind] = [])).push(n); });
+
+  byKind.device.sort(function(a,b){ return (a.label||'').localeCompare(b.label||''); });
+  var deviceOrder = {};
+  byKind.device.forEach(function(d, i){ deviceOrder[d.sub || d.id] = i; }); // device node's own id lives in .sub
+
+  if (byKind.destination) byKind.destination.sort(function(a,b){ return (a.label||'').localeCompare(b.label||''); });
+
+  function byDeviceThenRecency(a, b){
+    var da = deviceOrder[a.device_id] != null ? deviceOrder[a.device_id] : 999999;
+    var db = deviceOrder[b.device_id] != null ? deviceOrder[b.device_id] : 999999;
+    if (da !== db) return da - db;
+    return (b.timestamp||0) - (a.timestamp||0);
+  }
+  if (byKind.evidence) byKind.evidence.sort(byDeviceThenRecency);
+  if (byKind.decision) byKind.decision.sort(byDeviceThenRecency);
+
   var byId = {};
-  var laidOut = nodes.map(function(n){
-    var i = counters[n.kind] || 0;
-    counters[n.kind] = i + 1;
-    var spacing = n.kind === 'evidence' ? 48 : 90;
-    var seedX = colX[n.kind] != null ? colX[n.kind] : 700;
-    var out = Object.assign({}, n, {
-      x: seedX + (Math.random()-0.5)*40,
-      y: 50 + i * spacing + (Math.random()-0.5)*16,
-      targetX: seedX,
-      r: n.kind === 'decision' ? 11 : (n.kind === 'device' ? 12 : (n.kind === 'destination' ? 10 : 7)),
+  var laidOut = [];
+  Object.keys(colX).forEach(function(kind){
+    var seedX = colX[kind];
+    var r = radius[kind] || 9;
+    var rowH = r*2 + (minGap[kind] || 18);
+    var y = 40;
+    (byKind[kind] || []).forEach(function(n){
+      y += rowH/2;
+      var out = Object.assign({}, n, { x: seedX, y: y, r: r });
+      if (n.kind === 'decision') { out.fill = hexA(sevColor(n.label), 0.85); out.stroke = sevColor(n.label); }
+      else if (n.kind === 'device') { out.fill = 'rgba(90,167,240,.3)'; out.stroke = '#5aa7f0'; }
+      else if (n.kind === 'destination') { out.fill = 'rgba(155,110,224,.25)'; out.stroke = '#9e6ee0'; }
+      else { out.fill = 'rgba(226,229,235,.18)'; out.stroke = '#8b93a3'; }
+      byId[n.id] = out;
+      laidOut.push(out);
+      y += rowH/2;
     });
-    if (n.kind === 'decision') { out.fill = hexA(sevColor(n.label), 0.85); out.stroke = sevColor(n.label); }
-    else if (n.kind === 'device') { out.fill = 'rgba(90,167,240,.3)'; out.stroke = '#5aa7f0'; }
-    else if (n.kind === 'destination') { out.fill = 'rgba(155,110,224,.25)'; out.stroke = '#9e6ee0'; }
-    else { out.fill = 'rgba(226,229,235,.18)'; out.stroke = '#8b93a3'; }
-    byId[n.id] = out;
-    return out;
   });
+
   var laidOutEdges = edges.map(function(e){
     var relColor = { observed:'#4a5568', targets:'#5a6478', supports:'#22c7e0', contradicts:'#e0523f' };
     return Object.assign({}, e, { stroke: relColor[e.relation] || '#6b7280', dash: e.relation==='contradicts' ? '4,3' : '' });
   });
-
-  // Light force relaxation, run once on load: mutual repulsion + spring attraction along
-  // edges + a gentle pull back toward each node's kind column on x (keeps the
-  // device->evidence->destination->decision reading order legible instead of collapsing
-  // into an unreadable hairball). Makes the initial layout feel organic rather than rigid
-  // fixed columns; the user can still drag any node (or a shift-selected group of them,
-  // see attachGraphInteraction()) anywhere afterward. Recentering pull is deliberately
-  // weak (0.02, was 0.05) and repulsion reaches further (180px, was 120px) than the first
-  // pass at this -- that first version packed hundreds of evidence nodes into one narrow,
-  // visually "compressed" column since the strong pull-back fought the repulsion before it
-  // could spread anything out. Bounded to n<=600 nodes -- a busier response just keeps the
-  // straight-column seed positions above instead of paying an O(n^2) relaxation cost.
-  var n = laidOut.length;
-  if (n > 1 && n <= 600) {
-    var iterations = n > 200 ? 90 : 160;
-    var edgePairs = laidOutEdges.map(function(e){ return [byId[e.from], byId[e.to]]; }).filter(function(p){ return p[0] && p[1]; });
-    for (var it = 0; it < iterations; it++) {
-      for (var a = 0; a < n; a++) {
-        for (var b = a+1; b < n; b++) {
-          var A = laidOut[a], B = laidOut[b];
-          var dx = A.x - B.x, dy = A.y - B.y;
-          var distSq = dx*dx + dy*dy;
-          if (distSq > 32400 || distSq === 0) continue; // ignore far-apart pairs (>180px) -- cheap cutoff
-          var dist = Math.sqrt(distSq);
-          var force = 480 / distSq;
-          var fx = (dx/dist) * force, fy = (dy/dist) * force;
-          A.x += fx; A.y += fy;
-          B.x -= fx; B.y -= fy;
-        }
-      }
-      edgePairs.forEach(function(pair){
-        var A = pair[0], B = pair[1];
-        var ex = (B.x - A.x) * 0.018, ey = (B.y - A.y) * 0.018;
-        A.x += ex; A.y += ey; B.x -= ex; B.y -= ey;
-      });
-      laidOut.forEach(function(node){ node.x += (node.targetX - node.x) * 0.02; node.y = Math.max(20, node.y); });
-    }
-  }
 
   return { nodes: laidOut, edges: laidOutEdges, byId: byId };
 }
