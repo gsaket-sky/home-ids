@@ -181,6 +181,8 @@ class HealthManager:
         self._evaluate_feed_health_components()
         self._evaluate_job_health_components(now)
 
+        self._write_snapshot_file()
+
     # ------------------------------------------------------------- component probes
 
     def _check_zeek_freshness(self) -> Tuple[bool, str]:
@@ -485,6 +487,8 @@ class HealthManager:
         rec = self._get_record(component)
         prev_state = rec["state"]
         backoff: RecoveryBackoff = rec["backoff"]
+        rec["detail"] = detail
+        rec["last_updated"] = time.time()
 
         if prev_state == SAFE_MODE:
             if signal == HEALTHY:
@@ -558,15 +562,43 @@ class HealthManager:
     # ------------------------------------------------------------- read-only snapshot
 
     def snapshot(self) -> Dict[str, Any]:
-        """Everything /api/health/status needs -- called from the SAME process
-        this HealthManager lives in only (the console API subprocess reads the
-        heartbeat/job/feed files directly instead, since it can't reach this
-        live instance across the process boundary)."""
+        """Everything the console's Health view needs, IN-PROCESS. This is the
+        only place that has live visibility into the resource-pressure level
+        and the per-component state machine (HEALTHY/DEGRADED/UNHEALTHY/
+        SAFE_MODE) -- including the in-process components (pipeline_main_loop/
+        identity_reconcile_worker/ti_refresh), whose heartbeats live only in
+        the HEARTBEATS in-memory singleton, never written to a file the way
+        the cross-process ones are."""
         return {
+            "written_at": time.time(),
             "pressure_level": self._pressure_state,
             "rss_mb": self._rss_mb(),
+            "auto_recovery_enabled": bool(self.config.get("health_manager_auto_recovery_enabled", True)),
             "components": {
-                name: {"state": rec["state"], "recovery_attempts": rec["backoff"].attempt_count}
+                name: {
+                    "state": rec["state"],
+                    "detail": rec.get("detail", ""),
+                    "last_updated": rec.get("last_updated"),
+                    "recovery_attempts": rec["backoff"].attempt_count,
+                }
                 for name, rec in self._component_state.items()
             },
         }
+
+    def _write_snapshot_file(self) -> None:
+        """BUGFIX (console heartbeat visibility): the console's /api/health/status
+        runs in the SEPARATE API subprocess and can't reach this live instance
+        directly -- it could only ever see the two cross-process heartbeats
+        (api_subprocess/scheduler_subprocess) and the raw job_health.json/
+        feed_health.json files, with zero visibility into resource-pressure
+        level, in-process component heartbeats, or any state-machine state.
+        Written once per check cycle so the console reflects reality within one
+        health_manager_check_interval_seconds, same latency class as every
+        other cross-process signal this subsystem already produces."""
+        try:
+            path = self.state_dir / "health_manager_snapshot.json"
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self.snapshot(), indent=2), encoding="utf-8")
+            tmp.replace(path)
+        except Exception as exc:
+            LOGGER.debug("Health manager failed to write snapshot file: %s", exc)

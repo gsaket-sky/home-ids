@@ -197,5 +197,49 @@ def test_evaluate_probe_component_fail_streak_escalates_then_recovers(hm):
     assert hm._component_state["probe_x"]["state"] == HEALTHY
 
 
+# --- console visibility: snapshot() / _write_snapshot_file() ---------------------
+# Added so the console's Health view has something to read -- without this,
+# /api/health/status (running in a SEPARATE process from this HealthManager
+# instance) had zero visibility into pressure level, in-process component
+# heartbeats, or any state-machine state at all.
+
+def test_apply_signal_records_detail_and_timestamp(hm):
+    hm._apply_signal("comp_a", DEGRADED, "heartbeat age 12s")
+    rec = hm._component_state["comp_a"]
+    assert rec["detail"] == "heartbeat age 12s"
+    assert rec["last_updated"] is not None
+
+
+def test_snapshot_includes_every_tracked_component(hm):
+    hm._apply_signal("comp_a", HEALTHY, "ok")
+    hm._apply_signal("comp_b", DEGRADED, "slow")
+    snap = hm.snapshot()
+    assert set(snap["components"].keys()) == {"comp_a", "comp_b"}
+    assert snap["components"]["comp_a"]["state"] == HEALTHY
+    assert snap["components"]["comp_b"]["state"] == DEGRADED
+    assert snap["components"]["comp_b"]["detail"] == "slow"
+    assert "pressure_level" in snap
+    assert "rss_mb" in snap
+    assert "written_at" in snap
+
+
+def test_write_snapshot_file_round_trips_through_disk(hm, tmp_path):
+    import json
+    hm._apply_signal("comp_a", HEALTHY, "ok")
+    hm._write_snapshot_file()
+    path = tmp_path / "health_manager_snapshot.json"
+    assert path.exists()
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["components"]["comp_a"]["state"] == HEALTHY
+
+
+def test_check_cycle_writes_snapshot_file(hm, tmp_path, monkeypatch):
+    """Full _check_cycle() (as the real check loop calls it) must always end
+    with a fresh snapshot on disk, even though most of its own sub-checks
+    (psutil, file probes) are no-ops in this fake environment."""
+    hm._check_cycle()
+    assert (tmp_path / "health_manager_snapshot.json").exists()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

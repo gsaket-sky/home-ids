@@ -239,7 +239,8 @@ var ICONS = {
   search:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="M20 20l-5.5-5.5"></path></svg>',
   close:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"></path></svg>',
   blocking:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="10" rx="1.5"></rect><path d="M8 10V7a4 4 0 018 0v3"></path></svg>',
-  suricata:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 12L18 8M12 3.5v3M12 20.5v-3M3.5 12h3M20.5 12h-3"></path></svg>'
+  suricata:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 12L18 8M12 3.5v3M12 20.5v-3M3.5 12h3M20.5 12h-3"></path></svg>',
+  health:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l2-7 4 14 2-7h6"></path></svg>'
 };
 
 /* ============================= mutable state ============================= */
@@ -268,6 +269,8 @@ var state = {
   newBlockDomain: '', newBlockDeviceId: '', newBlockReason: '',
 
   suricataLoading: false, suricataLoaded: false, suricataLoadError: null, suricataDetections: [], suricataNote: '',
+
+  healthLoading: false, healthLoaded: false, healthLoadError: null, healthData: null,
 
   huntMode: 'touching',
   huntDest: '',
@@ -515,6 +518,18 @@ async function loadSuricata(){
   }
 }
 
+async function loadHealth(){
+  state.healthLoading = true; state.healthLoadError = null; render();
+  try {
+    state.healthData = await apiFetch('/api/health/status');
+    state.healthLoaded = true;
+  } catch (err) {
+    state.healthLoadError = err.message || String(err);
+  } finally {
+    state.healthLoading = false; render();
+  }
+}
+
 async function loadTopDomains(deviceId){
   state.topDomainsLoading = true; state.topDomainsError = null; render();
   try {
@@ -534,7 +549,7 @@ function typeOptionsHtml(selectedVal){
 }
 
 function renderSidebar(){
-  var defs = [['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['config','Config','config']];
+  var defs = [['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['health','Health','health'],['config','Config','config']];
   var items = defs.map(function(d){
     var id=d[0], label=d[1], icon=d[2];
     var active = (state.activeView===id) || (id==='devices' && state.activeView==='deviceDetail');
@@ -943,6 +958,128 @@ function renderSuricataView(){
     + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(state.suricataNote||'')+'</div></div>';
 }
 
+/* ============================= health / heartbeat view ============================= */
+
+var HEALTH_STATE_SEV = {
+  healthy:'BENIGN', degraded:'SUSPICIOUS', unhealthy:'HIGH', recovery_failed:'HIGH', safe_mode:'CRITICAL',
+  normal:'BENIGN', resource_pressure:'SUSPICIOUS', conservation:'HIGH', critical:'CRITICAL'
+};
+function healthPill(rawState){
+  var sevKey = HEALTH_STATE_SEV[rawState] || 'UNKNOWN';
+  return '<span class="pill" style="color:'+sevColor(sevKey)+';border-color:'+sevBorder(sevKey)+';background:'+sevBg(sevKey)+'">'
+    + '<span class="dot" style="background:'+sevColor(sevKey)+'"></span>'+esc(rawState || 'unknown')+'</span>';
+}
+function agoText(ts){
+  if (ts == null) return '—';
+  var s = Math.max(0, (Date.now()/1000) - ts);
+  if (s < 90) return Math.floor(s) + 's ago';
+  if (s < 5400) return Math.floor(s/60) + 'm ago';
+  if (s < 129600) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+var COMPONENT_LABELS = {
+  pipeline_main_loop: 'Pipeline main loop', identity_reconcile_worker: 'Identity reconcile worker',
+  ti_refresh: 'Threat-intel refresh', api_subprocess: 'Console / API subprocess',
+  scheduler_subprocess: 'Job scheduler subprocess', zeek: 'Zeek', suricata: 'Suricata', pihole: 'Pi-hole'
+};
+var COMPONENT_ORDER = ['pipeline_main_loop','identity_reconcile_worker','ti_refresh','api_subprocess','scheduler_subprocess','zeek','suricata','pihole'];
+function componentLabel(name){
+  if (COMPONENT_LABELS[name]) return COMPONENT_LABELS[name];
+  if (name.indexOf('feed:') === 0) return name.slice(5) + ' (feed)';
+  if (name.indexOf('job:') === 0) return name.slice(4) + ' (job)';
+  return name;
+}
+
+function renderHealthView(){
+  var topbarHead = '<div class="topbar"><div class="view-title">Health</div><div class="view-sub">Live watchdog status from core/health_manager.py — component heartbeats, resource-pressure level, and auto-recovery state. Written once per check cycle by the main engine process; this page reads that snapshot, it isn\'t computing anything itself.</div></div>';
+
+  if (state.healthLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not load health status: '+esc(state.healthLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadHealth()">Retry</button></div></div>';
+  }
+  if (state.healthLoading && !state.healthLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Loading health status…</div></div>';
+  }
+
+  var d = state.healthData || {};
+  var snap = d.snapshot || {};
+  var heartbeats = d.component_heartbeats || {};
+  var jobs = d.job_health || {};
+  var feeds = d.feed_health || {};
+  var hasSnapshot = snap && snap.written_at != null;
+
+  var summaryPanel;
+  if (!hasSnapshot) {
+    summaryPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-body"><div class="empty-state">'
+      + (d.health_manager_enabled ? 'No snapshot yet — the health manager writes one per check cycle, first one lands shortly after the engine boots.' : 'health_manager_enabled is false — the whole subsystem is off.')
+      + '</div></div></div>';
+  } else {
+    var snapAgeSec = (Date.now()/1000) - snap.written_at;
+    var staleWarning = snapAgeSec > 120
+      ? '<div style="color:'+sevColor('CRITICAL')+';font-size:12px;margin-top:8px;">⚠️ Snapshot is '+agoText(snap.written_at)+' old (expected every ~15-30s) — the health manager thread may have stopped.</div>'
+      : '';
+    summaryPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Resource pressure</div></div>'
+      + '<div class="panel-body">'
+      + '<div class="kv-row"><div class="kv-key">level</div><div class="kv-val">'+healthPill(snap.pressure_level)+'</div></div>'
+      + '<div class="kv-row"><div class="kv-key">main process RSS</div><div class="kv-val cell-mono">'+(snap.rss_mb!=null ? snap.rss_mb.toFixed(0)+' MB' : '—')+'</div></div>'
+      + '<div class="kv-row"><div class="kv-key">auto-recovery</div><div class="kv-val">'+(snap.auto_recovery_enabled ? '<span class="tag">enabled</span>' : '<span class="tag">alert-only</span>')+'</div></div>'
+      + '<div class="kv-row"><div class="kv-key">snapshot age</div><div class="kv-val cell-mono">'+agoText(snap.written_at)+'</div></div>'
+      + staleWarning
+      + '</div></div>';
+  }
+
+  var compEntries = snap.components || {};
+  var compNames = Object.keys(compEntries);
+  compNames.sort(function(a, b){
+    var ia = COMPONENT_ORDER.indexOf(a), ib = COMPONENT_ORDER.indexOf(b);
+    if (ia === -1) ia = 999; if (ib === -1) ib = 999;
+    if (ia !== ib) return ia - ib;
+    return a < b ? -1 : (a > b ? 1 : 0);
+  });
+  var compRows = compNames.length
+    ? compNames.map(function(name){
+        var c = compEntries[name];
+        var hb = heartbeats[name]; // extra fields (pid) for api_subprocess/scheduler_subprocess, if present
+        var extra = hb && hb.pid ? ' <span style="color:var(--text-faint);font-size:11px;">pid '+esc(String(hb.pid))+'</span>' : '';
+        return '<tr><td><div class="cell-title">'+esc(componentLabel(name))+extra+'</div><div class="cell-mono" style="font-size:11px;">'+esc(name)+'</div></td>'
+          + '<td>'+healthPill(c.state)+'</td>'
+          + '<td style="font-size:11.5px;color:var(--text-dim);">'+esc(c.detail||'')+'</td>'
+          + '<td class="cell-mono">'+(c.recovery_attempts||0)+'</td>'
+          + '<td class="cell-mono">'+agoText(c.last_updated)+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">No components tracked yet.</div></td></tr>';
+
+  var jobNames = Object.keys(jobs).sort();
+  var jobRows = jobNames.length
+    ? jobNames.map(function(name){
+        var j = jobs[name];
+        return '<tr><td class="cell-mono">'+esc(name)+'</td><td class="cell-mono">'+agoText(j.last_success)+'</td>'
+          + '<td class="cell-mono">'+(j.duration_seconds!=null ? j.duration_seconds.toFixed(1)+'s' : '—')+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="3"><div class="empty-state">No scheduled-job telemetry yet.</div></td></tr>';
+
+  var feedNames = Object.keys(feeds).sort();
+  var feedRows = feedNames.length
+    ? feedNames.map(function(name){
+        var f = feeds[name];
+        var failures = f.consecutive_failures || 0;
+        var state_ = failures === 0 ? 'healthy' : (f.category === 'auth_expired' ? 'unhealthy' : 'degraded');
+        return '<tr><td class="cell-mono">'+esc(name)+'</td><td>'+healthPill(state_)+'</td>'
+          + '<td class="cell-mono">'+failures+'</td>'
+          + '<td style="font-size:11.5px;color:var(--text-dim);">'+esc(f.last_error||'')+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="4"><div class="empty-state">No threat-intel feed telemetry yet.</div></td></tr>';
+
+  return topbarHead + '<div class="content">'
+    + summaryPanel
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Components</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Component</th><th>State</th><th>Detail</th><th>Recovery attempts</th><th>Updated</th></tr></thead><tbody>'+compRows+'</tbody></table></div></div>'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Scheduled jobs</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Job</th><th>Last success</th><th>Duration</th></tr></thead><tbody>'+jobRows+'</tbody></table></div></div>'
+    + '<div class="panel"><div class="panel-header"><div class="panel-title">Threat-intel feeds</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Feed</th><th>State</th><th>Consecutive failures</th><th>Last error</th></tr></thead><tbody>'+feedRows+'</tbody></table></div></div>'
+    + '</div>';
+}
+
 function renderGraphView(){
   var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
 
@@ -1327,6 +1464,7 @@ function renderApp(){
   else if (state.activeView==='graph') view = renderGraphView();
   else if (state.activeView==='blocking') view = renderBlockingView();
   else if (state.activeView==='suricata') view = renderSuricataView();
+  else if (state.activeView==='health') view = renderHealthView();
   else view = renderConfigView();
   return renderSidebar() + '<div class="main-panel">'+view+'</div>' + renderToasts();
 }
@@ -1360,6 +1498,7 @@ var app = {
     if (v === 'blocking' && !state.blockingLoading) loadBlockingState();
     if (v === 'blocking' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
     if (v === 'suricata' && !state.suricataLoading && !state.suricataLoaded) loadSuricata();
+    if (v === 'health' && !state.healthLoading) loadHealth();
   },
   selectDevice: function(id){
     state.activeView='deviceDetail'; state.selectedDeviceId=id;
@@ -1606,6 +1745,7 @@ var app = {
 
   /* ---- Suricata view ---- */
   reloadSuricata: function(){ loadSuricata(); },
+  reloadHealth: function(){ loadHealth(); },
 
   /* ---- Evidence Graph: pan/zoom/drag/group-select ---- */
   graphZoomBy: function(factor){
