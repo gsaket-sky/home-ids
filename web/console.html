@@ -584,6 +584,20 @@ function fmtTime(ts){
   return d.toISOString().slice(0,19).replace('T',' ');
 }
 
+// The console has no auto-refresh anywhere (deliberately -- continuous
+// background polling on every tab would mean constant HTTP traffic against a
+// Pi-target box this whole project is trying to keep lightweight). Every view
+// already has its own reloadX() (previously reachable only via the "Retry"
+// button on an ERROR state) -- this makes that same reload reachable at any
+// time via one consistent topbar button, not just after a failure.
+function topbarRefreshBtn(reloadFn, loading){
+  return '<button class="icon-btn" title="Refresh" onclick="app.'+reloadFn+'()"'+(loading?' disabled':'')+' style="flex:0 0 auto;">'+(loading?'⏳':'⟲')+'</button>';
+}
+function topbarWithRefresh(title, sub, reloadFn, loading){
+  return '<div class="topbar"><div class="topbar-row"><div><div class="view-title">'+title+'</div><div class="view-sub">'+sub+'</div></div>'
+    + topbarRefreshBtn(reloadFn, loading) + '</div></div>';
+}
+
 /* ============================= generic table sorting (every table, every column) ============================= */
 
 function sortRows(rows, sort, getters){
@@ -613,8 +627,10 @@ function sortableTh(table, field, label, extraAttrs){
 function renderDevicesView(){
   var topbarHead = '<div class="topbar"><div class="topbar-row">'
     + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the v13 evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
+    + '<div style="display:flex;align-items:center;gap:8px;">'
     + '<div class="search-wrap">'+ICONS.search+'<input id="deviceSearchInput" class="input search-input" placeholder="Search hostname, IP, MAC…" value="'+esc(state.deviceSearch)+'" oninput="app.onDeviceSearch(this.value)"></div>'
-    + '</div></div>';
+    + topbarRefreshBtn('reloadDevices', state.devicesLoading)
+    + '</div></div></div>';
 
   if (state.devicesLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not reach the devices API: '+esc(state.devicesLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadDevices()">Retry</button></div></div>';
@@ -875,7 +891,7 @@ function renderHuntView(){
 }
 
 function renderBlockingView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Blocking</div><div class="view-sub">Everything currently contained by this engine — Fritz!Box WAN isolation, Layer-2 tarpit, and Pi-hole domain blocks — with manual release/unblock, plus a form to block a domain by hand.</div></div>';
+  var topbarHead = topbarWithRefresh('Blocking', 'Everything currently contained by this engine — Fritz!Box WAN isolation, Layer-2 tarpit, and Pi-hole domain blocks — with manual release/unblock, plus a form to block a domain by hand.', 'reloadBlocking', state.blockingLoading);
 
   if (state.blockingLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load blocking state: '+esc(state.blockingLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadBlocking()">Retry</button></div></div>';
@@ -937,7 +953,7 @@ function renderBlockingView(){
 }
 
 function renderSuricataView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Suricata</div><div class="view-sub">Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the v13 evidence graph yet — see Documentation/CONSOLE_DATA_API.md).</div></div>';
+  var topbarHead = topbarWithRefresh('Suricata', 'Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the v13 evidence graph yet — see Documentation/CONSOLE_DATA_API.md).', 'reloadSuricata', state.suricataLoading);
 
   if (state.suricataLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load Suricata detections: '+esc(state.suricataLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadSuricata()">Retry</button></div></div>';
@@ -1011,7 +1027,7 @@ function alertVolumeBarChart(byDay){
 }
 
 function renderOverviewView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Overview</div><div class="view-sub">At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics, threat-landscape/geo, and autotune history stay Grafana-only; see Documentation for why).</div></div>';
+  var topbarHead = topbarWithRefresh('Overview', 'At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics, threat-landscape/geo, and autotune history stay Grafana-only; see Documentation for why).', 'reloadOverview', state.overviewLoading);
 
   if (state.overviewLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load overview: '+esc(state.overviewLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadOverview()">Retry</button></div></div>';
@@ -1094,7 +1110,7 @@ function componentLabel(name){
 }
 
 function renderHealthView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Health</div><div class="view-sub">Live watchdog status from core/health_manager.py — component heartbeats, resource-pressure level, and auto-recovery state. Written once per check cycle by the main engine process; this page reads that snapshot, it isn\'t computing anything itself.</div></div>';
+  var topbarHead = topbarWithRefresh('Health', 'Live watchdog status from core/health_manager.py — component heartbeats, resource-pressure level, and auto-recovery state. Written once per check cycle by the main engine process; this page reads that snapshot, it isn\'t computing anything itself.', 'reloadHealth', state.healthLoading);
 
   if (state.healthLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load health status: '+esc(state.healthLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadHealth()">Retry</button></div></div>';
@@ -1184,7 +1200,7 @@ function renderHealthView(){
 }
 
 function renderGraphView(){
-  var topbarHead = '<div class="topbar"><div class="view-title">Evidence graph</div><div class="view-sub">Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background to pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).</div></div>';
+  var topbarHead = topbarWithRefresh('Evidence graph', 'Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background (or press Esc) to deselect/pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).', 'reloadGraph', state.graphLoading);
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -1261,7 +1277,10 @@ function renderGraphView(){
                 ['evidence shown', n.evidence_truncated ? ('capped — showing recent subset of ' + n.evidence_total) : (n.evidence_total || 0)]];
     }
     var kvRows = fields.map(function(f){ return '<div class="kv-row"><div class="kv-key">'+f[0]+'</div><div class="kv-val cell-mono">'+esc(String(f[1]))+'</div></div>'; }).join('');
-    drawer = '<div style="font-size:10.5px;color:var(--text-faint);margin-bottom:2px;">'+n.kind.toUpperCase()+'</div><div style="font-size:14px;font-weight:600;margin-bottom:12px;">'+esc(n.type_label || n.label)+'</div>'+kvRows;
+    drawer = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">'
+      + '<div><div style="font-size:10.5px;color:var(--text-faint);margin-bottom:2px;">'+n.kind.toUpperCase()+'</div><div style="font-size:14px;font-weight:600;">'+esc(n.type_label || n.label)+'</div></div>'
+      + '<button class="icon-btn" title="Close" onclick="app.deselectGraphNode()" style="flex:0 0 auto;">'+ICONS.close+'</button>'
+      + '</div><div style="margin-bottom:12px;"></div>'+kvRows;
   } else {
     drawer = '<div class="empty-state">Click a node to inspect its fields.</div>';
   }
@@ -1428,9 +1447,20 @@ function attachGraphInteraction(){
       canvas.addEventListener('pointermove', onMove3);
       canvas.addEventListener('pointerup', onUp3);
     } else {
+      // BUGFIX (found live: "once a node is selected there's no way to go
+      // back to unselected view"): state.graphSelected was only ever SET
+      // (selectGraphNode(), on a plain node click) -- nothing anywhere ever
+      // set it back to null, including navigating away and back (the graph
+      // view doesn't reload once loaded) or the "Clear" button (which only
+      // clears the SEPARATE multi-select group, graphMultiSelected). A plain
+      // click on empty background -- not a drag, mirroring the exact
+      // `moved` tracking the node-drag branch above already uses to
+      // distinguish "clicked" from "dragged" -- now deselects.
       canvas.classList.add('panning');
       var panX0 = state.graphPan.x, panY0 = state.graphPan.y;
+      var movedBg = false;
       var onMove2 = function(ev){
+        if (Math.abs(ev.clientX - startX) > 2 || Math.abs(ev.clientY - startY) > 2) movedBg = true;
         state.graphPan.x = panX0 + (ev.clientX - startX);
         state.graphPan.y = panY0 + (ev.clientY - startY);
         _updateGraphTransform();
@@ -1439,6 +1469,7 @@ function attachGraphInteraction(){
         canvas.removeEventListener('pointermove', onMove2);
         canvas.removeEventListener('pointerup', onUp2);
         canvas.classList.remove('panning');
+        if (!movedBg && state.graphSelected) { state.graphSelected = null; render(); }
       };
       canvas.addEventListener('pointermove', onMove2);
       canvas.addEventListener('pointerup', onUp2);
@@ -1656,6 +1687,7 @@ var app = {
   onHuntSinceDays: function(v){ state.huntSinceDays=v; render(); },
 
   selectGraphNode: function(id){ state.graphSelected=id; render(); },
+  deselectGraphNode: function(){ state.graphSelected=null; render(); },
   toggleGraphKind: function(k){ state.graphShow[k]=!state.graphShow[k]; render(); },
 
   changeToken: function(){
@@ -1881,6 +1913,12 @@ var app = {
   graphFitToView: function(){ state.graphFitPending = true; render(); },
   graphClearSelection: function(){ state.graphMultiSelected = {}; render(); },
 };
+
+document.addEventListener('keydown', function(e){
+  if (e.key === 'Escape' && state.activeView === 'graph' && state.graphSelected) {
+    app.deselectGraphNode();
+  }
+});
 
 render();
 if (state.activeView === 'config') loadConfig();
