@@ -106,6 +106,31 @@ def write_component_heartbeat(state_dir, component: str, extra: Optional[dict] =
         pass  # best-effort -- a missed heartbeat write just reads as stale next cycle, not fatal.
 
 
+def reset_component_heartbeats(state_dir) -> None:
+    """BUGFIX (found live, 2026-09-14, immediately after the Health console tab
+    deploy): component_heartbeat.json persists across process restarts (it's
+    just a file, nothing clears it). On every soc.service restart, HealthManager's
+    very first check cycle runs essentially immediately -- long before the
+    freshly-spawned api_subprocess/scheduler_subprocess have had their own ~10s
+    to write a first heartbeat -- and it would read whatever STALE entry
+    survived from the PREVIOUS process's life instead. Confirmed live: this
+    read as "946s stale" on a subprocess that had, in reality, been running
+    and healthy for under a minute, correctly triggering a RECOVERY_ATTEMPT
+    that bounced an already-fine subprocess on every single restart -- the
+    exact "unnecessary restart churn" this subsystem's own design doc
+    (My_way_forward.txt) explicitly warned against. Called once at the very
+    top of main(), before either subprocess is spawned, so this boot starts
+    with a clean slate -- HeartbeatRegistry-style "never beaten yet" is
+    already a safe no-op (see health_manager.py's _evaluate_heartbeat_component),
+    it's specifically a STALE-but-present entry that was the problem."""
+    path = Path(state_dir) / COMPONENT_HEARTBEAT_FILENAME
+    try:
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
+
+
 def read_component_heartbeats(state_dir) -> Dict[str, Dict[str, Any]]:
     path = Path(state_dir) / COMPONENT_HEARTBEAT_FILENAME
     if not path.exists():

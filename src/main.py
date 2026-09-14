@@ -40,6 +40,7 @@ from core.state_guard import StateManager
 from core.pipeline import EnginePipeline
 from core import subprocess_launchers
 from core.health_manager import HealthManager
+from core.heartbeat import reset_component_heartbeats
 from extractors.dns_features import PiHoleCollector
 from intelligence.threat_intel import ThreatIntel
 from intelligence.geoip import GeoIPEngine
@@ -86,6 +87,13 @@ def main():
     scheduler_proc = None
     setup_logging()
     LOGGER.info("🚀 Booting Home IDS Network Detection & Response Platform...")
+
+    # BUGFIX (health manager): component_heartbeat.json persists across restarts
+    # -- reset it before either subprocess is spawned below, so a fresh boot's
+    # health manager doesn't read a STALE pre-restart heartbeat and needlessly
+    # bounce an already-healthy subprocess. See core/heartbeat.py's own
+    # reset_component_heartbeats() docstring for the live incident this fixes.
+    reset_component_heartbeats(Path(CONFIG.get("state_path", "state/ids_state.json")).parent)
 
     # =====================================================================
     # 0. INITIALIZE UNIFIED STATE MANAGER (CRITICAL FIX FOR RACE CONDITIONS)

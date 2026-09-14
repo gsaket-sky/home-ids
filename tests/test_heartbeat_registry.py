@@ -19,6 +19,7 @@ from core.heartbeat import (  # noqa: E402
     HeartbeatRegistry,
     write_component_heartbeat,
     read_component_heartbeats,
+    reset_component_heartbeats,
 )
 
 
@@ -110,6 +111,26 @@ def test_read_component_heartbeats_corrupt_file_returns_empty(tmp_path):
     path = tmp_path / "component_heartbeat.json"
     path.write_text("{not valid json", encoding="utf-8")
     assert read_component_heartbeats(tmp_path) == {}
+
+
+# --- BUGFIX regression: stale cross-process heartbeats must not survive a restart
+# Found live, 2026-09-14, immediately after the console Health tab deploy: a
+# perfectly healthy, freshly-restarted api_subprocess was reported "946s stale"
+# because component_heartbeat.json persisted the PREVIOUS process's entry,
+# triggering a needless recovery-attempt bounce on every single soc.service
+# restart. reset_component_heartbeats() is called once at the top of main(),
+# before either subprocess is spawned.
+
+def test_reset_component_heartbeats_clears_stale_entries(tmp_path):
+    write_component_heartbeat(tmp_path, "api_subprocess", extra={"pid": 111})
+    assert read_component_heartbeats(tmp_path) != {}
+    reset_component_heartbeats(tmp_path)
+    assert read_component_heartbeats(tmp_path) == {}
+
+
+def test_reset_component_heartbeats_on_missing_file_does_not_raise(tmp_path):
+    reset_component_heartbeats(tmp_path / "does_not_exist_yet")  # must not raise
+    reset_component_heartbeats(tmp_path)  # file never existed here either -- also fine
 
 
 if __name__ == "__main__":
