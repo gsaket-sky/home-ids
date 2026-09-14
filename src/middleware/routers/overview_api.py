@@ -72,14 +72,32 @@ _ALERT_VOLUME_MAX_SCAN_BYTES = 40 * 1024 * 1024
 _ALERT_VOLUME_MAX_DAYS = 14
 
 
-def _scrape_counters() -> Dict[str, float]:
+def _scrape_counters() -> "tuple[Dict[str, float], bool]":
+    """Returns (totals, scrape_ok). scrape_ok is True whenever the HTTP GET
+    and parsing both succeeded -- deliberately NOT the same thing as "totals
+    is non-empty".
+
+    BUGFIX (found live, 2026-09-14, right after the fp_verdict fix's own
+    deploy): every metric this function reads (pihole_blocks/
+    router_isolations/tarpit_activations/ips_errors/domains_immunized/
+    sigma_shifts) is a LABELED prometheus_client Counter (e.g. Counter(...,
+    ["device", "hostname"])). A labeled counter with no observations yet
+    exports ZERO sample lines at all -- not even a 0 -- until its first
+    .labels(...).inc() call (confirmed: reproduced `_scrape_counters()`
+    returning {} on .94 shortly after a restart, then proved BOTH the raw
+    HTTP GET and the parsing succeed fine in isolation against the exact
+    same real 359KB response -- the function's old bool(totals) return was
+    conflating "the scrape genuinely failed" with "nothing in this specific
+    set of six rare-ish events has happened yet," which right after a
+    restart is the common case, not a fault. The console's "could not reach
+    the metrics endpoint" warning was firing for a false reason."""
     port = int(CONFIG.get("metrics_port", 9105))
     try:
         resp = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=3)
         resp.raise_for_status()
     except Exception as exc:
         LOGGER.debug("Failed to scrape local /metrics: %s", exc)
-        return {}
+        return {}, False
     totals: Dict[str, float] = {}
     try:
         for family in text_string_to_metric_families(resp.text):
@@ -101,8 +119,8 @@ def _scrape_counters() -> Dict[str, float]:
                 totals[sample.name] = totals.get(sample.name, 0.0) + sample.value
     except Exception as exc:
         LOGGER.debug("Failed to parse /metrics response: %s", exc)
-        return {}
-    return totals
+        return {}, False
+    return totals, True
 
 
 def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
@@ -192,7 +210,7 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
 
 @router.get("/api/overview/summary")
 def get_overview_summary(token: str = Depends(verify_token)) -> dict:
-    counters_raw = _scrape_counters()
+    counters_raw, scrape_ok = _scrape_counters()
     security = {label: counters_raw.get(metric, 0.0) for metric, label in _SECURITY_COUNTER_NAMES.items()}
     self_healing = {label: counters_raw.get(metric, 0.0) for metric, label in _SELF_HEALING_COUNTER_NAMES.items()}
 
@@ -208,7 +226,7 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
     self_healing["fp_confirmed_threats"] = stats["fp_confirmed_threats"]
 
     return {
-        "counters_available": bool(counters_raw),
+        "counters_available": scrape_ok,
         "counters_since": (
             "pihole_blocks/router_isolations/tarpit_activations/ips_errors/domains_immunized/"
             "sigma_shifts are since last engine restart (in-process counters, not a database "

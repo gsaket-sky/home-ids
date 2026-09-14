@@ -150,7 +150,8 @@ def test_scrape_counters_sums_across_label_combinations(monkeypatch):
     monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
         text=_SAMPLE_METRICS_TEXT, raise_for_status=lambda: None,
     ))
-    result = overview_api._scrape_counters()
+    result, scrape_ok = overview_api._scrape_counters()
+    assert scrape_ok is True
     assert result["home_ids_ips_pihole_blocks_total"] == 15.0  # 12 + 3, summed across devices
     assert result["home_ids_fp_domains_immunized_total"] == 45.0
 
@@ -162,25 +163,41 @@ def test_scrape_counters_ignores_metrics_not_in_our_list(monkeypatch):
     monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
         text=_SAMPLE_METRICS_TEXT, raise_for_status=lambda: None,
     ))
-    result = overview_api._scrape_counters()
+    result, _ = overview_api._scrape_counters()
     assert "home_ids_unrelated_metric" not in result
     assert "home_ids_alerts_total" not in result
 
 
-def test_scrape_counters_connection_failure_returns_empty(monkeypatch):
+def test_scrape_counters_connection_failure_returns_empty_and_not_ok(monkeypatch):
     def _raise(*a, **kw):
         raise ConnectionError("nope")
     monkeypatch.setattr(overview_api.requests, "get", _raise)
-    assert overview_api._scrape_counters() == {}
+    assert overview_api._scrape_counters() == ({}, False)
 
 
-def test_scrape_counters_http_error_status_returns_empty(monkeypatch):
+def test_scrape_counters_http_error_status_returns_empty_and_not_ok(monkeypatch):
     def _bad_status():
         raise Exception("500")
     monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
         text="", raise_for_status=_bad_status,
     ))
-    assert overview_api._scrape_counters() == {}
+    assert overview_api._scrape_counters() == ({}, False)
+
+
+def test_scrape_counters_succeeds_but_finds_nothing_is_still_ok(monkeypatch):
+    """BUGFIX regression (found live, 2026-09-14, right after the fp_verdict
+    fix's own deploy): every scraped metric is a LABELED counter -- one with
+    no observations yet exports ZERO sample lines at all, not even a 0. This
+    is the common case right after a restart (no pihole blocks/router
+    isolations/etc. have happened yet), not a scrape failure -- must report
+    scrape_ok=True with empty totals, not conflate the two."""
+    monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
+        text="# a real response with none of our metric names present\n",
+        raise_for_status=lambda: None,
+    ))
+    result, scrape_ok = overview_api._scrape_counters()
+    assert result == {}
+    assert scrape_ok is True
 
 
 # --- get_overview_summary (end to end) ------------------------------------------
