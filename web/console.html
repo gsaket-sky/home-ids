@@ -975,10 +975,11 @@ function renderSuricataView(){
 
 /* ============================= overview (security summary) view ============================= */
 
-function statTile(label, value){
+function statTile(label, value, sinceRestart){
   return '<div style="background:var(--bg-panel);border:1px solid var(--border-soft);border-radius:6px;padding:12px 14px;">'
     + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">'+esc(label)+'</div>'
     + '<div class="cell-mono" style="font-size:20px;font-weight:600;color:var(--text);">'+esc(String(value))+'</div>'
+    + (sinceRestart ? '<div style="font-size:9.5px;color:var(--text-faint);margin-top:2px;">since restart</div>' : '')
     + '</div>';
 }
 function statGrid(tiles){
@@ -1022,20 +1023,22 @@ function renderOverviewView(){
   var d = state.overviewData || {};
   var sec = d.security || {};
   var heal = d.self_healing || {};
-  var counterNote = d.counters_available
-    ? '<div style="font-size:11px;color:var(--text-faint);margin-top:8px;">Counters are '+esc(d.counters_since||'since last restart')+' — not an all-time total.</div>'
-    : '<div style="font-size:11px;color:'+sevColor('SUSPICIOUS')+';margin-top:8px;">⚠️ Could not reach the local metrics endpoint — counters below are showing as 0, not actually zero.</div>';
+  var scrapeWarning = d.counters_available
+    ? ''
+    : '<div style="font-size:11px;color:'+sevColor('SUSPICIOUS')+';margin-top:8px;">⚠️ Could not reach the local metrics endpoint — the "since restart" tiles below are showing as 0, not actually zero.</div>';
+  var restartNote = '<div style="font-size:10.5px;color:var(--text-faint);margin-top:8px;">Tiles marked "since restart" reset on every engine restart, not a lifetime total. Alerts triaged / evaluations / suppressed / confirmed threats come from the alert log instead and don\'t reset.</div>';
 
   var securityPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Security posture</div></div>'
     + '<div class="panel-body">'
     + statGrid([
         statTile('Alerts triaged', fmtCount(sec.alerts_triaged)),
-        statTile('Pi-hole blocks', fmtCount(sec.pihole_blocks)),
-        statTile('Router isolations', fmtCount(sec.router_isolations)),
-        statTile('Tarpit activations', fmtCount(sec.tarpit_activations)),
-        statTile('IPS errors', fmtCount(sec.ips_errors)),
+        statTile('Pi-hole blocks', fmtCount(sec.pihole_blocks), true),
+        statTile('Router isolations', fmtCount(sec.router_isolations), true),
+        statTile('Tarpit activations', fmtCount(sec.tarpit_activations), true),
+        statTile('IPS errors', fmtCount(sec.ips_errors), true),
       ])
-    + counterNote
+    + scrapeWarning
+    + restartNote
     + '</div></div>';
 
   var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-healing (autonomous FP engine)</div></div>'
@@ -1044,8 +1047,8 @@ function renderOverviewView(){
         statTile('Evaluations', fmtCount(heal.fp_evaluations)),
         statTile('Suppressed (FP)', fmtCount(heal.fp_suppressed)),
         statTile('Confirmed threats', fmtCount(heal.fp_confirmed_threats)),
-        statTile('Domains immunized', fmtCount(heal.domains_immunized)),
-        statTile('Sensitivity adjustments', fmtCount(heal.sigma_shifts)),
+        statTile('Domains immunized', fmtCount(heal.domains_immunized), true),
+        statTile('Sensitivity adjustments', fmtCount(heal.sigma_shifts), true),
       ])
     + '</div></div>';
 

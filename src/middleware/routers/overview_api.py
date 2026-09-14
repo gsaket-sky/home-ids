@@ -6,22 +6,26 @@ per-device forensics, threat-landscape/geo, and autotune-history -- genuinely
 valuable for the operator/tuner, but too heavy a dependency (Prometheus +
 Loki + Promtail + Grafana, ~460MB RAM / ~1.9GB disk measured live on .94) to
 require for a consumer product. This endpoint pulls the small, highest-signal
-subset into the console instead: cumulative security/self-healing counters
-and a short alert-volume trend. It is NOT trying to replace the Grafana
-dashboards' depth (per-device DNS z-scores, autotune threshold history, geo
-maps, CL-AFPE funnel stay Grafana-only) -- just cover "is my network okay"
-without requiring the observability stack at all.
+subset into the console instead: security/self-healing counters and a short
+alert-volume trend. It is NOT trying to replace the Grafana dashboards' depth
+(per-device DNS z-scores, autotune threshold history, geo maps, CL-AFPE funnel
+stay Grafana-only) -- just cover "is my network okay" without requiring the
+observability stack at all.
 
-Two data sources, both already running, zero new services:
-1. A local self-scrape of this box's own /metrics endpoint
-   (prometheus_client's start_http_server(), unconditionally started in
-   core/pipeline.py's run() regardless of whether a Prometheus SERVICE is
-   installed). These are in-process Counter objects -- they reset to 0 on
-   every engine restart, so this is explicitly NOT a lifetime/all-time total;
-   labeled as such in the response rather than overclaiming.
+Two data sources:
+1. A local self-scrape of this box's own /metrics endpoint (prometheus_client's
+   start_http_server(), unconditionally started in core/pipeline.py's run()
+   regardless of whether a Prometheus SERVICE is installed). Still used for
+   pihole_blocks/router_isolations/tarpit_activations/ips_errors/
+   domains_immunized/sigma_shifts -- in-process Counter objects, reset to 0 on
+   every engine restart, labeled as such rather than overclaiming a lifetime
+   total.
 2. state/alerts.json, the same 170MB+ append-only NDJSON log suricata_api.py
-   already reads -- via the SAME bounded backward-scan helper
-   (_alert_log_utils.iter_lines_reverse()), never a full-file read.
+   already reads, via the SAME bounded backward-scan helper
+   (_alert_log_utils.iter_lines_reverse()), never a full-file read. Used for
+   BOTH the alert-volume trend AND alerts_triaged/fp_evaluations/fp_suppressed/
+   fp_confirmed_threats -- see _alert_stats()'s own docstring for why these
+   moved off Prometheus entirely.
 """
 import json
 import logging
@@ -39,17 +43,22 @@ from middleware.routers._alert_log_utils import iter_lines_reverse
 LOGGER = logging.getLogger("home_ids.overview_api")
 router = APIRouter()
 
+# home_ids_alerts_total/fp_evaluations_total/fp_suppressed_total/
+# fp_confirmed_threats_total deliberately NOT scraped from here anymore -- see
+# _alert_stats()'s docstring. Only counters unaffected by the v1/v13 CL-AFPE
+# split are scraped: IPS actions happen downstream of whichever engine chose
+# the verdict, and domains_immunized/sigma_shifts fire from
+# AutonomousFPEngine's mark_false_positive()/_apply_sigma_shift(), which v13's
+# ClAfpeEngine.evaluate() still calls directly (confirmed against
+# v13/cl_afpe/engine.py's own module docstring) even though it bypasses
+# AutonomousFPEngine.evaluate() itself.
 _SECURITY_COUNTER_NAMES = {
-    "home_ids_alerts_total": "alerts_triaged",
     "home_ids_ips_pihole_blocks_total": "pihole_blocks",
     "home_ids_ips_router_isolations_total": "router_isolations",
     "home_ids_ips_tarpit_activations_total": "tarpit_activations",
     "home_ids_ips_errors_total": "ips_errors",
 }
 _SELF_HEALING_COUNTER_NAMES = {
-    "home_ids_fp_evaluations_total": "fp_evaluations",
-    "home_ids_fp_suppressed_total": "fp_suppressed",
-    "home_ids_fp_confirmed_threats_total": "fp_confirmed_threats",
     "home_ids_fp_domains_immunized_total": "domains_immunized",
     "home_ids_fp_sigma_shifts_total": "sigma_shifts",
 }
@@ -96,10 +105,45 @@ def _scrape_counters() -> Dict[str, float]:
     return totals
 
 
-def _alert_volume_by_day(alerts_path: Path) -> Dict[str, Any]:
+def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
+    """Single bounded backward-scan over alerts.json computing the
+    alert-volume-by-day trend AND real FP-engine verdict tallies together
+    (one read of each line, not two separate scans).
+
+    BUGFIX (found live, 2026-09-14, user report: "1149 alerts today but zero
+    evaluation/suppressed/confirmed-threat counters, and no Telegram alerts"):
+    those counters used to come from Prometheus's home_ids_alerts_total/
+    fp_evaluations_total/fp_suppressed_total/fp_confirmed_threats_total.
+    home_ids_alerts_total is fine on its own, but it was being compared
+    against the OTHER three, which only ever increment inside the LEGACY
+    AutonomousFPEngine.evaluate() (src/intelligence/fp_engine.py) -- and
+    .94's live config has `cl_afpe_engine: v13` set, which routes every real
+    verdict through v13_live_engine.evaluate_cl_afpe_live() ->
+    ClAfpeEngine.evaluate() instead, a completely separate code path with NO
+    Prometheus instrumentation of its own (confirmed: zero Counter/inc() calls
+    anywhere in src/v13/cl_afpe/engine.py). AutonomousFPEngine.evaluate() is
+    only reached as an error-path fallback on that route -- confirmed live: 8
+    real alerts triaged in a 5-minute window, 0 recorded FP evaluations, not
+    because nothing happened but because that counter structurally cannot
+    increment under this deployment's actual configuration.
+
+    The fix isn't new instrumentation -- pipeline.py already writes the REAL
+    verdict (whichever engine produced it, v1 or v13, unconditionally) onto
+    every alert record as alert_payload["fp_verdict"]["verdict"] before it's
+    appended to alerts.json. Reading that back here is accurate regardless of
+    which engine is active, and as a side effect is NOT reset by a restart
+    the way the Prometheus counters were -- also fixing the separate
+    "still inconsistent" complaint (alerts_triaged, previously Prometheus-
+    since-restart, and the volume trend, always file-based-today, could
+    disagree after any recent deploy restart; both now come from this same
+    scan of the same file, so they can't disagree with each other again)."""
+    empty = {"by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0}
     if not alerts_path.exists():
-        return {"by_day": {}, "note": f"No alert log found at {alerts_path}."}
+        return dict(empty, note=f"No alert log found at {alerts_path}.")
     by_day: Dict[str, int] = {}
+    fp_evaluations = 0
+    fp_suppressed = 0
+    fp_confirmed_threats = 0
     scanned_lines = 0
     try:
         for line in iter_lines_reverse(alerts_path, _ALERT_VOLUME_MAX_SCAN_BYTES):
@@ -108,24 +152,40 @@ def _alert_volume_by_day(alerts_path: Path) -> Dict[str, Any]:
                 rec = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
-            ts = rec.get("timestamp") if isinstance(rec, dict) else None
-            if ts is None:
+            if not isinstance(rec, dict):
                 continue
-            day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
-            by_day[day] = by_day.get(day, 0) + 1
+
+            ts = rec.get("timestamp")
+            if ts is not None:
+                day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                by_day[day] = by_day.get(day, 0) + 1
+
+            verdict = (rec.get("fp_verdict") or {}).get("verdict")
+            if verdict is not None:
+                fp_evaluations += 1
+                if verdict == "FALSE_POSITIVE":
+                    fp_suppressed += 1
+                elif verdict == "CONFIRMED_THREAT":
+                    fp_confirmed_threats += 1
+
             if len(by_day) > _ALERT_VOLUME_MAX_DAYS:
                 break
     except Exception as exc:
         LOGGER.error("Failed reading %s: %s", alerts_path, exc)
-        return {"by_day": {}, "note": f"Failed reading the alert log: {exc}"}
+        return dict(empty, note=f"Failed reading the alert log: {exc}")
     return {
         "by_day": by_day,
+        "fp_evaluations": fp_evaluations,
+        "fp_suppressed": fp_suppressed,
+        "fp_confirmed_threats": fp_confirmed_threats,
         "scanned_lines": scanned_lines,
         "note": (
             f"Computed from the most recent ~{_ALERT_VOLUME_MAX_SCAN_BYTES // (1024 * 1024)}MB "
             f"of the alert log (a bounded tail-scan, not a full read of what can be a "
             f"100MB+ file on a real deployment) -- may cover fewer days than requested on "
-            f"a high-alert-volume network."
+            f"a high-alert-volume network. fp_evaluations may be lower than the alert "
+            f"count for the same reason, or if an older alert predates fp_verdict being "
+            f"recorded at all."
         ),
     }
 
@@ -137,13 +197,27 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
     self_healing = {label: counters_raw.get(metric, 0.0) for metric, label in _SELF_HEALING_COUNTER_NAMES.items()}
 
     alerts_path = Path(CONFIG.get("alert_json_path", "state/alerts.json"))
-    volume = _alert_volume_by_day(alerts_path)
+    stats = _alert_stats(alerts_path)
+
+    # alerts_triaged lives in `security` alongside the Prometheus-sourced
+    # counters for display purposes, but comes from the SAME alert-log scan as
+    # alert_volume_by_day below -- see _alert_stats()'s own docstring for why.
+    security["alerts_triaged"] = sum(stats["by_day"].values())
+    self_healing["fp_evaluations"] = stats["fp_evaluations"]
+    self_healing["fp_suppressed"] = stats["fp_suppressed"]
+    self_healing["fp_confirmed_threats"] = stats["fp_confirmed_threats"]
 
     return {
         "counters_available": bool(counters_raw),
-        "counters_since": "last engine restart (in-process counters, not a database -- not a lifetime total)",
+        "counters_since": (
+            "pihole_blocks/router_isolations/tarpit_activations/ips_errors/domains_immunized/"
+            "sigma_shifts are since last engine restart (in-process counters, not a database "
+            "-- not a lifetime total). alerts_triaged/fp_evaluations/fp_suppressed/"
+            "fp_confirmed_threats are computed from the alert log instead (same scanned "
+            "window as the trend below) and are NOT reset by a restart."
+        ),
         "security": security,
         "self_healing": self_healing,
-        "alert_volume_by_day": volume["by_day"],
-        "alert_volume_note": volume.get("note", ""),
+        "alert_volume_by_day": stats["by_day"],
+        "alert_volume_note": stats.get("note", ""),
     }
