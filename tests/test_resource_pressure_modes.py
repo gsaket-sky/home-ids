@@ -150,18 +150,50 @@ def test_classify_resource_pressure_on_rss_alone(hm, fake_psutil):
     assert hm._classify_pressure() == hm_module.RESOURCE_PRESSURE
 
 
-def test_classify_conservation_on_swap_alone(hm, fake_psutil):
-    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=65, available_mb=8000)
+def test_classify_conservation_on_swap_when_rss_also_elevated(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=1100, sysmem_pct=10, swap_pct=65, available_mb=8000)
     assert hm._classify_pressure() == hm_module.CONSERVATION
 
 
-def test_classify_critical_on_low_available_alone(hm, fake_psutil):
-    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=0, available_mb=100)
+def test_classify_critical_on_low_available_when_rss_also_elevated(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=1100, sysmem_pct=10, swap_pct=0, available_mb=100)
     assert hm._classify_pressure() == hm_module.CRITICAL
 
 
 def test_classify_critical_beats_conservation_beats_pressure(hm, fake_psutil):
     fake_psutil.state.update(rss_mb=2000, sysmem_pct=10, swap_pct=0, available_mb=8000)  # rss triggers all 3 -- highest wins
+    assert hm._classify_pressure() == hm_module.CRITICAL
+
+
+# --- BUGFIX regression: system-wide swap/sysmem/available must NOT escalate ----
+# a process that isn't itself contributing to the pressure. Found live,
+# 2026-09-14: .94 (a shared box also running Grafana/Loki/Immich/n8n/OpenWebUI)
+# had 87% system swap used entirely by OTHER processes while the IDS itself had
+# 0 bytes swapped and ~850MB RSS -- comfortably healthy. The original
+# implementation would have pushed this process into CONSERVATION/CRITICAL (and,
+# sustained, a pointless self-restart) for a problem it has zero responsibility
+# for and zero ability to fix by restarting itself.
+
+def test_high_swap_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=850, sysmem_pct=70, swap_pct=87, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_low_available_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=850, sysmem_pct=70, swap_pct=10, available_mb=100)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_high_sysmem_alone_with_healthy_rss_stays_normal(hm, fake_psutil):
+    fake_psutil.state.update(rss_mb=850, sysmem_pct=95, swap_pct=10, available_mb=8000)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_rss_crossing_its_own_tier_still_escalates_regardless_of_system_signals(hm, fake_psutil):
+    """rss alone crossing CRITICAL must still fire even with otherwise-calm
+    system-wide numbers -- the gating only applies to the swap/sysmem/available
+    signals, never to rss's own thresholds."""
+    fake_psutil.state.update(rss_mb=1900, sysmem_pct=5, swap_pct=0, available_mb=8000)
     assert hm._classify_pressure() == hm_module.CRITICAL
 
 

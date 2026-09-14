@@ -169,6 +169,23 @@ def test_evaluate_heartbeat_component_no_entry_yet_is_a_noop(hm):
     assert "never_beaten" not in hm._component_state
 
 
+def test_pipeline_main_loop_default_interval_tolerates_slow_cold_start_step(hm):
+    """BUGFIX regression (found live, 2026-09-14, 44 seconds after this
+    subsystem's first-ever boot): pipeline_main_loop's expected interval used
+    to be based on raw poll_interval (2.0s default), so a single slow _step()
+    call (a cold-start backlog, a burst of devices/evidence -- NOT a hung loop)
+    stale enough to be 21s old crossed the old 5x=10s UNHEALTHY threshold and
+    triggered a real self-restart while the pipeline was still actively
+    working. health_manager_pipeline_loop_expected_interval_seconds (default
+    60.0) is a deliberately generous, separately-tunable floor for exactly
+    this -- this asserts the exact real-world age (21s) that caused the
+    incident now stays comfortably HEALTHY."""
+    now = 1000.0
+    expected_interval = max(60.0, 2.0)  # health_manager_pipeline_loop_expected_interval_seconds default vs poll_interval
+    hm._evaluate_heartbeat_component("pipeline_main_loop", {"last_heartbeat": now - 21.0}, now, expected_interval=expected_interval)
+    assert hm._component_state["pipeline_main_loop"]["state"] == HEALTHY
+
+
 def test_evaluate_probe_component_fail_streak_escalates_then_recovers(hm):
     hm._evaluate_probe_component("probe_x", (False, "down"))
     assert hm._component_state["probe_x"]["state"] == DEGRADED

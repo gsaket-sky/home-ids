@@ -40,13 +40,25 @@ def _fake_hm(**overrides):
 
 
 # --- restart_own_process ----------------------------------------------------------
+#
+# BUGFIX regression (found live, 2026-09-14, minutes after first deploy):
+# restart_own_process() used to call sys.exit(1) directly. HealthManager runs
+# as a background daemon thread, not the main thread -- sys.exit() there only
+# unwinds the CALLING thread (Python's threading module swallows an uncaught
+# SystemExit at the top of Thread.run()), so the process never actually
+# restarted; the health manager thread just silently died instead, disabling
+# all further monitoring. Fixed to send itself SIGTERM (delivered to the
+# process regardless of which thread calls os.kill()), reusing main.py's
+# existing graceful shutdown_handler. These tests assert THAT mechanism, not
+# the old (broken) sys.exit() one.
 
-def test_restart_own_process_alerts_before_exiting(monkeypatch):
-    exits = []
-    monkeypatch.setattr(healing_actions.sys, "exit", lambda code=0: exits.append(code))
+def test_restart_own_process_sends_sigterm_to_self(monkeypatch):
+    kills = []
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: kills.append((pid, sig)))
     hm = _fake_hm()
-    healing_actions.restart_own_process(hm, "pipeline_main_loop")
-    assert exits == [1]
+    success, detail = healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert kills == [(healing_actions.os.getpid(), healing_actions.signal.SIGTERM)]
+    assert success is True
     assert len(hm.alert_manager.sent) == 1
     assert "pipeline_main_loop" in hm.alert_manager.sent[0]
 
@@ -55,7 +67,7 @@ def test_restart_own_process_survives_no_alert_manager(monkeypatch):
     """alert_manager=None must not raise -- a health manager built before the
     pipeline finished constructing its own AlertManager shouldn't crash the
     one recovery lever that matters most."""
-    monkeypatch.setattr(healing_actions.sys, "exit", lambda code=0: None)
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: None)
     hm = _fake_hm(alert_manager=None)
     healing_actions.restart_own_process(hm, "resource_pressure")  # must not raise
 

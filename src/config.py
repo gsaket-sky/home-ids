@@ -239,6 +239,13 @@ DEFAULT_CONFIG = {
     # the next cycle, no restart needed.
     "health_manager_enabled": True,
     "health_manager_check_interval_seconds": 15.0,
+    # Deliberately generous -- see health_manager.py's own bugfix comment on
+    # _check_cycle()'s pipeline_main_loop check: this is NOT poll_interval (the
+    # sleep between iterations), it's a floor for how long one _step() call can
+    # legitimately take (a cold-start backlog, a burst of devices/evidence)
+    # before being treated as stale. A too-tight value here false-triggered a
+    # self-restart 44 seconds after this subsystem's first-ever boot.
+    "health_manager_pipeline_loop_expected_interval_seconds": 60.0,
     "health_manager_auto_recovery_enabled": True,
     "health_manager_recovery_max_attempts": 5,
     "health_manager_rss_pressure_mb": 1024.0,

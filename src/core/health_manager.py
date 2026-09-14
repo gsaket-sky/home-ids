@@ -135,9 +135,22 @@ class HealthManager:
         now = time.time()
 
         # in-process heartbeat components
+        # BUGFIX (found live, 2026-09-14, minutes after first deploy): this used
+        # to base pipeline_main_loop's expected interval on raw poll_interval
+        # (default 2.0s) -- poll_interval is the SLEEP between iterations, not a
+        # worst-case bound on how long one _step() call can legitimately take. A
+        # single slow iteration (a cold-start backlog, a burst of devices/evidence,
+        # a reactive-capture trigger) easily exceeds the resulting 10s UNHEALTHY
+        # threshold while the loop is still actively working, not hung -- this
+        # false-triggered a self-restart 44 seconds after the very first boot with
+        # this subsystem live. health_manager_pipeline_loop_expected_interval_seconds
+        # is a deliberately generous, separately-tunable floor for exactly this.
         self._evaluate_heartbeat_component(
             "pipeline_main_loop", HEARTBEATS.get("pipeline_main_loop"), now,
-            expected_interval=max(2.0, float(self.config.get("poll_interval", 2.0))),
+            expected_interval=max(
+                float(self.config.get("health_manager_pipeline_loop_expected_interval_seconds", 60.0)),
+                float(self.config.get("poll_interval", 2.0)),
+            ),
         )
         self._evaluate_heartbeat_component(
             "identity_reconcile_worker", HEARTBEATS.get("identity_reconcile_worker"), now,
@@ -225,24 +238,38 @@ class HealthManager:
         sysmem_pct = vm.percent
         swap_pct = swap.percent
         available_mb = vm.available / (1024 * 1024)
+        rss_pressure_floor = float(self.config.get("health_manager_rss_pressure_mb", 1024))
 
-        if (
-            rss_mb >= float(self.config.get("health_manager_rss_critical_mb", 1843))
-            or swap_pct >= float(self.config.get("health_manager_swap_critical_pct", 80))
+        # BUGFIX (found live, 2026-09-14, minutes after first deploy): swap_pct/
+        # sysmem_pct/available_mb used to be independent, standalone triggers --
+        # confirmed live on .94 (a shared box also running Grafana/Loki/Immich/
+        # n8n/OpenWebUI) that system-wide swap sat at 87% used entirely by OTHER
+        # processes while THIS process had 0 bytes swapped (verified via
+        # /proc/<pid>/status VmSwap) and only ~850MB RSS -- comfortably healthy.
+        # Using swap/sysmem alone would have pushed this process into
+        # CONSERVATION or CRITICAL (and, sustained, a pointless self-restart)
+        # for a memory situation it has zero responsibility for and zero
+        # ability to fix by restarting itself. System-wide signals now only
+        # count as escalation triggers once this process's OWN rss already
+        # shows it's plausibly part of the problem (at least the
+        # RESOURCE_PRESSURE floor) -- rss crossing its own tier's threshold
+        # still escalates on its own regardless of system-wide swap/sysmem.
+        system_signals_active = rss_mb >= rss_pressure_floor
+
+        if rss_mb >= float(self.config.get("health_manager_rss_critical_mb", 1843)):
+            return CRITICAL
+        if system_signals_active and (
+            swap_pct >= float(self.config.get("health_manager_swap_critical_pct", 80))
             or available_mb < float(self.config.get("health_manager_min_available_mb", 512))
         ):
             return CRITICAL
-        if (
-            rss_mb >= float(self.config.get("health_manager_rss_conservation_mb", 1536))
-            or swap_pct >= float(self.config.get("health_manager_swap_conservation_pct", 60))
-            or sysmem_pct >= 85
-        ):
+        if rss_mb >= float(self.config.get("health_manager_rss_conservation_mb", 1536)):
             return CONSERVATION
-        if (
-            rss_mb >= float(self.config.get("health_manager_rss_pressure_mb", 1024))
-            or swap_pct >= float(self.config.get("health_manager_swap_pressure_pct", 40))
-            or sysmem_pct >= float(self.config.get("health_manager_sysmem_pressure_pct", 75))
-        ):
+        if system_signals_active and swap_pct >= float(self.config.get("health_manager_swap_conservation_pct", 60)):
+            return CONSERVATION
+        if rss_mb >= rss_pressure_floor:
+            return RESOURCE_PRESSURE
+        if system_signals_active and sysmem_pct >= float(self.config.get("health_manager_sysmem_pressure_pct", 75)):
             return RESOURCE_PRESSURE
         return NORMAL
 

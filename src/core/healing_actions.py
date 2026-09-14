@@ -14,11 +14,15 @@ HealthManager treats a component with no ACTIONS entry as alert-only, forever
 Every in-process component's ONLY real recovery lever is a clean process
 self-restart: Python cannot safely kill-and-revive a single hung daemon thread
 from inside the same process, but soc.service's own systemd unit already has
-Restart=on-failure / RestartSec=10 -- so `sys.exit(1)` is sufficient, no
-sudo/systemctl call needed.
+Restart=on-failure / RestartSec=10 -- so a graceful self-exit is sufficient, no
+sudo/systemctl call needed. restart_own_process() below sends itself SIGTERM
+(NOT sys.exit() -- see that function's own bugfix comment for why a bare
+sys.exit() from this background thread silently doesn't work at all) to reuse
+main.py's existing shutdown_handler.
 """
 import logging
-import sys
+import os
+import signal
 import time
 from typing import Callable, Dict, Tuple, TYPE_CHECKING
 
@@ -31,10 +35,28 @@ LOGGER = logging.getLogger("home_ids.healing_actions")
 
 
 def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]:
-    """The main pipeline process restarting itself. Never returns on success --
-    sys.exit(1) unwinds the process, systemd's Restart=on-failure relaunches it.
-    Alerts BEFORE exiting so the operator sees why, not just that soc.service
-    bounced."""
+    """The main pipeline process restarting itself.
+
+    BUGFIX (found live, 2026-09-14, minutes after this subsystem's first
+    deploy): this used to call sys.exit(1) directly. HealthManager runs as a
+    background daemon thread, NOT the main thread -- sys.exit() raises
+    SystemExit, which only unwinds the CALLING thread. Python's threading
+    module catches an uncaught SystemExit at the top of Thread.run() and
+    treats it as a normal thread exit; the rest of the process (main thread,
+    every other thread) keeps running completely unaffected. Confirmed live:
+    the log showed "triggered a self-restart" followed by systemd reporting
+    the SAME PID/NRestarts=0 six minutes later -- the health manager thread
+    had simply died, silently disabling ALL further health monitoring and
+    auto-recovery for the rest of the process's life, while the "self-restart"
+    itself never happened at all.
+
+    Fixed by sending SIGTERM to this process's own PID instead -- signals are
+    delivered to the process (handled on the main thread) regardless of which
+    thread calls os.kill(), so this correctly reuses main.py's EXISTING
+    shutdown_handler (graceful subprocess cleanup, health_manager.stop(),
+    pipeline.stop(), then a real sys.exit(0) called FROM the main thread,
+    which does terminate the process) instead of a bare, thread-local, silently
+    no-op exit."""
     try:
         if hm.alert_manager is not None:
             hm.alert_manager.send(
@@ -44,9 +66,9 @@ def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]
             )
     except Exception:
         pass
-    LOGGER.critical("Health manager triggered a self-restart (component=%s). Exiting for systemd to relaunch.", component)
-    sys.exit(1)
-    return False, "unreachable"  # pragma: no cover -- sys.exit() above never returns
+    LOGGER.critical("Health manager triggered a self-restart (component=%s). Sending SIGTERM to self for graceful shutdown.", component)
+    os.kill(os.getpid(), signal.SIGTERM)
+    return True, "SIGTERM sent to self"
 
 
 def restart_fastapi_subprocess(hm: "HealthManager", component: str) -> Tuple[bool, str]:

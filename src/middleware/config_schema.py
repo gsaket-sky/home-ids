@@ -276,6 +276,8 @@ CONFIG_SCHEMA = [
      "desc": "Master kill switch for the watchdog/health-manager subsystem. Disabling stops all heartbeat checks, resource-pressure monitoring, and auto-recovery."},
     {"s": "health_manager", "k": "health_manager_check_interval_seconds", "t": "number", "def": 15.0,
      "desc": "How often the health manager re-checks every component and resource levels."},
+    {"s": "health_manager", "k": "health_manager_pipeline_loop_expected_interval_seconds", "t": "number", "def": 60.0,
+     "desc": "Floor for how long one main-loop _step() call can legitimately take (NOT poll_interval, the sleep between calls) before being treated as stale. Too tight -> false self-restarts on a slow-but-working cycle."},
     {"s": "health_manager", "k": "health_manager_auto_recovery_enabled", "t": "bool", "def": True,
      "desc": "When false, heartbeats/alerts/resource-pressure monitoring still run, but no RECOVERY_ATTEMPT (process/subprocess restart) is ever triggered -- alert-only mode."},
     {"s": "health_manager", "k": "health_manager_recovery_max_attempts", "t": "number", "def": 5,
