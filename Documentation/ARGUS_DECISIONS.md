@@ -157,6 +157,41 @@ safety-relevant fact for a live system, re-verify directly rather than picking o
 
 ---
 
+**Composite trust shipped shadow-first, not hard-gated — and gained its missing
+`destination_class` classifier.** Wiring composite trust required building
+`classify_destination()` first (reusing `utils.is_cloud_cdn_provider_org`/
+`is_telemetry_domain`/stdlib `ipaddress` rather than a new taxonomy — nothing
+produced this dimension anywhere before 2026-09-15). `behavior_fingerprint`
+simplifies to activity-state alone (`derive_activity_state()`) and `regime_id`
+defaults to a fixed `0`, both because the full BOCPD/regime tracking that would
+feed richer versions of either only runs on the out-of-scope `.19` host, not in
+this live pipeline — documented as first-pass simplifications, not the schema's
+full original intent. `record_corroborating_signal()` is live (the table is
+accumulating real data from 2026-09-15 onward); `permits_suppression()` is
+computed and logged but deliberately not yet AND-ed onto the existing
+trust-cache fast path, since the table started empty and a hard gate would have
+immediately stripped away every currently-working trust-cache suppression until
+real corroboration re-accumulates — the same shadow-then-promote shape CL-AFPE
+itself already proved. `src/argus/cl_afpe/composite_trust.py`,
+`src/argus/cl_afpe/engine.py`.
+
+**`decision_replay.py`'s evidence is capped, not the original full bundle —
+verified directly, not assumed.** Running it for real (`--since-days 1`)
+against `.94` showed 127/859 replayed decisions "changed," almost all
+downgrading toward BENIGN — alarming until traced to the actual cause:
+`get_decision_evidence()` reconstructs evidence via the decision's `supports`
+graph edges, which `GraphStore.insert_decision()` caps
+(`_MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE`, most-recent-first — a real,
+pre-existing fix for a production decision once found with 56,073 uncapped
+edges). The full original evidence bundle is preserved in `raw_payload_json`
+but the replay tool doesn't read from there. This is an inherent fidelity
+limitation of the tool, confirmed by reading its own source, not a regression —
+none of the same day's code changes touch the Layer-1 `DecisionEngine` this
+tool replays through at all. Treat a large "changed" count from this tool as
+expected noise for any window with substantial per-device evidence volume, not
+evidence of a live bug, unless the *direction* is a severe, implausible jump
+(e.g. BENIGN→CRITICAL) rather than a mild grade drift.
+
 ## HEE Roadmap — items considered and deliberately not built
 
 Companion to the architecture doc — tracks what was **considered and explicitly not
