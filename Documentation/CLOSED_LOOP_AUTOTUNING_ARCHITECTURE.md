@@ -11,11 +11,12 @@ suite against the shipped v15.0.0 state, to avoid two sessions editing the
 same live production files at once.
 
 **DEPLOYED 2026-09-15** (user-approved, both hosts explicitly confirmed
-before acting): `.94`'s `soc.service` was 23 commits behind (still on the
-pre-Release-15 `23144ad`) — pulled to `3e31bcd` and restarted; confirmed
-healthy post-restart (`state/health_manager_snapshot.json`). Separately
-found `.19`'s `v13-ingest.service` (the Sheet 00 baseline daemon) running
-for 3 days on `bdbec7b`, from BEFORE Release 15 existed — Sheet 00 baseline
+before acting, twice the same day as the work landed in two rounds):
+`.94`'s `soc.service` was 23 commits behind (still on the pre-Release-15
+`23144ad`) — pulled to `3e31bcd` and restarted; confirmed healthy
+post-restart (`state/health_manager_snapshot.json`). Separately found
+`.19`'s `v13-ingest.service` (the Sheet 00 baseline daemon) running for 3
+days on `bdbec7b`, from BEFORE Release 15 existed — Sheet 00 baseline
 scoring had never actually run in production before this deploy. Pulled
 and restarted there too; confirmed live in the real graph db within
 minutes (`baseline_deviation`/`markov_activity_surprise` evidence and real
@@ -26,6 +27,17 @@ scheduled script does) — would have crashed silently on its first-ever
 3:30am scheduled run; fixed and re-verified with a real, bounded
 (`--max-devices 3`) run against `.94`'s live 7.6GB graph db before the
 restart (`overall_pass=True`, `golden_set=True`, `synthetic_detection=0.86`).
+
+**Second round the same day** (v15.1.0, Sheet 03a's remaining three
+parameters): both hosts pulled to `c5eac7f` and restarted again, each
+re-confirmed healthy post-restart with zero errors in the service logs.
+`.19` runs `v13/ingest/sources.py`'s `compute_decision()` directly (not
+`live_engine.py`'s wrapper), so this round is a no-behavior-change code
+sync there — the new per-device tuning only actually activates through
+`live_engine.py`, i.e. on `.94`'s real pipeline. `.94` itself stays
+behaviorally inert too until an actual autotuner value is promoted (none
+has been, yet — the autotuner's own scheduled backtest gate hasn't had a
+reason to propose anything).
 
 ## Why this exists
 
