@@ -211,7 +211,24 @@ class DecisionEngine:
 
     def evaluate(self, evidence_list: List[Evidence], rep, device_type: str = "",
                   baseline_familiarity: float = 0.0, features: Optional[dict] = None,
-                  is_safe: bool = False, now: Optional[float] = None) -> Dict[str, Any]:
+                  is_safe: bool = False, now: Optional[float] = None,
+                  hard_stop_candidate_sensitivity: Optional[float] = None) -> Dict[str, Any]:
+        """hard_stop_candidate_sensitivity (Release 15, Sheet 03a live-wiring
+        follow-up): overrides the confirmed_exploit hard-stop rule's
+        min_confidence bar (default 0.9, hardcoded in DEFAULT_HARD_STOP_
+        REGISTRY below) when given. None (the default -- every caller except
+        v13/ops/live_engine.py) preserves the exact original hardcoded
+        behavior. This engine stays store-agnostic by design (v13/autotune/
+        engine.py's AutotuneEngine.get_active_value() lookup happens in the
+        CALLER, live_engine.py, which already owns the GraphStore singleton
+        -- see that module's own comment) -- this param is a plain float,
+        never a store/engine dependency threaded into this file. Deliberately
+        NOT a generic per-rule override mechanism (this engine's hard-stop
+        registry stays pluggable for every OTHER rule, untouched) -- the
+        allowlist this parameter belongs to (TUNABLE_PARAMETERS) has exactly
+        one entry that maps here, so a small, named special case in the loop
+        below is the honest scope for what's actually tunable today, not a
+        speculative generic mechanism for tunables that don't exist yet."""
         now = now if now is not None else time.time()
         hyp_results = self.hypothesis_engine.evaluate_all(
             evidence_list, rep, device_type, baseline_familiarity, now=now)
@@ -328,7 +345,15 @@ class DecisionEngine:
         # --- pluggable hard-stop registry (replaces v-current's 4 hardcoded elifs) ---
         hard_stop_fired = None
         for rule in self.hard_stop_registry:
-            if rule.check(ev_store, features, is_safe, now):
+            # See evaluate()'s own docstring for hard_stop_candidate_sensitivity --
+            # this is the one named special case, not a generic per-rule override.
+            if rule.name == "confirmed_exploit" and hard_stop_candidate_sensitivity is not None:
+                rule_fired = _fresh_evidence_exists(
+                    ev_store, "suricata_signature_match", now, _HARD_STOP_FRESHNESS_SECONDS,
+                    min_confidence=hard_stop_candidate_sensitivity)
+            else:
+                rule_fired = rule.check(ev_store, features, is_safe, now)
+            if rule_fired:
                 hard_stop_fired = rule
                 break
 

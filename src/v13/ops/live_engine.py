@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from v13.autotune.engine import AutotuneEngine
 from v13.evidence.ingest import convert_list
 from v13.evidence.model import Evidence, NO_DESTINATION
 from v13.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
@@ -62,6 +63,7 @@ from v13.graph.window import RollingWindowView
 from v13.cl_afpe.engine import ClAfpeEngine
 from v13.cl_afpe.ml_scoring import MLScorer
 from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.reputation.classifier import ReputationClassifier
 from utils import is_cloud_cdn_provider_org
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
@@ -204,6 +206,55 @@ def get_graph_store() -> GraphStore:
     process) for its own anchor-MAC persistence, rather than opening a second,
     independent connection to the same db file."""
     return _get_graph_store()
+
+
+# Release 15 Sheet 03a live-wiring follow-up: the three autotuner-tunable
+# parameters decision/engine.py itself doesn't (and per its own docstring,
+# shouldn't) know how to read live -- resolved HERE, the one caller that
+# already owns the GraphStore singleton, and passed into evaluate() below as
+# plain values. `_reputation_classifier` is a second instance from pipeline.py's
+# own `self.rep_classifier` -- classify() is a pure, stateless function
+# (confirmed via direct read), so a second instance is not a second source of
+# truth, just avoids this module reaching into pipeline.py's own object.
+_autotune_engine: Optional[AutotuneEngine] = None
+_reputation_classifier = ReputationClassifier()
+
+
+def _get_autotune_engine() -> AutotuneEngine:
+    global _autotune_engine
+    if _autotune_engine is None or _autotune_engine.store is not _get_graph_store():
+        _autotune_engine = AutotuneEngine(_get_graph_store())
+    return _autotune_engine
+
+
+def _tuned_rep_vector(rep_vector, device_id: Optional[str], autotune: AutotuneEngine):
+    """Re-classifies `rep_vector` using the SAME raw inputs it was already
+    built from (vt/ti/abuse scores, asn_owner -- all already on the
+    ReputationVector dataclass), but with reputation_tier_suspicious_floor/
+    reputation_tier_high_floor read live from the autotuner -- inert by
+    construction (classify()'s own defaults, 2.0/4.0, match the original
+    hardcoded values exactly) until a real promotion exists for this device.
+
+    Deliberately does NOT touch core/pipeline.py's own `rep_vector` (the
+    object this function returns a NEW instance built from, never mutated)
+    -- pipeline.py's own alert text / v-current's decision path keep reading
+    the untouched original, so this only ever affects v13's OWN decision
+    call a few lines below. See classifier.py's own classify() docstring for
+    why this reclassify-in-the-caller approach was chosen over editing
+    pipeline.py's shared classify() call site directly."""
+    if rep_vector is None:
+        return rep_vector
+    suspicious_floor = autotune.get_active_value(
+        "reputation_tier_suspicious_floor", device_id, default=2.0)
+    high_floor = autotune.get_active_value(
+        "reputation_tier_high_floor", device_id, default=4.0)
+    return _reputation_classifier.classify(
+        rep_vector.domain, vt_score=rep_vector.vt_detection_ratio,
+        afpe_score=rep_vector.cl_afpe_similarity, is_new=rep_vector.first_seen,
+        ti_score=rep_vector.ti_risk, abuse_score=rep_vector.abuse_risk,
+        asn_owner=rep_vector.asn_owner,
+        confirmed_vt_ti_floor=suspicious_floor, confirmed_abuse_floor=high_floor,
+    )
 
 
 def record_device_traffic(device_id: str, destination_ids, now: Optional[float] = None) -> None:
@@ -650,10 +701,39 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # framing and why PeerDeviationHypothesis is deliberately capped low.
             merged_v2 = merged_v2 + _inject_peer_deviation_evidence(device_id, device_type, ts)
 
+        # Sheet 03a live-wiring follow-up: same `if device_id:` gate as every other
+        # graph-touching feature above -- omitting device_id means ZERO graph
+        # interaction (this function's own pre-Phase-1 contract, still enforced by
+        # this module's own test suite), so the autotuner lookup only runs when
+        # a device_id was actually given to scope it to.
+        #
+        # BUGFIX (caught by this module's own test suite, "a broken graph read
+        # never raises out of evaluate()"): this must degrade gracefully exactly
+        # like _query_graph_window()/_inject_graph_derived_evidence() above, not
+        # propagate into the OUTER try/except (which logs "this should never
+        # happen in normal operation" -- the wrong semantic for an ordinary,
+        # expected-to-be-resilient dependency like a GraphStore read). A broken
+        # autotune lookup falls back to the untouched original rep_vector and no
+        # hard-stop-sensitivity override, identical to this function's behavior
+        # before Sheet 03a's live wiring.
+        tuned_rep = rep_vector
+        hard_stop_sensitivity = None
+        if device_id:
+            try:
+                autotune = _get_autotune_engine()
+                tuned_rep = _tuned_rep_vector(rep_vector, device_id, autotune)
+                hard_stop_sensitivity = autotune.get_active_value(
+                    "hard_stop_candidate_sensitivity", device_id, default=None)
+            except Exception as e:
+                LOGGER.warning(
+                    "Failed to resolve live-tunable autotuner parameters for device %r, "
+                    "deciding with defaults this cycle: %s", device_id, e,
+                )
+
         decision = _v13_engine.evaluate(
-            merged_v2, rep_vector, device_type=device_type,
+            merged_v2, tuned_rep, device_type=device_type,
             baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
-            now=ts,
+            now=ts, hard_stop_candidate_sensitivity=hard_stop_sensitivity,
         )
 
         if device_id:

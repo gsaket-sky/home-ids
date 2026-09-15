@@ -112,7 +112,22 @@ class ReputationClassifier:
             or is_cloud_cdn_provider_org(asn_owner)
         )
 
-    def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False, ti_score: float = 0.0, abuse_score: float = 0.0, asn_owner: str = "Unknown") -> ReputationVector:
+    def classify(self, domain: str, vt_score: float = 0.0, afpe_score: float = 0.0, is_new: bool = False,
+                  ti_score: float = 0.0, abuse_score: float = 0.0, asn_owner: str = "Unknown",
+                  confirmed_vt_ti_floor: float = 2.0, confirmed_abuse_floor: float = 4.0) -> ReputationVector:
+        """confirmed_vt_ti_floor/confirmed_abuse_floor (Release 15, closed-loop
+        autotuning architecture, Sheet 03a follow-up): the two magic numbers
+        the confirmed_ioc check below used to hardcode (2.0/4.0) are now
+        optional overrides, defaulting to those exact original values -- pure
+        signature extension, zero behavior change for any caller that doesn't
+        pass them (every existing call site: core/pipeline.py's real live
+        classification, v13/synthetic/injector.py, v13/ingest/sources.py).
+        v13/ops/live_engine.py is the one caller that DOES pass tunable
+        values (v13/autotune/engine.py's TUNABLE_PARAMETERS
+        reputation_tier_suspicious_floor/reputation_tier_high_floor), scoped
+        to v13's OWN decision path only -- see that module's own comment for
+        why re-classifying there, not editing pipeline.py's shared call site,
+        keeps v-current's live behavior completely untouched."""
         domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
 
@@ -172,7 +187,7 @@ class ReputationClassifier:
         # detection) and TI (curated malware-blacklist feeds: Feodo/ThreatFox/OTX) are both
         # more authoritative single-source signals and keep their original >2.0 bar;
         # AbuseIPDB alone now has to clear the same 4.0 bar fp_engine already trusted it at.
-        confirmed_ioc = vt_score > 2.0 or ti_score > 2.0 or abuse_score >= 4.0
+        confirmed_ioc = vt_score > confirmed_vt_ti_floor or ti_score > confirmed_vt_ti_floor or abuse_score >= confirmed_abuse_floor
         weak_signal = vt_score > 0.0 or ti_score > 0.0 or abuse_score > 0.0
         # BUGFIX: this used to run unconditionally, so ANY explicit tier assigned above
         # (0/1/2, including the new ASN-based safe-infrastructure check) could still be
@@ -186,7 +201,7 @@ class ReputationClassifier:
         if tier == 3:
             if confirmed_ioc:
                 tier = 5
-                verified_ioc = ti_score > 2.0
+                verified_ioc = ti_score > confirmed_vt_ti_floor
             elif weak_signal:
                 tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
                          # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).

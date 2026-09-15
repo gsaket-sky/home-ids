@@ -782,6 +782,83 @@ check("H3: FAIL-SAFE -- a broken graph read for peer-deviation never raises out 
 
 _f_store.close()
 
+# --- I. Sheet 03a live wiring: reputation floors + hard_stop_candidate_sensitivity
+# actually reach a real decision through live_engine.evaluate(), not just
+# AutotuneEngine's own audit trail (test_v13_autotune_engine.py covers propose/
+# canary/promote in isolation; this covers the real read path end-to-end). ---
+_i_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_sheet03a_test_")
+_i_graph_db_path = str(_PathForSysPath(_i_tmpdir) / "i_graph.db")
+live_engine.configure(_i_graph_db_path)
+_i_store = live_engine._get_graph_store()
+
+
+def _i_promote(device_id, parameter, new_value, at):
+    """Inserts an already-PROMOTED threshold_history row directly -- propose/
+    canary/promote's own clamping/cooldown/backtest-gating is already covered
+    by test_v13_autotune_engine.py; this test only needs a promoted value to
+    exist so it can check whether the real read path (live_engine.evaluate())
+    actually picks it up."""
+    _i_store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'test')",
+        (f"sheet03a_{device_id}_{parameter}", device_id, parameter, 0.0, new_value, at, at, at),
+    )
+    _i_store._maybe_commit()
+
+
+# hard_stop_candidate_sensitivity: a suricata match at confidence=0.7 (below the
+# DEFAULT 0.9 bar) doesn't clear the bar at all -- no hard-stop branch fires.
+suricata_ev = [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=now, device="devSheet03a",
+                            value=1.0, confidence=0.7, independence_group="signature_match")]
+r_before = live_engine.evaluate(suricata_ev, ReputationVector(domain="", tier=3), features={},
+                                   device_id="devSheet03a", now=now)
+check("I: hard_stop_candidate_sensitivity default (0.9) -- a 0.7-confidence suricata "
+      "match doesn't clear the bar, no hard-stop branch fires",
+      r_before["decision_path"] not in ("suricata_uncorroborated", "hard_stop"),
+      f"got {r_before['decision_path']}")
+
+# ...until a lower sensitivity is promoted for this device.
+_i_promote("devSheet03a", "hard_stop_candidate_sensitivity", 0.6, now)
+r_after = live_engine.evaluate(suricata_ev, ReputationVector(domain="", tier=3), features={},
+                                  device_id="devSheet03a", now=now + 1)
+check("I: hard_stop_candidate_sensitivity promoted to 0.6 -- the SAME 0.7-confidence "
+      "suricata match now clears the lowered bar, reaching the uncorroborated hard-stop "
+      "branch (HIGH, not full CRITICAL -- no independent corroboration in this scenario)",
+      r_after["decision_path"] == "suricata_uncorroborated" and r_after["state"] == "HIGH",
+      f"got {r_after['decision_path']}/{r_after['state']}")
+
+# A DIFFERENT device with no promotion of its own is unaffected -- the tuning is
+# scoped per-device, not a global flip.
+r_other_device = live_engine.evaluate(
+    [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=now, device="devSheet03a_untouched",
+                 value=1.0, confidence=0.7, independence_group="signature_match")],
+    ReputationVector(domain="", tier=3), features={}, device_id="devSheet03a_untouched", now=now + 1)
+check("I: hard_stop_candidate_sensitivity promotion is scoped to the specific device "
+      "it was promoted for -- a different device with no promotion of its own still "
+      "sees the original 0.9 bar",
+      r_other_device["decision_path"] not in ("suricata_uncorroborated", "hard_stop"),
+      f"got {r_other_device['decision_path']}")
+
+# reputation_tier_high_floor: an abuse_score of 4.5 normally clears the default 4.0
+# floor (>=4.0), reaching tier 5.
+rep_moderate_abuse = ReputationVector(domain="", tier=3, abuse_risk=4.5)
+r_tier_before = live_engine.evaluate([], rep_moderate_abuse, features={}, device_id="devSheet03b", now=now)
+check("I: reputation_tier_high_floor default (4.0) -- abuse_score=4.5 reaches tier 5 "
+      "(a tier5_* decision_path), matching classify()'s own hardcoded default",
+      r_tier_before["decision_path"].startswith("tier5_"),
+      f"got {r_tier_before['decision_path']}")
+
+# ...until a higher floor (5.0) is promoted for this device, raising the bar past 4.5.
+_i_promote("devSheet03b", "reputation_tier_high_floor", 5.0, now)
+r_tier_after = live_engine.evaluate([], rep_moderate_abuse, features={}, device_id="devSheet03b", now=now + 1)
+check("I: reputation_tier_high_floor promoted to 5.0 -- the SAME abuse_score=4.5 no "
+      "longer clears the raised bar, so tier 5 is never reached (falls through to a "
+      "lower/no verdict instead of any tier5_* decision_path)",
+      not r_tier_after["decision_path"].startswith("tier5_"),
+      f"got {r_tier_after['decision_path']}")
+
+_i_store.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")
