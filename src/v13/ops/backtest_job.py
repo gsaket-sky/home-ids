@@ -36,9 +36,22 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from v13.autotune.engine import compute_drift_result
-from v13.graph.store import GraphStore
-from v13.synthetic.injector import sweep
+# BUGFIX (found live on .94 while dynamically testing this job ahead of its
+# first-ever scheduled run): this module had NO sys.path setup at all, unlike
+# every other v13/ops/*.py scheduled job (live_prune.py, live_retro_hunter.py,
+# etc., all `sys.path.append(.../src)` before their own v13.* imports).
+# Running it directly (as config.yaml's scheduler.backtest_job now does every
+# night, or as scripts/scheduler.py's own bare `subprocess.Popen([sys.executable,
+# script_path])` with no PYTHONPATH) failed immediately with `ModuleNotFoundError:
+# No module named 'v13'`, silently -- scheduler.py doesn't capture or check
+# subprocess output/exit codes, so this would have failed every single night
+# with nothing surfacing it. This never showed up in this module's own test
+# suite because that suite already sets up sys.path itself before importing.
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+
+from v13.autotune.engine import compute_drift_result  # noqa: E402
+from v13.graph.store import GraphStore  # noqa: E402
+from v13.synthetic.injector import sweep  # noqa: E402
 
 LOGGER = logging.getLogger("v13.ops.backtest_job")
 
