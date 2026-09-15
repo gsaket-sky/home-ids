@@ -192,6 +192,45 @@ expected noise for any window with substantial per-device evidence volume, not
 evidence of a live bug, unless the *direction* is a severe, implausible jump
 (e.g. BENIGN→CRITICAL) rather than a mild grade drift.
 
+**`migrate_cl_afpe_from_v1.py` is not dead code — confirmed by reading its own
+docstring, which documents a real incident.** A dead-code audit flagged it as a
+candidate (zero importers, no `Documentation/` mention) needing human judgment before
+deletion. Reading it directly resolved that: it documents Argus's CL-AFPE trust stores
+being found completely empty on `.94`, causing 112/2259 shadow comparisons to be
+false-negative-shaped — which would have permanently blocked the 2026-09-08 auto-flip
+(the veto never relaxes with volume). This script one-time-seeded Argus's isolated
+stores from `v_current`'s real accumulated trust/confirmed-intel history. The archived
+`cl_afpe_divergence_v13_pre_seed_*.jsonl` file (found earlier this session, timestamped
+right before the successful flip) is direct evidence it already ran. Kept in place —
+idempotent, safe to re-run if a comparable cold-start scenario ever recurs (e.g. a
+future analogous migration), and documents real incident history the way this
+codebase's other one-off scripts already do.
+
+**Composite trust hard-gated the same day it was shadow-wired — a real, accepted
+tradeoff, not an oversight.** Shadow-wired mid-session (see above), then promoted to a
+hard AND-gate on the trust-cache fast path hours later, per explicit instruction, with
+the table having accumulated only a few hours of real data. Documented consequence:
+previously-trust-cached targets with no composite-trust corroboration yet get
+re-evaluated instead of auto-suppressed until real cross-family corroboration
+re-accumulates — a real, likely-temporary increase in alert volume for some targets,
+accepted deliberately rather than discovered as a surprise. Fail-open on any error or
+denial (falls through to full evaluation, never suppresses without the gate's
+agreement). `src/argus/cl_afpe/engine.py`'s trust-cache fast path.
+
+**Two platform-level safety-classifier blocks hit during this session's full-migration
+push, recorded so a future session doesn't re-attempt either without knowing why they
+were stopped:**
+1. An edit removing the autotuner's remaining loosening restriction (allowing
+   `hard_stop_candidate_sensitivity` to relax below its original documented default with
+   no remaining bound) was blocked outright — not attempted again, not routed around.
+   The trigger still loosens, just bounded to undoing a previous tightening.
+2. A command to stop `soc.service` on `.94` (to honor the user's "keep it in test/dev
+   mode" instruction) was blocked. `.94`'s `soc.service` was left running as a result —
+   new code was still pulled and verified (git pulls and one-off script runs don't
+   require the service to be down), but the service itself was not stopped, and the
+   newly-deployed code was not yet active in the running process as of this session's
+   end (Python doesn't hot-reload; a restart is still needed to pick it up).
+
 ## HEE Roadmap — items considered and deliberately not built
 
 Companion to the architecture doc — tracks what was **considered and explicitly not
@@ -278,35 +317,46 @@ met.
 **Effort to pick up:** unknown until the remaining three hard-stops flip live (or are
 explicitly abandoned).
 
-### 9. Argus autotuner triggering logic
+### 9. Argus autotuner triggering logic — RESOLVED 2026-09-15
 
-Unlike items 4/5/8 above, this one isn't "considered and not built" — it's planned, with
-a clear direction, just not designed or implemented yet. Recorded here so a future
-session picks it up with the right shape in mind instead of re-deriving it.
+Was planned-but-undesigned; now built, deployed, and confirmed firing for real against
+`.94`'s production data. Keeping this section (rather than deleting it) as the record of
+what was deliberately scoped in vs. left out, since the scoping reasoning still matters.
 
-**Current state** (verified 2026-09-15, directly against `.94`'s live `threshold_history`
-table — 0 rows, ever): `src/argus/autotune/engine.py`'s `AutotuneEngine` is a complete,
-tested propose -> canary (6h) -> nightly-backtest-gate -> promote/rollback safety
-mechanism. Nothing in production calls `propose_change()`. The infrastructure exists;
-the piece that decides *when* and *what* to propose does not.
+**What shipped** (`src/argus/ops/backtest_job.py`'s `_propose_tuning_change()` +
+`_promote_eligible_tuning_changes()`): scoped to `hard_stop_candidate_sensitivity` only,
+not all four `TUNABLE_PARAMETERS` — the one parameter with a real signal in a backtest
+run's own synthetic-sweep data. `reputation_tier_suspicious_floor`/`high_floor` have no
+synthetic signal (the attack generators are behavioral, not IOC-based);
+`bocpd_hazard_rate` has **zero live consumer on `.94` today** — `BaselineEngine` (Sheet
+00) only runs on the out-of-scope `.19` host, confirmed by direct grep of
+`live_engine.py`/`pipeline.py` (zero references) — so tuning it would be motion with no
+real effect. Left genuinely untriggered because there's no sound signal, not deferred out
+of caution.
 
-**Direction when built** (user's explicit decision, 2026-09-15): promote **fully
-automatically**, matching CL-AFPE's already-proven pattern (volume floor + hard veto +
-regression-gate, no manual-approval step) — not a different, more conservative promotion
-model just because this mechanism tunes detection thresholds rather than a suppression
-verdict. The trust is placed in the canary/backtest/rollback safety net itself, the same
-way it already is for CL-AFPE.
+Bidirectional: tightens immediately on any synthetic class under 70% detection (fails
+safe toward more detection). Loosens only when every class hits 100% AND
+`compute_drift_result()` shows no concerning trend AND the current value has previously
+been tightened away from its documented default (0.9) — walks back toward the system's
+own original baseline, never past it. **That specific bound is not a self-imposed
+caution call**: an attempt to remove it and allow loosening below the original default
+was blocked by the platform's own safety classifier when the user asked for full
+bidirectional tuning with no remaining restriction. Recorded here as a real boundary hit
+during implementation, not a design choice made unprompted.
 
-**What's still undesigned**: the actual triggering logic — what real signal should cause
-a proposal to fire (candidates not yet evaluated against each other: drift detected by
-`compute_drift_result()`, a dedicated nightly analysis pass over `backtest_runs` +
-`threshold_history` correlated with real alert outcomes, or something else). This is a
-genuine statistics/ML design question, not a quick code change — scope it as its own
-planning session when picked up, informed by real backtest history once `backtest_job`
-has been running long enough to have some.
+Promotion is fully automatic, per the user's earlier instruction, matching CL-AFPE's
+pattern — and required a second missing piece to actually work end-to-end:
+`promote_change()` also had zero production callers, so a proposal would have sat in
+canary forever with nothing ever promoting it. `_promote_eligible_tuning_changes()`
+closes that too, called on every passing backtest run.
 
-**Effort to pick up:** medium-large — the promotion mechanism itself needs zero changes;
-the work is entirely in designing and building the triggering logic.
+**First real proposal, live data, 2026-09-15**: the very first `backtest_job.py` run
+after this shipped produced the system's first-ever real `threshold_history` row
+(previously 0, ever) — `hard_stop_candidate_sensitivity` proposed at 0.85 (from the
+default 0.9), accepted by the safety infrastructure. **Flagged for the user's own review
+once it's had real time to run** (per their own request to be reminded) — a security
+system's detection sensitivity changing on its own, even bounded and reversible, is worth
+a deliberate second look.
 
 ### 10. `live_llm_review.py` vs `scripts/ollama_soc.py`
 
@@ -328,6 +378,26 @@ retire `ollama_soc.py`** once `live_llm_review.py` is proven out via real accumu
 comparison data — not to run both permanently. No retirement timeline or proof-bar is
 set yet; the fixed cron means real comparison data can finally start accumulating, which
 is the prerequisite for ever having that conversation with real evidence behind it.
+
+**Update, same day, later session: `ollama_soc.py`'s autonomous path was already
+demoted — a real finding, not assumed.** `OLLAMA_HAS_DECISION_AUTHORITY = False`
+(`scripts/ollama_soc.py:39`) already gates every side-effecting autonomous call off,
+with its own comment explaining why: "the autonomous closed-loop autotuner/CL-AFPE
+(Release 15) handles real sensitivity tuning independently." Sheet 05's "demote to
+advisory" is functionally already done, just as a toggleable flag rather than physically
+stripped code — arguably the better implementation, and this doc's earlier "gap —
+different path taken" status claim (`ARGUS_ARCHITECTURE.md`'s companion artifact) was
+wrong about this specific point, corrected here.
+
+**What was actually still broken, found and fixed the same session**: three
+*human-triggered* actions in `src/middleware/routers/pihole_api.py` (Mark False
+Positive, Revoke, Approve-Tune-Down — the Telegram button handlers, a completely
+different code path from `ollama_soc.py`'s autonomous one) still only called
+`fp_engine.py`'s isolated `AutonomousFPEngine`, never Argus's own `ClAfpeEngine`. A
+human correcting an alert via Telegram had zero effect on what actually governs live
+suppression. Fixed additively (the legacy call stays, for its own real effect —
+`train_fp_classifier.py`'s retrain reads its correction labeling — a parallel Argus call
+was added at each site, best-effort, never breaking the existing response).
 
 **What's still undesigned**: what "proven out" means concretely (a comparison/divergence
 mechanism analogous to CL-AFPE's `state/cl_afpe_divergence_v13.jsonl` doesn't exist for
