@@ -189,7 +189,7 @@ shutil.rmtree(tmp_dir, ignore_errors=True)
 # ═══════════════════════════════════════════════════════════════════════════════════
 import json
 import merge_fragmented_devices as script_module
-from v13.graph.store import GraphStore
+from argus.graph.store import GraphStore
 
 tmp_dir_d = tempfile.mkdtemp(prefix="phase39_script_graph_")
 tmp_state_path_d = os.path.join(tmp_dir_d, "ids_state.json")

@@ -46,9 +46,9 @@ from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
-from v13.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
-from v13.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
-from v13.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
+from argus.ops import live_engine as v13_live_engine  # v13 fast cutover -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md
+from argus.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
+from argus.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
 

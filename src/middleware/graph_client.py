@@ -21,7 +21,7 @@ try:
 except ImportError:
     from core.config import CONFIG_FILE
 
-from v13.graph.store import GraphStore
+from argus.graph.store import GraphStore
 
 GRAPH_DB_PATH = CONFIG_FILE.parent / "state" / "v13_graph.db"
 

@@ -11,7 +11,7 @@ comment, and the fixture uses realistic values instead of a real incident_id.
 PURPOSE: this is the "prove the script with real-world data" regression harness
 -- run this whenever a new feature touches evidence scoring, corroboration
 counting, or the decision engine, to confirm every real incident that exposed a
-past bug still resolves correctly. Distinct from test_v13_decision_engine.py
+past bug still resolves correctly. Distinct from test_argus_decision_engine.py
 (that file is the synthetic unit-test suite covering the engine's mechanics in
 isolation); this file is the curated real-incident regression layer on top of
 it. Every scenario below is named for the real device/incident it reproduces
@@ -35,9 +35,9 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from v13.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
-from v13.decision.engine import DecisionEngine, DecisionState  # noqa: E402
-from v13.hypotheses.independence import family_for  # noqa: E402
+from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
+from argus.decision.engine import DecisionEngine, DecisionState  # noqa: E402
+from argus.hypotheses.independence import family_for  # noqa: E402
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # noqa: E402
 

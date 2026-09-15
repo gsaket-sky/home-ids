@@ -17,7 +17,7 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from v13.graph.store import GraphStore  # noqa: E402
+from argus.graph.store import GraphStore  # noqa: E402
 from core.state_guard import StateManager  # noqa: E402
 from middleware import graph_client  # noqa: E402
 from middleware.routers import devices_api  # noqa: E402

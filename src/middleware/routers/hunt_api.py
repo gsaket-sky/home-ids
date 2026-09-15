@@ -19,7 +19,7 @@ from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from middleware.humanize import label_evidence_type, label_hypothesis
 from core.state_guard import StateManager
-from v13.ops import threat_hunt, decision_replay
+from argus.ops import threat_hunt, decision_replay
 
 router = APIRouter()
 

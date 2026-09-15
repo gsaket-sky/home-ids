@@ -44,7 +44,7 @@ from core.device_matching import (
     dhcp_fingerprint_match, ja4_overlap, hostname_corroborates,
     match_confidence, AUTO_MERGE_CONFIDENCE,
 )
-from v13.graph.store import GraphStore
+from argus.graph.store import GraphStore
 
 
 def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
