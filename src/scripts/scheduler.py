@@ -39,6 +39,12 @@ def check_cron(cron_str: str, current_time: datetime) -> bool:
         return False
     
     def match(val: int, part: str) -> bool:
+        # A comma-separated list (e.g. "2,6,10,14,18,22") matches if any sub-part does --
+        # added after live_llm_review's cron silently never fired for days: this used to
+        # only support "*", "*/N", or a single exact integer, so int("2,6,10,...") raised
+        # and the bare except below swallowed it into an unconditional False.
+        if "," in part:
+            return any(match(val, p) for p in part.split(","))
         if part == "*": return True
         if part.startswith("*/"):
             try: return val % int(part[2:]) == 0

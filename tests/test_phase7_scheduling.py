@@ -151,6 +151,44 @@ if config_path.exists():
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section B2: check_cron()'s comma-separated-list support (BUGFIX 2026-09-15) -- a
+# comma list like "2,6,10,14,18,22" (live_llm_review's deliberate 2h stagger from
+# ollama_soc's own "*/4" cron, to avoid both hitting .94's single-in-flight-request
+# Ollama server at once) used to make match() call int("2,6,10,...") and silently
+# swallow the ValueError into an unconditional False -- the job never fired, for days,
+# with nothing surfacing it beyond an absent log line nobody was watching. The
+# collision check above can't catch this class of bug on its own: a job with zero real
+# fire hours (the exact broken state) has an empty fire_hours set, which trivially
+# "doesn't collide" with anything -- so this needs its own direct, explicit check.
+# ═══════════════════════════════════════════════════════════════════════════════════
+import datetime as _dt2
+
+_comma_cron = "30 2,6,10,14,18,22 * * *"
+_comma_fire_hours = {h for h in range(24)
+                      if scheduler_mod.check_cron(_comma_cron, _dt2.datetime(2026, 1, 5, h, 30))}
+check("THE SPECIFIC BUG: check_cron() matches every hour in a comma-separated list "
+      "(e.g. live_llm_review's \"30 2,6,10,14,18,22 * * *\"), not zero hours",
+      _comma_fire_hours == {2, 6, 10, 14, 18, 22}, f"got={_comma_fire_hours}")
+
+check("a comma-separated cron still correctly rejects a non-matching hour",
+      not scheduler_mod.check_cron(_comma_cron, _dt2.datetime(2026, 1, 5, 3, 30)))
+
+# Regression guard: every pre-existing cron style (used by every other real job) must
+# still behave identically after adding comma-list support.
+_existing_style_crons = {
+    "*": ("0 * * * *", 5, True),          # wildcard hour always matches
+    "*/N": ("0 */4 * * *", 4, True),      # step still matches an exact multiple
+    "*/N miss": ("0 */4 * * *", 5, False),  # step still rejects a non-multiple
+    "exact": ("0 3 * * *", 3, True),      # single exact integer still matches
+    "exact miss": ("0 3 * * *", 4, False),
+}
+for _label, (_cron, _hour, _expected) in _existing_style_crons.items():
+    _got = scheduler_mod.check_cron(_cron, _dt2.datetime(2026, 1, 5, _hour, 0))
+    check(f"pre-existing cron style '{_label}' unaffected by the comma-list fix",
+          _got == _expected, f"cron={_cron!r} hour={_hour} got={_got} expected={_expected}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: train_fp_classifier.py no longer trains on ollama_soc's transparency logs
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory() as tmpdir:
