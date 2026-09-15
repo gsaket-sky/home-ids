@@ -780,10 +780,15 @@ class ClAfpeEngine:
             cached_target = dest_ip
 
         if cached_target:
-            # Release 15 Sheet 03b, shadow-logged (see composite_trust.py's own
-            # docstring for why this isn't a hard AND-gate yet): compute what the
-            # composite-trust gate would say about this exact suppression, without
-            # affecting the real verdict below.
+            # Release 15 Sheet 03b, HARD-GATED (2026-09-15, promoted from shadow-only
+            # per explicit instruction): composite_trust must ALSO permit this exact
+            # tuple, not just the existing trust-cache, before the fast path below is
+            # taken. Fail-open toward re-evaluation, not suppression: any error here
+            # (or a real "not yet permitted") means falling through to the full
+            # Stage 1/2/3 path below, exactly as if this target had never been
+            # trust-cached at all -- never a reason to suppress something the
+            # composite gate hasn't independently corroborated.
+            composite_permits = False
             try:
                 evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
                 behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
@@ -793,14 +798,19 @@ class ClAfpeEngine:
                     alert_hypothesis, _DEFAULT_REGIME_ID, now=now,
                 )
                 LOGGER.info(
-                    "[COMPOSITE_TRUST_SHADOW] device=%s target=%s hypothesis=%s "
+                    "[COMPOSITE_TRUST] device=%s target=%s hypothesis=%s "
                     "fingerprint=%s dest_class=%s composite_permits=%s "
-                    "(trust-cache already permitted this suppression)",
+                    "(trust-cache permitted, composite gate %s)",
                     device_id, cached_target, alert_hypothesis, behavior_fingerprint,
                     destination_class, composite_permits,
+                    "AGREED" if composite_permits else "DENIED -- falling through to full evaluation",
                 )
             except Exception:
-                LOGGER.exception("[COMPOSITE_TRUST_SHADOW] evaluation failed, non-fatal")
+                LOGGER.exception("[COMPOSITE_TRUST] evaluation failed -- fail-open, falling through to full evaluation")
+            if not composite_permits:
+                cached_target = None
+
+        if cached_target:
             stage1_triggers = self._stage1_hard_stop(
                 features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
             if stage1_triggers:

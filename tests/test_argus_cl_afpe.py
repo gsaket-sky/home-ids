@@ -27,6 +27,7 @@ def check(name, cond, detail=""):
 
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.cl_afpe.engine import ClAfpeEngine, MIN_TRUST_ENTRY_TTL_SECONDS, MAX_TRUST_ENTRY_TTL_SECONDS  # noqa: E402
+from argus.cl_afpe import composite_trust as ct  # noqa: E402
 from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 
 tmpdir = tempfile.mkdtemp(prefix="v13_clafpe_test_")
@@ -435,9 +436,47 @@ check("...but the SAME burst on a known telemetry domain is exempt (real v1 bugf
       v["stage"] != "STAGE_1_HARD_STOP")
 
 # --- trust-cache fast path, wired through the composed evaluate() ---
+# Release 15 Sheet 03b, HARD-GATED (2026-09-15): trust-cache alone is no longer
+# sufficient -- composite_trust.permits_suppression() must also independently
+# agree, or evaluate() falls through to full Stage 1/2/3 instead of suppressing.
+# A SEPARATE device for this pre-check specifically -- falling through now reaches
+# Stage 3 and may itself call _apply_sigma_shift(TUNE_UP), which would otherwise
+# mutate "shadow_dev"'s cumulative sigma-shift state out from under the later,
+# pre-existing "tunes sensitivity UP" assertion below (that one depends on
+# capturing sigma_before immediately prior to its own single TUNE_UP event).
+store.upsert_device("shadow_dev_precheck", timestamp=NOW)
+cl_afpe.immunize("trusted-vendor-example.com", device_id="shadow_dev_precheck", hypothesis="NETWORK_INTRUSION", now=NOW)
+v = _evaluate(cl_afpe, _alert(device_id="shadow_dev_precheck", domain="trusted-vendor-example.com"))
+check("evaluate() does NOT suppress on trust-cache alone anymore -- composite_trust "
+      "hasn't corroborated this tuple yet, so it fails open to full evaluation "
+      "(THE hard-gate behavior, not the pre-2026-09-15 shadow-only one)",
+      v["stage"] != "TRUST_CACHE")
+
 cl_afpe.immunize("trusted-vendor-example.com", device_id="shadow_dev", hypothesis="NETWORK_INTRUSION", now=NOW)
+
+# Seed composite_trust with 2 DISTINCT evidence families, each past the trust floor
+# (0.6, needs ceil(0.6/0.15)=4 calls at _TRUST_INCREMENT=0.15 each) for the EXACT
+# tuple this alert/decision=None combination resolves to: behavior_fingerprint
+# "NORMAL" (derive_activity_state([]) with no decision passed), destination_class
+# "public" (no dest_ip, "trusted-vendor-example.com" isn't a known telemetry
+# domain), hypothesis "NETWORK_INTRUSION" (the alert's default signature),
+# regime_id 0 (this file's fixed default until Sheet 00 baseline ever runs here).
+# cl_afpe_trust.hypothesis_id is a real FK against the hypotheses catalog (same
+# pattern test_argus_cl_afpe_composite_trust.py already uses).
+store._conn.execute("INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')",
+                      ("NETWORK_INTRUSION",))
+for _ in range(4):
+    ct.record_corroborating_signal(store, "shadow_dev", "NORMAL", "public",
+                                      "NETWORK_INTRUSION", "dns_behavior", 0, now=NOW)
+    ct.record_corroborating_signal(store, "shadow_dev", "NORMAL", "public",
+                                      "NETWORK_INTRUSION", "reputation", 0, now=NOW)
+check("composite_trust.permits_suppression() now agrees for this exact tuple "
+      "(setup check before re-testing the fast path with both gates satisfied)",
+      ct.permits_suppression(store, "shadow_dev", "NORMAL", "public", "NETWORK_INTRUSION", 0, now=NOW))
+
 v = _evaluate(cl_afpe, _alert(domain="trusted-vendor-example.com"))
-check("evaluate() suppresses immediately on a trust-cache hit (TRUST_CACHE, no ML stages run)",
+check("evaluate() suppresses immediately once BOTH trust-cache AND composite_trust "
+      "agree (TRUST_CACHE, no ML stages run)",
       v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "TRUST_CACHE")
 
 sigma_before = cl_afpe.get_sigma_shift("shadow_dev")
