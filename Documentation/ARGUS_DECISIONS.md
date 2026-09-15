@@ -144,6 +144,17 @@ renaming a live multi-GB SQLite file mid-flight is real risk for zero functional
 benefit, so only the Python constant *names* pointing at them change, with a comment
 marking that as deliberate.
 
+**CL-AFPE's 2026-09-08 auto-flip to live suppression was legitimate — re-verified
+directly, not assumed.** A shadow-mode promotion review (2026-09-15) surfaced two
+research agents giving contradictory readings of the divergence log (one claimed 718
+comparisons including a false-negative-shaped veto entry; the other found 54, zero
+false-negative-shaped). Read `state/cl_afpe_divergence_v13.jsonl` on `.94` directly:
+54 comparisons, zero false-negative-shaped divergences (`v13_verdict == FALSE_POSITIVE`
+while `v1_verdict` was something else) — confirming the flip monitor's bar was
+genuinely cleared, not a fluke, and that the 718/veto claim was reading stale or local
+data rather than `.94`'s real file. Lesson: when two research agents disagree on a
+safety-relevant fact for a live system, re-verify directly rather than picking one.
+
 ---
 
 ## HEE Roadmap — items considered and deliberately not built
@@ -231,3 +242,65 @@ met.
 
 **Effort to pick up:** unknown until the remaining three hard-stops flip live (or are
 explicitly abandoned).
+
+### 9. Argus autotuner triggering logic
+
+Unlike items 4/5/8 above, this one isn't "considered and not built" — it's planned, with
+a clear direction, just not designed or implemented yet. Recorded here so a future
+session picks it up with the right shape in mind instead of re-deriving it.
+
+**Current state** (verified 2026-09-15, directly against `.94`'s live `threshold_history`
+table — 0 rows, ever): `src/argus/autotune/engine.py`'s `AutotuneEngine` is a complete,
+tested propose -> canary (6h) -> nightly-backtest-gate -> promote/rollback safety
+mechanism. Nothing in production calls `propose_change()`. The infrastructure exists;
+the piece that decides *when* and *what* to propose does not.
+
+**Direction when built** (user's explicit decision, 2026-09-15): promote **fully
+automatically**, matching CL-AFPE's already-proven pattern (volume floor + hard veto +
+regression-gate, no manual-approval step) — not a different, more conservative promotion
+model just because this mechanism tunes detection thresholds rather than a suppression
+verdict. The trust is placed in the canary/backtest/rollback safety net itself, the same
+way it already is for CL-AFPE.
+
+**What's still undesigned**: the actual triggering logic — what real signal should cause
+a proposal to fire (candidates not yet evaluated against each other: drift detected by
+`compute_drift_result()`, a dedicated nightly analysis pass over `backtest_runs` +
+`threshold_history` correlated with real alert outcomes, or something else). This is a
+genuine statistics/ML design question, not a quick code change — scope it as its own
+planning session when picked up, informed by real backtest history once `backtest_job`
+has been running long enough to have some.
+
+**Effort to pick up:** medium-large — the promotion mechanism itself needs zero changes;
+the work is entirely in designing and building the triggering logic.
+
+### 10. `live_llm_review.py` vs `scripts/ollama_soc.py`
+
+Also planned with a clear direction, not "not built."
+
+**Current state**: `live_llm_review.py` runs alongside `ollama_soc.py` as a permanent
+parallel comparator by original design — no promotion/flip mechanism exists or was ever
+planned for it, unlike CL-AFPE. It had a real, now-fixed bug (2026-09-15): its cron
+`"30 2,6,10,14,18,22 * * *"` used comma-list syntax `scripts/scheduler.py`'s `check_cron()`
+didn't support, so it silently never fired since whenever that cron string was set —
+confirmed via direct reproduction against `.94`'s live scheduler, not assumed. Fixed by
+extending `check_cron()`'s `match()` to support comma lists (the schedule's 2-hour
+stagger from `ollama_soc`'s own `*/4` cron was deliberate — avoids both hitting `.94`'s
+single-in-flight-request Ollama server at once — so the fix was the parser, not
+simplifying the cron string).
+
+**Direction** (user's explicit decision, 2026-09-15): the end goal is to **eventually
+retire `ollama_soc.py`** once `live_llm_review.py` is proven out via real accumulated
+comparison data — not to run both permanently. No retirement timeline or proof-bar is
+set yet; the fixed cron means real comparison data can finally start accumulating, which
+is the prerequisite for ever having that conversation with real evidence behind it.
+
+**What's still undesigned**: what "proven out" means concretely (a comparison/divergence
+mechanism analogous to CL-AFPE's `state/cl_afpe_divergence_v13.jsonl` doesn't exist for
+LLM review yet — today `live_llm_review.py` only reviews Argus's own decisions, it
+doesn't compare against `ollama_soc.py`'s verdicts on the same alerts), and what the
+actual retirement mechanics would look like (a flip, a gradual cutover, or something
+else).
+
+**Effort to pick up:** needs weeks of real comparison data to accumulate first (now that
+the cron fix lets it actually run), then a design pass for the proof-bar and comparison
+mechanism — similar shape to CL-AFPE's flip monitor, likely, but not assumed.
