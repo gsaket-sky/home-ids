@@ -266,7 +266,24 @@ class LiveConfig:
         self.file_path = file_path
         self._config = dict(default_config)
         self._lock = threading.Lock()
-        self._notify_cb = None
+        # BUGFIX (2026-09-15, live audit -- console log_level change silently not
+        # applying): this was a SINGLE callback slot (`self._notify_cb = None`,
+        # `set_notify()` overwriting it), but main.py's setup_logging() (the
+        # log-level live-reload hook) AND core/pipeline.py's EnginePipeline (its own
+        # dynamic-config hook, for safe_ips/telegram_enabled/home_subnets/etc.) both
+        # call set_notify() on the SAME process's CONFIG singleton -- confirmed live:
+        # EnginePipeline registers its own callback AFTER setup_logging() already
+        # registered log_level's, silently discarding it with no error/warning
+        # anywhere. Console PATCH /api/config/log_level DID correctly update
+        # CONFIG's in-memory value (confirmed via journalctl: "Applied 1 autonomous
+        # config override(s)") and pipeline.py's OWN handler correctly fired
+        # ("Dynamic configuration change detected") -- but main.py's handler, the
+        # one that actually calls logging.getLogger().setLevel(), never ran again.
+        # Now a list of subscribers, not one slot -- every registered callback
+        # fires on every change, each isolated so one subscriber's exception can't
+        # block another's (matches this class's own established non-fatal/caught
+        # resilience pattern elsewhere).
+        self._notify_cbs: list = []
         self._last_loaded = 0.0
         self._watcher_active = False
 
@@ -377,8 +394,8 @@ class LiveConfig:
                     ignored_static_keys
                 )
 
-            if changed and not is_initial_boot and self._notify_cb:
-                self._notify_cb(changed)
+            if changed and not is_initial_boot:
+                self._fire_notify(changed)
 
             # PHASE 12: re-assert autonomous overrides on top of whatever config.yaml just
             # set. Without this, an operator editing any UNRELATED key in config.yaml would
@@ -473,8 +490,8 @@ class LiveConfig:
             LOGGER.info("🔧 Applied %d autonomous config override(s): %s", len(applied), applied)
         if reverted:
             LOGGER.info("↩️ Reverted %d config override(s) removed from %s: %s", len(reverted), self._overrides_path, reverted)
-        if (applied or reverted) and self._notify_cb:
-            self._notify_cb({**reverted, **applied})
+        if applied or reverted:
+            self._fire_notify({**reverted, **applied})
 
     def revert_override(self, key: str, value) -> None:
         """Pushes `key` back to its config.yaml baseline value immediately, in-memory, in
@@ -493,17 +510,17 @@ class LiveConfig:
         overrides file and _load_overrides() notices the key is gone (see that method's
         own bugfix note for why this used to never happen for removals).
 
-        Fires _notify_cb the same way _load_overrides() does -- a revert is as much a
-        "this key's effective value just changed" event as an apply is (e.g. main.py's
-        log_level live-reload hook needs to hear about a revert-to-baseline too, not
-        just a PATCH).
+        Fires every registered notify subscriber the same way _load_overrides()
+        does -- a revert is as much a "this key's effective value just changed"
+        event as an apply is (e.g. main.py's log_level live-reload hook needs to
+        hear about a revert-to-baseline too, not just a PATCH).
         """
         with self._lock:
             changed = self._config.get(key) != value
             self._config[key] = value
             self._active_file_overrides.pop(key, None)
-        if changed and self._notify_cb:
-            self._notify_cb({key: value})
+        if changed:
+            self._fire_notify({key: value})
 
     def start_watcher(self, interval: float = 5.0) -> None:
         if self._watcher_active:
@@ -534,7 +551,21 @@ class LiveConfig:
         t.start()
 
     def set_notify(self, cb) -> None:
-        self._notify_cb = cb
+        """Registers `cb` as an ADDITIONAL config-change subscriber -- does not
+        replace any previously-registered callback (see this class's own
+        __init__ comment on _notify_cbs for the real bug this closes: multiple
+        independent parts of this codebase each need their own dynamic-reload
+        hook on the same process's CONFIG singleton)."""
+        self._notify_cbs.append(cb)
+
+    def _fire_notify(self, changed: dict) -> None:
+        """Calls every registered subscriber with `changed`, isolated so one
+        callback raising never prevents the others from running."""
+        for cb in self._notify_cbs:
+            try:
+                cb(changed)
+            except Exception:
+                LOGGER.exception("Config-change notify callback raised, continuing with remaining subscribers")
 
     def get(self, key: str, default=None):
         with self._lock:

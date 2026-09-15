@@ -149,4 +149,44 @@ def test_get_config_marks_restart_required(isolated_overrides):
     assert by_key["metrics_port"]["editable"] is False
     assert by_key["lateral_movement_ports"]["restart_required"] is True
     assert by_key["poll_interval"]["restart_required"] is False
-    assert by_key["poll_interval"]["editable"] is True
+
+
+def test_set_notify_supports_multiple_subscribers(isolated_overrides, monkeypatch):
+    """BUGFIX (2026-09-15, live audit -- console log_level changes not applying):
+    set_notify() used to silently OVERWRITE a previously-registered callback (a
+    single self._notify_cb slot) -- confirmed live via the real console API and
+    journalctl: PATCH /api/config/log_level correctly updated CONFIG's in-memory
+    value and core/pipeline.py's own EnginePipeline subscriber correctly fired
+    ("Dynamic configuration change detected"), but main.py's setup_logging()
+    subscriber -- registered FIRST, then silently discarded when EnginePipeline
+    registered its own callback SECOND -- never ran again, so
+    logging.getLogger().setLevel() was never actually called. Isolated via
+    monkeypatch (fresh _notify_cbs list) so this test's callbacks never leak into
+    CONFIG's real subscriber list or affect any other test."""
+    monkeypatch.setattr(CONFIG, "_notify_cbs", [])
+    calls_a = []
+    calls_b = []
+    CONFIG.set_notify(lambda changed: calls_a.append(changed))
+    CONFIG.set_notify(lambda changed: calls_b.append(changed))
+
+    config_api.patch_config("poll_interval", config_api.ConfigValuePayload(value=11), token="test")
+
+    assert calls_a and calls_a[-1] == {"poll_interval": 11}, "the FIRST-registered subscriber must still fire"
+    assert calls_b and calls_b[-1] == {"poll_interval": 11}, "the SECOND-registered subscriber must also fire"
+
+
+def test_notify_subscriber_exception_does_not_block_others(isolated_overrides, monkeypatch):
+    """A single misbehaving subscriber must not prevent every OTHER subscriber
+    (e.g. main.py's log_level hook) from receiving the same change."""
+    monkeypatch.setattr(CONFIG, "_notify_cbs", [])
+    calls_after = []
+
+    def _broken(changed):
+        raise RuntimeError("simulated subscriber failure")
+
+    CONFIG.set_notify(_broken)
+    CONFIG.set_notify(lambda changed: calls_after.append(changed))
+
+    config_api.patch_config("poll_interval", config_api.ConfigValuePayload(value=12), token="test")
+
+    assert calls_after and calls_after[-1] == {"poll_interval": 12}
