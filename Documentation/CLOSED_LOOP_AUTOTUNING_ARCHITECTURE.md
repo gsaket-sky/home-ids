@@ -10,6 +10,23 @@ concurrent peer session (`home-ids-dc`) running the full existing test
 suite against the shipped v15.0.0 state, to avoid two sessions editing the
 same live production files at once.
 
+**DEPLOYED 2026-09-15** (user-approved, both hosts explicitly confirmed
+before acting): `.94`'s `soc.service` was 23 commits behind (still on the
+pre-Release-15 `23144ad`) — pulled to `3e31bcd` and restarted; confirmed
+healthy post-restart (`state/health_manager_snapshot.json`). Separately
+found `.19`'s `v13-ingest.service` (the Sheet 00 baseline daemon) running
+for 3 days on `bdbec7b`, from BEFORE Release 15 existed — Sheet 00 baseline
+scoring had never actually run in production before this deploy. Pulled
+and restarted there too; confirmed live in the real graph db within
+minutes (`baseline_deviation`/`markov_activity_surprise` evidence and real
+`device_baselines` rows for the beta metrics, the exact path the crash bug
+above was in). Also found and fixed live during this deploy:
+`backtest_job.py` had no `sys.path` setup at all (every other `v13/ops/*.py`
+scheduled script does) — would have crashed silently on its first-ever
+3:30am scheduled run; fixed and re-verified with a real, bounded
+(`--max-devices 3`) run against `.94`'s live 7.6GB graph db before the
+restart (`overall_pass=True`, `golden_set=True`, `synthetic_detection=0.86`).
+
 ## Why this exists
 
 The old loop was: `detection → Ollama interpretation → human Telegram tap →
