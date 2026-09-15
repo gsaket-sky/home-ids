@@ -14,7 +14,7 @@ After=network.target
 Type=simple
 User=user
 WorkingDirectory=/home/user/home_ids
-ExecStart=/usr/bin/python3 /home/user/home_ids/src/v13/ingest/daemon.py /home/user/home_ids/config_v13.yaml
+ExecStart=/usr/bin/python3 /home/user/home_ids/src/argus/ingest/daemon.py /home/user/home_ids/config_v13.yaml
 Restart=always
 RestartSec=5
 

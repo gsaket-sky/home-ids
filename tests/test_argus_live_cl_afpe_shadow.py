@@ -3,7 +3,7 @@ Standalone runtime test for v13's CL-AFPE shadow-mode wiring (v13 full-architect
 plan, Phase 6e -- src/v13/ops/live_engine.py's evaluate_cl_afpe_shadow(), the pipeline.py
 call site added alongside the real self.fp_engine.evaluate() call) AND the Workstream 2
 live-flip adapter (evaluate_cl_afpe_live(), the call site pipeline.py switches to once
-config.yaml's cl_afpe_engine is flipped to "v13").
+config.yaml's cl_afpe_engine is flipped to "argus").
 
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_argus_live_cl_afpe_shadow.py`

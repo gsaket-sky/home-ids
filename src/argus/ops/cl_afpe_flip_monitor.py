@@ -8,7 +8,7 @@ retro_hunter.py/the retired gap_monitor.py already used).
 
 Checks state/cl_afpe_divergence_v13.jsonl (Phase 6e's shadow comparison, already
 accumulating real data every cycle an alert fires) against a fixed bar and, if
-cleared, flips config.yaml's `cl_afpe_engine` key from "v_current" to "v13"
+cleared, flips config.yaml's `cl_afpe_engine` key from "v_current" to "argus"
 automatically -- the user's explicit choice (2026-09-07): fully automatic once the
 bar clears, matching this project's own A9 precedent for the retired per-mechanism
 apparatus, applied here to CL-AFPE's own single, whole-engine flip. Deliberately
@@ -69,8 +69,8 @@ DIVERGENCE_LOG_FILENAME = "cl_afpe_divergence_v13.jsonl"
 MONITOR_STATE_FILENAME = "cl_afpe_flip_monitor_state.json"
 
 REGRESSION_TESTS = [
-    "tests/test_v13_cl_afpe.py",
-    "tests/test_v13_live_cl_afpe_shadow.py",
+    "tests/test_argus_cl_afpe.py",
+    "tests/test_argus_live_cl_afpe_shadow.py",
 ]
 
 
@@ -122,7 +122,7 @@ def _flip_to_live() -> bool:
     trip, which would silently strip every comment in this heavily-annotated file.
     Requires `cl_afpe_engine:` to already exist in config.yaml (added once, by hand,
     alongside this job's own scheduler entry -- see config.yaml.example). Idempotent:
-    already "v13" is a no-op that still returns True."""
+    already "argus" is a no-op that still returns True."""
     if not CONFIG_YAML_PATH.exists():
         return False
     text = CONFIG_YAML_PATH.read_text(encoding="utf-8")
@@ -130,9 +130,9 @@ def _flip_to_live() -> bool:
     match = pattern.search(text)
     if not match:
         return False
-    if match.group(2) == "v13":
+    if match.group(2) == "argus":
         return True
-    new_text = text[: match.start(2)] + "v13" + text[match.end(2):]
+    new_text = text[: match.start(2)] + "argus" + text[match.end(2):]
     tmp_path = CONFIG_YAML_PATH.with_suffix(".yaml.tmp")
     tmp_path.write_text(new_text, encoding="utf-8")
     tmp_path.replace(CONFIG_YAML_PATH)
@@ -178,7 +178,7 @@ def check_bar(state_dir: Path) -> dict:
     state, returns what was found as a plain dict, doesn't touch Telegram/config
     itself. `action` is one of: already_live, veto_blocked, waiting_volume_floor,
     bar_cleared."""
-    if _current_engine_value() == "v13":
+    if _current_engine_value() == "argus":
         return {"action": "already_live"}
 
     entries = _read_divergence_log(state_dir)
@@ -217,8 +217,8 @@ def run_once(config: dict = None, monitor_state: dict = None) -> dict:
             fn = outcome["detail"]
             send_telegram(
                 config,
-                "⚠️ <b>CL-AFPE v13 flip BLOCKED</b>\n"
-                f"A false-negative-shaped divergence was found -- v13 would have called "
+                "⚠️ <b>CL-AFPE argus flip BLOCKED</b>\n"
+                f"A false-negative-shaped divergence was found -- argus would have called "
                 f"<code>{fn.get('device_id', 'unknown')}</code>'s alert FALSE_POSITIVE "
                 f"(suppressed) where v-current's real verdict was "
                 f"<b>{fn.get('v1_verdict')}</b>.\n"
@@ -242,7 +242,7 @@ def run_once(config: dict = None, monitor_state: dict = None) -> dict:
         if not monitor_state.get("regression_fail_notified"):
             send_telegram(
                 config,
-                "⚠️ <b>CL-AFPE v13 flip BLOCKED</b>\n"
+                "⚠️ <b>CL-AFPE argus flip BLOCKED</b>\n"
                 f"Volume bar cleared but a regression test is currently FAILING on "
                 f"this box -- NOT flipping. Needs a human look:\n"
                 f"<pre>{test_output[-800:]}</pre>",
@@ -256,16 +256,16 @@ def run_once(config: dict = None, monitor_state: dict = None) -> dict:
     if flipped:
         send_telegram(
             config,
-            "✅ <b>CL-AFPE flipped to v13</b>\n"
+            "✅ <b>CL-AFPE flipped to argus</b>\n"
             f"Bar cleared ({outcome['detail']}). Regression tests passed. "
-            f"config.yaml's cl_afpe_engine is now <b>v13</b>.\n"
+            f"config.yaml's cl_afpe_engine is now <b>argus</b>.\n"
             f"⚠️ This does NOT restart soc.service automatically -- "
             f"run <code>sudo systemctl restart soc.service</code> manually to activate it.",
         )
     else:
         send_telegram(
             config,
-            "⚠️ <b>CL-AFPE v13 flip FAILED</b>\n"
+            "⚠️ <b>CL-AFPE argus flip FAILED</b>\n"
             f"Bar cleared and regression passed, but editing config.yaml failed -- "
             f"the cl_afpe_engine key may be missing. Needs a human look.",
         )

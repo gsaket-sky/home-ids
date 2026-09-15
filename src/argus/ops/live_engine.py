@@ -875,7 +875,7 @@ def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float
                             ti_engine=None, decision: Optional[dict] = None, asn_owner: str = "",
                             fallback_evaluate=None, now: Optional[float] = None) -> Dict[str, Any]:
     """v13 full-architecture plan, Workstream 2 -- the pipeline.py call site once
-    config.yaml's `cl_afpe_engine` is flipped from "v_current" to "v13" (see
+    config.yaml's `cl_afpe_engine` is flipped from "v_current" to "argus" (see
     cl_afpe_flip_monitor.py for how/when that flip happens). Unlike
     evaluate_cl_afpe_shadow() above, this function's RETURN VALUE is what pipeline.py
     actually acts on -- suppress/publish, ML-registry learn/reject, alerts.json's

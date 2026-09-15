@@ -520,7 +520,7 @@ class EnginePipeline:
         if state_manager is None:
             self.state_manager.load_from_disk(alpha=float(self.config.get("baseline_alpha", 0.05)))
 
-        # v13 full-architecture plan, Phase 3: config.get("engine", "v13") == "v13"
+        # v13 full-architecture plan, Phase 3: config.get("engine", "argus") == "argus"
         # (the default) swaps in LiveIdentityManager -- a real DeviceIdentityManager
         # SUBCLASS (Fritz!Box polling, process_dns_identities/process_zeek_identities,
         # apply_device_type, orphan-merge cleanup all inherited UNCHANGED; only
@@ -529,7 +529,7 @@ class EnginePipeline:
         # real MAC-randomization detection. Same rollback flag as the decision engine
         # (A13) -- "v_current" uses the real, unmodified DeviceIdentityManager exactly
         # as before Phase 3 existed.
-        if self.config.get("engine", "v13") == "v13":
+        if self.config.get("engine", "argus") == "argus":
             trust_anchors = load_trust_anchors_from_config(self.config)
             self.identity_manager = LiveIdentityManager(
                 self.state_manager, self.config, v13_live_engine.get_graph_store(), trust_anchors,
@@ -1636,7 +1636,7 @@ class EnginePipeline:
                 # permanently-dead code with no live path left to ever flip into (see the
                 # dependency map's A13 entry for the full cutover record; git history has the
                 # removed code if it's ever needed for reference).
-                if self.config.get("engine", "v13") == "v13":
+                if self.config.get("engine", "argus") == "argus":
                     decision = v13_live_engine.evaluate(
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
                         features=features, is_safe=is_safe,
@@ -1736,7 +1736,7 @@ class EnginePipeline:
                                         # would re-insert every one of those items again as genuine
                                         # duplicate graph rows. This second, rare re-evaluation path
                                         # stays graph-uninvolved until that's worth solving properly.
-                                        if self.config.get("engine", "v13") == "v13":
+                                        if self.config.get("engine", "argus") == "argus":
                                             decision = v13_live_engine.evaluate(
                                                 active_evidence, rep_vector, getattr(state, "device_type", ""),
                                                 fallback_evaluate=self.decision_engine.evaluate,
@@ -2291,12 +2291,12 @@ class EnginePipeline:
                         # the top-level `engine:` switch's exact shape -- default
                         # "v_current" keeps AutonomousFPEngine as the real suppression
                         # decision (with v13's ClAfpeEngine still shadow-computed
-                        # alongside for comparison, below); "v13" (set automatically by
+                        # alongside for comparison, below); "argus" (set automatically by
                         # cl_afpe_flip_monitor.py once its own bar clears, see that file's
                         # docstring) makes ClAfpeEngine's verdict the real one instead --
                         # a whole-engine swap, not a per-mechanism flag, matching this
                         # project's own precedent for the main decision engine (A13).
-                        if self.config.get("cl_afpe_engine", "v_current") == "v13":
+                        if self.config.get("cl_afpe_engine", "v_current") == "argus":
                             fp_verdict = v13_live_engine.evaluate_cl_afpe_live(
                                 alert_payload=alert_payload,
                                 features=features,
@@ -2320,7 +2320,7 @@ class EnginePipeline:
                             # V13 FULL-ARCHITECTURE PLAN, PHASE 6E: CL-AFPE shadow-mode
                             # comparison, compute-only -- never affects fp_verdict above
                             # or anything derived from it. Only runs while v1 is still
-                            # the real decision-maker -- once cl_afpe_engine="v13" above,
+                            # the real decision-maker -- once cl_afpe_engine="argus" above,
                             # there's no more real v1 verdict left to diff against (same
                             # reasoning that froze decision_engine.py's own shadow
                             # experiment once the main engine flipped, A13), and calling

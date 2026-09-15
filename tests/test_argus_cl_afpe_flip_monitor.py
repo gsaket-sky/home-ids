@@ -91,17 +91,17 @@ check("B: current engine value reads 'v_current' before any flip",
 flipped_ok = mon._flip_to_live()
 _after_first_flip = _test_config_path.read_text(encoding="utf-8")
 check("B: _flip_to_live returns True on a successful edit", flipped_ok is True)
-check("B: the value actually changed to 'v13' in the file",
-      mon._current_engine_value() == "v13")
+check("B: the value actually changed to 'argus' in the file",
+      mon._current_engine_value() == "argus")
 check("B: every comment line and surrounding section is byte-for-byte preserved",
       "# cl_afpe_engine -- see config.yaml.example" in _after_first_flip
       and "home_subnet: 192.168.1.0/24" in _after_first_flip
       and "telegram_enabled: true" in _after_first_flip)
 check("B: only the one value changed -- no stray reformatting of the rest of the file",
-      _after_first_flip.replace("cl_afpe_engine: v13", "cl_afpe_engine: v_current") == _SAMPLE_CONFIG)
+      _after_first_flip.replace("cl_afpe_engine: argus", "cl_afpe_engine: v_current") == _SAMPLE_CONFIG)
 
 flipped_again = mon._flip_to_live()
-check("B: flipping an already-'v13' value is idempotent (still returns True, file unchanged)",
+check("B: flipping an already-'argus' value is idempotent (still returns True, file unchanged)",
       flipped_again is True and _test_config_path.read_text(encoding="utf-8") == _after_first_flip)
 
 _no_key_config_path = TMPDIR / "config_no_key.yaml"
@@ -170,7 +170,7 @@ check("C: entries missing v1_verdict entirely don't count as eligible",
 # Already live -- short-circuits before even reading the log
 mon._flip_to_live()
 outcome = mon.check_bar(_state_dir_c)
-check("C: once cl_afpe_engine is already 'v13', check_bar reports already_live without "
+check("C: once cl_afpe_engine is already 'argus', check_bar reports already_live without "
       "re-evaluating the log",
       outcome["action"] == "already_live")
 _test_config_path.write_text(_SAMPLE_CONFIG, encoding="utf-8")  # reset for section D
@@ -226,8 +226,8 @@ mon._run_regression_tests = lambda: (True, "mocked pass")
 summary = mon.run_once(config={"state_path": str(_state_dir_d / "ids_state.json")}, monitor_state={})
 check("D3: bar cleared + regression pass -> flipped, exactly one success notification",
       summary["action"] == "flipped" and len(_telegram_calls) == 1
-      and "flipped to v13" in _telegram_calls[0])
-check("D3: config.yaml actually reflects the flip", mon._current_engine_value() == "v13")
+      and "flipped to argus" in _telegram_calls[0])
+check("D3: config.yaml actually reflects the flip", mon._current_engine_value() == "argus")
 
 # D4: bar cleared but regression FAILS -- does not flip, notifies once, not again
 _test_config_path.write_text(_SAMPLE_CONFIG, encoding="utf-8")
