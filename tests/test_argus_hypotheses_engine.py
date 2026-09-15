@@ -86,7 +86,17 @@ check("DNSTunnelingHypothesis requires BOTH high rate AND high entropy",
 
 score_strong = h.evaluate(
     score_evidence([ev("dns_rate", 150), ev("dns_entropy", 4.5), ev("dns_unique_ratio", 0.9)], now=NOW),
-    rep(0),  # tier 0 (local/internal): strong signal but not tier 4, isolates the Probable bump from the separate High bump
+    # BUGFIX (2026-09-15, gap 2 of the "3 automated-learning gaps" audit): this used
+    # to pass rep(0) here on the mistaken assumption tier 0 was neutral/non-
+    # contradicting -- it never actually was BY DESIGN (tier 0's own docstring
+    # always said "external reputation doesn't apply," the same dampening role as
+    # tier 1/2), it just happened to behave that way because of the very bug gap 2
+    # fixed (tier 0 was excluded from every `eff_tier in (1, 2)` check). Now that
+    # tier 0 correctly dampens like every other hypothesis, rep(3) (genuinely
+    # unclassified/neutral) is the correct fixture for "strong signal, no rep-tier
+    # interference" -- matches the tier-3 fixture already used two checks below for
+    # the identical isolate-from-tier-4 purpose.
+    rep(3),  # tier 3 (unclassified): strong signal but not tier 4, isolates the Probable bump from the separate High bump
 )
 check("DNSTunnelingHypothesis reaches Probable (3.0) with the strong signal present", score_strong == 3.0)
 
@@ -419,6 +429,23 @@ score_contradicted = h.evaluate(
 check("a trusted-tier destination (tier 1) contradicts even a many-device coordinated "
       "hit, same contradicting-evidence pattern every other hypothesis uses",
       score_contradicted == 2.0)
+
+# GAP 2 FIX (2026-09-15, "3 automated-learning gaps" audit): tier 0
+# ("local/internal, external reputation doesn't apply") used to be silently
+# excluded from this contradicting-evidence check (only (1,2) were checked,
+# despite tier 0's own docstring already promising the same dampening) --
+# this is the real-world shape of the actual bug: a household's own smart-TV
+# devices doing ordinary mDNS discovery of each other, which ReputationClassifier
+# now correctly assigns tier 0 to (see that module's own 2026-09-15 fix).
+h = CoordinatedTargetingHypothesis()
+score_contradicted_tier0 = h.evaluate(
+    score_evidence([ev("coordinated_targeting", 5.0, confidence=0.95)], now=NOW), rep(0),  # local/internal destination
+)
+check("a local/internal-tier destination (tier 0) NOW ALSO contradicts a many-device "
+      "coordinated hit, matching tier 1/2's existing dampening -- the actual fix for "
+      "the real Fire TV / Echo Show COORDINATED_TARGETING false positives found "
+      "2026-09-15 (ordinary mDNS discovery between a household's own devices)",
+      score_contradicted_tier0 == 2.0)
 
 engine_ct = HypothesisEngine()
 result_ct = engine_ct.evaluate_all([ev("coordinated_targeting", 3.0)], rep(3), now=NOW)

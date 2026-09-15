@@ -1,3 +1,4 @@
+import ipaddress
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
@@ -131,11 +132,32 @@ class ReputationClassifier:
         domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
 
+        # BUGFIX (2026-09-15, gap 2 of the "3 automated-learning gaps" audit): tier 0's
+        # own docstring above promises "RFC1918" coverage, but _TIER_0 was always just a
+        # set of DOMAIN-SUFFIX strings (.box/.local/fritz.box) -- a raw private IP like
+        # "192.168.1.41" (this classifier's `domain` param is sometimes a raw IP when
+        # there's no resolved hostname, e.g. pipeline.py's `reputation_target`) never
+        # matched any of them, so it fell through to tier 3 (neutral) instead of the
+        # dampening tier 0 the docstring already claimed it got. Network-agnostic by
+        # construction (per feedback_network_agnostic_design.md) -- this is a real IP-
+        # range check via stdlib `ipaddress`, not a household-specific literal, so it
+        # applies identically on any consumer network's own private address space.
+        # Same approach already proven the same day in
+        # composite_trust.classify_destination(). A non-IP domain string simply fails
+        # to parse and falls through to the existing suffix-based checks unchanged.
+        try:
+            addr = ipaddress.ip_address(domain)
+        except ValueError:
+            addr = None
+        if addr is not None and (addr.is_private or addr.is_link_local or addr.is_loopback):
+            tier = 0
+
         # Check explicit tiers (boundary-safe matching — see _suffix_or_domain_match)
-        for t0 in self._TIER_0:
-            if _suffix_or_domain_match(domain, t0):
-                tier = 0
-                break
+        if tier == 3:
+            for t0 in self._TIER_0:
+                if _suffix_or_domain_match(domain, t0):
+                    tier = 0
+                    break
         if tier == 3:
             for t1 in self._TIER_1:
                 if _suffix_or_domain_match(domain, t1):
