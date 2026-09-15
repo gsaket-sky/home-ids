@@ -130,6 +130,34 @@ def _propose_tuning_change(store: GraphStore, synthetic: Dict[str, Any], drift: 
             "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value}
 
 
+def _promote_eligible_tuning_changes(store: GraphStore, run_id: str, now: float) -> List[str]:
+    """The other genuinely missing half of 'fully automatic': propose_change()
+    creating a row was never enough on its own -- promote_change() ALSO had zero
+    production callers before this, so nothing would ever have promoted a
+    canary-elapsed proposal even after this same module started creating them.
+    Called only when overall_pass is True for THIS run (checked by the caller),
+    since a real backtest pass is exactly what promote_change() itself requires
+    as the confirming run for any change whose canary window has elapsed --
+    this run serves as that confirmation for every eligible pending change, not
+    only ones it personally proposed. Returns the list of change_ids actually
+    promoted this cycle."""
+    engine = AutotuneEngine(store)
+    rows = store._conn.execute(
+        "SELECT change_id FROM threshold_history WHERE promoted_at IS NULL "
+        "AND rolled_back_at IS NULL AND canary_until <= ?",
+        (now,),
+    ).fetchall()
+    promoted = []
+    for row in rows:
+        change_id = row["change_id"]
+        try:
+            if engine.promote_change(change_id, confirming_backtest_run_id=run_id, now=now):
+                promoted.append(change_id)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] promote_change(%s) failed, non-fatal", change_id)
+    return promoted
+
+
 def run_golden_set() -> Dict[str, Any]:
     """Runs the existing real-incident regression suite as a subprocess.
     Zero tolerance: any real-incident regression (non-zero exit) fails this
@@ -241,11 +269,16 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     # regressions matter at that point. Best-effort -- a failure here must never take
     # down the backtest run itself, which has already committed its own row above.
     tuning_proposal = None
+    tuning_promoted: List[str] = []
     if overall_pass:
         try:
             tuning_proposal = _propose_tuning_change(store, synthetic, drift, run_id, now)
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] tuning proposal evaluation failed, non-fatal")
+        try:
+            tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] promotion pass failed, non-fatal")
 
     # Release 15 heartbeat gap fix (2026-09-15): this job previously reported no
     # heartbeat at all -- a silently-stopped nightly backtest read as healthy
@@ -263,7 +296,8 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
         LOGGER.exception("[HEARTBEAT] failed to write backtest_job heartbeat, non-fatal")
 
     return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift,
-            "overall_pass": overall_pass, "tuning_proposal": tuning_proposal}
+            "overall_pass": overall_pass, "tuning_proposal": tuning_proposal,
+            "tuning_promoted": tuning_promoted}
 
 
 def main() -> None:
@@ -288,6 +322,8 @@ def main() -> None:
         LOGGER.warning("Posterior-trajectory drift detected: %s", result["drift"]["findings"])
     if result["tuning_proposal"]:
         LOGGER.info("[AUTOTUNE_TRIGGER] %s", result["tuning_proposal"])
+    if result["tuning_promoted"]:
+        LOGGER.info("[AUTOTUNE_TRIGGER] promoted: %s", result["tuning_promoted"])
     if not result["overall_pass"]:
         raise SystemExit(1)
 
