@@ -46,6 +46,33 @@ store.upsert_device(DEVICE, device_type="laptop", timestamp=NOW)
 store._conn.execute("INSERT INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')", (HYPOTHESIS,))
 store._conn.commit()
 
+# BUGFIX regression (found live on .94, minutes after deploying the "3
+# automated-learning gaps" fix, 2026-09-15): production's real hypotheses
+# table was completely empty -- nothing had ever seeded it -- so EVERY
+# record_corroborating_signal() call there failed with a caught-but-silent
+# sqlite3.IntegrityError (FK violation), meaning composite-trust corroboration
+# had likely never successfully written a row in production before this fix,
+# for ANY caller. This test deliberately does NOT pre-seed the hypotheses
+# table for UNSEEDED_HYPOTHESIS below -- proving record_corroborating_signal()
+# is now self-sufficient, matching what a real production call site actually
+# needs (nothing upstream reliably seeds this catalog).
+UNSEEDED_HYPOTHESIS = "COORDINATED_TARGETING"
+unseeded_check = store._conn.execute(
+    "SELECT COUNT(*) as c FROM hypotheses WHERE hypothesis_id=?", (UNSEEDED_HYPOTHESIS,)
+).fetchone()
+check("setup: UNSEEDED_HYPOTHESIS genuinely has no pre-existing catalog row "
+      "(proves the test below isn't accidentally passing for an unrelated reason)",
+      unseeded_check["c"] == 0)
+ct.record_corroborating_signal(store, DEVICE, FINGERPRINT, DEST_CLASS, UNSEEDED_HYPOTHESIS,
+                                  "reputation", REGIME, now=NOW)
+check("record_corroborating_signal() self-registers a missing hypothesis_id "
+      "(INSERT OR IGNORE into the catalog) instead of raising a caught-but-silent "
+      "sqlite3.IntegrityError -- the actual live production bug this fixes",
+      store._conn.execute("SELECT COUNT(*) as c FROM hypotheses WHERE hypothesis_id=?",
+                            (UNSEEDED_HYPOTHESIS,)).fetchone()["c"] == 1)
+check("...and the corroboration itself was genuinely recorded, not silently dropped",
+      len(ct._family_trusts(store, DEVICE, FINGERPRINT, DEST_CLASS, UNSEEDED_HYPOTHESIS, REGIME, NOW)) == 1)
+
 # =============================================================================
 # The core anti-gaming claim: ONE family repeatedly corroborating never
 # permits suppression, no matter how many times it fires.

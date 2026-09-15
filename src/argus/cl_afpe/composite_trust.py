@@ -108,6 +108,26 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
     if not eligible_to_contribute:
         return
     now = now if now is not None else time.time()
+    # BUGFIX (2026-09-15, found live on .94 minutes after deploying the "3
+    # automated-learning gaps" fix): cl_afpe_trust.hypothesis_id is a real FK
+    # against the hypotheses catalog table (GraphStore's PRAGMA foreign_keys=ON
+    # is real enforcement, not advisory) -- but nothing ever seeded that table on
+    # a live production deployment, so EVERY insert below has always failed with
+    # sqlite3.IntegrityError on .94, caught non-fatally by evaluate()'s own
+    # try/except and silently logged, since this function was first wired
+    # (composite trust's hard-gate went live earlier the same day). This means
+    # composite-trust corroboration has likely never successfully written a row
+    # in production before now, for ANY caller (the original Stage 2/3 path
+    # included), not just the new Stage 1b path that happened to be the first to
+    # exercise it heavily enough to surface the error in the journal. Ensuring
+    # the FK row exists here -- once, cheaply, via INSERT OR IGNORE -- fixes this
+    # for every current and future caller in one place, rather than requiring
+    # every caller to remember to seed it themselves (this module's own tests
+    # were doing exactly that seeding manually, masking the gap).
+    store._conn.execute(
+        "INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')",
+        (hypothesis_id,),
+    )
     row = store._conn.execute(
         "SELECT trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id=? AND behavior_fingerprint=? AND "
         "destination_class=? AND hypothesis_id=? AND evidence_family=? AND regime_id=?",
