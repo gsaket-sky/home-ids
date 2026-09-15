@@ -345,6 +345,43 @@ separate, explicit human-triggered action, same as every other automated flip in
 project's history. A veto or failing-regression state is Telegram-notified once (a
 persisted bookmark suppresses re-sending the same standing finding every 15-minute tick).
 
+### Composite trust (a stricter, additive gate on CL-AFPE, not part of the autotuner)
+
+**File:** `src/argus/cl_afpe/composite_trust.py`. A six-dimensional trust key (`device x
+behavior_fingerprint x destination_class x hypothesis x evidence_family x regime`) meant
+to *tighten*, never loosen, what `ClAfpeEngine`'s existing trust-cache already permits —
+trust only builds once >=2 *distinct* evidence families have each independently
+corroborated the same tuple, closing the classic gaming move of repeatedly tripping one
+weak signal just under the corroboration bar.
+
+Wired into `ClAfpeEngine.evaluate()` (2026-09-15) at two points: the write side
+(`record_corroborating_signal()`) fires for real on every genuine `STAGE_3_COMBINED`
+suppression, so the table has been accumulating real data since that date; the read side
+(`permits_suppression()`) is computed at the existing trust-cache fast path and logged,
+but deliberately **not** yet AND-ed onto it as a hard gate — the table started completely
+empty, and hard-gating immediately would have stripped away every currently-working
+trust-cache suppression until real corroboration re-accumulated. Promote to a hard gate
+once the shadow log shows it agreeing with real outcomes, the same shadow-then-promote
+shape the CL-AFPE flip monitor above already proved.
+
+`destination_class` had no producer anywhere in the codebase before this — built by
+reusing `utils.is_cloud_cdn_provider_org()`/`is_telemetry_domain()` and stdlib
+`ipaddress` rather than a new taxonomy. `behavior_fingerprint` simplifies to
+activity-state alone (`derive_activity_state()`, reused from `§Autotuning`'s baseline
+module) and `regime_id` defaults to a fixed `0` — both honestly first-pass, since the
+full BOCPD/regime tracking that would feed richer versions of either only runs on the
+out-of-scope `.19` host, not in this live pipeline (see the correction below).
+
+**Correction (2026-09-15): Sheet 00 baseline scoring does not run on `.94` at all.**
+`BaselineEngine` (Gaussian/Beta/Poisson/BOCPD/Markov, described above as feeding the
+autotuner's `bocpd_hazard_rate` read) is only ever instantiated by
+`src/argus/ingest/daemon.py` — the standalone `.19` shadow host — confirmed via a direct
+grep of `live_engine.py`/`pipeline.py` (zero references). The `baseline_deviation`/
+`regime_change`/`markov_*` evidence types this doc's hypothesis-engine tables describe
+are real and fully wired to be *consumed* if present, but nothing on `.94` currently
+*produces* them. Treat any future claim that "baseline scoring is live" as needing
+re-verification against `.94`'s actual pipeline, not this doc's own earlier prose.
+
 ## 6. Identity & Device Lifecycle
 
 **Scope**: the `device_id` lifecycle end-to-end and the subsystems that key state off it — resolve -> orphan-merge -> bind -> materialize -> refresh/classify -> prune. Not a whole-codebase map.
@@ -472,6 +509,7 @@ One daemon thread (`HealthManager`, `src/core/health_manager.py`), started from 
 | `ti_refresh` | in-process | `ThreatIntel._refresh_loop()` |
 | `api_subprocess` | cross-process file (`state/component_heartbeat.json`) | `middleware/main_api.py`'s startup background task, every ~10s |
 | `scheduler_subprocess` | cross-process file | `scripts/scheduler.py`, once per minute-tick |
+| `backtest_job` | cross-process file | `argus/ops/backtest_job.py`, once per nightly run — registered with an ~86400s expected interval (not the 15s/60s scale used above), added 2026-09-15 after a gap review found it had none |
 | `zeek` | probed directly | `HealthManager._check_zeek_freshness()` — same mtime check as `main.py`'s old boot-time alert, now repeating |
 | `suricata` | probed directly | `intelligence.detectors.suricata_scan.check_suricata_health()`, unchanged, now repeating |
 | `pihole` | probed directly | `IPSMitigator.check_pihole_health()`, unchanged, now repeating |
