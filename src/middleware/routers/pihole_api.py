@@ -8,6 +8,8 @@ from middleware.auth import verify_token, CONFIG, LOGGER
 from core.state_guard import StateManager
 from mitigation.ips import IPSMitigator
 from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
 
 router = APIRouter()
 
@@ -34,6 +36,34 @@ def _get_fp_engine() -> AutonomousFPEngine:
                     config=CONFIG, state_dir=str(Path(state_path).parent)
                 )
     return _fp_engine_singleton
+
+# Argus's own CL-AFPE engine (2026-09-15, full migration): the three human-interactive
+# actions below (immunize/revoke/approve-tune-down) previously only ever touched
+# AutonomousFPEngine (fp_engine.py, the legacy/rollback engine) -- an isolated store
+# `cl_afpe_engine: argus` (the live default since 2026-09-08) never reads from. A human
+# tapping "Mark False Positive" in Telegram had no effect on what actually governs live
+# suppression. Kept as a SEPARATE singleton, additive to the legacy call at each site
+# (never replacing it) -- the legacy call still matters for its own real side effect
+# (train_fp_classifier.py's weekly retrain reads its correction-sample labeling; the
+# ONNX/FastEmbed models themselves are the one artifact both engines already share
+# read-only). Best-effort at each call site: a failure here must never break the
+# existing, working Telegram-button response.
+_argus_cl_afpe_singleton: Optional[ClAfpeEngine] = None
+_argus_cl_afpe_lock = threading.Lock()
+
+def _get_argus_cl_afpe_engine() -> ClAfpeEngine:
+    global _argus_cl_afpe_singleton
+    if _argus_cl_afpe_singleton is None:
+        with _argus_cl_afpe_lock:
+            if _argus_cl_afpe_singleton is None:
+                # Same state_path -> state dir derivation _get_fp_engine() uses above,
+                # not a new config key -- matches live_engine.py's own default
+                # ("state/v13_graph.db" alongside ids_state.json), the actual live path.
+                state_path = CONFIG.get("state_path", "state/ids_state.json")
+                db_path = str(Path(state_path).parent / "v13_graph.db")
+                store = GraphStore(db_path)
+                _argus_cl_afpe_singleton = ClAfpeEngine(store)
+    return _argus_cl_afpe_singleton
 
 @router.post("/api/ipc/immunize")
 def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
@@ -93,6 +123,15 @@ def _ipc_immunize_logic(action_id: str):
                 "reason": result.get("refused_reason", "Cannot mark this alert as a false positive."),
                 "device_id": device_id,
             }
+
+        # Argus's own live effect (additive, best-effort -- see _get_argus_cl_afpe_engine's
+        # docstring above). The legacy call above already decided "refused" authoritatively
+        # for the HTTP response and training-data labeling; this only needs to also apply
+        # the correction to what actually governs live suppression today.
+        try:
+            _get_argus_cl_afpe_engine().mark_false_positive(alert_payload, source="operator")
+        except Exception as exc:
+            LOGGER.warning("Argus CL-AFPE mark_false_positive (additive) failed, non-fatal: %s", exc)
 
         # FIX #1 (blast radius): only the device this specific alert was about, not every
         # tracked device on the network.
@@ -170,6 +209,10 @@ def _ipc_revoke_logic(action_id: str):
         if entry.get("type") == "immunize_domain":
             fp = _get_fp_engine()
             fp.revoke_immunization(entry.get("target", ""))
+            try:
+                _get_argus_cl_afpe_engine().revoke(entry.get("target", ""))
+            except Exception as exc:
+                LOGGER.warning("Argus CL-AFPE revoke (additive) failed, non-fatal: %s", exc)
 
         device_id = entry.get("device_id", "")
         if device_id and sm.has_device(device_id):
@@ -239,6 +282,12 @@ def _ipc_approve_tune_down_logic(device_id: str):
 
         fp = _get_fp_engine()
         fp._apply_sigma_shift(device_id, hostname, direction="TUNE_DOWN", source="llm_pending_approval")
+        try:
+            _get_argus_cl_afpe_engine()._apply_sigma_shift(
+                device_id, direction="TUNE_DOWN", source="llm_pending_approval",
+            )
+        except Exception as exc:
+            LOGGER.warning("Argus CL-AFPE sigma-shift (additive) failed, non-fatal: %s", exc)
 
         ips = IPSMitigator(config=CONFIG, state_manager=sm)
         released = ips.release_device(device_id)
