@@ -77,7 +77,7 @@ single-cycle surprise value or a consecutive-streak check alone. Fixed with: (1)
 hypothesis at its current estimate instead of blind-resetting it, and (2) freezing the
 pre-spike model as a fixed reference and requiring several subsequent observations to
 average real surprise against that unchanging anchor, rather than trusting any single
-cycle. `src/v13/baseline/engine.py`.
+cycle. `src/argus/baseline/engine.py`.
 
 **The nightly golden-set regression stays a subprocess, not an importable library.**
 The original closed-loop plan called for refactoring `tests/
@@ -86,7 +86,7 @@ backtest could call it directly. That file encodes real, hard-won production-inc
 reproductions (real device IDs, timestamps, destinations); a rushed refactor risked
 silently corrupting one in a way that wouldn't be obvious from a diff. `backtest_job.py`
 runs it as a subprocess and reads the exit code instead — lower fidelity (no structured
-per-check results) but zero risk to the golden set's own fidelity. `src/v13/ops/
+per-check results) but zero risk to the golden set's own fidelity. `src/argus/ops/
 backtest_job.py`.
 
 **CL-AFPE's composite trust key exists but is deliberately not wired into live
@@ -99,7 +99,7 @@ its write-side function yet. Gating live suppression on an empty table would dis
 currently-working mechanism, not safely extend one; that's a regression risk, not a
 safe rollout. The remaining work is a genuine design question (what counts as
 independent corroboration for a benign verdict, and a real schema question about the
-hypothesis-catalog foreign key), not a difficulty-driven skip. `src/v13/cl_afpe/
+hypothesis-catalog foreign key), not a difficulty-driven skip. `src/argus/cl_afpe/
 composite_trust.py`.
 
 **Argus's tunable reputation floors were wired without touching the shared
@@ -108,11 +108,11 @@ composite_trust.py`.
 that call site (which would risk behavior changes for the legacy engine too), the two
 hardcoded thresholds inside `classify()` became optional parameters defaulting to their
 exact original values — a pure signature extension, zero behavior change for the
-shared call site and every other caller. Only `v13/ops/live_engine.py` — the one Argus
+shared call site and every other caller. Only `argus/ops/live_engine.py` — the one Argus
 caller that already owns the live graph store — re-classifies the reputation vector
 locally with the tunable floors before handing it to Argus's own `DecisionEngine`. The
 legacy engine's decision path and `pipeline.py`'s own alert text keep reading the
-untouched original classification. `intelligence/reputation/classifier.py`, `src/v13/
+untouched original classification. `intelligence/reputation/classifier.py`, `src/argus/
 ops/live_engine.py`.
 
 **The CL-AFPE engine flip is fully automatic by explicit choice, with non-negotiable
@@ -123,7 +123,7 @@ sense given that change — and re-confirmed "keep fully automatic," no per-flip
 approval. This is a deliberate, informed decision, not a holdover default: it stands
 specifically because the volume floor, the false-negative-shaped veto, and the live
 regression-suite gate remain non-negotiable regardless of the automatic-vs-manual
-choice — "fully automatic" was never asking to relax those. `src/v13/ops/
+choice — "fully automatic" was never asking to relax those. `src/argus/ops/
 cl_afpe_flip_monitor.py`.
 
 **The "v13"-to-"Argus" rename is code+docs, but sequenced to protect the live system.**
@@ -131,12 +131,14 @@ cl_afpe_flip_monitor.py`.
 namespace, and `cl_afpe_flip_monitor.py` actively rewrites one of them on a 15-minute
 cycle. Renaming the code without renaming the live config in the same tight window would
 silently fall back to the legacy engine — no crash, just quietly wrong. So the rename is
-split: documentation (this doc, `ARGUS_ARCHITECTURE.md`) ships first since it has zero
+split: documentation (this doc, `ARGUS_ARCHITECTURE.md`) shipped first since it has zero
 live-system coupling; the code-level rename (`src/v13/` -> `src/argus/`, the two magic
-strings, the systemd unit's internal paths) is git-tracked and reversible on its own,
-but the moment it touches `.94`/`.19` — `git pull`, a config edit, a `systemctl
+strings, the systemd unit's internal paths) landed next, git-tracked and reversible on
+its own, but the moment it touches `.94`/`.19` — `git pull`, a config edit, a `systemctl
 restart` — is a separate, explicitly gated step requiring the user's go-ahead each time,
-not something a plan's approval pre-authorizes in bulk. On-disk state artifacts
+not something a plan's approval pre-authorizes in bulk. As of this writing the rename is
+git-tracked but not yet deployed — `.94`/`.19` still run pre-rename code regardless of
+its state on `main`. On-disk state artifacts
 (`state/v13_graph.db` and siblings) are intentionally *not* renamed as part of this —
 renaming a live multi-GB SQLite file mid-flight is real risk for zero functional
 benefit, so only the Python constant *names* pointing at them change, with a comment

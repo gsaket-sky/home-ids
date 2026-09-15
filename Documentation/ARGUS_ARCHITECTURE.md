@@ -4,15 +4,20 @@
 > scheduled job, update the relevant section in the same commit — this doc replaces 13
 > older, overlapping documents specifically to stop that kind of drift.
 >
-> **A note on naming**: "Argus" is this project's friendly name for what the code
-> currently identifies as `v13` — the config value `engine: v13`, the `src/v13/` package,
-> the `v13-ingest.service` systemd unit, and `state/v13_*` data files all still use that
-> literal identifier today. A code-level rename (`src/v13/` → `src/argus/`, plus the
-> runtime config values) is planned as a separate, carefully-sequenced follow-up because
-> `engine`/`cl_afpe_engine` are live runtime magic strings on a production system, not
-> just a namespace — see `ARGUS_DECISIONS.md` for why that has to happen in its own
-> gated change rather than alongside this doc. Until then, every file:line reference below
-> uses the real, current path (`src/v13/...`) even though the prose calls it Argus.
+> **A note on naming**: "Argus" is this project's friendly name for what was formerly
+> called `v13` in code. The code-level rename has landed (`src/v13/` → `src/argus/`,
+> plus the `engine`/`cl_afpe_engine` config-comparison targets in
+> `src/core/pipeline.py` and `src/argus/ops/cl_afpe_flip_monitor.py`) — but a handful of
+> identifiers are **deliberately left as literal `v13`, permanently**, because they're
+> persisted data or a deployed artifact name, not a namespace: `state/v13_*` data files
+> (renaming a live multi-GB SQLite DB has real risk for zero benefit), the
+> `v13-ingest.service` systemd unit's filename (avoids an extra disable/enable cycle on
+> `.19`), and the `v13_live_engine` provenance string written into evidence rows
+> (`source="v13_live_engine"`, already-persisted historical data). See
+> `ARGUS_DECISIONS.md` for the reasoning. **The code-level rename is git-tracked but not
+> yet deployed** — `.94`'s live `config.yaml` still says `engine: v13` until an explicit,
+> separately-confirmed cutover (see `ARGUS_DECISIONS.md`'s "Notable closed decisions");
+> until that cutover, the deployed system still runs the pre-rename code.
 
 ## 1. System Overview
 
@@ -20,7 +25,7 @@ Argus is a home-network intrusion detection/prevention pipeline running across t
 
 - **`.94`** — the primary box. Runs `soc.service` (`src/main.py`), which owns the live
   decision path, mitigation, and the console API.
-- **`.19`** — a secondary host. Runs `v13-ingest.service` (`src/v13/ingest/daemon.py`), a
+- **`.19`** — a secondary host. Runs `v13-ingest.service` (`src/argus/ingest/daemon.py`), a
   standalone shadow ingest daemon that independently re-derives detections from the same
   Zeek/Pi-hole logs (SMB-mounted from `.94`) into its own separate graph database — a
   real-traffic testbed, not part of the live decision path.
@@ -40,7 +45,7 @@ flowchart TB
     end
 
     subgraph Host19["Host .19 -- v13-ingest.service"]
-        IngestDaemon["IngestDaemon.run()\nsrc/v13/ingest/daemon.py\n(continuous, ~2s poll + hourly prune)"]
+        IngestDaemon["IngestDaemon.run()\nsrc/argus/ingest/daemon.py\n(continuous, ~2s poll + hourly prune)"]
     end
 
     Scheduler -->|subprocess.Popen, one-shot| Jobs["9 scheduled jobs\n(see Section 3)"]
@@ -54,19 +59,19 @@ The live decision path on `.94`, one cycle every ~2 seconds
 
 ```mermaid
 flowchart LR
-    A["Ingest\nZeek/Suricata/Pi-hole logs,\nARP/NDP, honeypot touches"] --> B["Identity resolution\nLiveIdentityManager.resolve_device_id()\nsrc/v13/identity/live_manager.py"]
+    A["Ingest\nZeek/Suricata/Pi-hole logs,\nARP/NDP, honeypot touches"] --> B["Identity resolution\nLiveIdentityManager.resolve_device_id()\nsrc/argus/identity/live_manager.py"]
     B --> C["Detectors\nthreat_signals.py, suricata_scan.py,\nzeek_network.py, dns_evasion.py,\ndns_behavior.py, + inline pipeline.py signals"]
-    C --> D["Evidence objects\nsrc/v13/evidence/model.py (Evidence)\nconverted via evidence/ingest.py"]
-    D --> E["Graph store (SQLite, WAL)\nstate/v13_graph.db\nsrc/v13/graph/store.py: GraphStore"]
-    E --> F["Hypothesis engine\nHypothesisEngine.evaluate_all()\nsrc/v13/hypotheses/engine.py"]
-    F --> G["Decision engine\nDecisionEngine.evaluate()\nsrc/v13/decision/engine.py:212"]
+    C --> D["Evidence objects\nsrc/argus/evidence/model.py (Evidence)\nconverted via evidence/ingest.py"]
+    D --> E["Graph store (SQLite, WAL)\nstate/v13_graph.db\nsrc/argus/graph/store.py: GraphStore"]
+    E --> F["Hypothesis engine\nHypothesisEngine.evaluate_all()\nsrc/argus/hypotheses/engine.py"]
+    F --> G["Decision engine\nDecisionEngine.evaluate()\nsrc/argus/decision/engine.py:212"]
     G --> H["Alert / mitigation\nAlertJSONWriter -> state/alerts.json\nIPSMitigator, Telegram"]
 ```
 
 Each stage, briefly:
 
 - **Ingest** — raw traffic/log observation. On `.94` this feeds the live pipeline directly;
-  on `.19` it's `src/v13/ingest/daemon.py`'s own poll-tail-detect loop, reusing the same
+  on `.19` it's `src/argus/ingest/daemon.py`'s own poll-tail-detect loop, reusing the same
   detector code but writing to a separate database.
 - **Identity resolution** — raw MAC/IP pairs resolve to a stable canonical `device_id`
   before any evidence is generated, handling multi-subnet trust anchors and MAC
@@ -76,7 +81,7 @@ Each stage, briefly:
   access, geofencing, etc.).
 - **Evidence objects** — the common currency between detection and decision. Two parallel
   `Evidence` classes exist: the legacy in-memory one (`src/intelligence/hypotheses/evidence.py`,
-  TTL-decayed, never persisted) and Argus's own (`src/v13/evidence/model.py`, persisted to
+  TTL-decayed, never persisted) and Argus's own (`src/argus/evidence/model.py`, persisted to
   SQLite). `evidence/ingest.py`'s `convert()`/`convert_list()` bridges legacy detector output
   into Argus's shape.
 - **Graph store** — the durable handoff point. A single SQLite database
@@ -88,7 +93,7 @@ Each stage, briefly:
 - **Hypothesis engine** — scores 16 `Hypothesis` subclasses (network intrusion, DGA,
   exfiltration, beaconing, coordinated targeting, peer deviation, benign-profile, etc.)
   against the accumulated evidence, and counts how many *independent* evidence families
-  corroborate each hypothesis (`src/v13/hypotheses/independence.py`).
+  corroborate each hypothesis (`src/argus/hypotheses/independence.py`).
 - **Decision engine** — the classifier of record (see §4/§8): combines hypothesis scores,
   freshness-filtered evidence, independent-family counts, and a pluggable hard-stop rule
   registry into a verdict (`BENIGN|ANOMALOUS|SUSPICIOUS|HIGH|CRITICAL`).
@@ -112,13 +117,13 @@ integer — no lists/ranges), and `subprocess.Popen`s each due, enabled job. Con
 |---|---|---|---|
 | Legacy autotuner retrain | `scripts/train_fp_classifier.py` | `0 3 * * *` | Daily, 03:00 |
 | Ollama SOC triage | `scripts/ollama_soc.py` | `30 */4 * * *` | Every 4h at :30 |
-| Argus LLM review | `src/v13/ops/live_llm_review.py` | `45 */4 * * *` | Every 4h at :45 |
+| Argus LLM review | `src/argus/ops/live_llm_review.py` | `45 */4 * * *` | Every 4h at :45 |
 | Retro hunter (legacy) | `scripts/retro_hunter.py` | `0 2 * * *` | Daily, 02:00 |
 | Top domains report | `scripts/top_domains_report.py` | `0 6 * * *` | Daily, 06:00 |
-| Argus graph prune | `src/v13/ops/live_prune.py` | `15 3 * * *` | Daily, 03:15 |
-| Argus retro hunter | `src/v13/ops/live_retro_hunter.py` | `45 2 * * *` | Daily, 02:45 |
-| Decision archive | `src/v13/ops/live_decision_archive.py` | `0 4 1 * *` | Monthly, 1st @ 04:00 |
-| CL-AFPE flip monitor | `src/v13/ops/cl_afpe_flip_monitor.py` | `*/15 * * * *` | Every 15 minutes |
+| Argus graph prune | `src/argus/ops/live_prune.py` | `15 3 * * *` | Daily, 03:15 |
+| Argus retro hunter | `src/argus/ops/live_retro_hunter.py` | `45 2 * * *` | Daily, 02:45 |
+| Decision archive | `src/argus/ops/live_decision_archive.py` | `0 4 1 * *` | Monthly, 1st @ 04:00 |
+| CL-AFPE flip monitor | `src/argus/ops/cl_afpe_flip_monitor.py` | `*/15 * * * *` | Every 15 minutes |
 
 **Known gap**: `backtest_job.py` (the nightly regression/synthetic-attack sweep the
 closed-loop autotuner's `promote_change()` requires before promoting any parameter change)
@@ -154,18 +159,20 @@ behavior worth knowing about):
 `config.yaml` selects between two entirely different decision engines at runtime via a
 literal string comparison — this is deliberate, not incidental:
 
-- **`engine: v13`** (this doc's "Argus") — the current, default engine. Read in
-  `src/core/pipeline.py` (3 call sites) as `self.config.get("engine", "v13") == "v13"`.
+- **`engine: argus`** — the current, default engine (the code's comparison target as of
+  the v13->argus rename; the deployed `.94` config still literally says `engine: v13`
+  until the separately-gated cutover lands, see the note at the top of this doc). Read in
+  `src/core/pipeline.py` (3 call sites) as `self.config.get("engine", "argus") == "argus"`.
   When true, `LiveIdentityManager` and the Argus decision path (§8) are used.
 - **`engine: v_current`** — the original, unmodified legacy engine
   (`src/core/decision_engine.py`, `DeviceIdentityManager`). Kept permanently as the
   documented instant-rollback switch, not a deprecated dead path — flipping this one config
   value and restarting `soc.service` is the entire rollback procedure if Argus needs to be
   disabled.
-- **`cl_afpe_engine: v_current` / `v13`** — a second, independent flag selecting which
-  false-positive-suppression engine (CL-AFPE) is authoritative. `src/v13/ops/
+- **`cl_afpe_engine: v_current` / `argus`** — a second, independent flag selecting which
+  false-positive-suppression engine (CL-AFPE) is authoritative. `src/argus/ops/
   cl_afpe_flip_monitor.py` (§5, every 15 min) automatically flips this from `v_current` to
-  `v13` once enough clean shadow-mode comparisons have accumulated with zero
+  `argus` once enough clean shadow-mode comparisons have accumulated with zero
   false-negative-shaped divergences — this is a live, in-progress rollout, not a one-time
   setting.
 
@@ -182,8 +189,8 @@ schedules, own different state, and answer different questions. Keep them distin
 | Mechanism | Question it answers | Cadence | Where it's implemented |
 |---|---|---|---|
 | **Legacy autotuner** | "Retrain the FP classifier and calibrate one suppression threshold from the last day's corrections" | Daily, 03:00 | `src/scripts/train_fp_classifier.py` |
-| **Argus closed-loop autotuner** | "Should one of 4 specific detection parameters permanently change value?" | Continuous (propose -> 6h canary -> nightly backtest gate -> promote/rollback) | `src/v13/autotune/engine.py` |
-| **CL-AFPE flip monitor** | "Has Argus's suppression engine proven itself safe enough to replace the legacy one?" | Every 15 min, one-time flip | `src/v13/ops/cl_afpe_flip_monitor.py` |
+| **Argus closed-loop autotuner** | "Should one of 4 specific detection parameters permanently change value?" | Continuous (propose -> 6h canary -> nightly backtest gate -> promote/rollback) | `src/argus/autotune/engine.py` |
+| **CL-AFPE flip monitor** | "Has Argus's suppression engine proven itself safe enough to replace the legacy one?" | Every 15 min, one-time flip | `src/argus/ops/cl_afpe_flip_monitor.py` |
 
 None of these three write to the same state, gate on the same evidence, or share a
 promotion path — a change proposed by the Argus autotuner has no effect on the legacy
@@ -192,7 +199,7 @@ not a parameter tuner at all.
 
 ### The Argus closed-loop autotuner
 
-**File:** `src/v13/autotune/engine.py` — `class AutotuneEngine` (line 89). Exactly four
+**File:** `src/argus/autotune/engine.py` — `class AutotuneEngine` (line 89). Exactly four
 parameters are tunable, declared as a closed allowlist (`TUNABLE_PARAMETERS`, line 43)
 with per-parameter `min`/`max`/`max_step` bounds — there is no code path by which this
 module can touch anything else (the independent-sources minimum, family-collapse rules,
@@ -203,7 +210,7 @@ hard-stop registry membership all stay code-level invariants):
 | `reputation_tier_suspicious_floor` | 1.0 - 5.0 | The VT/TI aggregate score needed to reach reputation tier 4 (`intelligence/reputation/classifier.py`'s `classify()`) |
 | `reputation_tier_high_floor` | 2.0 - 5.0 | The AbuseIPDB score needed to reach reputation tier 5 |
 | `bocpd_hazard_rate` | 1/2000 - 1/100 | How readily the Bayesian changepoint tracker (Sheet 00) assumes a device's behavioral regime has genuinely shifted |
-| `hard_stop_candidate_sensitivity` | 0.5 - 0.99 | The `confirmed_exploit` hard-stop rule's `min_confidence` bar (`v13/decision/engine.py`, default 0.9) |
+| `hard_stop_candidate_sensitivity` | 0.5 - 0.99 | The `confirmed_exploit` hard-stop rule's `min_confidence` bar (`argus/decision/engine.py`, default 0.9) |
 
 Every change moves through the same four-stage lifecycle, versioned in the
 `threshold_history` table (one row per proposal, audit trail never overwritten):
@@ -267,14 +274,14 @@ has been promoted in production yet — every one of the four currently resolves
 untouched default via `get_active_value(..., default=...)`, so the mechanism is inert by
 construction until a first proposal is made.
 
-**Live-read integration** (Release 15 Sheet 03a follow-up): `v13/decision/engine.py`
+**Live-read integration** (Release 15 Sheet 03a follow-up): `argus/decision/engine.py`
 itself never reads `AutotuneEngine` directly (by design — it has no graph dependency).
 Two callers resolve promoted values and pass them in as plain arguments:
-- `v13/baseline/engine.py`'s `BaselineEngine._load_tracker()` reads `bocpd_hazard_rate`
+- `argus/baseline/engine.py`'s `BaselineEngine._load_tracker()` reads `bocpd_hazard_rate`
   once per (device, metric, hour) tracker construction — a value promoted after a
   tracker is already warm in a process doesn't take effect until that tracker is
   reconstructed (process restart, or the cache key evicted).
-- `v13/ops/live_engine.py` re-classifies the reputation vector locally
+- `argus/ops/live_engine.py` re-classifies the reputation vector locally
   (`_tuned_rep_vector()`) with the tunable floors before calling `DecisionEngine.evaluate()`,
   and resolves `hard_stop_candidate_sensitivity` the same way — both scoped `if device_id:`,
   degrading to the original hardcoded defaults on any failure. This only affects Argus's
@@ -308,7 +315,7 @@ per-device thresholds the same way).
 
 ### Adjacent mechanism: the CL-AFPE flip monitor (not a parameter tuner)
 
-**File:** `src/v13/ops/cl_afpe_flip_monitor.py`, run every 15 minutes
+**File:** `src/argus/ops/cl_afpe_flip_monitor.py`, run every 15 minutes
 (`scheduled_jobs.scheduler.cl_afpe_flip_monitor`, cron `*/15 * * * *`). This is a
 **one-time, one-directional flip gate**, not part of the 4-parameter autotuner above —
 it doesn't tune anything, it decides whether to switch which *engine* CL-AFPE's
@@ -323,14 +330,14 @@ a fixed bar:
    engine's real verdict actually surfaced as `CONFIRMED_THREAT` or `UNCERTAIN`. This
    direction never gets relaxed by volume; the opposite direction (Argus more cautious
    than the legacy engine) is not a veto.
-3. **A narrow regression suite** (`tests/test_v13_cl_afpe.py`,
-   `tests/test_v13_live_cl_afpe_shadow.py`) must currently pass on the box, not just
+3. **A narrow regression suite** (`tests/test_argus_cl_afpe.py`,
+   `tests/test_argus_live_cl_afpe_shadow.py`) must currently pass on the box, not just
    "have passed once at build time."
 
 Once all three clear, it edits `config.yaml`'s `cl_afpe_engine` key from its legacy
 value directly to Argus's (the literal string the code writes and checks for is
-`v13`, matching this codebase's on-disk identifier today) — a targeted text edit, not a
-full YAML round-trip, so the file's comments survive. This was an explicit, informed
+`argus`) — a targeted text edit, not a full YAML round-trip, so the file's comments
+survive. This was an explicit, informed
 product decision (2026-09-07): fully automatic once the bar clears, with no per-flip
 human approval — the hard safety vetoes above are what make that acceptable, not a
 substitute for them. It deliberately does **not** restart `soc.service` — that stays a
@@ -363,10 +370,10 @@ flowchart TD
 
 `DeviceIdentityManager` (`src/core/identity.py:75`) is the real, shared implementation of the whole lifecycle above — resolution, orphan-merge, MAC/IP/hostname refresh, and device-type classification. Which engine drives live traffic is a single config switch, read once at pipeline construction (`core/pipeline.py:532-538`):
 
-- `engine: v13` in `config.yaml` (**the default**) instantiates `LiveIdentityManager` (`src/v13/identity/live_manager.py:123`) — the Argus engine's identity manager. It **subclasses** `DeviceIdentityManager` and overrides only `resolve_device_id()`, `_refresh_identity_signals()`, and `_merge_orphan_if_fragmented()`; everything else (Fritz!Box hosts-webhook polling, the full per-row orchestration in `process_dns_identities()`/`process_zeek_identities()`, `apply_device_type()`) is inherited unchanged.
+- `engine: argus` in `config.yaml` (**the default**) instantiates `LiveIdentityManager` (`src/argus/identity/live_manager.py:123`) — the Argus engine's identity manager. It **subclasses** `DeviceIdentityManager` and overrides only `resolve_device_id()`, `_refresh_identity_signals()`, and `_merge_orphan_if_fragmented()`; everything else (Fritz!Box hosts-webhook polling, the full per-row orchestration in `process_dns_identities()`/`process_zeek_identities()`, `apply_device_type()`) is inherited unchanged.
 - Any other `engine` value falls back to the plain `DeviceIdentityManager` — this is the legacy engine's own identity manager, exactly as it behaved before Argus existed.
 
-Both engines produce identical `device_id` values for the same input via the shared `stable_device_id()` formula (sha256 of the lowercased identifier, truncated to 12 hex chars) — `core/identity.py:38` and `src/v13/identity/resolver.py:49` maintain independent copies of this formula, and `live_manager.py:108` asserts the two are byte-identical at import time so a future edit to either can't silently desync Argus's device_ids from the legacy engine's historical ones.
+Both engines produce identical `device_id` values for the same input via the shared `stable_device_id()` formula (sha256 of the lowercased identifier, truncated to 12 hex chars) — `core/identity.py:38` and `src/argus/identity/resolver.py:49` maintain independent copies of this formula, and `live_manager.py:108` asserts the two are byte-identical at import time so a future edit to either can't silently desync Argus's device_ids from the legacy engine's historical ones.
 
 ### `resolve_device_id()` priority order
 
@@ -382,12 +389,12 @@ Both engines produce identical `device_id` values for the same input via the sha
 
 Only one gateway/trust-anchor exists in this path — a router genuinely has multiple distinct physical MACs (one per LAN/WLAN/WAN interface), so the MAC-first branch alone can never fully unify it; that's what steps 1-2 exist to pin down.
 
-**Argus engine** (`LiveIdentityManager.resolve_device_id()`, `src/v13/identity/live_manager.py:227`) generalizes the single hardcoded gateway to an arbitrary list of named `trust_anchors` (`network.trust_anchors` in config, loaded via `TrustAnchor`, `src/v13/identity/resolver.py:42`) — a deployment can name its gateway, a NAS, a second AP, etc., not just one device:
+**Argus engine** (`LiveIdentityManager.resolve_device_id()`, `src/argus/identity/live_manager.py:227`) generalizes the single hardcoded gateway to an arbitrary list of named `trust_anchors` (`network.trust_anchors` in config, loaded via `TrustAnchor`, `src/argus/identity/resolver.py:42`) — a deployment can name its gateway, a NAS, a second AP, etc., not just one device:
 
 1. **Trust-anchor IP match**: if `client_ip` equals a configured anchor's `ip`, return `stable_device_id(anchor.ip)` — deliberately reuses the legacy engine's *own* formula (not a role-based hash) so a deployment cutting over to Argus sees zero `device_id` churn for an anchor it was already tracking. Opportunistically learns the anchor's MAC (persisted via `GraphStore.update_device_metadata()`, survives a restart) if that MAC isn't a randomized/locally-administered one.
 2. **Trust-anchor learned-MAC match**: if `mac_addr` matches a trust anchor's learned-or-configured MAC (and isn't itself locally-administered), return that anchor's canonical id.
 3. **MAC-binding lookup**: `state_manager.get_device_id_for_mac()`, same as the legacy engine's step 3 — checked *regardless* of whether the MAC looks randomized, because the locally-administered bit means "this MAC is capable of rotating," not "it's rotating right now" (modern iOS/Android private-Wi-Fi MACs are randomized per-SSID but stable across reconnects to the same network).
-4-7. **Delegated** to the pure function `v13_resolve_device_id()` (`src/v13/identity/resolver.py`) for the remaining branches — trackable IP anchor, hostname anchor, MAC fallback, raw-IP fallback — matching the legacy engine's own shapes.
+4-7. **Delegated** to the pure function `v13_resolve_device_id()` (`src/argus/identity/resolver.py`) for the remaining branches — trackable IP anchor, hostname anchor, MAC fallback, raw-IP fallback — matching the legacy engine's own shapes.
 
 `is_locally_administered_mac()` (`resolver.py:57`, checks the second-least-significant bit of the MAC's first octet per IEEE 802-2014 §8.2.2) is scoped narrowly to trust-anchor MAC *learning* only — it deliberately does not gate the general MAC-binding lookup in step 3, since excluding randomized-looking MACs there was tried and found to fragment identity for exactly the phones it was meant to help.
 
@@ -408,7 +415,7 @@ Only one gateway/trust-anchor exists in this path — a router genuinely has mul
 | **Containment** (tarpit/router-isolation) | `_last_migrated_isolation_target` side channel -> `_release_stale_isolation_if_merged()` | Reuses the same side channel — no separate isolation-release code needed | Not applicable |
 | **`blocked_domains` attribution** | Not touched | Reattributed (relabel only — `device_id`/`hostname` metadata fields, no functional block/release change) | Not touched — see Known limitations |
 
-**Argus overlay**: when the Argus engine is active, `LiveIdentityManager._merge_orphan_if_fragmented()` (`live_manager.py:286`) runs the legacy merge above unchanged, then *additionally* mirrors the same merge into the v13 evidence graph via `GraphStore.merge_device(orphan_id, dev_id)`. This is a materially different policy than the state-machine-level merge: the graph side is **tombstone-preserving** — the orphan's accumulated graph data isn't discarded, and `resolve_canonical_device_id()` transparently redirects later reads to the canonical id — versus `merge_into_canonical()`'s own discard-on-merge policy for in-memory state. A graph-mirroring failure here is best-effort and never blocks or reverts the real (state-level) merge, which is the one the live pipeline actually depends on.
+**Argus overlay**: when the Argus engine is active, `LiveIdentityManager._merge_orphan_if_fragmented()` (`live_manager.py:286`) runs the legacy merge above unchanged, then *additionally* mirrors the same merge into the Argus evidence graph via `GraphStore.merge_device(orphan_id, dev_id)`. This is a materially different policy than the state-machine-level merge: the graph side is **tombstone-preserving** — the orphan's accumulated graph data isn't discarded, and `resolve_canonical_device_id()` transparently redirects later reads to the canonical id — versus `merge_into_canonical()`'s own discard-on-merge policy for in-memory state. A graph-mirroring failure here is best-effort and never blocks or reverts the real (state-level) merge, which is the one the live pipeline actually depends on.
 
 Argus's `LiveIdentityManager._refresh_identity_signals()` (`live_manager.py:215`) similarly runs the legacy update unchanged via `super()`, then mirrors newly-seen MAC/IP values into `GraphStore.update_device_metadata()`'s `mac_history`/`known_ips_history` dicts (bounded at 20 MAC / 50 IP entries per device, oldest-by-last-seen eviction — a deliberate bound given the Pi-8GB memory/disk target this subsystem is designed for). This is write-only and durability/queryability-only — it is **never read** on the hot `resolve_device_id()` path, which stays sourced from `StateManager`'s in-memory index exclusively.
 
@@ -563,23 +570,23 @@ Argus's classification pipeline runs every alert through three layers, in order.
 
 | Layer | Module (current) | Question it answers | Can it escalate? | Can it suppress? |
 |---|---|---|---|---|
-| 1 — HEE (Hypothesis Evidence Engine) | `src/v13/hypotheses/engine.py` + `src/v13/decision/engine.py` | "What does the evidence, taken together, say happened?" -> `BENIGN` / `ANOMALOUS` / `SUSPICIOUS` / `HIGH` / `CRITICAL` | N/A — this *is* the initial verdict | No — it can only choose not to escalate |
-| 2 — CL-AFPE (autonomous false-positive engine) | `src/v13/cl_afpe/engine.py` (`ClAfpeEngine`) | "Have we already learned this specific target is safe, or does a model say this looks like noise?" | Yes — a hard-stop re-firing on a trust-cached target overrides a cached "safe" verdict back to `CONFIRMED_THREAT` | Yes — a `FALSE_POSITIVE` verdict sets `suppress=True`, silencing Telegram/containment, but never un-writes the Layer-1 verdict |
-| 3 — LLM batch review | `src/scripts/ollama_soc.py` (the legacy engine's script, still the live path, every 4h) — `src/v13/ops/live_llm_review.py` runs in parallel as a shadow comparator only | "Does an LLM, shown only the evidence (never the verdict), independently agree?" | Yes — `malicious` + valid -> `record_confirmed_threat()` + sigma tune-up | Yes — `benign` + `suppress` + valid + not-already-actioned -> autonomous `mark_false_positive()` |
+| 1 — HEE (Hypothesis Evidence Engine) | `src/argus/hypotheses/engine.py` + `src/argus/decision/engine.py` | "What does the evidence, taken together, say happened?" -> `BENIGN` / `ANOMALOUS` / `SUSPICIOUS` / `HIGH` / `CRITICAL` | N/A — this *is* the initial verdict | No — it can only choose not to escalate |
+| 2 — CL-AFPE (autonomous false-positive engine) | `src/argus/cl_afpe/engine.py` (`ClAfpeEngine`) | "Have we already learned this specific target is safe, or does a model say this looks like noise?" | Yes — a hard-stop re-firing on a trust-cached target overrides a cached "safe" verdict back to `CONFIRMED_THREAT` | Yes — a `FALSE_POSITIVE` verdict sets `suppress=True`, silencing Telegram/containment, but never un-writes the Layer-1 verdict |
+| 3 — LLM batch review | `src/scripts/ollama_soc.py` (the legacy engine's script, still the live path, every 4h) — `src/argus/ops/live_llm_review.py` runs in parallel as a shadow comparator only | "Does an LLM, shown only the evidence (never the verdict), independently agree?" | Yes — `malicious` + valid -> `record_confirmed_threat()` + sigma tune-up | Yes — `benign` + `suppress` + valid + not-already-actioned -> autonomous `mark_false_positive()` |
 
 ### Layer 1 call chain — how one alert gets its verdict
 
-Argus's `ReputationClassifier` is not a separate implementation — `src/v13/ops/live_engine.py` constructs its own instance of the exact same class the legacy pipeline uses (`classify()` is a pure, stateless function), so both engines score reputation identically. The actual live call site inside `core/pipeline.py` is `live_engine.evaluate()`, not `DecisionEngine.evaluate()` directly — it's the piece that merges fresh evidence with a graph-window read, injects graph-derived synthetic evidence, and only then calls the decision engine.
+Argus's `ReputationClassifier` is not a separate implementation — `src/argus/ops/live_engine.py` constructs its own instance of the exact same class the legacy pipeline uses (`classify()` is a pure, stateless function), so both engines score reputation identically. The actual live call site inside `core/pipeline.py` is `live_engine.evaluate()`, not `DecisionEngine.evaluate()` directly — it's the piece that merges fresh evidence with a graph-window read, injects graph-derived synthetic evidence, and only then calls the decision engine.
 
 ```mermaid
 sequenceDiagram
     participant P as core/pipeline.py
     participant RC as ReputationClassifier<br/>(intelligence/reputation/classifier.py)
-    participant LE as live_engine.evaluate()<br/>(v13/ops/live_engine.py)
-    participant GS as GraphStore<br/>(v13/graph/store.py)
-    participant DE as DecisionEngine.evaluate()<br/>(v13/decision/engine.py)
-    participant HE as HypothesisEngine.evaluate_all()<br/>(v13/hypotheses/engine.py)
-    participant CL as ClAfpeEngine<br/>(v13/cl_afpe/engine.py)
+    participant LE as live_engine.evaluate()<br/>(argus/ops/live_engine.py)
+    participant GS as GraphStore<br/>(argus/graph/store.py)
+    participant DE as DecisionEngine.evaluate()<br/>(argus/decision/engine.py)
+    participant HE as HypothesisEngine.evaluate_all()<br/>(argus/hypotheses/engine.py)
+    participant CL as ClAfpeEngine<br/>(argus/cl_afpe/engine.py)
     participant LLM as ollama_soc.py
 
     P->>RC: classify(reputation_target, vt_score, ti_score, abuse_score, asn_owner)
@@ -606,7 +613,7 @@ The `hee_*` fields are the load-bearing bridge between Layer 1 and Layer 3: `hee
 
 ### Layer 1 — attack hypotheses
 
-Each hypothesis's `evaluate()` (`src/v13/hypotheses/engine.py`) returns **0.0** (its required evidence is absent) or a score on a fixed ladder: **2.0** (bar just cleared) -> **3.0** (a "strong" signal present) -> **4.0** (strong signal + a second confirming condition). The decision engine then compares the single highest-scoring attack hypothesis against the highest-scoring benign hypothesis and the independent-family count to pick a final state.
+Each hypothesis's `evaluate()` (`src/argus/hypotheses/engine.py`) returns **0.0** (its required evidence is absent) or a score on a fixed ladder: **2.0** (bar just cleared) -> **3.0** (a "strong" signal present) -> **4.0** (strong signal + a second confirming condition). The decision engine then compares the single highest-scoring attack hypothesis against the highest-scoring benign hypothesis and the independent-family count to pick a final state.
 
 A cross-cutting rule applies to nearly every hypothesis below: `rep_vector.tier ∈ {1,2}` (trusted/known-safe) sets `contradicting_score += 1.0`, blocking every score bump gated on "contradicting == 0." But `pipeline.py` computes only *one* `ReputationVector` per device per cycle (for whichever destination scored highest that cycle), which is structurally unrelated to any individual hypothesis's own evidence. Every hypothesis therefore routes its tier check through `Hypothesis._effective_rep_tier()`, which compares `rep_vector.domain` against the real destination of that hypothesis's *own* evidence, and returns a neutral tier 3 ("unclassified") whenever both sides carry a destination and provably differ.
 
@@ -628,7 +635,7 @@ Two benign hypotheses gate directly on evidence: `ADVERTISING_BURST` (high `dns_
 
 ### Layer 1 — the four hard-stops (checked before any hypothesis score)
 
-Hard-stops are a pluggable registry (`DEFAULT_HARD_STOP_REGISTRY`, `src/v13/decision/engine.py`), checked first, in order; the first match short-circuits hypothesis scoring entirely.
+Hard-stops are a pluggable registry (`DEFAULT_HARD_STOP_REGISTRY`, `src/argus/decision/engine.py`), checked first, in order; the first match short-circuits hypothesis scoring entirely.
 
 | Hard-stop | Trigger | Freshness | Corroboration required for CRITICAL? |
 |---|---|---|---|
@@ -704,7 +711,7 @@ flowchart TD
     MLAnom -->|no| Benign["BENIGN / suppress<br/>never written to alerts.json"]
 ```
 
-### Layer 2 — CL-AFPE (`ClAfpeEngine`, `src/v13/cl_afpe/engine.py`)
+### Layer 2 — CL-AFPE (`ClAfpeEngine`, `src/argus/cl_afpe/engine.py`)
 
 Runs on every alert after Layer 1, independently of it. It never sees or modifies the Layer-1 state field itself.
 
