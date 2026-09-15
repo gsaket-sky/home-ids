@@ -35,7 +35,10 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from core.pipeline import _describe_evidence, _EVIDENCE_PLAIN_LANGUAGE, _build_status_lines, _build_confidence_line
+from core.pipeline import (
+    _describe_evidence, _EVIDENCE_PLAIN_LANGUAGE, _build_status_lines, _build_confidence_line,
+    _is_signature_based_hard_stop, _canonical_evidence_family, _route_evidence_into_buckets,
+)
 from intelligence.hypotheses.evidence import Evidence
 import time
 
@@ -142,6 +145,121 @@ check("a low false-positive-risk verdict is labeled High, not Mixed, and reads a
       label_hi == "High" and mixed_hi is False, f"got label={label_hi!r}")
 check("a calibrated score does NOT show the 'uncalibrated estimate' caveat",
       "uncalibrated estimate" not in line_hi, f"got {line_hi!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section B2 (2026-09-15, live alert audit -- iPhone/d7cb300865b3 DATA_EXFILTRATION,
+# real fired alert): every HARD_STOP verdict showed "Very High -- matched a known-bad
+# signature directly (not a probabilistic estimate)" regardless of WHICH Stage-1 check
+# actually fired -- but two of the real checks (lateral movement, exfiltration burst)
+# are purely statistical/behavioral, not a signature match of any kind. Confirmed live:
+# this alert's real reason was "Exfiltration Payload Burst (outbound_bytes_z=122.99...)"
+# and the destination turned out to be the user's own VPN -- misleading wording on a
+# genuinely ambiguous case.
+# ═══════════════════════════════════════════════════════════════════════════════════
+check("_is_signature_based_hard_stop: a ThreatIntel IOC reason is genuinely signature-based",
+      _is_signature_based_hard_stop(["ThreatIntel IOC match (ti_risk=3.50) – domain on global malware blacklist"]))
+check("_is_signature_based_hard_stop: a malicious JA3/JA4 fingerprint reason is genuinely signature-based",
+      _is_signature_based_hard_stop(["Malicious TLS fingerprint (JA3=1, JA4+=0 hits)"]))
+check("_is_signature_based_hard_stop: an exfiltration-burst-ONLY reason is NOT signature-based "
+      "-- the real iPhone alert's own exact shape",
+      not _is_signature_based_hard_stop(["Exfiltration Payload Burst (outbound_bytes_z=122.99, bytes=4531926)"]))
+check("_is_signature_based_hard_stop: a lateral-movement-ONLY reason is NOT signature-based",
+      not _is_signature_based_hard_stop(["Internal lateral movement / port scan (3 connection(s) across 2 distinct target(s))"]))
+check("_is_signature_based_hard_stop: a MIX of a statistical reason and a genuine signature "
+      "reason is still reported as signature-based -- something concrete DID match",
+      _is_signature_based_hard_stop([
+          "Exfiltration Payload Burst (outbound_bytes_z=8.0, bytes=3000000)",
+          "AbuseIPDB blacklisted destination IP (risk=5.0)",
+      ]))
+check("_is_signature_based_hard_stop: an empty/missing reasons list defaults to True "
+      "(the prior, safe behavior) rather than guessing with nothing to classify",
+      _is_signature_based_hard_stop([]) and _is_signature_based_hard_stop(None))
+
+exfil_only_verdict = {"stage": "STAGE_1_HARD_STOP",
+                       "reasons": ["Exfiltration Payload Burst (outbound_bytes_z=122.99, bytes=4531926)"]}
+label_ex, line_ex, mixed_ex = _build_confidence_line(85, exfil_only_verdict, 0, None)
+check("_build_confidence_line: a purely statistical hard-stop does NOT claim a signature "
+      "match -- the real bug this closes (note: the honest wording below deliberately "
+      "still says 'not a known-bad signature match' as a disclaimer, so this checks for "
+      "absence of the old CLAIM text specifically, not the substring 'known-bad signature')",
+      "matched a known-bad signature directly" not in line_ex, f"got {line_ex!r}")
+check("...and says so honestly instead (statistical/behavioral, not a signature)",
+      "statistical" in line_ex.lower() and "not a known-bad signature" in line_ex, f"got {line_ex!r}")
+check("...while still reading as a strong, confident verdict (this IS a real hard-stop, "
+      "just not a signature one) -- label stays Very High", label_ex == "Very High")
+
+ti_verdict = {"stage": "STAGE_1_HARD_STOP",
+              "reasons": ["ThreatIntel IOC match (ti_risk=3.50) – domain on global malware blacklist"]}
+label_ti, line_ti, mixed_ti = _build_confidence_line(90, ti_verdict, 0, None)
+check("_build_confidence_line: a genuine signature-based hard-stop keeps the original "
+      "'matched a known-bad signature directly' wording, unchanged",
+      "matched a known-bad signature directly" in line_ti, f"got {line_ti!r}")
+
+check("REGRESSION GUARD: the pre-existing hard_stop_verdict fixture above (no 'reasons' "
+      "key at all) still gets the original wording, not the new statistical one -- "
+      "missing reasons defaults safely, doesn't silently flip behavior",
+      "matched a known-bad signature directly" in line_hs, f"got {line_hs!r}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section B3 (2026-09-15, same live alert audit): grouped_evidence's WHY-block family
+# dedup. The real iPhone alert showed "4 independent evidence families" for what
+# hee_independent_sources correctly recorded as 2 -- dns_evasion_anomaly and
+# zeek_exfiltration each got counted TWICE, once under v1's own OLDER family name
+# (from whichever detector created the live active_evidence item) and once under
+# Argus's newer INDEPENDENCE_FAMILY_MAP name (from the decision["attack_evidence"]
+# bridge) -- two different dict keys for the identical real evidence.
+# ═══════════════════════════════════════════════════════════════════════════════════
+check("_canonical_evidence_family: dns_evasion_anomaly resolves to Argus's canonical "
+      "'dns_behavior', not v1's older 'blindspot_audit' independence_group -- the "
+      "exact real-alert mismatch this closes",
+      _canonical_evidence_family("dns_evasion_anomaly", "blindspot_audit") == "dns_behavior")
+check("_canonical_evidence_family: zeek_exfiltration resolves to Argus's canonical "
+      "'data_transfer_pattern', not v1's older 'zeek_network' independence_group",
+      _canonical_evidence_family("zeek_exfiltration", "zeek_network") == "data_transfer_pattern")
+check("_canonical_evidence_family: an evidence type NOT covered by Argus's map falls "
+      "back to the raw independence_group unchanged (e.g. a v1-only evidence type)",
+      _canonical_evidence_family("some_v1_only_evidence_type", "raw_v1_family") == "raw_v1_family")
+
+_gb, _cb = {}, {}
+_ev_legacy = Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
+                       device="dev1", value=0.6, confidence=0.9, independence_group="blindspot_audit")
+_fam_legacy = _canonical_evidence_family(_ev_legacy.type, _ev_legacy.independence_group)
+_route_evidence_into_buckets(_ev_legacy, _fam_legacy, _gb, _cb)
+_ev_bridged = Evidence(type="dns_evasion_anomaly", source="argus_live_engine", timestamp=time.time(),
+                        device="dev1", value=0.9, confidence=1.0, independence_group="dns_behavior")
+_fam_bridged = _canonical_evidence_family(_ev_bridged.type, _ev_bridged.independence_group)
+_route_evidence_into_buckets(_ev_bridged, _fam_bridged, _gb, _cb)
+check("end-to-end: the SAME real evidence type reaching grouped_evidence through BOTH "
+      "source loops (a live active_evidence item with the OLDER v1 family, and a "
+      "bridged decision.attack_evidence item with Argus's canonical family) collapses "
+      "into exactly ONE dict entry, not two -- fam_count = len(grouped_evidence) is "
+      "now correct", len(_gb) == 1, f"got {len(_gb)} entries: {list(_gb.keys())}")
+check("...and keeps the HIGHER-value entry between the two (0.9 from the bridged item, "
+      "not 0.6 from the legacy one) -- matches the pre-existing 'keep the higher "
+      "value' rule, now applied consistently across both loops",
+      _gb["dns_behavior"].value == 0.9)
+
+_gb2, _cb2 = {}, {}
+_ev_local = Evidence(type="local_device_discovery", source="lan", timestamp=time.time(),
+                      device="dev1", value=1.0, confidence=1.0, independence_group="local_context")
+_route_evidence_into_buckets(_ev_local, _canonical_evidence_family(_ev_local.type, _ev_local.independence_group),
+                              _gb2, _cb2)
+check("_route_evidence_into_buckets: a NON_ATTACK_FAMILIES member (local_context) is "
+      "routed to context_evidence, never grouped_evidence -- never inflates the "
+      "independent-source count, matches decision_engine.py's own exclusion",
+      len(_gb2) == 0 and len(_cb2) == 1)
+
+_gb3, _cb3 = {}, {}
+_route_evidence_into_buckets(Evidence(type="x", source="s", timestamp=time.time(), device="d",
+                                        value=1.0, confidence=1.0, independence_group="peer_cohort_deviation"),
+                              "peer_cohort_deviation", _gb3, _cb3)
+check("_route_evidence_into_buckets: peer_cohort_deviation (a DIFFERENT NON_ATTACK_FAMILIES "
+      "member than local_context, previously only excluded by the OTHER loop's own "
+      "separate hand-picked check) is ALSO correctly routed to context, not grouped -- "
+      "proves the two loops' context-routing can no longer disagree",
+      len(_gb3) == 0 and len(_cb3) == 1)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

@@ -49,6 +49,7 @@ from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Au
 from argus.ops import live_engine as argus_live_engine  # argus fast cutover -- see Documentation/ARGUS_ARCHITECTURE.md
 from argus.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
 from argus.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
+from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES  # 2026-09-15 Telegram WHY-block dedup fix, see grouped_evidence's own comment
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
 
@@ -264,6 +265,15 @@ _EVIDENCE_FAMILY_LABELS = {
     # evidence shape showed two different family labels depending on which bridge
     # reached it.
     "network_behavior": "Network (Zeek)",
+    # BUGFIX (2026-09-15, same pass as grouped_evidence's own canonical-key fix
+    # above): these two families (hypotheses/independence.py's own three-way split
+    # of v1's single "zeek_network" bucket) had no entry here at all, so they fell
+    # through to the generic de-snake-cased fallback -- harmless for
+    # "data_transfer_pattern" (already reads fine as "Data Transfer Pattern"), but
+    # "tls_fingerprint" rendered as "Tls Fingerprint" (title() only capitalizes the
+    # first letter of each word, not a real acronym).
+    "data_transfer_pattern": "Data Transfer Pattern",
+    "tls_fingerprint": "TLS Fingerprint",
 }
 
 # BUGFIX (live audit, 2026-09-09): the 4 v13-only synthetic evidence types
@@ -424,6 +434,75 @@ def _build_status_lines(action_summary: str, mixed_signal: bool) -> tuple:
     )
 
 
+def _canonical_evidence_family(ev_type: str, raw_independence_group: str) -> str:
+    """Resolves the WHY-block DISPLAY grouping key for one evidence item: Argus's
+    own INDEPENDENCE_FAMILY_MAP (hypotheses/independence.py) when this evidence
+    type is covered there, else the raw independence_group whichever detector
+    assigned it at creation. Extracted as its own pure function (2026-09-15) so
+    it's directly testable -- see grouped_evidence's own construction, below,
+    for the real live-alert bug (iPhone/d7cb300865b3 DATA_EXFILTRATION showing
+    "4 independent evidence families" for what hee_independent_sources correctly
+    recorded as 2) this closes: calling this SAME function for every evidence
+    item, regardless of which of the two source loops produced it, means the
+    same real evidence type always collapses into the same dict entry instead of
+    two, under two different family names, depending on which loop reached it
+    first. A pure display-key normalization -- does not change which family any
+    evidence type counts toward for SCORING purposes anywhere else."""
+    return INDEPENDENCE_FAMILY_MAP.get(ev_type, raw_independence_group)
+
+
+def _route_evidence_into_buckets(ev: Any, canonical_family: str, grouped_evidence: dict,
+                                   context_evidence: dict) -> None:
+    """Mutates grouped_evidence/context_evidence in place: routes `ev` into the
+    context bucket (shown for completeness, never decisive) when canonical_family
+    is one of independence.py's own NON_ATTACK_FAMILIES, else the decisive
+    bucket -- keeping whichever entry already there has the higher .value if this
+    canonical_family was already populated by EITHER source loop (active_evidence
+    or the decision["attack_evidence"] bridge). Extracted (2026-09-15) alongside
+    _canonical_evidence_family() above -- previously each of the two source loops
+    below had its OWN narrower, hand-picked context check ("local_context" only
+    in one, "peer_cohort_deviation" only in the other), each missing the other's
+    case and every other NON_ATTACK_FAMILIES member (ml_anomaly, policy,
+    baseline_deviation, regime_change, sequence_dynamics, novelty_context) --
+    latent versions of the exact same "these two loops don't agree" bug class,
+    just not yet triggered live. One shared, complete check now, used
+    identically by both loops."""
+    bucket = context_evidence if canonical_family in NON_ATTACK_FAMILIES else grouped_evidence
+    if canonical_family not in bucket or ev.value > bucket[canonical_family].value:
+        bucket[canonical_family] = ev
+
+
+# BUGFIX (2026-09-15, live alert audit -- iPhone/d7cb300865b3 DATA_EXFILTRATION,
+# real fired alert): every CL-AFPE Stage-1 hard-stop got the identical "matched a
+# known-bad signature directly" confidence text below, regardless of WHICH of the
+# 6-8 checks in _stage1_hard_stop() actually fired (argus/cl_afpe/engine.py and
+# intelligence/fp_engine.py, same trigger-message wording in both, confirmed by
+# direct read). Most of those checks genuinely are a signature/indicator match
+# (ThreatIntel IOC, malicious JA3/JA4 fingerprint, a real honeypot touch, an
+# AbuseIPDB blacklist hit, a prior locally-confirmed threat) -- but two are purely
+# STATISTICAL/behavioral (lateral-movement distinct-target count, an outbound-
+# bytes z-score burst), not a signature match of any kind. Confirmed live: the
+# iPhone alert's real hard-stop reason was "Exfiltration Payload Burst
+# (outbound_bytes_z=122.99...)" -- a genuine, strong finding, but "matched a
+# known-bad signature directly" was simply false for it, which could materially
+# mislead a reader's judgment on a genuinely ambiguous case (this one turned out
+# to be the user's own VPN). These two markers are matched against
+# fp_verdict["reasons"] (the exact trigger-message list both engines already
+# produce) to tell the two apart without needing a new signal anywhere upstream.
+_STATISTICAL_HARD_STOP_MARKERS = ("lateral movement", "exfiltration payload burst")
+
+
+def _is_signature_based_hard_stop(reasons: Optional[list]) -> bool:
+    """True if at least one Stage-1 hard-stop trigger reason is a genuine
+    signature/indicator match rather than purely statistical/behavioral. An empty
+    or missing reasons list defaults to True (the prior, safe behavior) rather
+    than guessing at a verdict with no evidence text to classify."""
+    texts = [str(r).lower() for r in (reasons or [])]
+    if not texts:
+        return True
+    return any(not any(marker in t for marker in _STATISTICAL_HARD_STOP_MARKERS) for t in texts)
+
+
 def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_pct: int, fp_calibrated_pct: Optional[int]) -> tuple:
     """Returns (confidence_label, confidence_line_text, mixed_signal_bool). Folds the
     two previously-separate raw percentages into one synthesized verdict -- the
@@ -433,7 +512,13 @@ def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_
     """
     fp_stage = str(fp_verdict.get("stage", ""))
     if "HARD_STOP" in fp_stage:
-        return "Very High", "Very High -- matched a known-bad signature directly _(not a probabilistic estimate)_", False
+        if _is_signature_based_hard_stop(fp_verdict.get("reasons")):
+            return "Very High", "Very High -- matched a known-bad signature directly _(not a probabilistic estimate)_", False
+        return ("Very High",
+                "Very High -- an extreme statistical/behavioral pattern crossed a hard, "
+                "deterministic threshold _(a rare outlier, not a known-bad signature match -- "
+                "worth a closer look at what's actually generating it)_",
+                False)
 
     fp_risk_pct = fp_calibrated_pct if fp_calibrated_pct is not None else fp_pct
     calib_suffix = "" if fp_calibrated_pct is not None else " _(uncalibrated estimate)_"
@@ -2849,12 +2934,50 @@ class EnginePipeline:
                                 # decisive (counts toward the verdict) vs. context (shown for
                                 # completeness, never decisive) -- same distinction the decision
                                 # engine itself already enforces, just finally reflected in the alert.
+                                # BUGFIX (2026-09-15, live alert audit -- iPhone/d7cb300865b3
+                                # DATA_EXFILTRATION, real fired alert showed "4 independent
+                                # evidence families" for what hee_independent_sources correctly
+                                # recorded as 2): this loop used to bucket by each evidence
+                                # item's own RAW `.independence_group` -- the family name
+                                # whichever detector happened to assign it at creation time,
+                                # which for several evidence types is v1's own OLDER family
+                                # name (e.g. dns_evasion_anomaly -> "blindspot_audit",
+                                # zeek_exfiltration -> "zeek_network", both from
+                                # intelligence/hypotheses/evidence.py and threat_signals.py).
+                                # The bridge loop below buckets the SAME evidence types by
+                                # Argus's own newer INDEPENDENCE_FAMILY_MAP instead
+                                # (dns_evasion_anomaly -> "dns_behavior", zeek_exfiltration ->
+                                # "data_transfer_pattern") -- a real, INTENTIONALLY preserved
+                                # disagreement between the two systems' own independence-
+                                # scoping judgment calls (see independence.py's own "KNOWN
+                                # DISCREPANCY FROM v-CURRENT" docstring -- this fix does NOT
+                                # touch or resolve that judgment call, which stays open
+                                # pending real divergence data). But because the two loops
+                                # used DIFFERENT dict keys for the identical real evidence
+                                # item, the bridge loop's own "never double-counted" claim
+                                # (comment below) was false whenever a type's two family names
+                                # actually differ -- confirmed live: the WHY-block showed the
+                                # exact same description text twice, under two different
+                                # family labels, and fam_count below counted both. A prior
+                                # fix (2026-09-09, _EVIDENCE_FAMILY_LABELS' "network_behavior"
+                                # entry) patched the DISPLAY LABEL for zeek_notice's own case
+                                # of this same class of bug, but not the underlying GROUPING
+                                # KEY -- so it was still two dict entries, just rendered with
+                                # matching text, not truly deduplicated. This is the root-cause
+                                # fix, for every evidence type, not just zeek_notice: key by
+                                # the SAME canonical family (INDEPENDENCE_FAMILY_MAP) this
+                                # bridge loop already uses whenever the evidence type is
+                                # covered there, falling back to the raw independence_group
+                                # only for types Argus's map doesn't cover -- a pure display-
+                                # dedup normalization, not a change to which family any
+                                # evidence type counts toward for SCORING purposes (that stays
+                                # wherever decision_engine.py/hypotheses/engine.py already
+                                # decide it, untouched here).
                                 grouped_evidence = {}
                                 context_evidence = {}
                                 for ev in active_evidence:
-                                    bucket = context_evidence if ev.independence_group == "local_context" else grouped_evidence
-                                    if ev.independence_group not in bucket or ev.value > bucket[ev.independence_group].value:
-                                        bucket[ev.independence_group] = ev
+                                    canonical_family = _canonical_evidence_family(ev.type, ev.independence_group)
+                                    _route_evidence_into_buckets(ev, canonical_family, grouped_evidence, context_evidence)
                                 # BUGFIX (live audit, 2026-09-09, real production alerts --
                                 # confirmed via a live PEER_COHORT_DEVIATION HIGH alert whose
                                 # PERSISTED hee_evidence_families/hee_independent_sources were
@@ -2905,28 +3028,24 @@ class EnginePipeline:
                                         provenance=we.get("provenance") or "",
                                         domain=dest if dest and dest != "(none)" else None,
                                     )
-                                    # BUGFIX (same pass): peer_cohort_deviation is in v13's
-                                    # own NON_ATTACK_FAMILIES (hypotheses/independence.py,
-                                    # "too cheap/unvalidated to count as one of the two
-                                    # independent SOURCES the whole HIGH bar rests on" --
-                                    # third-party review, same reasoning already applied to
-                                    # local_context above) -- decision["evidence_families"]
-                                    # (this same session's own fix, just above) correctly
-                                    # never includes it (attack_evidence is already filtered
-                                    # to exclude NON_ATTACK_FAMILIES, decision/engine.py).
-                                    # Routing it into grouped_evidence here would inflate
-                                    # fam_count PAST hee_independent_sources, creating a NEW
-                                    # families-vs-sources mismatch in the opposite direction
-                                    # from the one this whole fix exists to close.
-                                    # context_evidence (shown, never counted) is the correct
-                                    # bucket, same as local_context. In practice this branch
-                                    # is now dead code (attack_evidence never contains a
-                                    # NON_ATTACK_FAMILIES member), kept as an explicit
-                                    # defense-in-depth guard rather than trusting that
-                                    # invariant silently.
-                                    bucket = context_evidence if fam == "peer_cohort_deviation" else grouped_evidence
-                                    if fam not in bucket or synth_ev.value > bucket[fam].value:
-                                        bucket[fam] = synth_ev
+                                    # peer_cohort_deviation (and every other independence.py
+                                    # NON_ATTACK_FAMILIES member) is "too cheap/unvalidated to
+                                    # count as one of the two independent SOURCES the whole HIGH
+                                    # bar rests on" (third-party review) -- decision["evidence_
+                                    # families"] correctly never includes it (attack_evidence is
+                                    # already filtered to exclude NON_ATTACK_FAMILIES, decision/
+                                    # engine.py). context_evidence (shown, never counted) is the
+                                    # correct bucket. In practice this branch is now dead code
+                                    # (attack_evidence never contains a NON_ATTACK_FAMILIES
+                                    # member), kept as an explicit defense-in-depth guard rather
+                                    # than trusting that invariant silently. Routed through the
+                                    # SAME _route_evidence_into_buckets() the loop above uses
+                                    # (2026-09-15) -- this used to be its own narrower, hand-
+                                    # picked check (only "peer_cohort_deviation", missing every
+                                    # other NON_ATTACK_FAMILIES member and disagreeing with the
+                                    # OTHER loop's own narrower "local_context"-only check) --
+                                    # see that function's own docstring for the full incident.
+                                    _route_evidence_into_buckets(synth_ev, fam, grouped_evidence, context_evidence)
                                 why_lines = [_describe_evidence(ev, self.geoip_engine) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 # VERSION 12: family labels, aligned to why_lines by construction --
