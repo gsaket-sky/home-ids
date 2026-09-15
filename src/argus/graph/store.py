@@ -847,6 +847,40 @@ class GraphStore:
                 out.append(r["device_id"])
         return out
 
+    def is_own_registered_device(self, destination_id: str) -> bool:
+        """True if `destination_id` is provably one of THIS network's own
+        already-registered devices, not an unknown/external host -- part C of the
+        "3 automated-learning gaps" fix (2026-09-15). Checks two things: an exact
+        `device_id` match (some identities are keyed by an IP/MAC-derived id
+        directly), and membership as a KEY in any device's own
+        `metadata_json.known_ips_history` (the real, confirmed shape --
+        `{"192.168.1.41": <timestamp>, ...}` -- populated by
+        LiveIdentityManager._mirror_identity_signals()). Deliberately NOT reusing
+        get_devices_with_metadata_value() above: that does scalar equality on a
+        whole metadata value, not membership-as-a-key inside a nested dict.
+        Deliberately NOT reusing LiveIdentityManager.resolve_device_id() either --
+        that's a heavier, stateful live resolver needing trust-anchor/state-manager
+        wiring this store doesn't have; this is a simple, safe, read-only lookup
+        against data already proven to exist on this table. Same full-table-scan-
+        in-Python rationale as get_devices_with_metadata_value() (device counts are
+        small on any real deployment) -- and, per feedback_network_agnostic_design.md,
+        deliberately contains no protocol/port/vendor assumption: "is this my own
+        hardware" is the only question asked, so it applies identically on any
+        consumer network regardless of what discovery protocols its devices use."""
+        if not destination_id or destination_id == NO_DESTINATION:
+            return False
+        rows = self._conn.execute("SELECT device_id, metadata_json FROM devices").fetchall()
+        for r in rows:
+            if r["device_id"] == destination_id:
+                return True
+            try:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+            except (TypeError, ValueError):
+                continue
+            if destination_id in (meta.get("known_ips_history") or {}):
+                return True
+        return False
+
     def record_device_destinations(self, device_id: str, destination_ids, timestamp: Optional[float] = None) -> None:
         """Upserts one row per (device_id, destination_id) pair into
         device_destinations -- the REAL per-device traffic reality

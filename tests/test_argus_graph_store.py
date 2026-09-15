@@ -547,6 +547,31 @@ check("get_devices_with_metadata_value excludes a device of a DIFFERENT type",
 check("get_devices_with_metadata_value returns [] for a value nothing matches",
       store.get_devices_with_metadata_value("device_type", "camera") == [])
 
+# --- is_own_registered_device (2026-09-15, gap 3 of the "3 automated-learning gaps"
+# audit -- part C, the shared identity check both the reputation-tier fix and the
+# new local-origin auto-corroboration path build on) ---
+store.upsert_device("own_dev_by_id", timestamp=9_000_000.0)
+check("a destination_id that IS itself a real device_id is recognized as own hardware",
+      store.is_own_registered_device("own_dev_by_id"))
+
+store.upsert_device("own_dev_by_ip", timestamp=9_000_000.0)
+# Deliberately a different-looking private range than this project's own real
+# household subnet (192.168.77.0/24) -- per feedback_network_agnostic_design.md,
+# this check is a plain metadata lookup, not tied to any one network's addressing.
+store.update_device_metadata("own_dev_by_ip", {"known_ips_history": {"10.77.0.5": 9_000_000.0}},
+                               timestamp=9_000_000.0)
+check("a destination_id that appears as a KEY in some device's known_ips_history is "
+      "recognized as own hardware, even though it's not that device's OWN device_id",
+      store.is_own_registered_device("10.77.0.5"))
+check("a destination_id that is NOT any device's id and NOT in anyone's "
+      "known_ips_history is correctly NOT recognized as own hardware -- an unknown "
+      "external host stays unknown",
+      not store.is_own_registered_device("203.0.113.200"))
+check("an empty destination_id is rejected outright, never crashes",
+      not store.is_own_registered_device(""))
+check("the NO_DESTINATION sentinel is rejected outright",
+      not store.is_own_registered_device(NO_DESTINATION))
+
 store.record_device_destinations("n2_dev_iot1", ["a.example.com", "b.example.com"],
                                   timestamp=9_100_000.0)
 store.record_device_destinations("n2_dev_iot1", ["a.example.com"],
