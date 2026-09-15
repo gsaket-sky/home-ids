@@ -9,12 +9,26 @@ scopes trust by (device, destination_id, hypothesis) via is_trust_cached()/
 get_dynamic_trust_cache() -- three of these six dimensions. This module adds
 the remaining three (behavior_fingerprint instead of raw evidence_type,
 destination_class instead of a literal destination_id, evidence_family, and
-regime) as a SEPARATE, MORE CONSERVATIVE gate. NOT YET WIRED into
-ClAfpeEngine.evaluate() itself -- real, separate follow-up work, matching
-Sheet 00/02/03a's honest-gap pattern. When wired, the intended integration
-is AND, not OR: a suppression decision should require BOTH is_trust_cached()
-AND permits_suppression() below to agree, so this module can only ever
-TIGHTEN what already exists, never loosen it.
+regime) as a SEPARATE, MORE CONSERVATIVE gate.
+
+WIRED 2026-09-15 (write-side live, read-side shadow-logged, not yet hard-gating):
+record_corroborating_signal() is called for real on every genuine STAGE_3_COMBINED
+suppression in ClAfpeEngine.evaluate(), so the table starts accumulating real data
+now. permits_suppression() is also computed there and logged, but deliberately NOT
+yet AND-ed onto the existing is_trust_cached() fast path as a hard gate -- since
+this table starts completely empty, hard-gating immediately would strip away every
+currently-working trust-cache suppression until real corroboration re-accumulates
+(days, possibly longer), a significant live behavior change with zero real data
+behind it on day one. Promote to a hard gate once shadow data shows
+permits_suppression() agreeing with real outcomes, the same shadow-then-promote
+shape CL-AFPE itself already went through (see cl_afpe_flip_monitor.py). When
+promoted, the intended integration is AND, not OR: a suppression decision requires
+BOTH is_trust_cached() AND permits_suppression() below to agree, so this module can
+only ever TIGHTEN what already exists, never loosen it.
+
+Two of the six dimensions are first-pass simplifications, not the schema's original
+full intent -- see classify_destination() below and engine.py's call site for what
+behavior_fingerprint/regime_id actually resolve to today and why.
 
 THE QUESTION THIS CLOSES: "how do we know CL-AFPE isn't just learning to
 trust bad behavior." A plain (device, destination) key reproduces a softer
@@ -32,11 +46,13 @@ regime) tuple only rises once at least _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST
 DISTINCT evidence_family values have each independently corroborated it --
 never from N repeats of one family.
 """
+import ipaddress
 import time
 import uuid
 from typing import Optional
 
 from argus.graph.store import GraphStore
+from utils import is_cloud_cdn_provider_org, is_telemetry_domain
 
 # First-pass, not-yet-empirically-tuned constants (this codebase's own
 # established honesty framing).
@@ -44,6 +60,35 @@ _TRUST_INCREMENT = 0.15         # bounded step per confirming observation -- sam
 _TRUST_DECAY_PER_DAY = 0.05     # trust decays if not reinforced -- never permanent from one confirmation
 _SUPPRESSION_TRUST_FLOOR = 0.6  # minimum per-family trust before that family counts as "corroborating"
 _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST = 2
+
+# Release 15 Sheet 03b wiring (2026-09-15): no destination_class producer existed
+# anywhere in the codebase before this. Deliberately reuses this codebase's existing
+# private/multicast/CDN/telemetry classification (utils.is_cloud_cdn_provider_org/
+# is_telemetry_domain, stdlib ipaddress) rather than inventing a second taxonomy that
+# could quietly disagree with the first -- same reasoning as this module's own
+# docstring for why it uses existing dimensions instead of new ones.
+
+
+def classify_destination(dest_ip: str = "", base_domain: str = "", asn_owner: str = "") -> str:
+    """First-pass destination_class classifier. Checks IP-shape first (cheap,
+    always available when dest_ip is a real address), then domain/ASN-based
+    classification, falling back to "public" when nothing more specific matches."""
+    if dest_ip:
+        try:
+            addr = ipaddress.ip_address(dest_ip)
+            if addr.is_multicast:
+                return "multicast"
+            if addr.is_loopback:
+                return "loopback"
+            if addr.is_private or addr.is_link_local or addr.is_reserved:
+                return "private"
+        except ValueError:
+            pass
+    if base_domain and is_telemetry_domain(base_domain):
+        return "telemetry"
+    if asn_owner and is_cloud_cdn_provider_org(asn_owner):
+        return "cdn"
+    return "public"
 
 
 def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fingerprint: str,

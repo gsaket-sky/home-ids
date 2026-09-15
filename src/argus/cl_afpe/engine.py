@@ -117,6 +117,7 @@ used for branching," and this shadow verdict has no audit-trail UI to feed it in
 -- `calibrated_confidence` is always `None` in the dict this returns, same shape
 v1 itself uses when no reliable calibration is loaded.
 """
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -124,11 +125,23 @@ from typing import Any, Dict, List, Optional
 from argus.graph.store import GraphStore
 from argus.evidence.model import NO_DESTINATION
 from argus.cl_afpe.ml_scoring import MLScorer, NEUTRAL_LGBM_SCORE, combine_scores, stage3_rule_fallback
+from argus.cl_afpe import composite_trust as ct
+from argus.baseline.engine import derive_activity_state
 from intelligence.local_intel import LocalConfirmedIntel
 from utils import (
     KNOWN_PUBLIC_DNS_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain,
     _is_cdn_or_cloud_domain, etld1,
 )
+
+LOGGER = logging.getLogger("home_ids.cl_afpe")
+
+# Release 15 Sheet 03b: regime_id is part of composite_trust's key, but no live
+# per-alert regime value exists on this host today -- BOCPD/regime tracking
+# (src/argus/baseline/engine.py) only runs on the separate .19 shadow ingest
+# daemon, never in this live pipeline. Using a fixed default here (rather than
+# fabricating a meaningless per-call value) until baseline scoring is ever wired
+# into the live decision path -- see ARGUS_DECISIONS.md.
+_DEFAULT_REGIME_ID = 0
 
 # Matches fp_engine.py's constants exactly.
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600
@@ -767,6 +780,27 @@ class ClAfpeEngine:
             cached_target = dest_ip
 
         if cached_target:
+            # Release 15 Sheet 03b, shadow-logged (see composite_trust.py's own
+            # docstring for why this isn't a hard AND-gate yet): compute what the
+            # composite-trust gate would say about this exact suppression, without
+            # affecting the real verdict below.
+            try:
+                evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
+                behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
+                destination_class = ct.classify_destination(dest_ip, base_domain, asn_owner)
+                composite_permits = ct.permits_suppression(
+                    self.store, device_id, behavior_fingerprint, destination_class,
+                    alert_hypothesis, _DEFAULT_REGIME_ID, now=now,
+                )
+                LOGGER.info(
+                    "[COMPOSITE_TRUST_SHADOW] device=%s target=%s hypothesis=%s "
+                    "fingerprint=%s dest_class=%s composite_permits=%s "
+                    "(trust-cache already permitted this suppression)",
+                    device_id, cached_target, alert_hypothesis, behavior_fingerprint,
+                    destination_class, composite_permits,
+                )
+            except Exception:
+                LOGGER.exception("[COMPOSITE_TRUST_SHADOW] evaluation failed, non-fatal")
             stage1_triggers = self._stage1_hard_stop(
                 features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
             if stage1_triggers:
@@ -840,6 +874,22 @@ class ClAfpeEngine:
                     ],
                     "suppress": False,
                 }
+            # Release 15 Sheet 03b: a genuine, non-refused benign correction is exactly
+            # the corroborating signal composite_trust's key is meant to accumulate --
+            # record it for real (write-side is live, not shadow) so the table starts
+            # building genuine data now. One call per independent evidence family in
+            # this decision, matching permits_suppression()'s own distinct-family count.
+            try:
+                evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
+                behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
+                destination_class = ct.classify_destination(dest_ip, base_domain, asn_owner)
+                for family in (decision.get("evidence_families", []) if decision else []):
+                    ct.record_corroborating_signal(
+                        self.store, device_id, behavior_fingerprint, destination_class,
+                        alert_hypothesis, family, _DEFAULT_REGIME_ID, now=now,
+                    )
+            except Exception:
+                LOGGER.exception("[COMPOSITE_TRUST] record_corroborating_signal failed, non-fatal")
             return {
                 "verdict": "FALSE_POSITIVE", "confidence": combined,
                 "calibrated_confidence": None,
