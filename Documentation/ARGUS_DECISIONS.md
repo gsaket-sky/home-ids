@@ -33,6 +33,38 @@ Argus/pipeline work specifically:
 Genuinely load-bearing design calls with lasting "why" value. Routine bugfix history
 lives in `CHANGELOG.md`, not here.
 
+**Local-network false positives must resolve autonomously without hardcoding this
+household's own protocols — three real gaps closed 2026-09-15.** Two real HIGH alerts
+(Fire TV + Echo Show `COORDINATED_TARGETING`) fired from ordinary mDNS discovery
+between the user's own smart-home devices, surfaced by the same day's composite-trust
+hard-gate deploy. Investigating found three compounding gaps in the autonomous
+learning loop: (1) composite-trust corroboration (`ct.record_corroborating_signal`)
+was only ever recorded from the autonomous Stage 2/3 ML path, never from
+`mark_false_positive()` itself — a human's Telegram correction created a trust-cache
+edge but never fed the table the hard-gate actually checks; (2) reputation tier 0
+("local/internal, RFC1918") was documented but never implemented for raw IPs
+(`_TIER_0` was domain-suffix strings only), and separately excluded from ~11 attack
+hypotheses' trust-dampening checks despite two other hypotheses in the same file
+already correctly including it; (3) the only autonomous ML path (Stage 2/3) is
+structurally blind to domainless/internal-IP traffic (Stage 3 unconditionally skips
+without a resolved hostname). A first draft closed gap 3 with a fixed protocol/port
+allowlist (mDNS/SSDP/ARP/DHCP) — **rejected on user review** as hand-encoding this one
+household's discovery protocols, which wouldn't generalize to a different consumer
+network's own quirks ("that's not learning, it's me guessing on their behalf" — see
+`feedback_network_agnostic_design.md`, now a standing project philosophy for all
+future autonomous-decision work here). Replaced with a fully protocol-agnostic
+design: a new "Stage 1b" checks only whether the destination is one of the network's
+own already-registered devices (`GraphStore.is_own_registered_device()`) and whether
+threat-intel/reputation signals are clean — no port or protocol anywhere — and
+records corroboration without auto-resolving until composite trust's existing
+distinct-evidence-family floor is genuinely crossed, an explicitly accepted
+cold-start tradeoff (a genuinely new pattern still alerts for real the first several
+times). Verified end-to-end against the real fired Fire TV alert payload, replayed
+offline: alerted on occurrences 1–4, auto-resolved via Stage 1b on occurrence 5, then
+via the normal trust-cache fast path from occurrence 6 on — no human input anywhere
+in the sequence. `src/argus/cl_afpe/engine.py`, `src/argus/graph/store.py`,
+`src/intelligence/reputation/classifier.py`, `src/argus/hypotheses/engine.py`.
+
 **Reputation tier 5 requires a curated-feed match, not just an aggregate score.**
 Escalating a destination to reputation tier 5 (CRITICAL-eligible on its own, with no
 second independent evidence source required) used to trigger off *any* of three signals
