@@ -224,25 +224,39 @@ until that tracker is reconstructed (process restart, or the in-memory
 cache key evicted) — live cache invalidation on promotion is real,
 separate follow-up.
 
-The other three allowlisted parameters (`reputation_tier_suspicious_floor`,
-`reputation_tier_high_floor`, `hard_stop_candidate_sensitivity`) are NOT
-yet live-wired — genuinely harder surgery than `bocpd_hazard_rate` was,
-for a structural reason found while scoping it: `decision/engine.py` never
-computes reputation TIER itself (it only reads `rep.tier`, an int already
-decided by `intelligence/reputation/classifier.py`'s `classify()`), and
-`classify()` is called from exactly ONE shared site,
-`core/pipeline.py:1549` — v-current's own live file, used for BOTH engines
-(the `engine: v13`/`v_current` switch only decides which DECISION engine
-consumes the same `rep_vector`, not which reputation classification ran).
-Wiring these three safely means touching `pipeline.py` itself (behind its
-own `self.config.get("engine", "v13") == "v13"` branch, the same one that
-already exists a few lines below at the `v13_live_engine.evaluate()` call
-site) — real, deeper follow-up, deliberately not rushed into the same pass
-as the lower-risk, single-file `bocpd_hazard_rate` wiring. `hard_stop_
-candidate_sensitivity` maps, with reasonable confidence but not certainty,
-to `decision/engine.py`'s `confirmed_exploit` hard-stop rule's hardcoded
-`min_confidence=0.9` (its bounds `[0.5, 0.99]` bracket that exact default) —
-noted here for whoever picks this up next, not yet implemented.
+**The other three allowlisted parameters — CLOSED (2026-09-15, same-day
+second follow-up)**: `reputation_tier_suspicious_floor`/`reputation_tier_
+high_floor`/`hard_stop_candidate_sensitivity` are now all live. The
+structural obstacle found while scoping this (`decision/engine.py` never
+computes reputation TIER itself — it only reads `rep.tier`, decided by
+`intelligence/reputation/classifier.py`'s `classify()`, called from exactly
+ONE shared site, `core/pipeline.py:1549`, used for BOTH engines) was solved
+WITHOUT touching `pipeline.py`: `classify()`'s two hardcoded thresholds
+(`vt/ti_score > 2.0`, `abuse_score >= 4.0`) became optional overrides
+defaulting to those exact original values (pure signature extension, zero
+behavior change for pipeline.py's own call and every other existing
+caller), and `v13/ops/live_engine.py` — the one caller that already owns
+the live `GraphStore` singleton — re-classifies `rep_vector` LOCALLY from
+the same raw vt/ti/abuse/asn inputs it already carries, with the tunable
+floors, before handing that (and not the original) to `DecisionEngine.
+evaluate()`. `pipeline.py`'s own `rep_vector` and v-current's decision path
+keep reading the untouched original — this only ever affects v13's own
+call. `hard_stop_candidate_sensitivity` maps to `decision/engine.py`'s
+`confirmed_exploit` rule's `min_confidence` (default 0.9, bounds `[0.5,
+0.99]` bracket it exactly) via one named special case in the hard-stop
+loop — not a generic per-rule override mechanism, since this is the only
+tunable that currently maps to a hard-stop rule. Both new call sites are
+gated behind `if device_id:` (zero graph interaction when omitted, this
+module's own pre-existing contract) with their own try/except degrading to
+defaults on any failure — caught live by this module's own "a broken graph
+read never raises out of evaluate()" test, which initially failed against
+the first version of this wiring (it had used the OUTER try/except instead,
+the wrong semantic for an ordinary, expected-to-be-resilient dependency).
+Verified end-to-end in `tests/test_v13_live_engine.py`: a promoted
+`hard_stop_candidate_sensitivity` changes whether a below-default-confidence
+Suricata match reaches the uncorroborated hard-stop branch; a promoted
+`reputation_tier_high_floor` changes whether an abuse score reaches tier 5;
+both scoped per-device, both inert for an unpromoted one.
 
 ## Sheet 03b — CL-AFPE composite trust key
 
@@ -253,6 +267,31 @@ the remaining three dimensions (behavior_fingerprint, destination_class,
 evidence_family, regime) as a separate, more conservative gate. Not yet
 wired into `ClAfpeEngine.evaluate()` — intended future integration is AND,
 not OR, so this can only tighten what exists, never loosen it.
+
+**Re-scoped 2026-09-15 (checked, deliberately not implemented this pass)**:
+confirmed via direct grep that NOTHING anywhere in `src/` calls
+`record_corroborating_signal()` — `cl_afpe_trust` is empty in every real
+deployment. `permits_suppression()` requires 2+ DISTINCT evidence families
+to have each independently corroborated a tuple; against an empty table
+that's always `False`. Unlike the three Sheet 03a parameters above (each
+inert-by-construction until a real promotion exists, because the default
+exactly matches current behavior), gating the trust-cache fast path's
+`suppress=True` on `permits_suppression()` right now would NOT be inert —
+it would immediately disable today's WORKING trust-cache suppression path
+in production until the table is repopulated from scratch, a real behavior
+regression, not a safe extension. The actual remaining work is the WRITE
+side: deciding which real signals legitimately count as independent
+corroboration for a benign verdict (a candidate: Stage 2 LightGBM and
+Stage 3 FastEmbed independently agreeing, in `ClAfpeEngine.evaluate()`'s
+own STAGE_3_COMBINED suppress branch, treated as two distinct evidence
+families — genuinely different models, not the same signal counted twice)
+and WHEN to call it (deliberately never from the trust-cache fast path
+itself, to avoid an already-trusted tuple trivially reinforcing its own
+trust) — plus a real schema question (`cl_afpe_trust.hypothesis_id` is an
+FK against the `hypotheses` catalog table, which alert-signature strings
+aren't automatically registered in). A genuine design decision, not
+something to rush into the same pass as the other three parameters just to
+close out the checklist.
 
 **The actual anti-gaming fix**: trust for a tuple only rises once at least
 2 distinct evidence families have each independently corroborated it past
@@ -307,19 +346,16 @@ which stays fully intact and keeps informing the narrative report text.
 Real attack detection was never dependent on Ollama; this only removes
 Ollama's own independent judgment from taking real action.
 
-## What's deliberately not done (updated 2026-09-15)
+## What's deliberately not done (updated 2026-09-15, end of day)
 
-- **Live wiring of `reputation_tier_suspicious_floor`/`reputation_tier_high_floor`/
-  `hard_stop_candidate_sensitivity` into `decision/engine.py`, and Sheet 03b's
-  composite trust key into `cl_afpe/engine.py`.** `bocpd_hazard_rate` (Sheet
-  03a) IS now live — see that Sheet's own section above. The remaining three
-  need real surgery in `core/pipeline.py` (the single shared `classify()`
-  call site both engines read from) / `cl_afpe/engine.py` specifically,
-  deliberately not rushed into the same pass as the lower-risk fixes here —
-  those two files are also both large, heavily-tested, live production
-  paths a peer session was running the full test suite against concurrently
-  while this pass ran, so touching them was deferred to avoid two sessions
-  editing the same file at once, not skipped for difficulty alone.
+- **Sheet 03b's composite trust key wired into `cl_afpe/engine.py`.** All
+  four Sheet 03a parameters ARE now live (see that Sheet's own section
+  above, closed in two passes the same day). Sheet 03b's own section above
+  has the real reason this one specifically is deferred: gating live
+  suppression on `permits_suppression()` today would disable a WORKING
+  mechanism (nothing populates `cl_afpe_trust` yet), not safely extend one —
+  a genuine design decision (what counts as independent corroboration, a
+  real hypothesis-catalog FK question), not a difficulty-driven skip.
 - **Phase 6 (soak + cutover).** Requires real elapsed time running in
   shadow on deployed infrastructure, plus explicit user sign-off before
   making the new loop authoritative on the live `.94` box and retiring
