@@ -1,3 +1,16 @@
+"""
+core/decision_engine.py -- the legacy decision engine.
+
+STATUS (2026-09-15): no longer the default. Live decisions on the default
+config (`engine: argus`) run through `argus/decision/engine.py`'s
+`DecisionEngine` instead (a different class of the same name, imported
+elsewhere as `V13DecisionEngine`/similar to disambiguate). This file is kept
+as the documented, permanent instant-rollback path -- set `engine: v_current`
+and restart `soc.service` to fall back here, no redeploy needed. It is fully
+reachable and load-bearing (constructed unconditionally by `pipeline.py`,
+exercised directly by `tests/regression_tester.py` and ~15 `test_phaseN_*.py`
+files), not dead code -- do not delete it.
+"""
 from typing import List, Dict, Any, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
 from intelligence.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES

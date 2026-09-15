@@ -1,6 +1,15 @@
 """
 fp_engine.py – Closed-Loop Autonomous False-Positive Elimination Engine (CL-AFPE)
 
+STATUS (2026-09-15): this is the LEGACY engine, no longer the default. Live
+suppression on the default config (`cl_afpe_engine: argus`) runs through
+`argus/cl_afpe/engine.py`'s `ClAfpeEngine` instead. This file is kept as the
+documented, permanent instant-rollback path -- set `cl_afpe_engine: v_current`
+and restart `soc.service` to fall back here, no redeploy needed -- the same
+pattern `core/decision_engine.py` and every other legacy fallback in this
+codebase uses. It is fully reachable and load-bearing (every method here has a
+real caller), not dead code -- do not delete it.
+
 ======================================================================================
 WHAT DOES THIS MODULE DO?  (Plain English for Novice Users)
 ======================================================================================
