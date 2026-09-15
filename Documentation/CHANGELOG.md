@@ -13,7 +13,7 @@ DNS-hygiene language -- query rate, unique domains, entropy -- none of which
 report's real immunizations against the review's own suggested checklist, a confirmed
 live bug: the persistent Ollama-verdict cache never re-validated a cache HIT against
 the current `DeterministicValidator` logic, so a validator upgrade had no effect on
-any already-cached pattern. See `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`'s
+any already-cached pattern. See `Documentation/ARGUS_ARCHITECTURE.md`§8's
 Gap 6 entry for the full trace, live-evidence citations, and per-item file:line detail
 -- summarized here.
 
@@ -321,7 +321,7 @@ CRITICAL / "Internal Honeypot Accessed".
   `is_safe` devices regardless, so the only effect of not exempting it was a
   misleading CRITICAL alert with no real containment behind it.
 - `decision_engine.py`'s shadow computation (Gap 3, evaluating a proposed
-  evidence-taxonomy fix from `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`)
+  evidence-taxonomy fix from `Documentation/ARGUS_ARCHITECTURE.md`§8)
   deliberately reads the same raw `zeek_honeypot_hits` feature directly instead of
   checking `EvidenceStore` presence, to dodge a *different* bug (stale evidence
   re-firing the same verdict for up to 600s). In copying the raw-feature read, it
@@ -510,9 +510,9 @@ A parallel workstream (run alongside the identity/dashboard work below) built a 
 - New shadow-decision log (`state/shadow_decisions.jsonl`) recording, for every live alert, what the CURRENT decision logic produced side-by-side with what a proposed evidence-taxonomy fix would have produced — lets the fix be evaluated against real traffic before it's ever flipped live, with zero risk to production verdicts.
 - `src/scripts/shadow_watcher.py` (new, temporary — cron `*/5 * * * *`): fires a Telegram notification the moment a new divergence is logged, so observing the fix's live behavior doesn't require an open session. Tracks its own read-position bookmark so repeated 5-minute polls never re-send the same entries.
 - `src/scripts/shadow_backtest.py` (new, manual/offline): backtest CLI for replaying historical alerts through both the current and proposed logic.
-- Two real bugs found via the shadow comparison's own divergence data and fixed: a hard-stop evidence staleness gap (evidence from a prior, already-resolved incident could still count toward a fresh hard-stop) and a Gap 1 shadow-severity/geofencing-attribution bug, both documented with root cause and fix in `Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md`.
+- Two real bugs found via the shadow comparison's own divergence data and fixed: a hard-stop evidence staleness gap (evidence from a prior, already-resolved incident could still count toward a fresh hard-stop) and a Gap 1 shadow-severity/geofencing-attribution bug, both documented with root cause and fix in `Documentation/ARGUS_ARCHITECTURE.md`§8.
 - `ollama_soc.py`'s cron had silently drifted from its intended 4-hourly cadence to once-daily (`"30 4 * * *"`) — corrected back to `"30 */4 * * *"`.
-- `Documentation/ALERT_CATEGORIZATION_CATALOG.md` (new): a verdict-by-verdict audit of every state/action/explanation each decision layer (Layer 1 rules, Layer 2 CL-AFPE, Layer 3 Ollama) can produce, cross-referenced against real production alert counts.
+- `Documentation/ARGUS_ARCHITECTURE.md`§8 (new content at the time): a verdict-by-verdict audit of every state/action/explanation each decision layer (Layer 1 rules, Layer 2 CL-AFPE, Layer 3 Ollama) can produce, cross-referenced against real production alert counts.
 - Telegram's "Contacted" line enriched with IP geo/ASN info for the primary THREAT alert (the same `lookup_asn()`/`lookup()` pattern later reused for the autonomous-action alerts in v12.4.0 above).
 
 ## [v12.2.0] - 2026-08-25
@@ -526,7 +526,7 @@ Prompted by a live Prometheus/Grafana review ("fritzbox isolation and tarpit sti
 - Closed two pre-existing gaps in the same pass: `fp_engine.py` had no discard/migrate primitive for its per-device profile store at all (now wired into both the merge path and ordinary stale-device eviction), and `prune_stale_devices()` only cleared a device's most-recent `client_ip` from the reverse IP index, not its other `known_ips`.
 - `apply_device_type()` bugfix: the old guard only re-inferred `device_type` on a device's literal first classification, permanently locking in a cold-start guess (e.g. "laptop") even after a real hostname later resolved.
 - `src/merge_fragmented_devices.py` (new): one-time offline cleanup script (dry-run by default) for existing fragmentation. Verified and applied against real production state: 24 groups, 36 orphans merged.
-- `Documentation/DEVICE_IDENTITY_LIFECYCLE.md` (new): living reference for the full identity-resolution priority order and every "move" (migrate/merge/prune) a device_id can go through.
+- `Documentation/ARGUS_ARCHITECTURE.md`§6 (new content at the time): living reference for the full identity-resolution priority order and every "move" (migrate/merge/prune) a device_id can go through.
 
 ### 📟 Alert Readability Redesign & Live Bug Fixes
 
@@ -691,7 +691,7 @@ The largest release since the Hypothesis & Evidence Engine rewrite. Two major bo
 
 ### 📡 New: Reactive Fritzbox WLAN Capture (Phase 21)
 
-Closes a real, live-confirmed gap: on an all-in-one modem+router+AP (this deployment's Fritzbox, and most consumer routers), neither a mirror port nor an inline bridge can see WiFi-to-WiFi traffic at all — only the two wired devices had genuine Zeek flow visibility (lateral movement, JA3/JA4). AVM's own per-radio diagnostic capture (`ath0`/`ath1`) *does* see it (confirmed with a live controlled ping test), but continuous dual-radio capture measured ~3GB/hour with observable router latency under load — this ships the reactive, triggered-burst alternative instead. Full architecture in [ENGINEERING_MANUAL.md §7](ENGINEERING_MANUAL.md#7-reactive-fritzbox-wlan-capture).
+Closes a real, live-confirmed gap: on an all-in-one modem+router+AP (this deployment's Fritzbox, and most consumer routers), neither a mirror port nor an inline bridge can see WiFi-to-WiFi traffic at all — only the two wired devices had genuine Zeek flow visibility (lateral movement, JA3/JA4). AVM's own per-radio diagnostic capture (`ath0`/`ath1`) *does* see it (confirmed with a live controlled ping test), but continuous dual-radio capture measured ~3GB/hour with observable router latency under load — this ships the reactive, triggered-burst alternative instead. Full architecture in [Documentation/ARGUS_ARCHITECTURE.md](ARGUS_ARCHITECTURE.md).
 
 - **Fritzbox capture client** (`extractors/fritzbox_capture.py`) — TR-064 challenge-response auth (PBKDF2 + legacy MD5 fallback), live-verified capture-burst start/stop against the real `capture_notimeout` endpoint, AVM-format→standard pcap conversion, and reprocessing through the same live `local.zeek` policy (JSON logging, MAC-logging, DHCP fingerprinting, JA4/JA3) — feeding results into the exact same `ZeekFeatureExtractor` instance live traffic uses, so WiFi devices get real JA3/JA4 signal (both Stage-1 malicious-fingerprint matching and JA4-overlap device re-identification) for the first time, as a direct consequence of the design rather than new logic.
 - **ARP host-discovery sweep detection** — broadcast-visible, works without any Fritzbox integration (ARP reaches WiFi devices the same way MAC correlation already does). Required a missing Zeek script: stock Zeek 8.0.8 ships the underlying `arp_request`/`arp_reply` events but no script that writes `arp.log` — added `zeek_scripts/local-arp-log.zeek`, confirmed end-to-end against 71/71 real request/reply pairs from a live capture. New `arp_sweep` evidence wired into `ConnectionAbuseHypothesis` as an alternate trigger; per-device auto-calibrated threshold (see Autonomous Learning below).
@@ -812,7 +812,7 @@ This release started from a third-party review of a single live alert (a connect
 
 ### 🤖 Autonomous Self-Calibration (new)
 
-- **The false-positive engine now calibrates its own suppression threshold from real evidence**, both global and per-device, with zero human involvement required. Full mechanics in [USER_MANUAL.md §2](USER_MANUAL.md#-autonomous-self-calibration--the-override-layer) and [ENGINEERING_MANUAL.md §5](ENGINEERING_MANUAL.md#5-the-autonomous-self-calibration-loop). Summary: needs ≥5 pooled (or ≥3 per-device) confirmed false positives, only ever lowers the threshold, refuses outright on any ambiguous overlap with never-corrected alerts, has a hard floor.
+- **The false-positive engine now calibrates its own suppression threshold from real evidence**, both global and per-device, with zero human involvement required. Full mechanics in [USER_MANUAL.md §2](USER_MANUAL.md#-autonomous-self-calibration--the-override-layer) and [Documentation/ARGUS_ARCHITECTURE.md §5](ARGUS_ARCHITECTURE.md#5-autotuning). Summary: needs ≥5 pooled (or ≥3 per-device) confirmed false positives, only ever lowers the threshold, refuses outright on any ambiguous overlap with never-corrected alerts, has a hard floor.
 - **A new, layered config-override system replaces "the LLM edits `config.yaml` directly"** (an earlier, never-fully-working design). `config.py`'s `LiveConfig` now also watches `state/config_overrides.json` (global autonomous adjustments) and `fp_engine.py` owns `state/device_fp_profiles.json` (per-device adjustments) — both layer on top of the hand-authored `config.yaml` baseline at read time, both are watched live (~5s), and **neither is ever written to `config.yaml` itself.** Deleting a key from either file instantly reverts to the `config.yaml` value.
 - **`ollama_soc.py`'s LLM-validated corrections are now a first-class, human-independent evidence source.** `fp_engine.mark_false_positive()` gained a `source` parameter (`"operator"` vs `"llm_validated"`) so the calibration pass can tell a real Telegram tap apart from the batch analyst's own validated correction — or pool both. Previously both were mislabeled identically as `OPERATOR_MARKED_FALSE_POSITIVE`, and the batch analyst's autonomous action wrote to `safe_host_patterns` (a device-*hostname* matcher, not a domain-suppression mechanism — it could never have suppressed anything even before this fix, an independent bug found while tracing the mislabeling).
 - **Two independent retrain triggers now both run calibration.** `fp_engine.py` has its own internal 7-day in-process retrain thread, separate from the scheduler's standalone daily 3am cron invocation of `train_fp_classifier.py` — both call the same `train_and_export_onnx()`, but only the cron path was also calling the new calibration function. Fixed so both paths run calibration after their retrain step, regardless of whether the retrain itself succeeded.

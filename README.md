@@ -69,7 +69,7 @@ A real alert isn't a wall of numbers — it's built to be understood in five sec
 
 That's it. What happened, why, how sure it is, and a one-tap way to correct it if it's wrong — no decoding required.
 
-The self-tuning described in the next section sends its own plain-English notifications too — "I just decided this domain is safe, tap here if I'm wrong," "this device's history now protects every other device from the same threat." Real examples of every one of those, alongside exactly what happens in the background when you see them, are in [`Documentation/AUTONOMOUS_LEARNING.md`](Documentation/AUTONOMOUS_LEARNING.md).
+The self-tuning described in the next section sends its own plain-English notifications too — "I just decided this domain is safe, tap here if I'm wrong," "this device's history now protects every other device from the same threat." Real examples of every one of those, alongside exactly what happens in the background when you see them, are in [`Documentation/ARGUS_ARCHITECTURE.md` §5](Documentation/ARGUS_ARCHITECTURE.md#5-autotuning).
 
 ---
 
@@ -85,13 +85,13 @@ Commercial home-network security appliances are real products that work. They al
 
 Home-IDS trades that for: **it's free, it's entirely yours, and nothing about your network ever leaves your house** — including its optional AI analyst, which runs locally instead of calling out to anyone. It runs comfortably on modest hardware you likely already own. That combination of always-on autonomous protection, full transparency into every decision, and genuine self-improvement over time is normally something you'd pay a real subscription for, if you could find it at all outside of expensive commercial or enterprise-grade gear.
 
-**And here's the part most product pages leave out:** it's not psychic, it can't see inside an encrypted VPN tunnel (nothing legitimately can), and its deepest inspection is strongest for wired devices — WiFi coverage is real but currently more targeted than continuous on a typical all-in-one router. We'd rather tell you that up front than have you discover it later. The full, unvarnished, threat-by-threat account of exactly where it's strong and where it's still maturing lives in the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md#10-detection-coverage--known-limitations) — written for the technically curious, not hidden from anyone.
+**And here's the part most product pages leave out:** it's not psychic, it can't see inside an encrypted VPN tunnel (nothing legitimately can), and its deepest inspection is strongest for wired devices — WiFi coverage is real but currently more targeted than continuous on a typical all-in-one router. We'd rather tell you that up front than have you discover it later. The full, unvarnished, threat-by-threat account of exactly where it's strong and where it's still maturing lives in the [Architecture doc](Documentation/ARGUS_ARCHITECTURE.md) — written for the technically curious, not hidden from anyone.
 
 ---
 
 ## What it's built on
 
-Three systems working together — a real-time watchdog that decides, a self-correcting judge that keeps it honest and quiet, and an optional local AI analyst for deeper review — all built on open, well-respected foundations (Pi-hole for DNS, Grafana for dashboards, and industry-standard network-monitoring and signature-detection tools underneath). If you want the actual architecture diagrams, the mathematics, and every design decision explained and justified, that's what the [Engineering Manual](Documentation/ENGINEERING_MANUAL.md) is for.
+Three systems working together — a real-time watchdog that decides, a self-correcting judge that keeps it honest and quiet, and an optional local AI analyst for deeper review — all built on open, well-respected foundations (Pi-hole for DNS, Grafana for dashboards, and industry-standard network-monitoring and signature-detection tools underneath). If you want the actual architecture diagrams, the mathematics, and every design decision explained and justified, that's what the [Architecture doc](Documentation/ARGUS_ARCHITECTURE.md) is for.
 
 ---
 
@@ -101,8 +101,8 @@ Three systems working together — a real-time watchdog that decides, a self-cor
 |---|---|
 | [INSTALL.md](Documentation/INSTALL.md) | Setting it up for the first time — step by step, including everything it depends on. |
 | [USER_MANUAL.md](Documentation/USER_MANUAL.md) | Running it day to day — every setting, every dashboard, what everything means. |
-| [AUTONOMOUS_LEARNING.md](Documentation/AUTONOMOUS_LEARNING.md) | Every self-tuning feedback loop, every scheduled background job, and real Telegram alert examples for each. |
-| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The technical deep-dive — architecture, mathematics, and the full honest limitations breakdown. |
+| [ARGUS_ARCHITECTURE.md](Documentation/ARGUS_ARCHITECTURE.md) | The technical deep-dive — architecture, scheduling, decision engines, autotuning, and every self-tuning feedback loop with real Telegram alert examples. |
+| [ARGUS_DECISIONS.md](Documentation/ARGUS_DECISIONS.md) | Standing rules, notable closed decisions, and the roadmap of what's deliberately not built (yet). |
 | [CHANGELOG.md](Documentation/CHANGELOG.md) | What's changed, release by release. |
 
 New here? Start with [INSTALL.md](Documentation/INSTALL.md).

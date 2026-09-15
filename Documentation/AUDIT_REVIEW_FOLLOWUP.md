@@ -8,15 +8,17 @@ confidence) plus a 27-point review of the whole hypothesis/decision architecture
 confirmed the core complaint was genuine production behavior (34 of 121 real alerts
 showed the same "HIGH with 0 evidence families" shape) — not a misreading, but also not
 a scoring bug: a display/persistence bug, fixed same-day (`f027a6f`/`cd3d747`/`7d70e10`,
-see [`THREAT_CATEGORY_REFERENCE.md`](THREAT_CATEGORY_REFERENCE.md) §5/§8 for the full
-incident writeup and [[project_v13_alert_quality_fixes]] in memory).
+see [`Documentation/ARGUS_ARCHITECTURE.md`](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic)
+for the full incident writeup and [[project_v13_alert_quality_fixes]] in memory).
 
 This document tracks everything from that review that is **not** a same-session code
 fix — either because it's genuinely large architectural work, or because closer
 examination found it needs a decision or more data before it can be implemented safely.
-Same discipline as `V13_REMAINING_WORK.md`: each item states *why* it's open and *when*
+Same discipline as the now-retired remaining-work ledger (its durable rationale items
+now live in `Documentation/ARGUS_DECISIONS.md`): each item states *why* it's open and *when*
 it should be picked up, not just "not done yet." When an item here gets resolved, move
-its outcome into `THREAT_CATEGORY_REFERENCE.md` and delete it from here.
+its outcome into [`Documentation/ARGUS_ARCHITECTURE.md`](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic)
+and delete it from here.
 
 ---
 
@@ -53,7 +55,7 @@ pass also shipped, tested, and deployed:
    new `attack_evidence` field, `core/pipeline.py`) — the persisted alert JSON was
    already correct, but the ACTUAL Telegram text still showed 0-1 families because
    `pipeline.py`'s WHY-block looped over its own ~600s-TTL local evidence snapshot
-   while the decision itself draws on v13's 24h graph-window query. Found and fixed
+   while the decision itself draws on Argus's 24h graph-window query. Found and fixed
    from 2 real Telegram alerts the user pasted mid-conversation, live-verified against
    the user's own next real alert (not just a data pull).
 6. **Reputation evidence/tier ignored known-trusted infrastructure**
@@ -250,13 +252,13 @@ history for this category.
 
 **Proposed approach**: define the required-core/supporting/contradicting split
 explicitly (mirroring this document's §F "evidence classes" below), starting from
-`Documentation/ALERT_CATEGORIZATION_CATALOG.md`'s real production volume data for this
+`Documentation/ARGUS_ARCHITECTURE.md`§8's real production volume data for this
 category to see what the CURRENT false-positive/negative shape actually looks like
 before redesigning blind.
 
 **Trigger**: a dedicated session with time to (1) pull real DNS-tunneling alert history,
 (2) design the new required-evidence model against it, (3) shadow-test before flipping
-live — same discipline v13's own CL-AFPE rollout used.
+live — same discipline Argus's own CL-AFPE rollout used.
 
 ### D. DGA lexical/NXDOMAIN detector capability (audit §6)
 
@@ -288,7 +290,7 @@ with dynamic naming. This is a real design decision (are `zeek_conn_abuse`/
 tuning?), not obviously correct either way without live false-positive/negative data
 per sub-category.
 
-**Trigger**: if `ALERT_CATEGORIZATION_CATALOG.md`'s volume data (or a future live audit)
+**Trigger**: if `Documentation/ARGUS_ARCHITECTURE.md`§8's volume data (or a future live audit)
 shows one of the three sub-shapes has a meaningfully different false-positive rate than
 the others under the SAME shared thresholds — that's the concrete evidence needed to
 justify the split.
@@ -448,7 +450,7 @@ otherwise closed. Worth confirming that framing before a full rewrite, not just
 implementing on the audit's say-so.
 
 **Trigger**: a dedicated multi-session design effort, with the current score-based
-engine kept running in parallel (shadow mode, same pattern as v13's own rollout against
+engine kept running in parallel (shadow mode, same pattern as Argus's own rollout against
 v-current) for comparison before ever flipping live — this is exactly the kind of change
 [[feedback_verify_dont_assume]] and [[feedback_pi_target_and_v13_execution]]'s
 autonomous-execution rules require stopping for a real architectural decision on, not

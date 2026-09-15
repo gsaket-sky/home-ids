@@ -2,8 +2,8 @@
 
 Welcome to the definitive reference documentation for **Home-IDS**.
 
-This manual covers the v13 Evidence Graph and Hypothesis Evidence Engine (HEE) —
-the live, primary decision engine as of v13/v14 — how evidence is created and
+This manual covers the Argus Evidence Graph and Hypothesis Evidence Engine (HEE) —
+the live, primary decision engine as of Argus/v14 — how evidence is created and
 pruned, and exactly how a decision is reached; the older Tri-Brain architecture
 description (still accurate for CL-AFPE and the Ollama batch reviewer, and still
 present as a fallback decision path); an exhaustive breakdown of every
@@ -18,7 +18,7 @@ dashboards.
 ---
 
 ## 📋 Table of Contents
-1. [🧬 The v13 Evidence Graph & Decision Engine (Primary)](#-the-v13-evidence-graph--decision-engine-primary)
+1. [🧬 The Argus Evidence Graph & Decision Engine (Primary)](#-the-argus-evidence-graph--decision-engine-primary)
 2. [🌟 The Tri-Brain Architecture & Internal Data Flow](#-the-tri-brain-architecture--internal-data-flow)
 3. [⏱️ The Automation Timeline: Sequence, Cadence & Latency](#%EF%B8%8F-the-automation-timeline-sequence-cadence--latency)
 4. [🤖 Autonomous Self-Calibration & The Override Layer](#-autonomous-self-calibration--the-override-layer)
@@ -34,15 +34,15 @@ dashboards.
 
 ---
 
-## 🧬 The v13 Evidence Graph & Decision Engine (Primary)
+## 🧬 The Argus Evidence Graph & Decision Engine (Primary)
 
 This section describes what actually decides a threat verdict today — `.94`'s
-`config.yaml` runs `engine: v13`, which means this is the primary path, not a
+`config.yaml` runs `engine: v13`, which means Argus is the primary path, not a
 parallel experiment. The older "Brain 1" description in the next section
 (`src/core/decision_engine.py` + `src/intelligence/hypotheses/`) still exists in
 the codebase and is still wired in, but only as a **fallback** — `pipeline.py`
 calls `v13_live_engine.evaluate(..., fallback_evaluate=self.decision_engine.evaluate)`,
-so the old engine only ever runs if v13's own evaluation raises an exception.
+so the old engine only ever runs if Argus's own evaluation raises an exception.
 
 ### The central rule
 
@@ -196,10 +196,10 @@ retention window.
 
 > **Brain 1 below (`decision_engine.py`/`intelligence/hypotheses/`) is no
 > longer the primary decision path** — it's kept live only as a fallback if the
-> v13 evaluation in the section above raises an exception. Its description here
+> Argus evaluation in the section above raises an exception. Its description here
 > is still accurate for what it does when it runs, and Brains 2 and 3 below
 > (CL-AFPE and the Ollama batch reviewer) are unchanged and still primary. Read
-> [🧬 The v13 Evidence Graph & Decision Engine](#-the-v13-evidence-graph--decision-engine-primary)
+> [🧬 The Argus Evidence Graph & Decision Engine](#-the-argus-evidence-graph--decision-engine-primary)
 > above first if you're trying to understand what actually decides a live
 > verdict today.
 
@@ -428,13 +428,13 @@ gantt
     shadow_watcher.py poll                            :00:00, 5m
 ```
 
-- **`retro_hunter.py`** — 2:00 AM daily. Two passes: rescans recent history against freshly refreshed external threat-intel feeds (writes findings to `state/retro_hunt_findings.jsonl` + a Telegram summary), and cross-references history against the *local* confirmed-intel store. As of 2026-08-27 the local-intel pass is closed-loop, not purely observational — a match also calls `record_confirmed_threat()` (updates the shared network-effect store) and tightens that device's sigma-shift. See [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §7 for the full loop and a real alert example.
+- **`retro_hunter.py`** — 2:00 AM daily. Two passes: rescans recent history against freshly refreshed external threat-intel feeds (writes findings to `state/retro_hunt_findings.jsonl` + a Telegram summary), and cross-references history against the *local* confirmed-intel store. As of 2026-08-27 the local-intel pass is closed-loop, not purely observational — a match also calls `record_confirmed_threat()` (updates the shared network-effect store) and tightens that device's sigma-shift. See [`Documentation/ARGUS_ARCHITECTURE.md` §5](ARGUS_ARCHITECTURE.md#5-autotuning) for the full loop and a real alert example.
 - **`train_fp_classifier.py`** — 3:00 AM daily (plus the independent ~weekly in-process pass above). The only scheduled job that changes live detection behavior via the override layer, and only via the 5s watcher, never immediately.
 - **`top_domains_report.py`** — 6:00 AM daily. Markdown + Telegram "top domains per device" digest. Genuinely observational only — never blocks, unblocks, or tunes anything.
-- **`ollama_soc.py`** — every 4 hours, at :30 past the hour (00:30/04:30/08:30/12:30/16:30/20:30 — corrected 2026-08-27 after its cron had silently drifted to once-daily). Can both unblock a Pi-hole domain (LLM-validated benign) and tighten sensitivity/update the local-intel store network-wide (LLM-validated malicious) — see [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md) §8.
-- **`shadow_watcher.py`** — every 5 minutes. **Temporary**: notifies the moment the shadow-mode evidence-taxonomy evaluation logs a new divergence (see [`DECISION_LOGIC_DEPENDENCY_MAP.md`](DECISION_LOGIC_DEPENDENCY_MAP.md)). Purely observational, removed once that fix is flipped live or abandoned.
+- **`ollama_soc.py`** — every 4 hours, at :30 past the hour (00:30/04:30/08:30/12:30/16:30/20:30 — corrected 2026-08-27 after its cron had silently drifted to once-daily). Can both unblock a Pi-hole domain (LLM-validated benign) and tighten sensitivity/update the local-intel store network-wide (LLM-validated malicious) — see [`Documentation/ARGUS_ARCHITECTURE.md` §5](ARGUS_ARCHITECTURE.md#5-autotuning).
+- **`shadow_watcher.py`** — every 5 minutes. **Temporary**: notifies the moment the shadow-mode evidence-taxonomy evaluation logs a new divergence (see [`Documentation/ARGUS_ARCHITECTURE.md` §8](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic)). Purely observational, removed once that fix is flipped live or abandoned.
 - All of the above are launched by `scripts/scheduler.py`, which itself only checks cron expressions once a minute — so any job can start up to 60 seconds after its exact cron minute.
-- For every feedback loop mentioned above (sigma-shift, trust cache, per-device thresholds, local confirmed-intel, transfer learning, retroactive identity merge) explained end-to-end with real Telegram alert examples, see [`AUTONOMOUS_LEARNING.md`](AUTONOMOUS_LEARNING.md).
+- For every feedback loop mentioned above (sigma-shift, trust cache, per-device thresholds, local confirmed-intel, transfer learning, retroactive identity merge) explained end-to-end with real Telegram alert examples, see [`Documentation/ARGUS_ARCHITECTURE.md` §5](ARGUS_ARCHITECTURE.md#5-autotuning).
 
 ---
 
@@ -622,9 +622,9 @@ Short, triggered Fritzbox WLAN capture bursts — the only way this deployment g
 
 | Key | Default | Reload | Description |
 |---|---|---|---|
-| `reactive_capture_enabled` | `false` | `[LIVE]` | Master switch. Live-verified and enabled on this deployment; leave `false` until you've confirmed the capture-control CGI parameters against your own router (see ENGINEERING_MANUAL.md §7). |
+| `reactive_capture_enabled` | `false` | `[LIVE]` | Master switch. Live-verified and enabled on this deployment; leave `false` until you've confirmed the capture-control CGI parameters against your own router (see `Documentation/ARGUS_ARCHITECTURE.md`). |
 | `reactive_capture_max_bursts_per_hour` | `6` | `[LIVE]` | Shared budget every trigger source below draws from — a burst captures the whole radio regardless of which trigger fired it, so trigger-source count doesn't multiply cost, only actual burst count does. |
-| `reactive_capture_{new_device,arp_sweep,dns,high_severity,reid_ambiguous,wired_probe}_trigger_enabled` | `true` (all) | `[LIVE]` | Per-source enable flags — six independent trigger conditions, each individually disable-able without touching the shared budget. See ENGINEERING_MANUAL.md §7 for what each one fires on. |
+| `reactive_capture_{new_device,arp_sweep,dns,high_severity,reid_ambiguous,wired_probe}_trigger_enabled` | `true` (all) | `[LIVE]` | Per-source enable flags — six independent trigger conditions, each individually disable-able without touching the shared budget. See `Documentation/ARGUS_ARCHITECTURE.md` for what each one fires on. |
 | `reactive_capture_wired_probe_ips` | `[]` | `[LIVE]` | The wired-device IP(s) the wired-probe trigger watches for a new, previously-unseen source connecting to. |
 | `reactive_capture_spotcheck_enabled` / `_interval_seconds` | `true` / `1800.0` | `[LIVE]` | Periodic baseline capture regardless of any trigger — runs in-process (not a separate scheduled script), since a burst's findings only reach live detection by ingesting into the same long-running `ZeekFeatureExtractor` instance the pipeline already holds. |
 | `reactive_capture_radios` | `[ath0, ath1]` | `[LIVE]` | Which Fritzbox diagnostic interfaces to capture — this router's 2.4GHz/5GHz radios, confirmed live as the only interfaces that see WiFi-to-WiFi traffic. |
@@ -633,7 +633,7 @@ Short, triggered Fritzbox WLAN capture bursts — the only way this deployment g
 | `reactive_capture_scratch_dir` | `state/reactive_capture` | `[LIVE]` | Where raw/converted pcaps and Zeek's scratch reprocessing output land. |
 | `reactive_capture_delete_after_ingest` | `true` | `[LIVE]` | Deletes each burst's raw pcaps/Zeek scratch logs right after ingestion (disk safety — unbounded retention fills a disk over weeks at ~3GB/hour). `reactive_capture_history.jsonl` (a compact permanent summary) is kept regardless. |
 | `arp_sweep_unique_targets_threshold` | `8` | `[LIVE]` | Distinct ARP-requested targets in-window before the ARP host-discovery-sweep evidence fires (§6 Detection Engine's own category, not this one, but tuned alongside reactive capture since ARP sweeps are one of its triggers). Auto-calibrated per-device — see §3 and `train_fp_classifier.py`'s `calibrate_arp_sweep_threshold()`. |
-| `local_confirmed_intel_ttl_seconds` | `2592000.0` (30 days) | `[LIVE]` | TTL for the network-effect confirmed-threat learning store — see ENGINEERING_MANUAL.md §8 and the state-file reference below (`local_confirmed_intel.json`). |
+| `local_confirmed_intel_ttl_seconds` | `2592000.0` (30 days) | `[LIVE]` | TTL for the network-effect confirmed-threat learning store — see [`Documentation/ARGUS_ARCHITECTURE.md` §5](ARGUS_ARCHITECTURE.md#5-autotuning) and the state-file reference below (`local_confirmed_intel.json`). |
 | `reactive_capture_suricata_enabled` | `false` | `[LIVE]` | New in 11.0. Batch-mode Suricata signature scan of each reactive-capture burst pcap — never continuous against live traffic. Does nothing until Suricata is installed and `reactive_capture_suricata_bin`/`_rules_path` (below) are set. See INSTALL.md §3.7. |
 | `reactive_capture_suricata_timeout_seconds` | `60.0` (code default) | `[LIVE]` | Max seconds to let one batch scan run before giving up (non-fatal — the burst's other findings are unaffected). **Set this to `240.0` in practice** — a real deployment measured every batch invocation cold-starting Suricata (full ruleset recompile before any packet is scanned), which took well over 60s against a ~30-40MB burst pcap even with a trimmed ruleset. Bursts are rate-limited to 6/hour and already take 120s to capture, so a generous value here creates no scheduling conflict. See INSTALL.md §3.7.3. |
 
@@ -726,7 +726,7 @@ Standalone, operator-run utilities — none of these run automatically. All foll
 | `src/clean_confirmed_intel.py` | Audits/prunes `state/local_confirmed_intel.json` for known-safe domains or private/multicast/`safe_ips` addresses — see the state-file reference above. |
 | `src/release_wrongly_blocked_domains.py` | Classifies every currently Pi-hole-blocked domain into recognized-safe (CDN/telemetry allowlist), manually-reviewed-safe (a curated list built from this deployment's own blocklist), suspicious (regex DGA-pattern families — never auto-touched), or unclassified — and releases the safe categories via `fp.mark_false_positive()` + `ips.unblock_by_base_domain()`. |
 | `src/clear_stale_isolation.py` | `python3 src/clear_stale_isolation.py <identifier>` — removes only matching `tarpit_targets`/`router_isolated_devices` bookkeeping entries, deliberately **not** touching `blocked_domains` (unlike `release_device()`). For the specific case of a device manually released on the router/Pi-hole admin UI while Home-IDS's own state still thinks it's isolated. |
-| `src/identify_corrupted_training_rows.py` | Finds and (with `--apply`) excludes historically-corrupted `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` training rows — see `training_row_exclusions.json` above and ENGINEERING_MANUAL.md §8. |
+| `src/identify_corrupted_training_rows.py` | Finds and (with `--apply`) excludes historically-corrupted `DNS_COVERT_TUNNELING`/`DGA_BOTNET_C2` training rows — see `training_row_exclusions.json` above and [`Documentation/ARGUS_ARCHITECTURE.md` §5](ARGUS_ARCHITECTURE.md#5-autotuning). |
 | `src/scripts/incident_report.py` | New in 11.0. Read-only — groups `alerts.json` by `incident_id` into a human "ONE INCIDENT, N occurrences" rollup instead of raw JSONL. `python3 src/scripts/incident_report.py [--hours 24] [--top 30] [--min-occurrences 1]`. Never writes to `alerts.json`; safe to run anytime, including against the live file. |
 
 ---
@@ -918,8 +918,8 @@ The whole point of this family: turn "the system is healing/tuning itself" from 
 
 ## 📚 Threat Category Reference — Every Verdict & How It's Created
 
-This is the plain-language version of `Documentation/THREAT_CATEGORY_REFERENCE.md`
-— that file has the exhaustive score ladder and exact evidence-type list per
+This is the plain-language version of [`Documentation/ARGUS_ARCHITECTURE.md` §8](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic)
+— that section has the exhaustive score ladder and exact evidence-type list per
 hypothesis (`v13/hypotheses/engine.py`), sourced directly from the live code;
 this section is "what does this alert NAME actually mean and what real-world
 behavior creates it," organized by category. Every one of these is an **attack
@@ -1041,7 +1041,7 @@ high crowd-sourced AbuseIPDB score corroborated by ≥2 independent families).
 - **`LOCAL_DEVICE_DISCOVERY`** — routine LAN discovery traffic (ARP/mDNS-style)
   — almost always benign, logged as evidence rather than treated as a threat.
 
-See `Documentation/THREAT_CATEGORY_REFERENCE.md` for the exact score ladder
+See [`Documentation/ARGUS_ARCHITECTURE.md` §8](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic) for the exact score ladder
 (what specific combination reaches SUSPICIOUS vs. HIGH vs. CRITICAL) and the
 full evidence-type list per hypothesis — this section explains *what triggers
 each name*, that one explains *exactly how strong each trigger has to be*.

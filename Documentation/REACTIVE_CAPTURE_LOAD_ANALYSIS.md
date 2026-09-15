@@ -6,7 +6,7 @@ the Suricata batch scan in [`src/intelligence/detectors/suricata_scan.py`](../sr
 and the 7 trigger call sites in [`src/core/pipeline.py`](../src/core/pipeline.py) — and how that
 subsystem behaves under two ends of the load spectrum. It is not a whole-codebase map.
 
-**A note on accuracy** (matching `ENGINEERING_MANUAL.md`'s standard): every number below is
+**A note on accuracy** (matching `Documentation/ARGUS_ARCHITECTURE.md`'s standard): every number below is
 either read directly from the running config/source, or drawn from a real incident on this
 deployment (2026-08-31, see §3). This is a living document — extend it if the dispatcher's
 throttling logic changes.
@@ -64,7 +64,7 @@ zero bursts are normal.
   record), negligible.
 - Zeek (`zeek -r`) and Suricata (`suricata -r ... --runmode=autofp`) each process a few MB and
   exit in seconds; well inside the 240s Suricata timeout. (Runmode updated 2026-09-07 — see
-  `V13_FULL_ARCHITECTURE_SHIFT_PLAN.md` Workstream 6 for why `--runmode=single` was replaced,
+  `Documentation/ARGUS_DECISIONS.md` for why `--runmode=single` was replaced,
   and why the first attempted fix, `--runmode=workers`, was itself wrong for offline pcap mode.)
 - `_cleanup_burst_files()` deletes the raw/converted pcaps and Zeek scratch dir immediately after
   ingest (`reactive_capture_delete_after_ingest: true`), so disk never accumulates either.

@@ -571,7 +571,7 @@ function renderSidebar(){
     return '<div class="nav-item'+(active?' active':'')+'" onclick="app.goView(\''+id+'\')">'+ICONS[icon]+'<span>'+label+'</span></div>';
   }).join('');
   return '<div class="sidebar">'
-    + '<div class="brand"><div class="brand-name">Home-IDS Console</div><div class="brand-sub">v13 · evidence-graph engine</div></div>'
+    + '<div class="brand"><div class="brand-name">Home-IDS Console</div><div class="brand-sub">Argus · evidence-graph engine</div></div>'
     + '<div class="nav">'+items+'</div>'
     + '<div class="sidebar-foot"><div class="status-row"><span class="status-dot"></span><span>LAN-accessible · served from this box</span></div>'
     + '<div class="status-line2 link" onclick="app.changeToken()">'+(getToken() ? 'API token set — click to change' : 'No API token set — click to add one')+'</div></div>'
@@ -626,7 +626,7 @@ function sortableTh(table, field, label, extraAttrs){
 
 function renderDevicesView(){
   var topbarHead = '<div class="topbar"><div class="topbar-row">'
-    + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the v13 evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
+    + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the Argus evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
     + '<div style="display:flex;align-items:center;gap:8px;">'
     + '<div class="search-wrap">'+ICONS.search+'<input id="deviceSearchInput" class="input search-input" placeholder="Search hostname, IP, MAC…" value="'+esc(state.deviceSearch)+'" oninput="app.onDeviceSearch(this.value)"></div>'
     + topbarRefreshBtn('reloadDevices', state.devicesLoading)
@@ -953,7 +953,7 @@ function renderBlockingView(){
 }
 
 function renderSuricataView(){
-  var topbarHead = topbarWithRefresh('Suricata', 'Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the v13 evidence graph yet — see Documentation/CONSOLE_DATA_API.md).', 'reloadSuricata', state.suricataLoading);
+  var topbarHead = topbarWithRefresh('Suricata', 'Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the Argus evidence graph yet — see Documentation/CONSOLE_DATA_API.md).', 'reloadSuricata', state.suricataLoading);
 
   if (state.suricataLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load Suricata detections: '+esc(state.suricataLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadSuricata()">Retry</button></div></div>';

@@ -31,7 +31,7 @@ pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py 
 
 # Added 2026-09-14 for core/health_manager.py's resource-pressure state machine
 # (RSS/system-memory/swap monitoring) -- zero prior usage of psutil anywhere in this
-# codebase before this. See Documentation/HEALTH_MANAGER_DEPENDENCY_MAP.md.
+# codebase before this. See Documentation/ARGUS_ARCHITECTURE.md#7-health-manager.
 psutil>=5.9.0
 
 # Added 2026-08-29: infer_device_type()'s mac_vendor parameter existed but no caller

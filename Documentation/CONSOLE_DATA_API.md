@@ -8,7 +8,7 @@ data: `GET /api/devices[/{id}]`, `GET /api/hunt/*`, `GET /api/graph`.
 
 There is no persisted "current verdict" anywhere in `DeviceState`/`state/ids_state.json`
 — confirmed by direct inspection, not assumed. The real source is each device's most
-recent v13 decision (`state`/`risk_score`/`confidence` on the `decisions` table),
+recent Argus decision (`state`/`risk_score`/`confidence` on the `decisions` table),
 the same way Grafana's own "Master Threat Ledger" panel already sources its State/Risk
 columns (`home_ids_decision_state`/`home_ids_threat_confidence` gauges, themselves
 populated from that same per-cycle decision). `GraphStore.get_devices_with_latest_decision()`
@@ -18,7 +18,7 @@ dhcp_fingerprint) — two different sources for one device, by design.
 
 ## Top 10 domains (all-time) is not implemented
 
-Deliberately, not an oversight. The v13 evidence graph only stores evidence-WORTHY
+Deliberately, not an oversight. The Argus evidence graph only stores evidence-WORTHY
 events (an entry only exists because a detector flagged something), not general query
 volume — most of a device's routine DNS traffic never becomes an `evidence` row at
 all. The real data for "top 10 domains" lives in Pi-hole's own query log, the same
@@ -95,14 +95,14 @@ now genuinely live, whether the change came from a config.yaml edit or a console
 `_notify_cb` firing it was missing — a revert-to-baseline is as much an
 effective-value-changed event as a PATCH is.
 
-## Suricata is not in the v13 graph (a pre-existing, already-documented gap)
+## Suricata is not in the Argus graph (a pre-existing, already-documented gap)
 
 Checked directly while scoping this work, not assumed: Suricata's batch-scan findings
-(`intelligence/detectors/suricata_scan.py`) are still built as the OLD, pre-v13
-`Evidence` shape (`type=`, `device=`, `independence_group=`, `domain=`), not the v13
+(`intelligence/detectors/suricata_scan.py`) are still built as the OLD, pre-Argus
+`Evidence` shape (`type=`, `device=`, `independence_group=`, `domain=`), not the Argus
 `Evidence` dataclass this graph stores. `src/v13/ingest/sources.py`'s own module
 docstring already says why: Suricata only runs in short batch invocations against
-reactively-captured pcap bursts, not a continuous log stream, and wiring that into v13
+reactively-captured pcap bursts, not a continuous log stream, and wiring that into Argus
 "needs the whole reactive-capture trigger/dispatch subsystem, not a log tailer... NOT
 attempted here." So Suricata alerts don't appear in the Threat Hunt or Evidence Graph
 tabs — not a limitation of this console work, a pre-existing, already-acknowledged

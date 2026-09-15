@@ -42,8 +42,8 @@ match the new intentional behavior.
 ## §0. Critical context the audit missed: which decision engine is actually live
 
 `main.py` boots `core.pipeline.EnginePipeline`, and `pipeline.py` does still contain
-`core/decision_engine.py`-shaped logic — but as of the 2026-09-07
-`V13_FULL_ARCHITECTURE_SHIFT_PLAN.md` cutover, **`config.get("engine", "v13")`
+`core/decision_engine.py`-shaped logic — but as of the 2026-09-07 architecture-shift
+cutover (see `Documentation/ARGUS_DECISIONS.md`), **`config.get("engine", "v13")`
 defaults to `"v13"`**, meaning every real decision is evaluated by
 [`src/v13/decision/engine.py`](../src/v13/decision/engine.py), not
 `src/core/decision_engine.py`. The latter now only runs under the explicit
@@ -131,7 +131,7 @@ surfaces in production logs.
 Already tracked in [[project_v13_alert_quality_fixes]]: `zeek_notice` was fragmented
 into 4 evidence types by tier (`utils.py`'s `ZEEK_NOTICE_EVIDENCE_TYPES`), weak-tier
 notices are explicitly excluded from `ATTACK_SHAPED_EVIDENCE_TYPES`
-(`evidence.py:94-104`) and from `v13`'s equivalent benign-hypothesis treatment, and
+(`evidence.py:94-104`) and from Argus's equivalent benign-hypothesis treatment, and
 weak-tier retention was cut from the general 90-day default to 12 hours with a
 dedicated `idx_evidence_type_ts` index to make the resulting prune/query pattern
 cheap. This was the single largest share of the graph's write volume; the fix
@@ -435,7 +435,7 @@ Worth a follow-up check once §1.5's zeek_notice fix has had time to show its ef
 on real WAL file size on `.94` — likely much less pressing post-fix than the audit
 assumed, but not verified with fresh production numbers in this session.
 
-### 3.6 NEW (found while testing this session's fixes, not from the audit): the v13 ingest daemon never computes `outbound_bytes_z`
+### 3.6 NEW (found while testing this session's fixes, not from the audit): the Argus ingest daemon never computes `outbound_bytes_z`
 
 While re-running tests after §2.4's change, `tests/test_v13_ingest_daemon.py`'s
 "massive-outbound-burst" check failed. Traced to the root cause, and it's unrelated
@@ -446,7 +446,7 @@ to any of this session's 6 fixes: `calc_z()` (the EWMA-baseline z-score computat
 detector branch in `threat_signals.py` — not just exfiltration's three tiers, any
 other z-score-gated check too — silently and permanently reads `outbound_bytes_z=0.0`
 (the `features.get(..., 0.0)` default) whenever evidence is generated through the
-v13 ingest daemon path specifically, rather than through `core/pipeline.py`'s own
+Argus ingest daemon path specifically, rather than through `core/pipeline.py`'s own
 cycle. This looks like a real, pre-existing gap, not something this session
 introduced — worth confirming which path `soc.service` actually runs in production
 (`core.pipeline.EnginePipeline` per `main.py`, or a standalone `IngestDaemon`?) before
@@ -461,13 +461,13 @@ scope-creeping onto the 6 items above.
 
 The audit evaluates everything against "deployment on a Raspberry Pi 8 GB" and scores
 "Raspberry Pi suitability: 3/10... FAIL" as if that's the box currently in production.
-It isn't, per `V13_ARCHITECTURE_DEPENDENCY_MAP.md`'s own verified (not assumed)
+It isn't, per `Documentation/ARGUS_DECISIONS.md`'s own verified (not assumed)
 hardware table:
 
 | Claim in audit | Actual current state |
 |---|---|
-| "Local Ollama inference... requires ~4-5GB RAM and saturates the CPU [on the Pi]" | The v13 parallel-run's Ollama runs on `.19`, a *separate* Intel i7/31GB-RAM box, reached over the LAN — not on the production sensor box at all. The production box (`.94`) does run its own local Ollama (`llama3.1:latest`, 8B Q4_K_M) for the legacy/`ollama_soc.py` review path, but `.94` is not a Raspberry Pi. |
-| "Raspberry Pi 8GB" as the thing being evaluated | Per `V13_ARCHITECTURE_DEPENDENCY_MAP.md:20` (2026-09-05): *"The 8GB Raspberry Pi remains a forward-looking product target only — not hardware available for direct testing as of this document."* Nobody has run this stack on real Pi-8GB hardware yet. |
+| "Local Ollama inference... requires ~4-5GB RAM and saturates the CPU [on the Pi]" | The Argus parallel-run's Ollama runs on `.19`, a *separate* Intel i7/31GB-RAM box, reached over the LAN — not on the production sensor box at all. The production box (`.94`) does run its own local Ollama (`llama3.1:latest`, 8B Q4_K_M) for the legacy/`ollama_soc.py` review path, but `.94` is not a Raspberry Pi. |
+| "Raspberry Pi 8GB" as the thing being evaluated | Per `Documentation/ARGUS_DECISIONS.md` (originally recorded 2026-09-05): *"The 8GB Raspberry Pi remains a forward-looking product target only — not hardware available for direct testing as of this document."* Nobody has run this stack on real Pi-8GB hardware yet. |
 | Implied box: SD-card-based Pi | `.94` is a BOSGAME E4 mini-PC (Ryzen 5 3550H, 4C/8T, 12GB RAM — not the 16GB some old docstrings still claim, corrected 2026-09-05), running Ubuntu 26.04 on what's presumably SSD/eMMC storage, not an SD card. |
 
 This matters for how to read the audit's Pi-specific findings: `pi_8gb`-profile code
@@ -503,7 +503,7 @@ verified** (test status per item below).
 | 5 | §2.5 `risk_score` structural decoupling | Low now (already closed off in practice) | Medium | Deferred — not urgent, no change this round |
 | 6 | §2.6 autonomous router-isolation holds engine-wide lock across a live HTTP call | Medium — a slow/unresponsive Fritz!Box stalls Pi-hole blocking, tarpit registration, and `release_device()` fleet-wide, not just router isolation | Trivial — working fix already existed in the same file | **Done** — network call moved outside `self._lock`, mirrors `operator_isolate_router()`; `test_ips_operator_actions.py` passing unchanged |
 | — | §3.1-3.5 | Various, all accepted tradeoffs or deferred new work | — | No action this round |
-| — | §3.6 (new, not from the audit) | v13 ingest daemon never computes `outbound_bytes_z` — found while re-testing #4 | Needs scoping | Flagged, not fixed — see §3.6 |
+| — | §3.6 (new, not from the audit) | Argus ingest daemon never computes `outbound_bytes_z` — found while re-testing #4 | Needs scoping | Flagged, not fixed — see §3.6 |
 | 7 | §7 (new, not from the audit) — stale evidence counted as live corroboration | Medium-high — could pad `num_independent_sources` to reach HIGH on one live signal + one dead one, and the same set drives the Telegram WHY-block | Trivial (1-line, reuses existing TTL machinery) | **Done** — see §7 |
 
 Items 2 and 3 were the two places this plan couldn't just proceed
@@ -589,7 +589,7 @@ WHY-block reads — all derived from `ev_store`. Safe for the hard-stop registry
 checks too (their 120s TTL is strictly tighter than the 600s/86400s bound applied
 here, so nothing a 120s check would find is ever excluded by this). No corresponding
 change needed in `core/decision_engine.py` (the rollback path) — that file never
-introduced a second, broader-window evidence source the way v13's graph merge did;
+introduced a second, broader-window evidence source the way Argus's graph merge did;
 its own `ev_store` parameter is the caller's already-TTL-filtered
 `EvidenceStore.get_for_device()` result throughout, so scoring and counting were
 never split there.
