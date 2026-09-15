@@ -559,6 +559,137 @@ check("evaluate()'s Check 7 gives a DIFFERENT device an immediate hard-stop on t
       later_verdict["verdict"] == "CONFIRMED_THREAT"
       and any("Local confirmed-threat match" in r for r in later_verdict["reasons"]))
 
+# --- "3 automated-learning gaps" fix (2026-09-15) -----------------------------
+# Gap 1: composite-trust corroboration must accumulate from ANY genuine,
+# non-refused mark_false_positive() call, not just the autonomous Stage 2/3 ML
+# path. Gap 3: a new, deliberately protocol-agnostic "Stage 1b" auto-
+# corroboration path -- see engine.py's own 2026-09-15 comments for the full
+# design rationale (feedback_network_agnostic_design.md).
+
+# --- gap 1: operator-sourced mark_false_positive now records corroboration ---
+# Mirrors pihole_api.py's real call shape exactly: no `decision` kwarg (the
+# operator path never has a live one), relies entirely on the alert's own
+# persisted hee_evidence_families/hee_evidence_types -- confirmed present on
+# every real alert payload. 4 calls, 2 distinct families each call, to cross
+# the same 0.6-per-family trust floor the pre-existing Stage 2/3 test above
+# already exercises directly via ct.record_corroborating_signal() -- this
+# time going through mark_false_positive(source="operator") instead, which
+# is exactly the path that used to NOT feed this table at all.
+store.upsert_device("op_corrob_dev", timestamp=NOW)
+
+
+def _operator_alert(domain):
+    return {
+        "signature": "NETWORK_INTRUSION",
+        "device": {"id": "op_corrob_dev", "hostname": "op-corrob-host"},
+        "network_context": {"queried_domain": domain},
+        "hee_evidence_families": ["dns_behavior", "reputation"],
+        "hee_evidence_types": [],
+    }
+
+
+check("before any operator correction, composite_trust has not corroborated this tuple",
+      not ct.permits_suppression(store, "op_corrob_dev", "NORMAL", "public",
+                                    "NETWORK_INTRUSION", 0, now=NOW))
+
+for _ in range(4):
+    op_result = cl_afpe.mark_false_positive(_operator_alert("op-corrob-example.com"), source="operator", now=NOW)
+check("a purely operator-sourced correction (no `decision` passed, matching pihole_api.py's "
+      "real call shape) is NOT refused", not op_result.refused)
+check("...and, after enough repeated operator corrections, composite_trust HAS now "
+      "corroborated this tuple -- the actual gap 1 fix: this used to be impossible "
+      "via the operator path, only the autonomous Stage 2/3 path could do it",
+      ct.permits_suppression(store, "op_corrob_dev", "NORMAL", "public",
+                                "NETWORK_INTRUSION", 0, now=NOW))
+
+# --- gap 3: local-origin auto-corroboration, protocol-agnostic -----------------
+# Two device pairs with DELIBERATELY DIFFERENT "shapes" (a plausible mDNS-like
+# one and a totally fictional protocol/port) to prove the mechanism is
+# structurally incapable of depending on protocol/port -- nothing in Stage 1b's
+# own code path ever reads destination_port/service_name at all.
+store._conn.execute("INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')",
+                      ("LOCAL_ORIGIN_TEST",))
+
+
+def _own_device_alert(device_id, dest_ip, features=None):
+    return {
+        "signature": "LOCAL_ORIGIN_TEST",
+        "device": {"id": device_id, "hostname": device_id},
+        "network_context": {"queried_domain": "", "destination_ip": dest_ip},
+        "features": features or {},
+    }
+
+
+def _run_local_origin_sequence(label, observer_id, dest_device_id, dest_ip, features):
+    store.upsert_device(observer_id, timestamp=NOW)
+    store.upsert_device(dest_device_id, timestamp=NOW)
+    store.update_device_metadata(dest_device_id, {"known_ips_history": {dest_ip: NOW}}, timestamp=NOW)
+    decision = {"evidence_families": ["dns_behavior", "reputation"], "evidence_types": []}
+
+    for i in range(3):
+        v = _evaluate(cl_afpe, _own_device_alert(observer_id, dest_ip, features), decision=decision)
+        check(f"[{label}] occurrence {i+1}/4: NOT auto-resolved yet -- a genuinely new "
+              "pattern still alerts for real while corroboration is still accumulating "
+              "(never on a first sighting)",
+              v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+
+    v = _evaluate(cl_afpe, _own_device_alert(observer_id, dest_ip, features), decision=decision)
+    check(f"[{label}] occurrence 4/4: NOW auto-resolves once composite_trust's "
+          "distinct-family floor is genuinely crossed -- no human input anywhere "
+          "in this sequence",
+          v.get("verdict") == "FALSE_POSITIVE" and v.get("stage") == "STAGE_1B_LOCAL_ORIGIN"
+          and v.get("suppress") is True)
+    check(f"[{label}] the auto-resolution actually created a real trust-cache edge "
+          "(mark_false_positive() genuinely ran, not just a synthetic verdict)",
+          cl_afpe.is_trust_cached(dest_ip, device_id=observer_id, hypothesis="LOCAL_ORIGIN_TEST", now=NOW))
+
+
+_run_local_origin_sequence(
+    "mdns-like", "lo_dev_mdns", "lo_dest_mdns", "10.20.30.41",
+    {"destination_port": 5353, "service_name": "mDNS"},
+)
+_run_local_origin_sequence(
+    "fictional-protocol", "lo_dev_fictional", "lo_dest_fictional", "10.20.30.42",
+    {"destination_port": 47823, "service_name": "totally-made-up-protocol-xyz"},
+)
+
+# --- gap 3 negative cases: must NOT auto-resolve ---
+store.upsert_device("lo_dev_dirty_ti", timestamp=NOW)
+store.upsert_device("lo_dest_dirty_ti", timestamp=NOW)
+store.update_device_metadata("lo_dest_dirty_ti", {"known_ips_history": {"10.20.30.43": NOW}}, timestamp=NOW)
+decision = {"evidence_families": ["dns_behavior", "reputation"], "evidence_types": []}
+for _ in range(4):
+    # ti_risk=1.0 is BELOW Stage 1's own hard-stop bar (_TI_RISK_HARD_STOP=2.0, so
+    # Stage 1 itself doesn't catch it) but ABOVE Stage 1b's stricter "==0.0 clean"
+    # bar -- proves Stage 1b's own redundant safety condition, not just Stage 1's.
+    v = _evaluate(cl_afpe, _own_device_alert("lo_dev_dirty_ti", "10.20.30.43", {"ti_risk": 1.0}), decision=decision)
+check("a destination that IS the network's own device but has a non-zero (if "
+      "sub-hard-stop) threat-intel signal NEVER auto-resolves via Stage 1b, "
+      "even after repeated occurrences",
+      v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+
+store.upsert_device("lo_dev_unknown_dest", timestamp=NOW)
+for _ in range(4):
+    # 203.0.113.99 (TEST-NET-3, RFC 5737) is never registered as a device --
+    # is_own_registered_device() must return False every time.
+    v = _evaluate(cl_afpe, _own_device_alert("lo_dev_unknown_dest", "203.0.113.99"), decision=decision)
+check("a destination that is NOT one of the network's own registered devices "
+      "never auto-resolves via Stage 1b, regardless of how many times it recurs "
+      "-- an unrecognized external host stays fully scrutinized",
+      v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+
+store.upsert_device("lo_dev_hardstop_sig", timestamp=NOW)
+store.upsert_device("lo_dest_hardstop_sig", timestamp=NOW)
+store.update_device_metadata("lo_dest_hardstop_sig", {"known_ips_history": {"10.20.30.44": NOW}}, timestamp=NOW)
+hardstop_alert = _own_device_alert("lo_dev_hardstop_sig", "10.20.30.44")
+hardstop_alert["signature"] = "Confirmed Malicious IOC"  # a _HARD_STOP_SIGNATURES member
+v = _evaluate(cl_afpe, hardstop_alert, decision=decision)
+check("an alert whose SIGNATURE is a hard-stop verdict is refused by "
+      "mark_false_positive()'s own guard even when Stage 1b's own own-device/clean-TI "
+      "conditions are otherwise satisfied -- the safety net is shared, not "
+      "reimplemented, across every autonomous source",
+      v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+
 store.close()
 
 print()

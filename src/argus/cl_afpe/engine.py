@@ -417,11 +417,24 @@ class ClAfpeEngine:
 
     def mark_false_positive(self, alert_payload: dict, source: str = "operator",
                               ttl_seconds: Optional[float] = None,
+                              decision: Optional[dict] = None, asn_owner: str = "",
                               now: Optional[float] = None) -> MarkFalsePositiveResult:
         now = now if now is not None else time.time()
         signature = alert_payload.get("signature", "")
         device_id = alert_payload.get("device", {}).get("id", "unknown")
         hostname = alert_payload.get("device", {}).get("hostname", "") or ""
+        # Hoisted here (2026-09-15, gap 1 of the "3 automated-learning gaps" fix) so
+        # the corroboration-recording block at the end of this method -- and the
+        # existing default domain/IP immunization branch below, which used to
+        # compute its own separate copy of these three -- share one computation.
+        domain = alert_payload.get("network_context", {}).get("queried_domain", "") or ""
+        dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
+        base_domain = ""
+        if domain and domain != "unknown":
+            try:
+                base_domain = etld1(domain) or ""
+            except Exception:
+                base_domain = ""
 
         # Phase 64c device-identity refusal, ported exactly.
         if device_id and device_id != "unknown":
@@ -522,13 +535,8 @@ class ClAfpeEngine:
             # been immunizing the raw domain instead since Phase 6a first wrote
             # this branch -- never actually exercised end-to-end until Phase 6e's
             # composed evaluate() tests caught the mismatch.
-            domain = alert_payload.get("network_context", {}).get("queried_domain", "") or ""
-            base_domain = ""
-            if domain and domain != "unknown":
-                try:
-                    base_domain = etld1(domain) or ""
-                except Exception:
-                    base_domain = ""
+            # `domain`/`base_domain` now computed once at the top of this method
+            # (see 2026-09-15 gap-1 comment there) -- no longer recomputed here.
             if base_domain:
                 target = base_domain
                 is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
@@ -538,7 +546,6 @@ class ClAfpeEngine:
                 # parse it) -- fall back to the raw destination IP, matching v1
                 # exactly (the live-audit bugfix that closed the "raw-IP alert
                 # falls through to a total no-op" gap).
-                dest_ip = alert_payload.get("network_context", {}).get("destination_ip", "") or ""
                 if dest_ip and dest_ip != "unknown":
                     target = dest_ip
                     is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
@@ -548,6 +555,39 @@ class ClAfpeEngine:
         # dampener, not specific to domain-based corrections (matches v1's own
         # placement exactly, fp_engine.py:1914).
         self._apply_sigma_shift(device_id, source=source, now=now)
+
+        # GAP 1 FIX (2026-09-15, "3 automated-learning gaps" audit): this used to
+        # live ONLY inside evaluate()'s STAGE_3_COMBINED branch, so composite-trust
+        # corroboration accumulated exclusively from the autonomous Stage 2/3 ML
+        # path -- an operator tapping "Mark False Positive" in Telegram
+        # (pihole_api.py, source="operator") created a trust-cache edge via
+        # immunize() above but never fed this table, meaning the composite-trust
+        # hard-gate (this class's evaluate(), trust-cache fast path) could keep
+        # denying suppression indefinitely even after a human corrected the alert.
+        # Moved here so ANY genuine, non-refused correction -- operator,
+        # autonomous_stage23, or the new autonomous_local_origin (gap 3) -- feeds
+        # the same table identically. `decision` carries the freshest
+        # evidence_types/evidence_families during a live evaluate() cycle; callers
+        # with no live decision (the operator path has none) fall back to the
+        # alert's own persisted hee_evidence_types/hee_evidence_families -- the
+        # same data, confirmed present on every real alert payload, just read from
+        # a different place.
+        try:
+            if decision is not None:
+                evidence_types_this_cycle = decision.get("evidence_types", [])
+                evidence_families_this_cycle = decision.get("evidence_families", [])
+            else:
+                evidence_types_this_cycle = alert_payload.get("hee_evidence_types", [])
+                evidence_families_this_cycle = alert_payload.get("hee_evidence_families", [])
+            behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
+            destination_class = ct.classify_destination(dest_ip, base_domain, asn_owner)
+            for family in evidence_families_this_cycle:
+                ct.record_corroborating_signal(
+                    self.store, device_id, behavior_fingerprint, destination_class,
+                    signature, family, _DEFAULT_REGIME_ID, now=now,
+                )
+        except Exception:
+            LOGGER.exception("[COMPOSITE_TRUST] record_corroborating_signal failed, non-fatal")
 
         return MarkFalsePositiveResult(refused=False, is_new_immunization=is_new,
                                          immunized_destination=target, threshold_bumped=threshold_bumped)
@@ -851,6 +891,74 @@ class ClAfpeEngine:
                 "reasons": stage1_triggers, "suppress": False,
             }
 
+        # --- Stage 1b: local-origin auto-corroboration (gap 3, 2026-09-15, "3
+        # automated-learning gaps" audit) ---
+        # Design principle, per feedback_network_agnostic_design.md: NOT a fixed
+        # protocol/port allowlist (an early draft proposed mDNS/SSDP/ARP/DHCP by
+        # name -- rejected on review as hand-encoding this one household's
+        # discovery protocols, which wouldn't generalize to a different consumer
+        # network's own quirks). The only signal used here is structurally
+        # general: is the DESTINATION itself one of this network's own already-
+        # registered devices (is_own_registered_device()), and are threat-intel/
+        # reputation signals clean. Neither mentions a port, protocol, or vendor,
+        # so it behaves identically regardless of what local-discovery mechanism
+        # a given household's devices happen to use.
+        #
+        # Deliberately does NOT auto-resolve on a first sighting -- only records a
+        # corroborating signal (same table/mechanism gap 1 universalized) and
+        # checks whether THIS exact (device, behavior_fingerprint,
+        # destination_class, hypothesis, regime) tuple has now crossed
+        # composite_trust's existing distinct-evidence-family trust floor. A
+        # genuinely new device-pair/pattern therefore still alerts for real the
+        # first several times -- correctly, since it IS new and unverified -- and
+        # only quiets down once real, diverse corroboration has accumulated. This
+        # method is only ever reached when the trust-cache fast path above did
+        # NOT already resolve this alert (no edge yet, or composite_permits was
+        # still false), so there's no redundant work once a destination is fully
+        # resolved -- future cycles hit that fast path directly instead.
+        #
+        # mark_false_positive()'s own _HARD_STOP_SIGNATURES refusal guard, and
+        # Stage 1's hard-stop check just above, both still run before this can
+        # ever fire -- a genuinely confirmed-malicious verdict can never reach
+        # this branch, exactly like the existing autonomous Stage 2/3 path.
+        try:
+            if self.store.is_own_registered_device(dest_ip):
+                ti_risk = float(features.get("ti_risk", 0.0) or 0.0)
+                abuseipdb_risk = float(features.get("abuseipdb_risk", 0.0) or 0.0)
+                if ti_risk == 0.0 and abuseipdb_risk == 0.0:
+                    evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
+                    evidence_families_this_cycle = decision.get("evidence_families", []) if decision else []
+                    behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
+                    destination_class = ct.classify_destination(dest_ip, base_domain, asn_owner)
+                    for family in evidence_families_this_cycle:
+                        ct.record_corroborating_signal(
+                            self.store, device_id, behavior_fingerprint, destination_class,
+                            alert_hypothesis, family, _DEFAULT_REGIME_ID, now=now,
+                        )
+                    if ct.permits_suppression(
+                        self.store, device_id, behavior_fingerprint, destination_class,
+                        alert_hypothesis, _DEFAULT_REGIME_ID, now=now,
+                    ):
+                        mark_result = self.mark_false_positive(
+                            alert_payload, source="autonomous_local_origin", decision=decision,
+                            asn_owner=asn_owner, now=now)
+                        if not mark_result.refused:
+                            return {
+                                "verdict": "FALSE_POSITIVE", "confidence": 1.0,
+                                "calibrated_confidence": None,
+                                "stage": "STAGE_1B_LOCAL_ORIGIN",
+                                "reasons": [
+                                    f"'{dest_ip}' is one of this network's own registered devices, "
+                                    f"threat-intel/reputation signals are clean, and repeated "
+                                    f"corroborating evidence for this exact pattern has crossed the "
+                                    f"composite-trust floor -- autonomously resolved with no human "
+                                    f"input (source=autonomous_local_origin).",
+                                ],
+                                "suppress": True,
+                            }
+        except Exception:
+            LOGGER.exception("[LOCAL_ORIGIN] Stage 1b auto-corroboration failed, non-fatal")
+
         # --- Stage 2: LightGBM ---
         lgbm_prob = self.ml_scorer.score_stage2(features, domain, is_trust_cached=False) if self.ml_scorer else None
         if lgbm_prob is None:
@@ -871,7 +979,14 @@ class ClAfpeEngine:
         effective_suppress_threshold = self.get_device_suppress_threshold(device_id)
 
         if combined >= effective_suppress_threshold:
-            mark_result = self.mark_false_positive(alert_payload, source="autonomous_stage23", now=now)
+            # GAP 1 FIX (2026-09-15): decision/asn_owner now threaded through so
+            # mark_false_positive()'s own corroboration-recording (moved there, see
+            # its 2026-09-15 comment) has the freshest evidence_types/
+            # evidence_families/destination-classification data from THIS live
+            # cycle, matching what this call site used to compute inline itself.
+            mark_result = self.mark_false_positive(
+                alert_payload, source="autonomous_stage23", decision=decision,
+                asn_owner=asn_owner, now=now)
             if mark_result.refused:
                 return {
                     "verdict": "UNCERTAIN", "confidence": combined,
@@ -884,22 +999,6 @@ class ClAfpeEngine:
                     ],
                     "suppress": False,
                 }
-            # Release 15 Sheet 03b: a genuine, non-refused benign correction is exactly
-            # the corroborating signal composite_trust's key is meant to accumulate --
-            # record it for real (write-side is live, not shadow) so the table starts
-            # building genuine data now. One call per independent evidence family in
-            # this decision, matching permits_suppression()'s own distinct-family count.
-            try:
-                evidence_types_this_cycle = decision.get("evidence_types", []) if decision else []
-                behavior_fingerprint = derive_activity_state(evidence_types_this_cycle)
-                destination_class = ct.classify_destination(dest_ip, base_domain, asn_owner)
-                for family in (decision.get("evidence_families", []) if decision else []):
-                    ct.record_corroborating_signal(
-                        self.store, device_id, behavior_fingerprint, destination_class,
-                        alert_hypothesis, family, _DEFAULT_REGIME_ID, now=now,
-                    )
-            except Exception:
-                LOGGER.exception("[COMPOSITE_TRUST] record_corroborating_signal failed, non-fatal")
             return {
                 "verdict": "FALSE_POSITIVE", "confidence": combined,
                 "calibrated_confidence": None,
