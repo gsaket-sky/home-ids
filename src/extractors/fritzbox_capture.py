@@ -53,6 +53,7 @@ import requests
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
 from intelligence.detectors.suricata_scan import run_and_attribute as run_suricata_and_attribute
 from utils import memory_limited_preexec_fn
+from core.heartbeat import write_component_heartbeat
 from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
     reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
@@ -654,11 +655,27 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
                         suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
                     suricata_scan_total.labels(outcome="success").inc()
                     suricata_last_success_timestamp.set(time.time())
+                    # BUGFIX (2026-09-15, console/health audit -- user report: health only
+                    # shows Suricata's binary/rules-file presence, never whether a scan
+                    # actually ran recently). suricata_last_success_timestamp above is a
+                    # Prometheus gauge -- real telemetry, but health_manager.py reads JSON
+                    # state files, not its own metrics endpoint, so this never reached the
+                    # console. write_component_heartbeat() is the SAME cross-process
+                    # mechanism already wired for backtest_job earlier this session --
+                    # reused here, not reinvented.
+                    write_component_heartbeat(out_dir.parent, "suricata_scan", extra={"outcome": "completed"})
                 except Exception as exc:
                     LOGGER.error("Suricata batch scan failed for %s (non-fatal): %s", iface, exc)
                     summary["errors"].append(f"{iface}: suricata scan failed -- {exc}")
                     reactive_capture_errors_total.labels(stage="suricata_scan").inc()
                     suricata_scan_total.labels(outcome="error").inc()
+                    # Deliberately NOT writing a heartbeat here: write_component_heartbeat()
+                    # always stamps last_heartbeat=now unconditionally (see its own
+                    # docstring/body), so calling it on a FAILURE would wrongly refresh the
+                    # "recently active" signal during a failure streak -- masking exactly
+                    # the problem this whole feature exists to surface. Only a genuine
+                    # completed scan (above) counts, so health_manager's own recency check
+                    # means "time since last SUCCESSFUL scan," not "time since last attempt."
         finally:
             if delete_after_ingest:
                 _cleanup_burst_files(avm_path, std_path, scratch)

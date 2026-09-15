@@ -20,9 +20,11 @@ import sqlite3
 import time
 import math
 from collections import Counter, defaultdict
+from pathlib import Path
 
 from utils import entropy, suspicious_dga, is_telemetry_domain, _is_cdn_or_cloud_domain, etld1
 from config import CONFIG
+from core.heartbeat import write_component_heartbeat
 
 LOGGER = logging.getLogger("home_ids.dns_features")
 
@@ -80,7 +82,16 @@ class PiHoleCollector:
         
         self._last_hostname_refresh = 0.0
         self._hostname_refresh_interval = 60.0
-        
+
+        # Rate-limits the new health heartbeat write below -- poll() itself runs
+        # roughly once per poll_interval (config.yaml default 2s), but
+        # write_component_heartbeat() is a full read-modify-write against a file
+        # shared with several other writers (docstring: "low-frequency writes,
+        # once per ~10s at most"); writing on literally every poll would be both
+        # wasteful and out of line with that contract.
+        self._last_heartbeat_write = 0.0
+        self._heartbeat_write_interval = 30.0
+
         self._connect()
 
     @property
@@ -184,7 +195,29 @@ class PiHoleCollector:
             return []
         except Exception:
             return []
-            
+
+        # BUGFIX (2026-09-15, console/health audit -- user report: "the same logic
+        # should apply for all other subsystems", re: Suricata's own last-scan
+        # recency fix). Written here, right after a genuinely successful query,
+        # regardless of whether it found any NEW rows -- zero new rows is still a
+        # successful poll, not a failure, so it must still count. Never written on
+        # either exception path above, matching suricata_scan's own "only a real
+        # success refreshes the recency clock" design (write_component_heartbeat()
+        # always stamps `now` unconditionally, so writing it on a failure would
+        # wrongly mask a real outage). Rate-limited via _heartbeat_write_interval
+        # (see __init__'s own comment) -- the console's health check only needs
+        # ~2-minute-scale freshness, not every single 2-second poll cycle.
+        now_ts = time.time()
+        if now_ts - self._last_heartbeat_write > self._heartbeat_write_interval:
+            self._last_heartbeat_write = now_ts
+            try:
+                write_component_heartbeat(
+                    Path(CONFIG.get("state_path", "state/ids_state.json")).parent,
+                    "pihole_poll", extra={"new_rows": len(rows)},
+                )
+            except Exception:
+                pass
+
         if not rows:
             return []
         
