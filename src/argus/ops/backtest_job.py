@@ -52,6 +52,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from argus.autotune.engine import compute_drift_result  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
+from core.heartbeat import write_component_heartbeat  # noqa: E402
 
 LOGGER = logging.getLogger("v13.ops.backtest_job")
 
@@ -167,6 +168,21 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
          1 if overall_pass else 0),
     )
     store._maybe_commit()
+
+    # Release 15 heartbeat gap fix (2026-09-15): this job previously reported no
+    # heartbeat at all -- a silently-stopped nightly backtest read as healthy
+    # indefinitely. state_dir mirrors scheduler.py's own pattern (heartbeat file
+    # lives next to the state the component actually touches); guarded since
+    # store.db_path is the literal string ":memory:" in tests, which has no
+    # meaningful parent directory.
+    try:
+        if store.db_path and store.db_path != ":memory:":
+            write_component_heartbeat(
+                Path(store.db_path).parent, "backtest_job",
+                extra={"run_id": run_id, "overall_pass": overall_pass},
+            )
+    except Exception:
+        LOGGER.exception("[HEARTBEAT] failed to write backtest_job heartbeat, non-fatal")
 
     return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift, "overall_pass": overall_pass}
 

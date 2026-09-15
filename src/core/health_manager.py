@@ -169,6 +169,16 @@ class HealthManager:
         self._evaluate_heartbeat_component(
             "scheduler_subprocess", cross_process.get("scheduler_subprocess"), now, expected_interval=60.0,
         )
+        # Release 15 heartbeat gap fix (2026-09-15): backtest_job.py runs nightly, not
+        # every 15-60s like the other cross-process components above -- expected_interval
+        # is on a ~daily scale deliberately (not the same 15s/60s used elsewhere), since
+        # the shared 2x/5x staleness multiplier (DEGRADED at 2x, UNHEALTHY at 5x) needs a
+        # value matched to this job's real cadence to avoid both false-alarming across
+        # the exact 24h boundary and staying silently generous for days if set too high.
+        self._evaluate_heartbeat_component(
+            "backtest_job", cross_process.get("backtest_job"), now,
+            expected_interval=float(self.config.get("health_manager_backtest_job_expected_interval_seconds", 86400.0)),
+        )
 
         # probe-based components (no self-reported heartbeat -- checked directly,
         # reusing the exact same real checks main.py's boot-time alert already does)
