@@ -49,7 +49,9 @@ from typing import Any, Dict, List, Optional
 # suite because that suite already sets up sys.path itself before importing.
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
-from argus.autotune.engine import compute_drift_result  # noqa: E402
+from argus.autotune.engine import (  # noqa: E402
+    AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION, compute_drift_result,
+)
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
@@ -63,6 +65,69 @@ _GOLDEN_SET_TIMEOUT_SECONDS = 120
 # established honesty framing) -- the minimum fraction of synthetic attack
 # classes a device sample must detect for the sweep to pass.
 _DEFAULT_ATTACK_FLOOR = 0.5
+
+# Release 15 Sheet 03a triggering logic (2026-09-15): propose_change() had zero
+# production callers before this -- the autotuner's safety infrastructure (canary,
+# backtest-gate, bounded steps, rollback) was fully built with nothing driving it.
+# Scoped to hard_stop_candidate_sensitivity ONLY, deliberately, not all four
+# TUNABLE_PARAMETERS: it's the one parameter with a real, grounded signal in this
+# run's own synthetic-sweep data (a per-class detection rate). The other three
+# (reputation_tier_suspicious_floor/high_floor, bocpd_hazard_rate) have no
+# comparable signal here -- the synthetic attack generators are behavioral, not
+# reputation/IOC-based, so they don't stress the reputation-tier floors at all;
+# bocpd_hazard_rate in particular has ZERO live consumer on .94 today
+# (BaselineEngine, Release 15 Sheet 00, only runs on the out-of-scope .19 shadow
+# host, confirmed this session) -- proposing changes to it would be motion with no
+# real effect. Left genuinely untriggered because there's no sound signal to act
+# on, not silently deferred out of caution -- see ARGUS_DECISIONS.md.
+_TUNE_PARAMETER = "hard_stop_candidate_sensitivity"
+_TUNE_TIGHTEN_FLOOR = 0.70   # any class below this proposes tightening
+_TUNE_LOOSEN_CEILING = 1.0   # every class must be at 100% to even consider loosening
+_TUNE_DEFAULT_SENSITIVITY = 0.9  # matches decision/engine.py's own hardcoded default
+
+
+def _propose_tuning_change(store: GraphStore, synthetic: Dict[str, Any], drift: Dict[str, Any],
+                              run_id: str, now: float) -> Optional[Dict[str, Any]]:
+    """Evaluates this run's real synthetic per-class detection rates against
+    _TUNE_PARAMETER's bounds and proposes a bounded step in either direction --
+    tightens immediately on any weak class (fails safe toward more detection,
+    no waiting), loosens only when every class hit 100% AND compute_drift_result()
+    shows no concerning trend, and even then only ever within this parameter's own
+    existing [min, max] -- never a new, wider bound. Returns the ProposalResult as
+    a plain dict (JSON-friendly for the backtest_runs row), or None if no class
+    data was available to evaluate at all."""
+    by_class: Dict[str, List[bool]] = {}
+    for device_result in synthetic.get("per_device", {}).values():
+        for cls, r in device_result.get("attack_results", {}).items():
+            if isinstance(r, dict) and "detected" in r:
+                by_class.setdefault(cls, []).append(bool(r["detected"]))
+
+    class_rates = {cls: (sum(hits) / len(hits)) for cls, hits in by_class.items() if hits}
+    if not class_rates:
+        return None
+
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_TUNE_PARAMETER]
+    direction = _LESS_SENSITIVE_DIRECTION[_TUNE_PARAMETER]
+    current = engine.get_active_value(_TUNE_PARAMETER, default=_TUNE_DEFAULT_SENSITIVITY)
+    min_class, min_rate = min(class_rates.items(), key=lambda kv: kv[1])
+
+    if min_rate < _TUNE_TIGHTEN_FLOOR:
+        new_value = current - direction * bounds["max_step"]
+        reason = (f"backtest {run_id}: synthetic detection for '{min_class}' fell to "
+                   f"{min_rate:.2f} (floor {_TUNE_TIGHTEN_FLOOR}) -- tightening")
+    elif min_rate >= _TUNE_LOOSEN_CEILING and not drift.get("drift_detected") \
+            and current != _TUNE_DEFAULT_SENSITIVITY:
+        new_value = current + direction * bounds["max_step"]
+        reason = (f"backtest {run_id}: every synthetic class at {_TUNE_LOOSEN_CEILING:.0%} detection, "
+                   f"no drift detected -- easing back toward default")
+    else:
+        return None
+
+    result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason,
+                                     backtest_run_id=run_id, now=now)
+    return {"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+            "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value}
 
 
 def run_golden_set() -> Dict[str, Any]:
@@ -169,6 +234,19 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     )
     store._maybe_commit()
 
+    # Release 15 Sheet 03a (2026-09-15): the triggering logic that was the autotuner's
+    # one genuine remaining gap -- see _propose_tuning_change()'s own docstring for
+    # exactly what's scoped in/out and why. Gated on overall_pass: a failing backtest
+    # run should never be the basis for a NEW tuning proposal, only golden/synthetic
+    # regressions matter at that point. Best-effort -- a failure here must never take
+    # down the backtest run itself, which has already committed its own row above.
+    tuning_proposal = None
+    if overall_pass:
+        try:
+            tuning_proposal = _propose_tuning_change(store, synthetic, drift, run_id, now)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] tuning proposal evaluation failed, non-fatal")
+
     # Release 15 heartbeat gap fix (2026-09-15): this job previously reported no
     # heartbeat at all -- a silently-stopped nightly backtest read as healthy
     # indefinitely. state_dir mirrors scheduler.py's own pattern (heartbeat file
@@ -184,7 +262,8 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     except Exception:
         LOGGER.exception("[HEARTBEAT] failed to write backtest_job heartbeat, non-fatal")
 
-    return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift, "overall_pass": overall_pass}
+    return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift,
+            "overall_pass": overall_pass, "tuning_proposal": tuning_proposal}
 
 
 def main() -> None:
@@ -207,6 +286,8 @@ def main() -> None:
         # logged at WARNING so it's visible to an operator without being a
         # scheduled-job failure.
         LOGGER.warning("Posterior-trajectory drift detected: %s", result["drift"]["findings"])
+    if result["tuning_proposal"]:
+        LOGGER.info("[AUTOTUNE_TRIGGER] %s", result["tuning_proposal"])
     if not result["overall_pass"]:
         raise SystemExit(1)
 
