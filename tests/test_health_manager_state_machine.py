@@ -5,7 +5,9 @@ HEALTHY) and the two heartbeat/probe classification helpers that feed it.
 Direct-call style -- no real network/psutil/subprocess, monkeypatched
 ACTIONS entries where recovery needs to be exercised.
 """
+import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -16,8 +18,10 @@ if str(SRC_DIR) not in sys.path:
 
 from core import health_manager as hm_module  # noqa: E402
 from core.health_manager import (  # noqa: E402
-    HealthManager, HEALTHY, DEGRADED, UNHEALTHY, RECOVERY_FAILED, SAFE_MODE,
+    HealthManager, HEALTHY, DEGRADED, UNHEALTHY, RECOVERY_FAILED, SAFE_MODE, RETIRED,
+    _estimate_cron_interval_seconds,
 )
+from core.heartbeat import write_component_heartbeat  # noqa: E402
 
 
 class FakeConfig:
@@ -197,6 +201,117 @@ def test_evaluate_probe_component_fail_streak_escalates_then_recovers(hm):
     assert hm._component_state["probe_x"]["state"] == HEALTHY
 
 
+# --- job-health: per-job cron-derived staleness + retired-job handling ----------
+# BUGFIX (2026-09-15, console/health audit -- user report: shadow_watcher and
+# gap_monitor permanently showing "degraded"). See _evaluate_job_health_components()'s
+# own docstring for the full incident.
+
+def test_estimate_cron_interval_matches_every_real_schedule_in_config_yaml():
+    assert _estimate_cron_interval_seconds("*/15 * * * *") == 15 * 60
+    assert _estimate_cron_interval_seconds("30 */4 * * *") == 4 * 3600
+    assert _estimate_cron_interval_seconds("30 2,6,10,14,18,22 * * *") == 4 * 3600  # 6x/day
+    assert _estimate_cron_interval_seconds("0 2 * * *") == 86400
+    assert _estimate_cron_interval_seconds("0 6 * * *") == 86400
+    assert _estimate_cron_interval_seconds("15 3 * * *") == 86400
+    assert _estimate_cron_interval_seconds("45 2 * * *") == 86400
+    assert _estimate_cron_interval_seconds("30 3 * * *") == 86400
+    assert _estimate_cron_interval_seconds("0 3 * * *") == 86400
+    assert _estimate_cron_interval_seconds("0 4 1 * *") == pytest.approx(30 * 86400)
+
+
+def test_estimate_cron_interval_handles_weekly_and_malformed():
+    assert _estimate_cron_interval_seconds("0 4 * * 1") == 7 * 86400  # weekly (fixed weekday)
+    assert _estimate_cron_interval_seconds("not a cron") is None
+    assert _estimate_cron_interval_seconds("") is None
+    assert _estimate_cron_interval_seconds(None) is None
+
+
+def test_retired_job_never_reaches_degraded(hm):
+    """shadow_watcher/gap_monitor's real incident: a job present in
+    job_health.json but absent from the current scheduler.scheduler config
+    must show RETIRED, never DEGRADED/UNHEALTHY, no matter how stale."""
+    hm.config = FakeConfig(scheduler={"retro_hunter": {"enabled": True, "cron": "0 2 * * *"}})
+    now = 1_000_000_000.0
+    job_health_data = {"shadow_watcher": {"last_success": now - 300 * 3600}}  # 300h stale
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps(job_health_data), encoding="utf-8"
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:shadow_watcher"]["state"] == RETIRED
+    assert "300" in hm._component_state["job:shadow_watcher"]["detail"] or "no longer scheduled" in hm._component_state["job:shadow_watcher"]["detail"]
+
+
+def test_disabled_scheduler_job_is_also_retired_not_degraded(hm):
+    hm.config = FakeConfig(scheduler={"retro_hunter": {"enabled": False, "cron": "0 2 * * *"}})
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"retro_hunter": {"last_success": now - 100 * 3600}}), encoding="utf-8"
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:retro_hunter"]["state"] == RETIRED
+
+
+def test_active_daily_job_uses_its_own_cron_derived_threshold(hm):
+    hm.config = FakeConfig(scheduler={"retro_hunter": {"enabled": True, "cron": "0 2 * * *"}})
+    now = 1_000_000_000.0
+    # 20h stale -- well within a daily job's 2x-cron (48h) threshold.
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"retro_hunter": {"last_success": now - 20 * 3600}}), encoding="utf-8"
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:retro_hunter"]["state"] == HEALTHY
+
+
+def test_active_15min_job_flags_degraded_much_sooner_than_the_old_uniform_30h(hm):
+    """THE FIX: cl_afpe_flip_monitor (every 15 minutes) used to be held to the
+    SAME 30h bar as a daily job -- a real failure wouldn't surface for up to
+    30 hours. Now its own cron (2x = 30 minutes) catches it almost immediately."""
+    hm.config = FakeConfig(scheduler={"cl_afpe_flip_monitor": {"enabled": True, "cron": "*/15 * * * *"}})
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"cl_afpe_flip_monitor": {"last_success": now - 3600}}), encoding="utf-8"  # 1h stale
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:cl_afpe_flip_monitor"]["state"] == DEGRADED
+
+
+def test_active_monthly_job_is_not_wrongly_flagged_degraded_under_the_old_uniform_30h(hm):
+    """THE OTHER HALF of the fix: live_decision_archive (monthly) would show
+    'degraded' ~29 days out of 30 under the old uniform 30h rule the moment it
+    got a first entry. Its own cron (2x = ~60 days) correctly tolerates this."""
+    hm.config = FakeConfig(scheduler={"live_decision_archive": {"enabled": True, "cron": "0 4 1 * *"}})
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"live_decision_archive": {"last_success": now - 20 * 86400}}), encoding="utf-8"  # 20 days
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:live_decision_archive"]["state"] == HEALTHY
+
+
+def test_train_fp_classifier_uses_the_autotune_schedule_cron_pair(hm):
+    hm.config = FakeConfig(scheduler={}, autotune_enabled=True, autotune_schedule_cron="0 3 * * *")
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"train_fp_classifier": {"last_success": now - 34.8 * 3600}}), encoding="utf-8"
+    )
+    hm._evaluate_job_health_components(now)
+    # 34.8h stale vs a daily job's 48h (2x) threshold -- still healthy, matches
+    # the real .94 data this was found against (34.8h was one of the "degraded"
+    # jobs under the OLD uniform-30h rule; it should NOT be degraded under a
+    # correctly daily-cadence-aware 48h one).
+    assert hm._component_state["job:train_fp_classifier"]["state"] == HEALTHY
+
+
+def test_train_fp_classifier_retired_when_autotune_disabled(hm):
+    hm.config = FakeConfig(scheduler={}, autotune_enabled=False, autotune_schedule_cron="0 3 * * *")
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(
+        json.dumps({"train_fp_classifier": {"last_success": now - 3600}}), encoding="utf-8"
+    )
+    hm._evaluate_job_health_components(now)
+    assert hm._component_state["job:train_fp_classifier"]["state"] == RETIRED
+
+
 # --- console visibility: snapshot() / _write_snapshot_file() ---------------------
 # Added so the console's Health view has something to read -- without this,
 # /api/health/status (running in a SEPARATE process from this HealthManager
@@ -239,6 +354,51 @@ def test_check_cycle_writes_snapshot_file(hm, tmp_path, monkeypatch):
     (psutil, file probes) are no-ops in this fake environment."""
     hm._check_cycle()
     assert (tmp_path / "health_manager_snapshot.json").exists()
+
+
+# --- suricata_scan / pihole_poll: real "did it actually run" recency, distinct
+# from suricata/pihole's own binary-presence/connectivity-only checks ------------
+# BUGFIX (2026-09-15, console/health audit -- user report: "check if suricata ran
+# properly or not, it should be visible in health... the same logic should apply
+# for all other subsystems"). See _check_cycle()'s own comment for the full
+# incident (56+ real hours of stalled Suricata scans earlier this session, wholly
+# invisible to health because the binary/rules check alone stayed "healthy"
+# throughout).
+
+def test_check_cycle_picks_up_a_fresh_suricata_scan_heartbeat(hm, tmp_path):
+    write_component_heartbeat(tmp_path, "suricata_scan", extra={"outcome": "completed"})
+    hm._check_cycle()
+    assert hm._component_state["suricata_scan"]["state"] == HEALTHY
+
+
+def test_check_cycle_flags_a_stale_suricata_scan_heartbeat(hm, tmp_path):
+    """A scan attempt from well beyond the expected interval (default 4h, so
+    2x=8h/5x=20h) must surface as DEGRADED/UNHEALTHY, not silently pass."""
+    old_ts = time.time() - 30 * 3600  # 30h old -- past the 5x=20h UNHEALTHY bar
+    (tmp_path / "component_heartbeat.json").write_text(
+        json.dumps({"suricata_scan": {"last_heartbeat": old_ts, "last_success": old_ts, "outcome": "completed"}}),
+        encoding="utf-8",
+    )
+    hm._check_cycle()
+    assert hm._component_state["suricata_scan"]["state"] == UNHEALTHY
+
+
+def test_check_cycle_picks_up_a_fresh_pihole_poll_heartbeat(hm, tmp_path):
+    write_component_heartbeat(tmp_path, "pihole_poll", extra={"new_rows": 12})
+    hm._check_cycle()
+    assert hm._component_state["pihole_poll"]["state"] == HEALTHY
+
+
+def test_suricata_binary_check_and_scan_recency_are_tracked_as_separate_components(hm, tmp_path, monkeypatch):
+    """THE ACTUAL FIX: these must be two INDEPENDENT components, never merged,
+    so a healthy binary can't mask a stalled scan (or vice versa) -- matches the
+    real incident where check_suricata_health() stayed green the whole time."""
+    monkeypatch.setattr(hm_module.HealthManager, "_check_suricata", lambda self: (True, "binary OK"))
+    # No suricata_scan heartbeat written at all -- cold-boot grace period, per
+    # _evaluate_heartbeat_component()'s own documented "entry is None -> no-op."
+    hm._check_cycle()
+    assert hm._component_state["suricata"]["state"] == HEALTHY
+    assert "suricata_scan" not in hm._component_state  # cold boot -- not yet alarmed, not faked healthy either
 
 
 if __name__ == "__main__":

@@ -39,6 +39,15 @@ DEGRADED = "degraded"
 UNHEALTHY = "unhealthy"
 RECOVERY_FAILED = "recovery_failed"
 SAFE_MODE = "safe_mode"
+# BUGFIX (2026-09-15, console/health audit): a scheduled job removed from
+# config.yaml's own scheduler entirely (shadow_watcher, gap_monitor -- see
+# _evaluate_job_health_components()'s own comment) used to fall through
+# _apply_signal()'s implicit "anything that isn't HEALTHY/DEGRADED is
+# UNHEALTHY" branch forever, since nothing ever updates job_health.json for a
+# job nothing schedules anymore. A distinct, neutral state -- never triggers
+# _maybe_recover(), never alerts -- for "this used to be a real component, it
+# just isn't scheduled anymore."
+RETIRED = "retired"
 
 # --- resource-pressure states ---
 NORMAL = "normal"
@@ -57,6 +66,71 @@ try:
     import psutil
 except ImportError:  # pragma: no cover -- exercised only if the dependency is missing
     psutil = None
+
+
+def _estimate_cron_interval_seconds(cron_expr: Optional[str]) -> Optional[float]:
+    """Estimates a standard 5-field cron expression's typical interval in
+    seconds -- for exactly the shapes this project's own config.yaml
+    (`scheduled_jobs.scheduler`) actually uses (a step minute/hour field, a
+    comma-separated hour list, or a fixed daily/monthly/weekly time), not a
+    general-purpose cron scheduler. Returns None for anything it can't
+    confidently estimate, so the caller falls back to a safe default rather
+    than silently guessing wrong.
+
+    BUGFIX (2026-09-15, console/health audit): _evaluate_job_health_components()
+    used to apply ONE uniform health_manager_job_staleness_hours (30.0) to
+    every job regardless of its real cadence -- correct-ish for the daily jobs
+    that happen to dominate this config, but would have been badly wrong for
+    cl_afpe_flip_monitor (every 15 minutes -- a real failure wouldn't surface
+    for up to 30 hours) and live_decision_archive (monthly -- would show
+    "degraded" ~29 days out of every 30 the moment it ever gets a first entry).
+    """
+    if not cron_expr:
+        return None
+    parts = str(cron_expr).split()
+    if len(parts) != 5:
+        return None
+    minute, hour, day, month, weekday = parts
+
+    def _step(field: str) -> Optional[int]:
+        if field.startswith("*/"):
+            try:
+                return int(field[2:])
+            except ValueError:
+                return None
+        return None
+
+    def _list_count(field: str) -> Optional[int]:
+        return len(field.split(",")) if "," in field else None
+
+    # Monthly: a fixed day-of-month, month=*, weekday=*.
+    if day not in ("*", "?") and month == "*" and weekday in ("*", "?"):
+        return 30.0 * 86400.0
+
+    # Weekly: day=*, a fixed/listed weekday.
+    if day == "*" and weekday not in ("*", "?"):
+        return 7.0 * 86400.0
+
+    # Minute-level step, e.g. "*/15 * * * *".
+    min_step = _step(minute)
+    if min_step and hour == "*":
+        return float(min_step * 60)
+
+    # Hour-level step, e.g. "30 */4 * * *".
+    hour_step = _step(hour)
+    if hour_step and day == "*" and month == "*":
+        return float(hour_step * 3600)
+
+    # Comma-separated hour list, e.g. "30 2,6,10,14,18,22 * * *".
+    hour_count = _list_count(hour)
+    if hour_count and day == "*" and month == "*":
+        return (24.0 / hour_count) * 3600.0
+
+    # Fixed minute+hour, day/month/weekday all wildcards -> daily.
+    if day == "*" and month == "*" and weekday in ("*", "?") and minute != "*" and hour != "*":
+        return 86400.0
+
+    return None
 
 
 class HealthManager:
@@ -178,6 +252,29 @@ class HealthManager:
         self._evaluate_heartbeat_component(
             "backtest_job", cross_process.get("backtest_job"), now,
             expected_interval=float(self.config.get("health_manager_backtest_job_expected_interval_seconds", 86400.0)),
+        )
+        # BUGFIX (2026-09-15, console/health audit -- user report: "check if suricata
+        # ran properly or not, it should be visible in health... not just that it is
+        # working properly"): "suricata" below has only ever checked binary/rules-file
+        # presence -- true even during the 56+ hour real window earlier this same
+        # session where reactive-capture Suricata scans had genuinely stopped
+        # succeeding (a CPUQuota starvation issue, since fixed). Distinct component,
+        # not merged into "suricata", so the operator sees BOTH signals plainly
+        # instead of one hiding the other. Reactive-capture is event-triggered, not
+        # strictly periodic (spotcheck every reactive_capture_spotcheck_interval_
+        # seconds, plus several other real-time triggers) -- a generous default
+        # tolerates normal quiet periods without false-alarming.
+        self._evaluate_heartbeat_component(
+            "suricata_scan", cross_process.get("suricata_scan"), now,
+            expected_interval=float(self.config.get("health_manager_suricata_scan_expected_interval_seconds", 14400.0)),
+        )
+        # Same pattern, same reasoning, generalized to Pi-hole per the user's own
+        # explicit request -- "the same logic should apply for all other
+        # subsystems." "pihole" below only ever checked reachability/auth, never
+        # whether DNS queries are actually being polled and processed.
+        self._evaluate_heartbeat_component(
+            "pihole_poll", cross_process.get("pihole_poll"), now,
+            expected_interval=float(self.config.get("health_manager_pihole_poll_expected_interval_seconds", 120.0)),
         )
 
         # probe-based components (no self-reported heartbeat -- checked directly,
@@ -488,6 +585,23 @@ class HealthManager:
                 self._apply_signal(component, signal, f"{failures} consecutive failures")
 
     def _evaluate_job_health_components(self, now: float) -> None:
+        """BUGFIX (2026-09-15, console/health audit -- user report: shadow_watcher
+        and gap_monitor permanently showing "degraded"): this used to apply ONE
+        uniform health_manager_job_staleness_hours (30.0) to every key EVER
+        present in job_health.json, with no way to tell "still scheduled, just
+        running late" apart from "removed from the scheduler entirely, nothing
+        will ever update this again." Confirmed live: shadow_watcher's decision-
+        engine hook was removed 2026-09-07 ("nothing left to watch"), gap_monitor
+        was superseded by the whole-engine Argus cutover -- neither is in
+        config.yaml's scheduled_jobs.scheduler anymore, so both grew staler every
+        single day with no code path that ever excluded them. Now: (1) a job's
+        real cron schedule (scheduled_jobs.scheduler, or the special
+        autotune_schedule_cron pair for train_fp_classifier) drives its own
+        staleness threshold via _estimate_cron_interval_seconds(), so a 15-minute
+        job and a monthly job are no longer held to the same bar; (2) a job
+        present in job_health.json but absent from the CURRENT schedule (or
+        explicitly disabled) is reported RETIRED, not DEGRADED -- a real, distinct,
+        never-alerting state for "this used to be a real component."""
         path = self.state_dir / "job_health.json"
         if not path.exists():
             return
@@ -495,17 +609,39 @@ class HealthManager:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return
-        staleness_hours = float(self.config.get("health_manager_job_staleness_hours", 30.0))
+        scheduler_jobs = self.config.get("scheduler", {}) or {}
+        fallback_hours = float(self.config.get("health_manager_job_staleness_hours", 30.0))
         for job_name, entry in data.items():
             if not isinstance(entry, dict):
                 continue
             last_success = float(entry.get("last_success", 0) or 0)
             age_hours = (now - last_success) / 3600.0
             component = f"job:{job_name}"
+
+            cron_expr = None
+            if job_name == "train_fp_classifier":
+                # Its own dedicated enable/cron pair, not in the scheduler dict --
+                # see config.yaml's own comment on autotune_schedule_cron.
+                if bool(self.config.get("autotune_enabled", True)):
+                    cron_expr = self.config.get("autotune_schedule_cron")
+            else:
+                job_cfg = scheduler_jobs.get(job_name)
+                if isinstance(job_cfg, dict) and job_cfg.get("enabled", True):
+                    cron_expr = job_cfg.get("cron")
+
+            if cron_expr is None:
+                self._apply_signal(
+                    component, RETIRED,
+                    f"no longer scheduled -- last success {age_hours:.1f}h ago",
+                )
+                continue
+
+            interval_seconds = _estimate_cron_interval_seconds(cron_expr)
+            staleness_hours = (interval_seconds * 2.0 / 3600.0) if interval_seconds else fallback_hours
             if age_hours < staleness_hours:
                 self._apply_signal(component, HEALTHY, f"last success {age_hours:.1f}h ago")
             else:
-                self._apply_signal(component, DEGRADED, f"no success in {age_hours:.1f}h (expected within {staleness_hours:.0f}h)")
+                self._apply_signal(component, DEGRADED, f"no success in {age_hours:.1f}h (expected within {staleness_hours:.1f}h)")
 
     def _apply_signal(self, component: str, signal: str, detail: str) -> None:
         rec = self._get_record(component)
@@ -533,6 +669,12 @@ class HealthManager:
             if prev_state == HEALTHY:
                 LOGGER.warning("Health manager: %s -> DEGRADED (%s)", component, detail)
             rec["state"] = DEGRADED
+            return
+
+        if signal == RETIRED:
+            if prev_state != RETIRED:
+                LOGGER.info("Health manager: %s -> RETIRED (%s)", component, detail)
+            rec["state"] = RETIRED
             return
 
         # signal == UNHEALTHY
