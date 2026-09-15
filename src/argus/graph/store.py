@@ -1179,6 +1179,35 @@ class GraphStore:
             out.append(d)
         return out
 
+    def get_recent_composite_trust(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Most recent cl_afpe_trust rows (composite_trust.py's own
+        corroboration-accumulator table), newest-updated first -- for the
+        console's Autonomy view (2026-09-15), the "still building trust"
+        counterpart to get_recent_threshold_history() above and the `trusts`
+        edges get_edges(relation='trusts') already exposes for "already
+        resolved." Plain read; composite_trust.py itself keeps its own direct
+        SQL for the corroboration-recording write path (a different module's
+        job), this is just the console's read side."""
+        rows = self._conn.execute(
+            "SELECT * FROM cl_afpe_trust ORDER BY last_updated DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_threshold_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Most recent autotuner proposals (argus/autotune/engine.py's own
+        threshold_history table), newest first -- for the console's Autonomy
+        view (2026-09-15). The table is already a complete, self-explaining
+        event log (old_value/new_value/reason/proposed_at/canary_until/
+        promoted_at/rolled_back_at); this is a plain read, no new
+        instrumentation needed. Kept here rather than as raw SQL in the router,
+        matching every other table read in this class."""
+        rows = self._conn.execute(
+            "SELECT * FROM threshold_history ORDER BY proposed_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def count_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
                       src_id: Optional[str] = None, dst_kind: Optional[str] = None,
                       dst_id: Optional[str] = None) -> int:

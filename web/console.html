@@ -241,6 +241,7 @@ var ICONS = {
   blocking:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="10" width="14" height="10" rx="1.5"></rect><path d="M8 10V7a4 4 0 018 0v3"></path></svg>',
   suricata:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 12L18 8M12 3.5v3M12 20.5v-3M3.5 12h3M20.5 12h-3"></path></svg>',
   health:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12h4l2-7 4 14 2-7h6"></path></svg>',
+  autonomy:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 6h14M5 12h14M5 18h14"></path><circle cx="9" cy="6" r="2" fill="currentColor" stroke="none"></circle><circle cx="16" cy="12" r="2" fill="currentColor" stroke="none"></circle><circle cx="10" cy="18" r="2" fill="currentColor" stroke="none"></circle></svg>',
   overview:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="8" height="8" rx="1.3"></rect><rect x="13" y="3" width="8" height="5" rx="1.3"></rect><rect x="13" y="10" width="8" height="11" rx="1.3"></rect><rect x="3" y="13" width="8" height="8" rx="1.3"></rect></svg>'
 };
 
@@ -274,6 +275,8 @@ var state = {
   healthLoading: false, healthLoaded: false, healthLoadError: null, healthData: null,
 
   overviewLoading: false, overviewLoaded: false, overviewLoadError: null, overviewData: null,
+
+  autonomyLoading: false, autonomyLoaded: false, autonomyLoadError: null, autonomyData: null,
 
   huntMode: 'touching',
   huntDest: '',
@@ -533,6 +536,18 @@ async function loadHealth(){
   }
 }
 
+async function loadAutonomy(){
+  state.autonomyLoading = true; state.autonomyLoadError = null; render();
+  try {
+    state.autonomyData = await apiFetch('/api/autonomy');
+    state.autonomyLoaded = true;
+  } catch (err) {
+    state.autonomyLoadError = err.message || String(err);
+  } finally {
+    state.autonomyLoading = false; render();
+  }
+}
+
 async function loadOverview(){
   state.overviewLoading = true; state.overviewLoadError = null; render();
   try {
@@ -564,7 +579,7 @@ function typeOptionsHtml(selectedVal){
 }
 
 function renderSidebar(){
-  var defs = [['overview','Overview','overview'],['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['health','Health','health'],['config','Config','config']];
+  var defs = [['overview','Overview','overview'],['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['health','Health','health'],['autonomy','Autonomy','autonomy'],['config','Config','config']];
   var items = defs.map(function(d){
     var id=d[0], label=d[1], icon=d[2];
     var active = (state.activeView===id) || (id==='devices' && state.activeView==='deviceDetail');
@@ -1081,7 +1096,11 @@ function renderOverviewView(){
 
 var HEALTH_STATE_SEV = {
   healthy:'BENIGN', degraded:'SUSPICIOUS', unhealthy:'HIGH', recovery_failed:'HIGH', safe_mode:'CRITICAL',
-  normal:'BENIGN', resource_pressure:'SUSPICIOUS', conservation:'HIGH', critical:'CRITICAL'
+  normal:'BENIGN', resource_pressure:'SUSPICIOUS', conservation:'HIGH', critical:'CRITICAL',
+  /* 2026-09-15: a job removed from the scheduler entirely (e.g. shadow_watcher,
+     gap_monitor) -- neutral gray, distinct from both "healthy" (green) and any
+     alert-severity color, since it isn't something to act on. */
+  retired:'UNKNOWN'
 };
 function healthPill(rawState){
   var sevKey = HEALTH_STATE_SEV[rawState] || 'UNKNOWN';
@@ -1099,9 +1118,15 @@ function agoText(ts){
 var COMPONENT_LABELS = {
   pipeline_main_loop: 'Pipeline main loop', identity_reconcile_worker: 'Identity reconcile worker',
   ti_refresh: 'Threat-intel refresh', api_subprocess: 'Console / API subprocess',
-  scheduler_subprocess: 'Job scheduler subprocess', zeek: 'Zeek', suricata: 'Suricata', pihole: 'Pi-hole'
+  scheduler_subprocess: 'Job scheduler subprocess', zeek: 'Zeek', suricata: 'Suricata', pihole: 'Pi-hole',
+  /* 2026-09-15: distinct from "suricata"/"pihole" above on purpose -- those only
+     check binary presence / connectivity, these show whether a scan/poll actually
+     completed recently. Keeping both visible (not merged) so one can't hide the
+     other. */
+  suricata_scan: 'Suricata (last scan)', pihole_poll: 'Pi-hole (last poll)',
+  backtest_job: 'Nightly backtest job'
 };
-var COMPONENT_ORDER = ['pipeline_main_loop','identity_reconcile_worker','ti_refresh','api_subprocess','scheduler_subprocess','zeek','suricata','pihole'];
+var COMPONENT_ORDER = ['pipeline_main_loop','identity_reconcile_worker','ti_refresh','api_subprocess','scheduler_subprocess','zeek','suricata','suricata_scan','pihole','pihole_poll','backtest_job'];
 function componentLabel(name){
   if (COMPONENT_LABELS[name]) return COMPONENT_LABELS[name];
   if (name.indexOf('feed:') === 0) return name.slice(5) + ' (feed)';
@@ -1196,6 +1221,91 @@ function renderHealthView(){
     + '<div class="table-wrap"><table><thead><tr><th>Job</th><th>Last success</th><th>Duration</th></tr></thead><tbody>'+jobRows+'</tbody></table></div></div>'
     + '<div class="panel"><div class="panel-header"><div class="panel-title">Threat-intel feeds</div></div>'
     + '<div class="table-wrap"><table><thead><tr><th>Feed</th><th>State</th><th>Consecutive failures</th><th>Last error</th></tr></thead><tbody>'+feedRows+'</tbody></table></div></div>'
+    + '</div>';
+}
+
+/* ============================= autonomy view (autotuner + composite trust) ========= */
+/* 2026-09-15, console/health audit -- user's own framing: "it should be clear what has
+   happened and how it is tuned up or down." Both event logs (threshold_history, the
+   graph's own 'trusts' edges) already existed with complete, self-explaining history;
+   this is the first console surface for either. */
+
+var AUTOTUNE_DIRECTION_STYLE = {
+  tightened: { label: '▲ Tightened', color: SEV_HEX.ANOMALOUS },
+  loosened: { label: '▼ Loosened', color: SEV_HEX.SUSPICIOUS },
+  unchanged: { label: '— Unchanged', color: SEV_HEX.UNKNOWN },
+};
+var AUTOTUNE_STATUS_STYLE = {
+  promoted: { label: 'Promoted', color: SEV_HEX.BENIGN },
+  pending_canary: { label: 'Pending canary', color: SEV_HEX.ANOMALOUS },
+  rolled_back: { label: 'Rolled back', color: SEV_HEX.HIGH },
+};
+function directionBadge(direction){
+  var s = AUTOTUNE_DIRECTION_STYLE[direction] || { label: direction, color: SEV_HEX.UNKNOWN };
+  return '<span class="pill" style="color:'+s.color+';border-color:'+hexA(s.color,0.45)+';background:'+hexA(s.color,0.12)+'">'+esc(s.label)+'</span>';
+}
+function statusBadge(status){
+  var s = AUTOTUNE_STATUS_STYLE[status] || { label: status, color: SEV_HEX.UNKNOWN };
+  return '<span class="pill" style="color:'+s.color+';border-color:'+hexA(s.color,0.45)+';background:'+hexA(s.color,0.12)+'">'+esc(s.label)+'</span>';
+}
+function fmtParamValue(v){ return (v == null) ? '—' : (Math.round(v*1000)/1000); }
+
+function renderAutonomyView(){
+  var topbarHead = topbarWithRefresh('Autonomy', 'What Argus has changed on its own, and which direction -- the closed-loop autotuner\'s threshold history, and composite trust\'s auto-resolved corroboration grants. Nothing here needs a human tap; this is a record of what already happened autonomously, and what\'s still accumulating evidence toward a future auto-resolution.', 'reloadAutonomy', state.autonomyLoading);
+
+  if (state.autonomyLoadError) {
+    return topbarHead + '<div class="content"><div class="error-banner">Could not load autonomy data: '+esc(state.autonomyLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadAutonomy()">Retry</button></div></div>';
+  }
+  if (state.autonomyLoading && !state.autonomyLoaded) {
+    return topbarHead + '<div class="content"><div class="empty-state">Loading autonomy data…</div></div>';
+  }
+
+  var d = state.autonomyData || {};
+  var autotuner = d.autotuner || [];
+  var trustGrants = d.trust_grants || [];
+  var buildingTrust = d.building_trust || [];
+
+  var autotuneRows = autotuner.length
+    ? autotuner.map(function(row){
+        return '<tr><td class="cell-mono">'+esc(row.parameter)+'</td>'
+          + '<td>'+directionBadge(row.direction)+'</td>'
+          + '<td class="cell-mono">'+fmtParamValue(row.old_value)+' → '+fmtParamValue(row.new_value)+'</td>'
+          + '<td>'+statusBadge(row.status)+'</td>'
+          + '<td style="font-size:11.5px;color:var(--text-dim);max-width:360px;">'+esc(row.reason||'')+'</td>'
+          + '<td class="cell-mono">'+agoText(row.proposed_at)+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="6"><div class="empty-state">No autotuner activity yet -- nothing has been proposed.</div></td></tr>';
+
+  var trustRows = trustGrants.length
+    ? trustGrants.map(function(row){
+        return '<tr><td class="cell-mono">'+esc(row.device_id||'')+'</td>'
+          + '<td class="cell-mono">'+esc(row.destination_id||'')+'</td>'
+          + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
+          + '<td><span class="tag">'+esc(row.source_label)+'</span></td>'
+          + '<td class="cell-mono">'+agoText(row.granted_at)+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">No composite-trust grants yet.</div></td></tr>';
+
+  var buildingRows = buildingTrust.length
+    ? buildingTrust.map(function(row){
+        var pct = Math.round((row.progress_fraction||0)*100);
+        var bar = '<div style="width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;">'
+          + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
+        return '<tr><td class="cell-mono">'+esc(row.device_id||'')+'</td>'
+          + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
+          + '<td style="font-size:11.5px;">'+esc(row.destination_class||'')+' / '+esc(row.evidence_family||'')+'</td>'
+          + '<td>'+bar+'<span class="cell-mono" style="font-size:11px;margin-left:6px;">'+pct+'%</span></td>'
+          + '<td class="cell-mono">'+agoText(row.last_updated)+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">Nothing currently accumulating corroboration.</div></td></tr>';
+
+  return topbarHead + '<div class="content">'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autotuner history</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'+autotuneRows+'</tbody></table></div></div>'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — resolved</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Destination</th><th>Hypothesis</th><th>How it was resolved</th><th>Granted</th></tr></thead><tbody>'+trustRows+'</tbody></table></div></div>'
+    + '<div class="panel"><div class="panel-header"><div class="panel-title">Composite trust — still building</div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Hypothesis</th><th>Destination class / family</th><th>Progress toward auto-resolution</th><th>Updated</th></tr></thead><tbody>'+buildingRows+'</tbody></table></div></div>'
     + '</div>';
 }
 
@@ -1619,6 +1729,7 @@ function renderApp(){
   else if (state.activeView==='blocking') view = renderBlockingView();
   else if (state.activeView==='suricata') view = renderSuricataView();
   else if (state.activeView==='health') view = renderHealthView();
+  else if (state.activeView==='autonomy') view = renderAutonomyView();
   else view = renderConfigView();
   return renderSidebar() + '<div class="main-panel">'+view+'</div>' + renderToasts();
 }
@@ -1654,6 +1765,7 @@ var app = {
     if (v === 'suricata' && !state.suricataLoading && !state.suricataLoaded) loadSuricata();
     if (v === 'health' && !state.healthLoading) loadHealth();
     if (v === 'overview' && !state.overviewLoading) loadOverview();
+    if (v === 'autonomy' && !state.autonomyLoading) loadAutonomy();
   },
   selectDevice: function(id){
     state.activeView='deviceDetail'; state.selectedDeviceId=id;
@@ -1902,6 +2014,7 @@ var app = {
   /* ---- Suricata view ---- */
   reloadSuricata: function(){ loadSuricata(); },
   reloadHealth: function(){ loadHealth(); },
+  reloadAutonomy: function(){ loadAutonomy(); },
   reloadOverview: function(){ loadOverview(); },
 
   /* ---- Evidence Graph: pan/zoom/drag/group-select ---- */

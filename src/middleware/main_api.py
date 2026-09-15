@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from middleware.routers import (
     fritzbox_api, pihole_api, config_api, devices_api, hunt_api, graph_api,
-    mitigation_api, suricata_api, health_api, overview_api,
+    mitigation_api, suricata_api, health_api, overview_api, autonomy_api,
 )
 from middleware.auth import CONFIG
 from core.heartbeat import write_component_heartbeat
@@ -23,6 +23,7 @@ app.include_router(mitigation_api.router)
 app.include_router(suricata_api.router)
 app.include_router(health_api.router)
 app.include_router(overview_api.router)
+app.include_router(autonomy_api.router)
 
 
 @app.on_event("startup")
