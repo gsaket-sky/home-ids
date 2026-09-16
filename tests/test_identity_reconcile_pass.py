@@ -152,5 +152,80 @@ def main() -> None:
     print("All _identity_reconcile_pass() end-to-end checks PASSED.")
 
 
+def test_reapply_device_type_overrides() -> None:
+    """2026-09-16, user report: "in console the device type change do not get
+    apply." Root cause (confirmed live on .94 before writing this fix): the
+    console's device_type_overrides PATCH reaches this process's own CONFIG
+    immediately (LiveConfig's own watcher), but a device's STORED device_type
+    only gets recomputed by apply_device_type(), which only ever runs from
+    inside process_dns_identities()/process_zeek_identities() -- i.e. only when
+    that device generates fresh traffic. devices_api.py's console display reads
+    the stored value directly, never recomputing from device_type_overrides
+    itself, so an idle device's console-displayed type could stay stale
+    indefinitely -- looking to the operator like the change simply "doesn't
+    apply," not just that it's delayed.
+
+    core/pipeline.py's own _reapply_device_type_overrides() is the fix -- tested
+    here directly against a real StateManager + real DeviceIdentityManager
+    (matching this file's own established "real objects, not full
+    EnginePipeline" convention), without needing the full pipeline's IPC
+    sentinel plumbing around it."""
+    from core.pipeline import _reapply_device_type_overrides
+
+    with tempfile.TemporaryDirectory() as d:
+        config = _FakeConfig({})
+        sm = StateManager(state_path=str(Path(d) / "ids_state.json"), max_devices=100)
+        identity_manager = DeviceIdentityManager(sm, config)
+
+        idle_dev = sm.get_or_create(device_id="idle_dev", client_ip="10.0.1.5", hostname="my-smart-tv")
+        idle_dev.device_type = "laptop"  # stale -- as if inferred long ago, before this hostname was even known
+        idle_dev.device_type_is_override = False
+
+        unrelated_dev = sm.get_or_create(device_id="unrelated_dev", client_ip="10.0.1.6", hostname="printer_office")
+        unrelated_dev.device_type = "printer"
+        unrelated_dev.device_type_is_override = False
+
+        # Simulates the console PATCH having just landed in CONFIG -- the exact
+        # dict apply_device_type() reads (device_type_overrides is a
+        # hostname-substring map, confirmed via config_api.py's own docstring).
+        fresh_overrides = {"smart-tv": "smart_tv"}
+
+        reapplied = _reapply_device_type_overrides(sm, identity_manager, fresh_overrides)
+        check("_reapply_device_type_overrides: reports exactly 1 device actually changed",
+              reapplied == 1)
+        with sm.lock_device("idle_dev") as st:
+            check("_reapply_device_type_overrides: the idle device's STORED "
+                  "device_type is updated immediately, without it ever "
+                  "generating fresh traffic",
+                  st.device_type == "smart_tv")
+            check("_reapply_device_type_overrides: device_type_is_override is "
+                  "correctly set True by the underlying apply_device_type() call",
+                  st.device_type_is_override is True)
+        with sm.lock_device("unrelated_dev") as st:
+            check("_reapply_device_type_overrides: an unrelated device (no "
+                  "matching pattern) is left completely untouched",
+                  st.device_type == "printer" and st.device_type_is_override is False)
+
+        # Idempotency: re-running with the SAME overrides changes nothing further.
+        reapplied_again = _reapply_device_type_overrides(sm, identity_manager, fresh_overrides)
+        check("_reapply_device_type_overrides: re-running with the same "
+              "overrides is a safe no-op (0 changed, not re-flagged as changed "
+              "every cycle)", reapplied_again == 0)
+
+        # No overrides configured at all -- must never touch anything or crash.
+        reapplied_empty = _reapply_device_type_overrides(sm, identity_manager, {})
+        check("_reapply_device_type_overrides: an empty overrides dict is a "
+              "safe no-op, not a crash", reapplied_empty == 0)
+
+    print()
+    if FAILURES:
+        print(f"{len(FAILURES)} check(s) FAILED:")
+        for f in FAILURES:
+            print(f"  - {f}")
+        sys.exit(1)
+    print("All _reapply_device_type_overrides() checks PASSED.")
+
+
 if __name__ == "__main__":
     main()
+    test_reapply_device_type_overrides()

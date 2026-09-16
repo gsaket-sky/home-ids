@@ -25,13 +25,18 @@ from core.heartbeat import write_component_heartbeat  # noqa: E402
 
 
 class FakeConfig:
-    def __init__(self, **overrides):
+    def __init__(self, overrides_path=None, **overrides):
         self._data = {
             "health_manager_recovery_max_attempts": 5,
             "health_manager_auto_recovery_enabled": True,
             "telegram_enabled": True,
         }
         self._data.update(overrides)
+        # 2026-09-16: matches the REAL LiveConfig's own attribute name exactly
+        # (config.py's _overrides_path) -- _describe_disabled_reason() reads
+        # this directly, same pattern health_manager.py's own
+        # _set_config_override() already uses.
+        self._overrides_path = overrides_path
 
     def get(self, key, default=None):
         return self._data.get(key, default)
@@ -399,6 +404,95 @@ def test_suricata_binary_check_and_scan_recency_are_tracked_as_separate_componen
     hm._check_cycle()
     assert hm._component_state["suricata"]["state"] == HEALTHY
     assert "suricata_scan" not in hm._component_state  # cold boot -- not yet alarmed, not faked healthy either
+
+
+# --- _describe_disabled_reason / _check_suricata's "disabled" detail text ------
+# BUGFIX (2026-09-16, user report: "in health, suricata is shown disabled").
+# Confirmed live on .94: NOT a bug in the disable decision itself -- the box was
+# genuinely at pressure_level=conservation and _apply_pressure_level() had
+# correctly auto-disabled reactive_capture_suricata_enabled via the exact same
+# config-override channel the console's manual toggles use. The real problem
+# was the bare word "disabled" giving the operator no way to tell "you turned
+# this off" from "the system throttled itself under memory pressure and will
+# re-enable automatically" -- these tests cover that distinction.
+
+def test_describe_disabled_reason_no_overrides_file_at_all(tmp_path):
+    hm = HealthManager(config=FakeConfig(overrides_path=tmp_path / "does_not_exist.json"),
+                          alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    reason = hm._describe_disabled_reason("reactive_capture_suricata_enabled")
+    assert "config.yaml" in reason
+
+
+def test_describe_disabled_reason_operator_console_override(tmp_path):
+    overrides_path = tmp_path / "config_overrides.json"
+    overrides_path.write_text(json.dumps({
+        "reactive_capture_suricata_enabled": {
+            "value": False, "baseline": True, "set_at": time.time(),
+            "set_by": "console_ui", "reason": "manual",
+        },
+    }), encoding="utf-8")
+    hm = HealthManager(config=FakeConfig(overrides_path=overrides_path),
+                          alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    reason = hm._describe_disabled_reason("reactive_capture_suricata_enabled")
+    assert "operator override" in reason
+    assert "auto-disabled" not in reason  # must not be mislabeled as automatic
+
+
+def test_describe_disabled_reason_health_manager_auto_disable_names_current_pressure(tmp_path):
+    """THE CORE FIX: an entry set_by='health_manager' (the exact shape
+    _set_config_override() writes) must be labeled as automatic resource-
+    pressure throttling, name the CURRENT pressure level, and say it
+    self-recovers -- not read as an unexplained fault."""
+    overrides_path = tmp_path / "config_overrides.json"
+    set_at = time.time() - 3600
+    overrides_path.write_text(json.dumps({
+        "reactive_capture_suricata_enabled": {
+            "value": False, "baseline": True, "set_at": set_at,
+            "set_by": "health_manager", "reason": "resource pressure",
+        },
+    }), encoding="utf-8")
+    hm = HealthManager(config=FakeConfig(overrides_path=overrides_path),
+                          alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    hm._pressure_state = "conservation"
+    reason = hm._describe_disabled_reason("reactive_capture_suricata_enabled")
+    assert "auto-disabled" in reason
+    assert "conservation" in reason
+    assert "automatically" in reason  # says it self-recovers, not stuck forever
+
+
+def test_check_suricata_disabled_detail_includes_the_reason(tmp_path):
+    """End-to-end: _check_suricata() itself (not just the helper in isolation)
+    produces the full, explained detail string an operator actually sees in
+    the console -- the exact real .94 shape (config says enabled=True at
+    baseline, but health_manager's own override currently reads False)."""
+    overrides_path = tmp_path / "config_overrides.json"
+    overrides_path.write_text(json.dumps({
+        "reactive_capture_suricata_enabled": {
+            "value": False, "baseline": True, "set_at": time.time(),
+            "set_by": "health_manager", "reason": "resource pressure",
+        },
+    }), encoding="utf-8")
+    hm = HealthManager(
+        config=FakeConfig(overrides_path=overrides_path, reactive_capture_suricata_enabled=False),
+        alert_manager=FakeAlertManager(), state_dir=str(tmp_path),
+    )
+    hm._pressure_state = "conservation"
+    healthy, detail = hm._check_suricata()
+    assert healthy is True  # still correctly non-alarming -- a throttle, not a fault
+    assert detail.startswith("disabled")
+    assert "resource-pressure" in detail
+
+
+def test_describe_disabled_reason_survives_a_corrupt_overrides_file(tmp_path):
+    """Never lets a diagnostic-clarity nicety become a health-check failure --
+    a corrupt/unreadable overrides file degrades to an empty suffix, not an
+    exception bubbling out of _check_suricata()."""
+    overrides_path = tmp_path / "config_overrides.json"
+    overrides_path.write_text("{not valid json", encoding="utf-8")
+    hm = HealthManager(config=FakeConfig(overrides_path=overrides_path),
+                          alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    reason = hm._describe_disabled_reason("reactive_capture_suricata_enabled")
+    assert reason == ""
 
 
 if __name__ == "__main__":

@@ -1090,7 +1090,7 @@ function alertVolumeBarChart(byDay, selectedDay){
 }
 
 function renderOverviewView(){
-  var topbarHead = topbarWithRefresh('Overview', 'At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics, threat-landscape/geo, and autotune history stay Grafana-only; see Documentation for why).', 'reloadOverview', state.overviewLoading);
+  var topbarHead = topbarWithRefresh('Overview', 'At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics and threat-landscape/geo stay Grafana-only; see Documentation for why).', 'reloadOverview', state.overviewLoading);
 
   if (state.overviewLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load overview: '+esc(state.overviewLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadOverview()">Retry</button></div></div>';
@@ -1143,13 +1143,35 @@ function renderOverviewView(){
       ])
     + '</div></div>';
 
+  // 2026-09-16 (user request: "include the overview of per device tuning in
+  // console"): tiny summary of argus/autotune/engine.py's scoped (device- and
+  // category-level) proposals that have actually promoted and are still live
+  // -- not day-filtered (unlike the panels above) since a scoped override's
+  // relevant lifetime is "since it was promoted," not "today," and the
+  // backend's _per_device_tuning_summary() doesn't bucket by day. Links to
+  // the Autonomy tab, which already has the full timeline with direction/
+  // status badges -- this tile is deliberately just the at-a-glance count.
+  var tuning = d.per_device_tuning || {};
+  var hasTuning = (tuning.devices_tuned || 0) > 0 || (tuning.categories_tuned || 0) > 0;
+  var tuningPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Per-device tuning</div></div>'
+    + '<div class="panel-body">'
+    + (hasTuning
+        ? statGrid([
+            statTile('Devices with their own tuning', fmtCount(tuning.devices_tuned)),
+            statTile('Categories with their own tuning', fmtCount(tuning.categories_tuned)),
+            statTile('Last change promoted', tuning.last_activity_at != null ? agoText(tuning.last_activity_at) : '—'),
+          ])
+        : '<div class="empty-state">No device- or category-scoped overrides have promoted yet — every threshold is still at the global default.</div>')
+    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:10px;">Counts live, promoted, non-rolled-back overrides from the autotuner\'s Wilson-bound safety gate — see the <a href="#" onclick="app.goView(\'autonomy\');return false;" style="color:var(--accent);">Autonomy tab</a> for the full per-change timeline.</div>'
+    + '</div></div>';
+
   var volumePanel = '<div class="panel"><div class="panel-header"><div class="panel-title">Alert volume</div></div>'
     + '<div class="panel-body">'
     + alertVolumeBarChart(d.alert_volume_by_day, selectedDay)
     + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(d.alert_volume_note||'')+'</div>'
     + '</div></div>';
 
-  return topbarHead + '<div class="content">' + dayFilterBanner + securityPanel + healingPanel + volumePanel + '</div>';
+  return topbarHead + '<div class="content">' + dayFilterBanner + securityPanel + healingPanel + tuningPanel + volumePanel + '</div>';
 }
 
 /* ============================= health / heartbeat view ============================= */

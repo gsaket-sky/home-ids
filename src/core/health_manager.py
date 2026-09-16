@@ -304,9 +304,46 @@ class HealthManager:
         except Exception as exc:
             return False, f"error ({exc})"
 
+    def _describe_disabled_reason(self, key: str) -> str:
+        """BUGFIX (2026-09-16, user report: "in health, suricata is shown
+        disabled"). Confirmed live on .94: this WAS correct, intended
+        behavior, not a fault -- the box was genuinely at pressure_level=
+        conservation (RSS ~1.3GB), and _apply_pressure_level() had correctly
+        auto-disabled reactive_capture_suricata_enabled via the SAME
+        config-override channel the console's own manual toggles use
+        (_set_config_override(), set_by="health_manager"). The bare word
+        "disabled" gave the operator no way to tell "you (or config.yaml)
+        turned this off" from "the system throttled itself under memory
+        pressure and will turn it back on automatically once that pressure
+        subsides" -- indistinguishable from a real fault at a glance, exactly
+        the ambiguity this session's earlier Suricata-visibility work was
+        trying to close. Returns a suffix string to append to a bare
+        "disabled" detail; "" if the override file can't be read (never lets
+        a diagnostic-clarity nicety become a health-check failure)."""
+        try:
+            overrides_path = self.config._overrides_path
+            if not overrides_path.exists():
+                return " (set in config.yaml)"
+            data = json.loads(overrides_path.read_text(encoding="utf-8"))
+            entry = data.get(key)
+            if not isinstance(entry, dict):
+                return " (set in config.yaml)"
+            if entry.get("set_by") == "health_manager":
+                set_at = entry.get("set_at")
+                when = time.strftime("%H:%M UTC", time.gmtime(set_at)) if set_at else "recently"
+                return (f" -- auto-disabled by resource-pressure conservation at {when} "
+                         f"(current level: {self._pressure_state}); re-enables automatically "
+                         f"once pressure drops back to normal")
+            return f" (operator override via console, set by {entry.get('set_by', 'unknown')})"
+        except Exception:
+            return ""
+
     def _check_suricata(self) -> Tuple[bool, str]:
         if not bool(self.config.get("reactive_capture_suricata_enabled", True)):
-            return True, "disabled"  # a disabled optional feature isn't unhealthy
+            # a disabled optional feature isn't unhealthy -- but SAY WHY, so it
+            # doesn't read as a fault when it's this box's own automatic
+            # resource-conservation response (see _describe_disabled_reason()).
+            return True, "disabled" + self._describe_disabled_reason("reactive_capture_suricata_enabled")
         try:
             from intelligence.detectors.suricata_scan import check_suricata_health
             return check_suricata_health(

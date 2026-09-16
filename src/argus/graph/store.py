@@ -239,7 +239,6 @@ class GraphStore:
                 snapshot_id      TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_threshold_history_device ON threshold_history(device_id, proposed_at);
-            CREATE INDEX IF NOT EXISTS idx_threshold_history_device_type ON threshold_history(device_type, proposed_at);
 
             CREATE TABLE IF NOT EXISTS baseline_snapshots (
                 snapshot_id            TEXT PRIMARY KEY,
@@ -274,10 +273,28 @@ class GraphStore:
         # `ADD COLUMN IF NOT EXISTS`; the try/except is the idiom for that, same
         # "no-op on a db that already has it, real migration on one that doesn't"
         # framing as every CREATE TABLE/INDEX above.
+        #
+        # BUGFIX (2026-09-16, found via test coverage + confirmed .94's own live db
+        # still lacks this column despite two later deploys never actually reaching
+        # .94): this ADD COLUMN must run, and commit, BEFORE any CREATE INDEX that
+        # references device_type -- it used to live in the executescript block above,
+        # which runs top-to-bottom as one unit against a genuinely old db (where
+        # CREATE TABLE IF NOT EXISTS no-ops because the table already exists sans
+        # this column): CREATE INDEX ON threshold_history(device_type, ...) hit the
+        # column before this ALTER TABLE (which ran AFTER the whole executescript
+        # call) ever got a chance to add it, raising
+        # "sqlite3.OperationalError: no such column: device_type" out of
+        # GraphStore.__init__ itself for every old-db deployment. Splitting the
+        # index out of the script and issuing it here, after the ALTER TABLE, is
+        # what makes the ordering actually safe.
         try:
             self._conn.execute("ALTER TABLE threshold_history ADD COLUMN device_type TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_threshold_history_device_type "
+            "ON threshold_history(device_type, proposed_at)"
+        )
         self._conn.commit()
 
     def close(self) -> None:

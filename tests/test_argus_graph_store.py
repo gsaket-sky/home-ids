@@ -11,6 +11,7 @@ Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_argus_graph_store.py`
 """
 import json
+import sqlite3
 import sys
 import tempfile
 import time
@@ -807,6 +808,75 @@ with tempfile.TemporaryDirectory() as tmpdir:
               "a second open (no duplicate-column corruption)",
               sum(1 for row in second_open._conn.execute("PRAGMA table_info(threshold_history)")
                    if row[1] == "device_type") == 1)
+        second_open.close()  # Windows: an unclosed sqlite connection blocks the
+                              # TemporaryDirectory's own cleanup on __exit__.
+
+# 2026-09-16 REGRESSION COVERAGE: the check above never actually exercised a
+# GENUINELY old db -- it only reopens a db that _apply_schema() (the fresh-db
+# path) already created WITH device_type, so "column already exists" was the
+# only branch it ever took. The real bug (confirmed live: .94's own
+# state/v13_graph.db, predating this migration, has no device_type column)
+# was that _migrate_existing_db()'s CREATE INDEX ...(device_type, ...) used to
+# sit INSIDE the executescript block, running against threshold_history BEFORE
+# the ALTER TABLE ADD COLUMN (issued after the script) ever got a chance to
+# add it -- raising "no such column: device_type" out of GraphStore.__init__
+# for every old-db deployment. This builds an old-shaped db by hand (the exact
+# pre-2026-09-16 threshold_history column set) to actually exercise that path.
+with tempfile.TemporaryDirectory() as tmpdir:
+    old_db_path = str(_PathForSysPath(tmpdir) / "genuinely_old.db")
+    # Build a fully valid, CURRENT-schema db first (every real table, via the
+    # normal schema.sql path) so this fixture never drifts from the actual
+    # schema -- then surgically revert ONLY threshold_history to its
+    # pre-2026-09-16 shape, mirroring exactly what was confirmed live on .94's
+    # own real database (device_id, parameter, old_value, new_value,
+    # proposed_at, canary_until, promoted_at, rolled_back_at, reason,
+    # backtest_run_id, snapshot_id -- no device_type).
+    seed_store = GraphStore(old_db_path)
+    seed_store.close()
+    raw_conn = sqlite3.connect(old_db_path)
+    raw_conn.execute("DROP INDEX IF EXISTS idx_threshold_history_device_type")
+    raw_conn.execute("ALTER TABLE threshold_history DROP COLUMN device_type")
+    raw_conn.commit()
+    raw_conn.close()
+
+    _c = sqlite3.connect(old_db_path)
+    pre_cols = [row[1] for row in _c.execute("PRAGMA table_info(threshold_history)")]
+    _c.close()
+    check("fixture actually lacks device_type before GraphStore ever opens it (sanity check on the test itself)",
+          "device_type" not in pre_cols, str(pre_cols))
+
+    try:
+        old_store = GraphStore(old_db_path)
+        old_open_ok = True
+    except Exception as exc:
+        old_open_ok = False
+        old_store = None
+        _old_open_error = exc
+    check("GraphStore opens a genuinely pre-device_type db without raising "
+          "(the real bug: this used to throw 'no such column: device_type')",
+          old_open_ok, "" if old_open_ok else f"{type(_old_open_error).__name__}: {_old_open_error}")
+
+    if old_store is not None:
+        migrated_cols = [row[1] for row in old_store._conn.execute("PRAGMA table_info(threshold_history)")]
+        check("device_type column was actually added to the old table by migration",
+              "device_type" in migrated_cols)
+        idx_names = [row[0] for row in old_store._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='threshold_history'")]
+        check("idx_threshold_history_device_type index was created after the column existed",
+              "idx_threshold_history_device_type" in idx_names)
+        # end-to-end: the whole point of the column is a device_type-scoped write/read
+        old_store.upsert_device("dev_regression_test")
+        old_store._conn.execute(
+            "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, "
+            "old_value, new_value, proposed_at) VALUES (?, ?, ?, 'x', 0.1, 0.2, ?)",
+            ("regress1", "dev_regression_test", "iot", time.time()),
+        )
+        old_store._maybe_commit()
+        row = old_store._conn.execute(
+            "SELECT device_type FROM threshold_history WHERE change_id='regress1'").fetchone()
+        check("a device_type-scoped row can actually be written and read back after migration",
+              row is not None and row[0] == "iot")
+        old_store.close()
         second_open.close()
 
 print()

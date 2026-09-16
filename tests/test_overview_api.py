@@ -18,6 +18,8 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from argus.graph.store import GraphStore  # noqa: E402
+from middleware import graph_client  # noqa: E402
 from middleware.routers import overview_api  # noqa: E402
 
 
@@ -325,6 +327,101 @@ def test_get_overview_summary_exposes_day_filterable_metrics_and_breakdowns(tmp_
         "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"
     }
     assert "pihole_blocks" not in result["day_filterable_metrics"]
+
+
+# --- _per_device_tuning_summary / per_device_tuning (2026-09-16, user request:
+# "include the overview of per device tuning in console") -------------------
+
+def _insert_scoped_threshold_row(store, change_id, device_id, device_type, promoted_at, rolled_back_at=None):
+    if device_id is not None:
+        store.upsert_device(device_id)
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, rolled_back_at, reason) VALUES "
+        "(?, ?, ?, 'hard_stop_candidate_sensitivity', 0.9, 0.85, ?, ?, ?, ?, 'test')",
+        (change_id, device_id, device_type, promoted_at, promoted_at, promoted_at, rolled_back_at),
+    )
+    store._maybe_commit()
+
+
+def test_per_device_tuning_summary_empty_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", tmp_path / "does_not_exist.db")
+    result = overview_api._per_device_tuning_summary()
+    assert result == {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None}
+
+
+def test_per_device_tuning_summary_counts_active_scoped_overrides(tmp_path, monkeypatch):
+    db_path = tmp_path / "v13_graph.db"
+    store = GraphStore(str(db_path))
+    now = time.time()
+    _insert_scoped_threshold_row(store, "c1", "dev_a", None, now - 100)
+    _insert_scoped_threshold_row(store, "c2", "dev_b", None, now - 50)
+    _insert_scoped_threshold_row(store, "c3", None, "iot", now - 30)
+    _insert_scoped_threshold_row(store, "c4", None, "phone", now - 10)
+    store.close()
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", db_path)
+
+    result = overview_api._per_device_tuning_summary()
+    assert result["devices_tuned"] == 2
+    assert result["categories_tuned"] == 2
+    assert abs(result["last_activity_at"] - (time.time() - 10)) < 2
+
+
+def test_per_device_tuning_summary_excludes_rolled_back_and_unpromoted(tmp_path, monkeypatch):
+    db_path = tmp_path / "v13_graph.db"
+    store = GraphStore(str(db_path))
+    now = time.time()
+    _insert_scoped_threshold_row(store, "c1", "dev_a", None, now - 100, rolled_back_at=now - 50)  # rolled back
+    store.upsert_device("dev_b")
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+        "proposed_at, canary_until, reason) VALUES "
+        "('c2', 'dev_b', NULL, 'hard_stop_candidate_sensitivity', 0.9, 0.85, ?, ?, 'still in canary')",
+        (now, now + 21600),
+    )  # never promoted at all
+    store._maybe_commit()
+    store.close()
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", db_path)
+
+    result = overview_api._per_device_tuning_summary()
+    assert result["devices_tuned"] == 0
+    assert result["categories_tuned"] == 0
+    assert result["last_activity_at"] is None
+
+
+def test_per_device_tuning_summary_excludes_global_scope_rows(tmp_path, monkeypatch):
+    """A global (device_id AND device_type both NULL) row is NOT per-device
+    tuning -- must never be counted here, that's the Autotuner Timeline
+    panel's own job, not this summary's."""
+    db_path = tmp_path / "v13_graph.db"
+    store = GraphStore(str(db_path))
+    _insert_scoped_threshold_row(store, "c1", None, None, time.time())
+    store.close()
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", db_path)
+
+    result = overview_api._per_device_tuning_summary()
+    assert result["devices_tuned"] == 0
+    assert result["categories_tuned"] == 0
+
+
+def test_get_overview_summary_includes_per_device_tuning(tmp_path, monkeypatch):
+    monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
+        text="", raise_for_status=lambda: None,
+    ))
+    alerts_path = tmp_path / "alerts.json"
+    _write_jsonl(alerts_path, [{"timestamp": _day_ts(0)}])
+    monkeypatch.setattr(overview_api.CONFIG, "get", lambda key, default=None: {
+        "metrics_port": 9105, "alert_json_path": str(alerts_path),
+    }.get(key, default))
+
+    db_path = tmp_path / "v13_graph.db"
+    store = GraphStore(str(db_path))
+    _insert_scoped_threshold_row(store, "c1", "dev_a", None, time.time())
+    store.close()
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", db_path)
+
+    result = overview_api.get_overview_summary(token="test")
+    assert result["per_device_tuning"]["devices_tuned"] == 1
 
 
 if __name__ == "__main__":

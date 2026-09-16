@@ -47,6 +47,17 @@ _OVERRIDES_PATH = _STATE_DIR / "config_overrides.json"
 _AUDIT_LOG_PATH = _STATE_DIR / "config_changes.jsonl"
 _OVERRIDES_LOCK = threading.Lock()
 
+def _touch_sync_signal() -> None:
+    """Same sentinel file / same convention mitigation_api.py's own
+    _touch_sync_signal() already uses -- prompts the main pipeline process's
+    reconciliation pass (core/pipeline.py, right after the IPS sentinel check)
+    to act on this write immediately rather than waiting for its own separate
+    ~10s config-poll interval AND, for device_type specifically, a device's
+    next traffic event (see pipeline.py's own 2026-09-16 bugfix comment at
+    that reconciliation block for why the two are different waits)."""
+    Path(CONFIG.get("state_path", "state/ids_state.json")).parent.joinpath(".ipc_sync_signal").touch()
+
+
 DEVICE_TYPE_OVERRIDES_KEY = "device_type_overrides"
 DEVICE_TYPES = [
     "laptop", "desktop", "phone", "tablet", "smart_tv", "gaming_console", "printer",
@@ -236,6 +247,15 @@ def patch_device_type_override(pattern: str, payload: DeviceTypePayload, token: 
     current = dict(CONFIG.get(DEVICE_TYPE_OVERRIDES_KEY, {}) or {})
     current[pattern] = payload.type
     _set_override(DEVICE_TYPE_OVERRIDES_KEY, current, set_by="console_ui", reason=payload.reason or f"assigned via console: {pattern} -> {payload.type}")
+    # BUGFIX (2026-09-16, user report: "in console the device type change do not
+    # get apply"): _set_override() above already reloads THIS process's own CONFIG
+    # immediately, but the actual device_type shown in the console comes from
+    # ids_state.json, written by the SEPARATE main pipeline process -- which only
+    # recomputes it when the affected device generates fresh traffic. Touching the
+    # same sentinel mitigation_api.py's operator actions already use prompts that
+    # process to re-apply every device's type from the fresh override right away
+    # (see pipeline.py's own reconciliation block).
+    _touch_sync_signal()
     return {"pattern": pattern, "type": payload.type, "device_type_overrides": current}
 
 
@@ -246,4 +266,5 @@ def delete_device_type_override(pattern: str, token: str = Depends(verify_token)
         raise HTTPException(status_code=404, detail=f"No device_type_overrides entry for '{pattern}'.")
     del current[pattern]
     _set_override(DEVICE_TYPE_OVERRIDES_KEY, current, set_by="console_ui", reason=f"removed via console: {pattern}")
+    _touch_sync_signal()
     return {"pattern": pattern, "device_type_overrides": current}

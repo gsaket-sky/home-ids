@@ -12,7 +12,7 @@ alert-volume trend. It is NOT trying to replace the Grafana dashboards' depth
 stay Grafana-only) -- just cover "is my network okay" without requiring the
 observability stack at all.
 
-Two data sources:
+Three data sources:
 1. A local self-scrape of this box's own /metrics endpoint (prometheus_client's
    start_http_server(), unconditionally started in core/pipeline.py's run()
    regardless of whether a Prometheus SERVICE is installed). Still used for
@@ -26,6 +26,16 @@ Two data sources:
    BOTH the alert-volume trend AND alerts_triaged/fp_evaluations/fp_suppressed/
    fp_confirmed_threats -- see _alert_stats()'s own docstring for why these
    moved off Prometheus entirely.
+3. 2026-09-16 (user request: "include the overview of per device tuning in
+   console") -- a single cheap COUNT query against the graph's own
+   threshold_history table (the SAME table /api/autonomy/devices already
+   surfaces in full detail) for a one-line "how many devices/categories are
+   currently tuned away from global" summary, deliberately NOT the full
+   per-device/category breakdown that endpoint already provides -- Overview
+   stays "at a glance," the Autonomy tab stays the place for real detail. This
+   revises the module's own earlier "autotune history stays Grafana-only"
+   framing above -- true when originally written, superseded once the
+   console got its own Autonomy tab.
 """
 import json
 import logging
@@ -38,6 +48,7 @@ from fastapi import APIRouter, Depends
 from prometheus_client.parser import text_string_to_metric_families
 
 from middleware.auth import verify_token, CONFIG
+from middleware.graph_client import open_store
 from middleware.routers._alert_log_utils import iter_lines_reverse
 
 LOGGER = logging.getLogger("home_ids.overview_api")
@@ -238,6 +249,36 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     }
 
 
+def _per_device_tuning_summary() -> Dict[str, Any]:
+    """2026-09-16 (user request: "include the overview of per device tuning in
+    console"). One cheap COUNT(DISTINCT ...) query against threshold_history
+    for how many devices/categories currently have an ACTIVE (promoted, not
+    rolled back) scoped autotuner override -- i.e. genuinely tuned away from
+    the global default right now, not merely proposed-and-canary or
+    since-rolled-back. Deliberately NOT the full per-device/category
+    breakdown -- that's /api/autonomy/devices's job; this is Overview's own
+    "at a glance" framing, same spirit as the rest of this endpoint.
+
+    Returns zeros (not an error) when the graph db doesn't exist yet, same
+    degradation shape open_store()'s own docstring already documents for
+    every other console endpoint that reads it."""
+    with open_store() as store:
+        if store is None:
+            return {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None}
+        row = store._conn.execute(
+            "SELECT COUNT(DISTINCT device_id) AS devices_tuned, "
+            "COUNT(DISTINCT device_type) AS categories_tuned, "
+            "MAX(promoted_at) AS last_activity_at "
+            "FROM threshold_history WHERE promoted_at IS NOT NULL AND rolled_back_at IS NULL "
+            "AND (device_id IS NOT NULL OR device_type IS NOT NULL)"
+        ).fetchone()
+    return {
+        "devices_tuned": row["devices_tuned"] or 0,
+        "categories_tuned": row["categories_tuned"] or 0,
+        "last_activity_at": row["last_activity_at"],
+    }
+
+
 @router.get("/api/overview/summary")
 def get_overview_summary(token: str = Depends(verify_token)) -> dict:
     counters_raw, scrape_ok = _scrape_counters()
@@ -281,4 +322,5 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
         "fp_suppressed_by_day": stats["fp_suppressed_by_day"],
         "fp_confirmed_threats_by_day": stats["fp_confirmed_threats_by_day"],
         "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"],
+        "per_device_tuning": _per_device_tuning_summary(),
     }

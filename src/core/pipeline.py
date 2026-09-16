@@ -537,6 +537,41 @@ def _enforce_evidence_families_invariant(grouped_evidence: dict, context_evidenc
             context_evidence[fam] = demoted
 
 
+def _reapply_device_type_overrides(state_manager: Any, identity_manager: Any,
+                                      type_overrides: Dict[str, str]) -> int:
+    """BUGFIX (2026-09-16, user report: "in console the device type change do not
+    get apply"). device_type_overrides written via the console (config_api.py's
+    patch_device_type_override()) already reach this process's own CONFIG
+    correctly -- LiveConfig's own watcher (10s poll) already picks up
+    state/config_overrides.json. The actual gap: a device's STORED device_type
+    only gets recomputed when apply_device_type() runs, which only ever happens
+    from inside process_dns_identities()/process_zeek_identities() -- i.e. only
+    when that device generates FRESH traffic. An idle device's device_type could
+    stay stale indefinitely; devices_api.py's console display reads that stored
+    value directly (confirmed by direct read -- it never recomputes from
+    device_type_overrides itself), so the operator would see NO change at all,
+    not just a delayed one.
+
+    Re-runs apply_device_type() for EVERY currently-tracked device with the
+    freshly-reloaded overrides, immediately, instead of waiting on each
+    device's own next traffic event. Extracted as its own function (matching
+    _canonical_evidence_family()/_enforce_evidence_families_invariant()'s own
+    extraction above) so it's directly testable against a real StateManager +
+    identity manager, without needing a full EnginePipeline.
+
+    Returns the number of devices whose device_type actually changed."""
+    if not type_overrides:
+        return 0
+    reapplied = 0
+    for dev_id in state_manager.get_all_device_ids():
+        with state_manager.lock_device(dev_id) as locked_state:
+            before = getattr(locked_state, "device_type", None)
+            identity_manager.apply_device_type(locked_state, type_overrides)
+            if locked_state.device_type != before:
+                reapplied += 1
+    return reapplied
+
+
 # BUGFIX (2026-09-15, live alert audit -- iPhone/d7cb300865b3 DATA_EXFILTRATION,
 # real fired alert): every CL-AFPE Stage-1 hard-stop got the identical "matched a
 # known-bad signature directly" confidence text below, regardless of WHICH of the
@@ -3560,6 +3595,27 @@ class EnginePipeline:
                     LOGGER.info("✅ [IPC SYNC] IPSMitigator in-memory state reconciled after Telegram release.")
             except Exception as _ipc_exc:
                 LOGGER.warning("IPC sentinel reconciliation failed: %s", _ipc_exc)
+
+            # 2026-09-16 (user report: "in console the device type change do not get
+            # apply") -- see _reapply_device_type_overrides()'s own docstring for the
+            # full root cause. Piggybacks on this SAME sentinel (config_api.py's
+            # device-type endpoints now also touch it, matching mitigation_api.py's
+            # existing _touch_sync_signal() convention). Best-effort, same "never
+            # block the real reconciliation above" framing -- a failure here doesn't
+            # affect the IPS reconciliation that already succeeded.
+            try:
+                if self.identity_manager:
+                    reapplied = _reapply_device_type_overrides(
+                        self.state_manager, self.identity_manager,
+                        self.config.get("device_type_overrides", {}),
+                    )
+                    if reapplied:
+                        LOGGER.info("✅ [IPC SYNC] device_type_overrides re-applied immediately -- "
+                                     "%d device(s) changed, rather than waiting for their next traffic event.",
+                                     reapplied)
+            except Exception as _dt_exc:
+                LOGGER.warning("device_type_overrides immediate reconciliation failed, non-fatal "
+                                 "(will still apply on each device's next traffic event): %s", _dt_exc)
 
         if now - self._last_flush > 60.0:
             LOGGER.debug("Triggering periodic state/model flush to disk.")
