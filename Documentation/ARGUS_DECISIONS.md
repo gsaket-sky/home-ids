@@ -441,3 +441,60 @@ else).
 **Effort to pick up:** needs weeks of real comparison data to accumulate first (now that
 the cron fix lets it actually run), then a design pass for the proof-bar and comparison
 mechanism — similar shape to CL-AFPE's flip monitor, likely, but not assumed.
+
+### 11. Three console gaps + a real migration-ordering bug — RESOLVED 2026-09-16
+
+User report: *"in console the device type change do not get apply. also in health,
+suricata is shown disabled. include the overview of per device tuning in console."*
+All three root-caused against `.94`'s real live state before fixing (not guessed), and
+shipped together as v15.5.0:
+
+- **Device-type override not applying**: verified via direct SSH inspection of `.94`'s
+  real `config_overrides.json`/`ids_state.json` that most overrides HAD actually
+  applied — narrowing the real bug to devices that hadn't generated fresh traffic
+  since the override was set (`apply_device_type()` only runs per-row, on real
+  traffic). Fixed via the `.ipc_sync_signal` immediate-reconciliation path — see
+  `ARGUS_ARCHITECTURE.md` §6.
+- **Suricata "disabled"**: verified via direct SSH inspection of `.94`'s real
+  `health_manager_snapshot.json`/`config_overrides.json`/current `pressure_level`
+  that this was correct, intended CONSERVATION-tier auto-throttle — the fix was
+  communication (a detail string explaining who disabled it and when it re-enables),
+  not a behavior change. See `ARGUS_ARCHITECTURE.md` §7.
+- **Overview per-device-tuning panel**: new `_per_device_tuning_summary()` in
+  `overview_api.py`, one cheap `COUNT`/`MAX` query against the same
+  `threshold_history` table the Autonomy tab already surfaces in full detail —
+  deliberately just a 3-number summary (devices tuned, categories tuned, last
+  promoted), linking to Autonomy for the real breakdown.
+
+**The more consequential find**: while testing the Overview backend, found a real
+statement-ordering bug in `GraphStore._migrate_existing_db()`
+(`src/argus/graph/store.py`) — the `CREATE INDEX` on
+`threshold_history(device_type, ...)` (added earlier the same day, for the
+per-device/category autotune work) sat inside the same `executescript()` block as the
+table's own `CREATE TABLE IF NOT EXISTS`, running *before* the `ALTER TABLE ... ADD
+COLUMN device_type` that only ran after the script finished. On any database that
+predates that column, this raised `sqlite3.OperationalError: no such column:
+device_type` straight out of `GraphStore.__init__()`. Confirmed via direct SSH query
+that `.94`'s live `state/v13_graph.db` genuinely lacked the column — but then confirmed
+`.94` was still pinned at v15.3.0, two commits behind the schema change, so **this bug
+was never actually live**; it would have broken on the next deploy. `open_store()`
+(`middleware/graph_client.py`) and `_get_graph_store()` (`argus/ops/live_engine.py`)
+both construct a fresh `GraphStore()` with no exception handling around construction —
+and `live_engine.evaluate()`'s own outer `try/except` would have silently caught the
+resulting crash and fallen back to the legacy `v-current` decision engine on **every
+single decision**, logging one `LOGGER.error()` line and nothing else — service stays
+up, no crash, looks like nothing happened. Exactly the kind of regression a routine
+"restart looked clean" check would miss.
+
+Fixed by splitting the `CREATE INDEX idx_threshold_history_device_type` out of the
+executescript block to run after the `ALTER TABLE`. New regression coverage in
+`tests/test_argus_graph_store.py` builds a genuinely pre-migration database (by taking
+a real current-schema db and `ALTER TABLE ... DROP COLUMN` + `DROP INDEX` to revert it)
+— the prior migration test only ever reopened a database the *same* schema version had
+already created, which never exercised the missing-column path at all.
+
+**Deploy, same day**: `.94` fast-forwarded `v15.3.0 -> v15.5.0` in one restart (catching
+up v15.4.0's per-device/category autotune work too, which had never reached `.94`
+before this). Verified live: `device_type` column + index now exist on `.94`'s real
+graph db with zero errors; zero "v13 live engine raised" fallback log lines since
+restart; console API subprocess confirmed responding (`/docs` -> 200).

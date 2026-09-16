@@ -83,6 +83,18 @@ that read-modify-write the whole merged dict as one override entry, rather than 
 generic per-key endpoints. The console's Device Detail "assign type" control and the
 Config tab's `network_and_devices` panel both call these same two endpoints.
 
+**Immediate reconciliation (2026-09-16)**: both endpoints now also touch
+`state/.ipc_sync_signal` after writing the override (`_touch_sync_signal()`) — the
+same cross-process "reconcile now" file `mitigation_api.py` already used for IPS
+state. Without this, a saved override only took effect the next time the target
+device generated real traffic (`apply_device_type()` is a per-row call, not a
+poll loop); an idle device could sit on its old `device_type` indefinitely even
+though the console showed the new value as saved. The main pipeline process now
+notices the touched file within one main-loop tick and immediately re-applies every
+override against every known device (`core/pipeline.py`'s
+`_reapply_device_type_overrides()`). See `ARGUS_ARCHITECTURE.md` §6 for the full
+mechanism.
+
 `scheduler.ollama_soc.enabled` and its five siblings are genuinely nested
 (`config.yaml`'s `scheduled_jobs.scheduler` is itself a dict of dicts, so
 `CONFIG.get("scheduler")` returns the whole nested structure — there's no flat

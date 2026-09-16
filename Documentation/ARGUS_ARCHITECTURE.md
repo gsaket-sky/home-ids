@@ -14,10 +14,12 @@
 > `v13-ingest.service` systemd unit's filename (avoids an extra disable/enable cycle on
 > `.19`), and the `v13_live_engine` provenance string written into evidence rows
 > (`source="v13_live_engine"`, already-persisted historical data). See
-> `ARGUS_DECISIONS.md` for the reasoning. **The code-level rename is git-tracked but not
-> yet deployed** — `.94`'s live `config.yaml` still says `engine: v13` until an explicit,
-> separately-confirmed cutover (see `ARGUS_DECISIONS.md`'s "Notable closed decisions");
-> until that cutover, the deployed system still runs the pre-rename code.
+> `ARGUS_DECISIONS.md` for the reasoning. **The code-level rename is deployed and live**
+> — confirmed 2026-09-16 via a direct SSH read of `.94`'s real `config.yaml`:
+> `engine: argus` and `cl_afpe_engine: argus` are both set (superseding this note's
+> earlier "not yet deployed" claim, which was accurate when first written but went
+> stale once the cutover actually shipped). `.94` runs the current Argus code path for
+> both the main decision engine and CL-AFPE.
 
 ## 1. System Overview
 
@@ -263,16 +265,97 @@ sequenceDiagram
     end
 ```
 
-**Honest scope note on "Proposer":** the engine is the complete, tested propose /
-canary / promote / rollback safety mechanism, gated so a proposal cannot even be
-*created* without a passing `backtest_run_id`. What is not yet wired is an automatic
-value-selection component that decides *what* new value to propose and calls
-`propose_change()` on its own — today `backtest_job.py`'s nightly run only persists
-`backtest_runs` rows and (on regression) calls `rollback_all_unconfirmed_for_backtest()`;
-nothing currently calls `propose_change()`/`promote_change()` outside tests. No parameter
-has been promoted in production yet — every one of the four currently resolves to its
-untouched default via `get_active_value(..., default=...)`, so the mechanism is inert by
-construction until a first proposal is made.
+**Live proposer, as of 2026-09-15**: `backtest_job.py`'s `_propose_tuning_change()` +
+`_promote_eligible_tuning_changes()` close the loop for `hard_stop_candidate_sensitivity`
+— the one parameter with a real signal in a backtest run's synthetic-sweep data (see
+`ARGUS_DECISIONS.md` §9 for why the other three stay untriggered). **As of the
+2026-09-16 deploy** (v15.5.0, confirmed live via direct SSH query of `.94`'s
+`threshold_history` table): 1 global-scope row exists, still in its 6h canary window,
+not yet promoted; the per-device/category tiers below are freshly deployed and have
+produced zero scoped proposals so far — expected, since scoped proposals need real
+per-device/category traffic volume to accumulate first (see the Wilson-bound gate).
+Re-verify this table's live state before citing a specific promoted value in an
+incident writeup — it changes continuously.
+
+### Per-device and per-category tuning (2026-09-16, on top of the global tier above)
+
+**File:** `src/argus/autotune/engine.py`, `Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md`.
+Every tunable parameter now resolves through 3 tiers, most-specific first
+(`get_active_value()`, lines 149-173):
+
+```python
+def get_active_value(self, parameter, device_id=None, device_type=None, default=None):
+    if device_id:
+        value = self._promoted_value_at_scope(parameter, device_id, None)
+        if value is not None:
+            return value
+    if device_type:
+        value = self._promoted_value_at_scope(parameter, None, device_type)
+        if value is not None:
+            return value
+    value = self._promoted_value_at_scope(parameter, None, None)
+    return value if value is not None else default
+```
+
+device-specific → category (`device_type`)-specific → global → caller-supplied
+`default`. Each tier lookup requires `promoted_at IS NOT NULL AND rolled_back_at IS
+NULL`, most recent `promoted_at` wins — a rolled-back promotion never counts, at any
+tier. `propose_change(parameter, new_value, ..., device_id=..., device_type=...)`:
+`device_id` (if given) is the scope actually WRITTEN to the row; `device_type` is a
+parent-resolution hint only, used to find the right parent tier for the trust-radius
+check below, never itself written when `device_id` is also present.
+
+**Three failsafes gate every scoped (device- or category-level) proposal** — a global
+proposal only goes through the plain canary/backtest gate above; these three only
+apply once a proposal tries to diverge a single device or category away from its
+parent:
+
+1. **Wilson-bound safe-threshold gate for loosening** (`_MIN_TRIALS_FOR_LOOSENING = 20`,
+   `_TUNE_LOOSEN_WILSON_FLOOR = 0.85`, `_TUNE_TIGHTEN_FLOOR = 0.70`,
+   `wilson_lower_bound()` at `autotune/engine.py:91-107`):
+   ```python
+   def wilson_lower_bound(hits: int, n: int, z: float = 1.959963984540054) -> float:
+       if n <= 0:
+           return 0.0
+       phat = hits / n
+       denom = 1.0 + z * z / n
+       center = phat + z * z / (2 * n)
+       margin = z * ((phat * (1 - phat) / n + z * z / (4 * n * n)) ** 0.5)
+       return max(0.0, (center - margin) / denom)
+   ```
+   the standard 95% Wilson score interval lower bound. **Tightening** a scope has no
+   sample-size floor at all — a single confidence-band miss below the 0.70 raw
+   detection-rate floor tightens immediately (fail-safe: err toward more scrutiny with
+   thin evidence). **Loosening** requires >=20 real trials for every synthetic attack
+   class at that scope, a literal 100% raw detection rate, AND the Wilson lower bound
+   across all classes >=0.85 — per the code's own comment, `wilson_lower_bound(n, n)`
+   at `n=20` is only ≈0.836, so 20 perfect trials alone still isn't enough; ~22 are
+   needed in practice. See `Documentation/PIPELINE_MATH_REFERENCE.md` for the full
+   derivation and worked example.
+
+2. **Trust-radius cap** (`_TRUST_RADIUS_MAX_STEPS = 2.0`, `autotune/engine.py:81-88,
+   256-287`): once a scoped proposal moves in the *less-sensitive* direction, it's
+   rejected if `(new_value - parent_value) * direction > 2.0 * max_step` — a device or
+   category can never drift more than 2 `max_step`s looser than its own parent tier
+   (category looser than global, or device looser than its category/global). Tightening
+   past the parent is never capped — only loosening divergence is bounded.
+
+3. **Retroactive circuit-breaker** (`check_retroactive_misses_and_rollback()`,
+   `backtest_job.py:422-536`, shipped same day as the two gates above): scans the last
+   7 days of real `suricata_signature_match` evidence for any hit whose confidence
+   falls in the band between a scope's own (looser) value and its parent's (stricter)
+   value — i.e. a real signature match that *would* have cleared the parent tier's
+   hard-stop bar but didn't clear this scope's own, looser bar. If any such near-miss
+   is cross-referenced against a `CONFIRMED_THREAT` decision for that device within
+   the hard-stop freshness window, the scoped override is rolled back immediately and
+   unconditionally — no canary, no confirming backtest, no operator approval. This is
+   the one failsafe that can fire between backtest runs, not just at proposal time: a
+   scoped loosening that looked statistically safe at promotion time gets pulled the
+   moment real evidence shows it wasn't.
+
+Console visibility: the Autonomy tab's per-device panel and Overview's "Per-device
+tuning" summary (`overview_api.py`'s `_per_device_tuning_summary()`) both read this
+same `threshold_history` table — see `Documentation/CONSOLE_DATA_API.md`.
 
 **Live-read integration** (Release 15 Sheet 03a follow-up): `argus/decision/engine.py`
 itself never reads `AutotuneEngine` directly (by design — it has no graph dependency).
@@ -476,6 +559,7 @@ Argus's `LiveIdentityManager._refresh_identity_signals()` (`live_manager.py:215`
 - **Precedence**: client-IP override -> device-id override -> hostname-substring override -> (if none apply and not already an explicit override) re-infer via `infer_device_type(hostname, mac_vendor=...)` (`utils.py:662`), using `utils.get_mac_vendor()` (`utils.py:81`, offline MAC-OUI lookup) when no hostname signal exists. `infer_device_type()`'s own final fallback is `"unknown"` (not a guessed type), which activates `fp_engine.py`'s own `dev_type_weights["unknown"]` entry rather than silently misclassifying.
 - **Re-inference is idempotent**: it re-runs every cycle whenever the current value isn't an explicit override, but a stable hostname/MAC-vendor always re-infers to the same classification, so this doesn't flap — it only changes the stored value once new signal (a resolved hostname, a resolvable vendor MAC) actually arrives.
 - **Called by**: both `process_dns_identities()`/`process_zeek_identities()`, once per row, after `_refresh_identity_signals()`. Inherited unchanged by Argus's `LiveIdentityManager` — this piece of the lifecycle is identical across both engines.
+- **Console `device_type_overrides` — immediate reconciliation (2026-09-16, user report: "the device type change do not get apply")**: a console-set override previously only took effect the next time `apply_device_type()` happened to run for that device — i.e. its next real traffic event. An idle device (no fresh DNS/Zeek rows) stayed on its old `device_type` indefinitely, even though `state/config_overrides.json` already had the new value. Fixed by reusing the pre-existing `.ipc_sync_signal` sentinel-file mechanism (the same cross-process "reconcile now" signal `mitigation_api.py` already used for IPS state) — `config_api.py`'s `patch_device_type_override()`/`delete_device_type_override()` now touch that file, and `pipeline.py`'s main loop, on seeing it, immediately calls a new `_reapply_device_type_overrides()` helper that walks every known device and re-runs `apply_device_type()` against the current override dict, under that device's own lock. A console change now reaches every device within one main-loop tick, not just the ones that happen to generate traffic next.
 
 **`MetricsExporter.remove_device_metric_labels(dev_id, hostname, device_type, keep_safe_flag=False)`** (`core/metrics_sync.py:126`)
 - **Called by**: `pipeline.py`'s hourly `prune_stale_devices()` cleanup and `identity.py`'s `_cleanup_merged_orphan()` — both always with the *orphan's* own pre-merge `(dev_id, hostname, device_type)`, never the canonical's.
@@ -495,6 +579,7 @@ Argus's `LiveIdentityManager._refresh_identity_signals()` (`live_manager.py:215`
 
 - Pi-hole `blocked_domains` entries for a device that was **pruned** (not merged) still show that now-gone `device_id` — `merge_into_canonical()` reattributes on merge, but there's no equivalent hook for ordinary prune-based eviction, since a pruned device's historical blocks genuinely have nothing to be reattributed to.
 - Under Argus, an ordinary prune-based eviction has no corresponding `GraphStore` un-mirroring step — only merge events are mirrored into the graph today.
+- **Deleting a `device_type_overrides` entry does not trigger re-inference** (found 2026-09-16, not yet fixed). Once `device_type_is_override=True`, `apply_device_type()`'s re-infer branch only ever runs `if not device_type_is_override` — so removing the override via the console leaves the device permanently stuck on its last override value, never falling back to hostname/MAC-vendor inference again. Needs `apply_device_type()` to detect "an override existed last cycle but no longer matches this device" and clear the flag so inference resumes.
 
 ## 7. Health Manager
 
@@ -593,6 +678,8 @@ The CONSERVATION-tier `reactive_capture_*` keys are the opposite case — none o
 - **Heartbeats for `AlertManager`'s own two daemon threads** (`telegram-alert-worker`, `telegram-bot-updates`).
 
 Note: the console **does** now ship a "Health" tab (`web/console.html`'s `renderHealthView()`, reading `GET /api/health/status`) — a later addition beyond the original read-only-endpoint-only scope.
+
+**Suricata "disabled" detail (2026-09-16, user report: "in health, suricata is shown disabled")**: `_check_suricata()` returning `"disabled"` when `reactive_capture_suricata_enabled` is false was correct, working-as-designed behavior — most often the CONSERVATION-tier auto-throttle described above, not a fault — but the console showed a bare "disabled" pill with no reason, indistinguishable from something actually broken. New `_describe_disabled_reason(key)` reads `state/config_overrides.json` directly (the same file `_set_config_override()` already writes) and appends a suffix distinguishing three cases: no override present (`" (set in config.yaml)"`), an operator-set override via the console (`" (operator override via console, set by <who>)"`), or `health_manager`'s own auto-disable (`" -- auto-disabled by resource-pressure conservation at <time> (current level: <level>); re-enables automatically once pressure drops back to normal"`), reading the same `set_by`/`set_at`/`reason` fields `_apply_pressure_level()` already writes into the override entry.
 
 ### Files
 
