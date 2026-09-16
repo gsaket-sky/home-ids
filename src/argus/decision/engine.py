@@ -559,4 +559,22 @@ class DecisionEngine:
             "evidence_families": evidence_families,
             "evidence_types": evidence_types,
             "attack_evidence": full_attack_evidence,
+            # 2026-09-16 (live alert audit, user-flagged -- FireTV/a4544eb6d2ca
+            # COORDINATED_TARGETING): exposes the same hyp_destinations this function
+            # already computed and used for its own Gap-64 destination-linkage
+            # filtering above, so pipeline.py's WHY-block construction can apply the
+            # identical "does this evidence's destination actually relate to the
+            # winning hypothesis" check to what it DISPLAYS, not just trust that
+            # attack_evidence (already filtered) is the only thing it draws from --
+            # active_evidence (pipeline.py's own separate, short-TTL v1 evidence
+            # store) had no such check at all until this fix, so a destination-
+            # mismatched item could win a decisive WHY-block slot even though this
+            # same function had already excluded it from independent_sources for the
+            # identical reason. Empty list means "no destination anchor for this
+            # decision" -- see _route_evidence_into_buckets() (core/pipeline.py) for
+            # how this is consumed; None/missing on the receiving end degrades to the
+            # same "don't filter" behavior (v-current's decision dict lacks this key
+            # entirely, same graceful-degradation pattern as evidence_families/
+            # evidence_types above).
+            "hypothesis_destination_ids": sorted(hyp_destinations),
         }

@@ -554,6 +554,21 @@ check("evidence_families/evidence_types are empty lists (not crashing) when ther
       r_ef_empty["evidence_families"] == [] and r_ef_empty["evidence_types"] == []
       and r_ef_empty["independent_sources"] == 0)
 
+# --- hypothesis_destination_ids (2026-09-16, live alert audit -- FireTV/a4544eb6d2ca
+# COORDINATED_TARGETING, user-flagged): exposes the SAME hyp_destinations this function
+# already computes for its own Gap-64 destination-linkage filtering above, so
+# pipeline.py's WHY-block construction can apply the identical check to what it
+# DISPLAYS -- previously only the SCORING path (attack_evidence/independent_sources)
+# had this; the display path (pipeline.py's active_evidence loop) had no way to know
+# which destination(s) the winning hypothesis actually verified.
+check("hypothesis_destination_ids carries the SAME anchor evidence_families was "
+      "filtered against -- the real evil-dga.example destination from r_ef above",
+      r_ef["hypothesis_destination_ids"] == ["evil-dga.example"],
+      f"got {r_ef['hypothesis_destination_ids']}")
+check("hypothesis_destination_ids is an empty list (not crashing, not None) when "
+      "there's no winning attack hypothesis to anchor against at all",
+      r_ef_empty["hypothesis_destination_ids"] == [])
+
 # --- INVARIANT BATTERY (third-party architecture review, item #11: "enforce
 # HIGH/CRITICAL invariants in code") -- rather than trusting the branch logic by
 # convention, assert the two central rules directly against a battery of varied

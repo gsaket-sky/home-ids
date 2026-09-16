@@ -38,6 +38,7 @@ def check(name, cond, detail=""):
 from core.pipeline import (
     _describe_evidence, _EVIDENCE_PLAIN_LANGUAGE, _build_status_lines, _build_confidence_line,
     _is_signature_based_hard_stop, _canonical_evidence_family, _route_evidence_into_buckets,
+    _enforce_evidence_families_invariant,
 )
 from intelligence.hypotheses.evidence import Evidence
 import time
@@ -260,6 +261,117 @@ check("_route_evidence_into_buckets: peer_cohort_deviation (a DIFFERENT NON_ATTA
       "separate hand-picked check) is ALSO correctly routed to context, not grouped -- "
       "proves the two loops' context-routing can no longer disagree",
       len(_gb3) == 0 and len(_cb3) == 1)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section B4 (2026-09-16, real live alert -- FireTV/a4544eb6d2ca COORDINATED_TARGETING,
+# user-flagged): destination-linkage for the WHY-block DISPLAY, not just decision/
+# engine.py's own SCORING. The real alert showed 3 "independent evidence families":
+# cross_device_correlation (dest 192.168.77.41, genuinely the incident's own
+# destination), dns_behavior (dest 62.245.131.134, an unrelated German IP, confidence
+# 0.0), and network_behavior -- but network_behavior's DISPLAYED item was a weak,
+# unrelated-destination Zeek notice (45.57.41.1, Netflix, confidence 0.4) even though a
+# stronger, genuinely destination-matching item existed in the SAME family (an actual
+# SSL::Invalid_Server_Cert notice fired on a connection to 192.168.77.41 itself,
+# confidence 0.65) -- it just carried the same flat value=1.0 as the wrong one, so the
+# old value-only tie-break couldn't tell them apart. decision/engine.py's own Gap-64
+# filter already excluded the unrelated items from independent_sources; this closes the
+# matching gap in what gets DISPLAYED.
+# ═══════════════════════════════════════════════════════════════════════════════════
+_hyp_dest = frozenset({"192.168.77.41"})
+_gb4, _cb4 = {}, {}
+_ev_ctc = Evidence(type="coordinated_targeting", source="argus_live_engine", timestamp=time.time(),
+                    device="dev1", value=3.0, confidence=1.0, independence_group="cross_device_correlation",
+                    domain="192.168.77.41")
+_route_evidence_into_buckets(_ev_ctc, "cross_device_correlation", _gb4, _cb4, _hyp_dest)
+_ev_dns_unrelated = Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
+                              device="dev1", value=2.0, confidence=0.0, independence_group="dns_behavior",
+                              domain="62.245.131.134")
+_route_evidence_into_buckets(_ev_dns_unrelated, "dns_behavior", _gb4, _cb4, _hyp_dest)
+check("_route_evidence_into_buckets: a dns_behavior item about a destination that "
+      "doesn't match the winning hypothesis's own verified destination is demoted to "
+      "context, never grouped -- the exact real bug (Germany IP shown as one of the "
+      "'independent evidence families' when decision/engine.py's own Gap-64 filter "
+      "had already excluded it from scoring for the identical reason)",
+      "dns_behavior" not in _gb4 and "dns_behavior" in _cb4)
+
+_ev_zeek_weak_wrong_dest = Evidence(type="zeek_notice_weak", source="zeek", timestamp=time.time() - 60,
+                                     device="dev1", value=1.0, confidence=0.4, independence_group="network_behavior",
+                                     domain="45.57.41.1", provenance="detector:zeek:notice:weird:window_recision")
+_route_evidence_into_buckets(_ev_zeek_weak_wrong_dest, "network_behavior", _gb4, _cb4, _hyp_dest)
+_ev_zeek_medium_right_dest = Evidence(type="zeek_notice_medium", source="zeek", timestamp=time.time(),
+                                       device="dev1", value=1.0, confidence=0.65, independence_group="network_behavior",
+                                       domain="192.168.77.41", provenance="detector:zeek:notice:SSL::Invalid_Server_Cert")
+_route_evidence_into_buckets(_ev_zeek_medium_right_dest, "network_behavior", _gb4, _cb4, _hyp_dest)
+check("THE REAL FIX: within the SAME family (network_behavior), the destination-matching "
+      "zeek_notice_medium (SSL::Invalid_Server_Cert on 192.168.77.41 itself) wins the "
+      "decisive slot over the unrelated-destination zeek_notice_weak (Netflix, "
+      "45.57.41.1) -- even though the old code would have kept whichever inserted "
+      "first, since both share the same flat value=1.0",
+      _gb4.get("network_behavior") is _ev_zeek_medium_right_dest,
+      f"got {_gb4.get('network_behavior')!r}")
+check("...and the unrelated Netflix item lands in context_evidence instead of being "
+      "silently dropped -- still shown for completeness, just never decisive",
+      _cb4.get("network_behavior") is _ev_zeek_weak_wrong_dest)
+check("net result for this exact real alert shape: fam_count = len(grouped_evidence) "
+      "is 2 (cross_device_correlation + network_behavior), matching what "
+      "independent_sources actually was for this incident -- not the 3 the live alert's "
+      "Telegram text showed", len(_gb4) == 2, f"got {len(_gb4)}: {sorted(_gb4.keys())}")
+
+_gb5, _cb5 = {}, {}
+_route_evidence_into_buckets(
+    Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(), device="d",
+              value=2.0, confidence=0.0, independence_group="dns_behavior", domain="62.245.131.134"),
+    "dns_behavior", _gb5, _cb5, frozenset())
+check("_route_evidence_into_buckets: an EMPTY hyp_destination_ids (no destination anchor "
+      "for this decision at all) never demotes anything on destination grounds -- "
+      "mirrors decision/engine.py's own 'no anchor -> no filtering' Gap-64 rule",
+      "dns_behavior" in _gb5)
+
+_gb6, _cb6 = {}, {}
+_route_evidence_into_buckets(
+    Evidence(type="ml_anomaly", source="ml", timestamp=time.time(), device="d",
+              value=1.0, confidence=0.5, independence_group="ml_anomaly", domain=None),
+    "ml_anomaly", _gb6, _cb6, _hyp_dest)
+check("_route_evidence_into_buckets: an evidence item with NO destination at all "
+      "(domain=None) is unaffected by hyp_destination_ids -- only carries the "
+      "pre-existing NON_ATTACK_FAMILIES routing (ml_anomaly), same as before this fix",
+      "ml_anomaly" not in _gb6 and "ml_anomaly" in _cb6)
+
+# --- _enforce_evidence_families_invariant() (2026-09-16, same fix): the general
+# backstop for every OTHER way a family could end up decisive here without actually
+# counting toward independent_sources in decision/engine.py -- not just the
+# destination-mismatch case _route_evidence_into_buckets() already covers above.
+# E.g. a family that's decisive in grouped_evidence purely because active_evidence's
+# own freshness/attack-shaped filtering diverged from decision/engine.py's (per-type
+# TTLs via score_evidence(), _is_attack_shaped()) -- decision["evidence_families"] is
+# the single ground truth, so anything grouped_evidence has that it doesn't gets
+# demoted, regardless of WHY the two disagreed.
+_gb7 = {"network_behavior": Evidence(type="zeek_notice_medium", source="zeek", timestamp=time.time(),
+                                       device="d", value=1.0, confidence=0.65, domain="192.168.77.41"),
+        "dns_behavior": Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
+                                   device="d", value=2.0, confidence=0.0, domain="192.168.77.41")}
+_cb7 = {}
+_enforce_evidence_families_invariant(_gb7, _cb7, {"evidence_families": ["network_behavior"]})
+check("_enforce_evidence_families_invariant: a family present in grouped_evidence "
+      "but absent from decision['evidence_families'] (the actual scoring ground "
+      "truth) is demoted to context -- covers every divergence source, not just "
+      "the destination-mismatch one _route_evidence_into_buckets() already filters",
+      "dns_behavior" not in _gb7 and "network_behavior" in _gb7 and "dns_behavior" in _cb7)
+
+_gb8, _cb8 = {"network_behavior": Evidence(type="x", source="s", timestamp=time.time(), device="d", value=1.0)}, {}
+_enforce_evidence_families_invariant(_gb8, _cb8, {})
+check("_enforce_evidence_families_invariant: a decision dict with NO 'evidence_families' "
+      "key at all (v-current, which never populates it) degrades to a no-op -- exactly "
+      "today's unfiltered behavior, not a wrongly-empty allowlist",
+      "network_behavior" in _gb8 and _cb8 == {})
+
+_gb9, _cb9 = {"network_behavior": Evidence(type="x", source="s", timestamp=time.time(), device="d", value=1.0)}, {}
+_enforce_evidence_families_invariant(_gb9, _cb9, {"evidence_families": []})
+check("_enforce_evidence_families_invariant: a genuinely EMPTY evidence_families "
+      "(0 independent sources) correctly demotes everything -- the key's PRESENCE, "
+      "not truthiness, is what gates enforcement",
+      _gb9 == {} and "network_behavior" in _cb9)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

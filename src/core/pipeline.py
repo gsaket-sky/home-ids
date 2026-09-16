@@ -452,24 +452,89 @@ def _canonical_evidence_family(ev_type: str, raw_independence_group: str) -> str
 
 
 def _route_evidence_into_buckets(ev: Any, canonical_family: str, grouped_evidence: dict,
-                                   context_evidence: dict) -> None:
+                                   context_evidence: dict,
+                                   hyp_destination_ids: "frozenset[str]" = frozenset()) -> None:
     """Mutates grouped_evidence/context_evidence in place: routes `ev` into the
     context bucket (shown for completeness, never decisive) when canonical_family
-    is one of independence.py's own NON_ATTACK_FAMILIES, else the decisive
-    bucket -- keeping whichever entry already there has the higher .value if this
-    canonical_family was already populated by EITHER source loop (active_evidence
-    or the decision["attack_evidence"] bridge). Extracted (2026-09-15) alongside
-    _canonical_evidence_family() above -- previously each of the two source loops
-    below had its OWN narrower, hand-picked context check ("local_context" only
-    in one, "peer_cohort_deviation" only in the other), each missing the other's
-    case and every other NON_ATTACK_FAMILIES member (ml_anomaly, policy,
-    baseline_deviation, regime_change, sequence_dynamics, novelty_context) --
-    latent versions of the exact same "these two loops don't agree" bug class,
-    just not yet triggered live. One shared, complete check now, used
-    identically by both loops."""
-    bucket = context_evidence if canonical_family in NON_ATTACK_FAMILIES else grouped_evidence
+    is one of independence.py's own NON_ATTACK_FAMILIES, OR when `ev` carries a
+    destination that doesn't match any of hyp_destination_ids (the winning
+    hypothesis's own verified destinations, decision/engine.py's `hyp_destinations`
+    -- empty means "no destination anchor for this decision," which never demotes
+    anything, mirroring Gap-64's own "no anchor -> no filtering" rule there). Else
+    routes to the decisive bucket -- keeping whichever entry already there has the
+    higher .value if this canonical_family was already populated by EITHER source
+    loop (active_evidence or the decision["attack_evidence"] bridge). Extracted
+    (2026-09-15) alongside _canonical_evidence_family() above -- previously each of
+    the two source loops below had its OWN narrower, hand-picked context check
+    ("local_context" only in one, "peer_cohort_deviation" only in the other), each
+    missing the other's case and every other NON_ATTACK_FAMILIES member
+    (ml_anomaly, policy, baseline_deviation, regime_change, sequence_dynamics,
+    novelty_context) -- latent versions of the exact same "these two loops don't
+    agree" bug class, just not yet triggered live. One shared, complete check now,
+    used identically by both loops.
+
+    BUGFIX (2026-09-16, live alert audit -- FireTV/a4544eb6d2ca COORDINATED_
+    TARGETING, user-flagged): this had NO destination check at all until now, so a
+    dns_evasion_anomaly item about a completely unrelated destination (a German
+    IP the device also happened to contact, confidence 0.0) landed in the DECISIVE
+    bucket and displayed in the Telegram WHY-block as if it were one of the "N
+    independent evidence families" backing the verdict -- even though decision/
+    engine.py's own Gap-64 destination-linkage filter had already excluded that
+    exact same item from independent_sources/evidence_families for the identical
+    reason (see that file's own comment on hyp_destinations). Confirmed live via
+    the graph store: the SAME family (network_behavior) also had a genuinely
+    destination-matching, higher-confidence item (a real SSL::Invalid_Server_Cert
+    notice fired on a connection to the incident's own destination, confidence
+    0.65) that lost its family slot to an unrelated, lower-confidence
+    zeek_notice_weak on a different destination entirely (confidence 0.4) purely
+    because zeek notices all carry the same flat value=1.0 -- the old .value-only
+    comparison had no way to prefer the relevant one. Routing a mismatched item to
+    context_evidence up front (rather than trying to out-rank it later) fixes
+    both at once: a mismatched item can never win a decisive slot at all, so the
+    matching item wins by simply having no decisive competitor."""
+    is_destination_mismatch = bool(hyp_destination_ids) and bool(ev.domain) and ev.domain not in hyp_destination_ids
+    bucket = context_evidence if (canonical_family in NON_ATTACK_FAMILIES or is_destination_mismatch) else grouped_evidence
     if canonical_family not in bucket or ev.value > bucket[canonical_family].value:
         bucket[canonical_family] = ev
+
+
+def _enforce_evidence_families_invariant(grouped_evidence: dict, context_evidence: dict, decision: Dict[str, Any]) -> None:
+    """Mutates grouped_evidence/context_evidence in place: demotes any family that
+    survived _route_evidence_into_buckets() into the decisive bucket but ISN'T a
+    member of decision["evidence_families"] -- the exact ground truth
+    independent_sources counts against (independence_families, computed right
+    before the return in decision/engine.py).
+
+    BUGFIX (2026-09-16, user-requested general guarantee -- "ensure telegram alerts
+    for all cases exactly match the HEE decision engine"): the destination-mismatch
+    check _route_evidence_into_buckets() now applies closes ONE specific way
+    active_evidence's own loop (pipeline.py's separate, short-TTL v1 evidence store)
+    could disagree with decision/engine.py's actual verdict -- but that loop still
+    applies none of decision/engine.py's OTHER filters on ev_store before it becomes
+    attack_evidence there (per-type freshness TTLs via score_evidence(),
+    _is_attack_shaped() -- see that function's own docstring and the 2026-09-11
+    zeek_notice_weak BUGFIX comment in decision/engine.py) -- each one a distinct,
+    real way a family could still end up decisive here without actually having
+    counted toward independent_sources there. Rather than re-implementing every one
+    of decision/engine.py's filters a second time in this file (exactly the kind of
+    duplicated-logic drift that caused most of the OTHER bugs this file's own
+    comment history documents), this is a single, general invariant instead: no
+    family may stay in the DECISIVE bucket unless decision["evidence_families"]
+    itself says so. Demoted (not dropped) to context_evidence, same "shown for
+    completeness, never decisive" treatment every other non-decisive item already
+    gets, keeping the higher-.value item if context_evidence already had an entry
+    for that family. Gated on the key's PRESENCE (not truthiness) so v-current's
+    decision dict -- which lacks this key entirely -- degrades to exactly today's
+    unfiltered behavior, same pattern as every other decision.get(...) call in this
+    file; an argus decision with a genuinely empty evidence_families (0 independent
+    sources) correctly demotes everything, matching that true state."""
+    if "evidence_families" not in decision:
+        return
+    verified_families = set(decision["evidence_families"])
+    for fam in [f for f in grouped_evidence if f not in verified_families]:
+        demoted = grouped_evidence.pop(fam)
+        if fam not in context_evidence or demoted.value > context_evidence[fam].value:
+            context_evidence[fam] = demoted
 
 
 # BUGFIX (2026-09-15, live alert audit -- iPhone/d7cb300865b3 DATA_EXFILTRATION,
@@ -2975,9 +3040,18 @@ class EnginePipeline:
                                 # decide it, untouched here).
                                 grouped_evidence = {}
                                 context_evidence = {}
+                                # 2026-09-16: the winning hypothesis's own verified destinations
+                                # (decision/engine.py's hyp_destinations, exposed here as
+                                # hypothesis_destination_ids) -- threaded into BOTH loops below so
+                                # a destination-mismatched item can never occupy a decisive slot,
+                                # same Gap-64 semantics the scoring path already applies. See
+                                # _route_evidence_into_buckets()'s own docstring for the live bug
+                                # this closes.
+                                hyp_destination_ids = frozenset(decision.get("hypothesis_destination_ids", []))
                                 for ev in active_evidence:
                                     canonical_family = _canonical_evidence_family(ev.type, ev.independence_group)
-                                    _route_evidence_into_buckets(ev, canonical_family, grouped_evidence, context_evidence)
+                                    _route_evidence_into_buckets(ev, canonical_family, grouped_evidence, context_evidence,
+                                                                  hyp_destination_ids)
                                 # BUGFIX (live audit, 2026-09-09, real production alerts --
                                 # confirmed via a live PEER_COHORT_DEVIATION HIGH alert whose
                                 # PERSISTED hee_evidence_families/hee_independent_sources were
@@ -3045,7 +3119,12 @@ class EnginePipeline:
                                     # other NON_ATTACK_FAMILIES member and disagreeing with the
                                     # OTHER loop's own narrower "local_context"-only check) --
                                     # see that function's own docstring for the full incident.
-                                    _route_evidence_into_buckets(synth_ev, fam, grouped_evidence, context_evidence)
+                                    _route_evidence_into_buckets(synth_ev, fam, grouped_evidence, context_evidence,
+                                                                  hyp_destination_ids)
+                                # 2026-09-16, user-requested general guarantee -- "ensure telegram
+                                # alerts for all cases exactly match the HEE decision engine": see
+                                # _enforce_evidence_families_invariant()'s own docstring.
+                                _enforce_evidence_families_invariant(grouped_evidence, context_evidence, decision)
                                 why_lines = [_describe_evidence(ev, self.geoip_engine) for ev in
                                              sorted(grouped_evidence.values(), key=lambda e: e.value, reverse=True)]
                                 # VERSION 12: family labels, aligned to why_lines by construction --
