@@ -383,9 +383,38 @@ class GraphStore:
         discard-on-merge (state_guard.py:436-439, called out in the plan for your
         sign-off, not a silent behavior change). The orphan row is tombstoned via
         merged_into_device_id, never deleted, so every evidence/edge row that
-        pointed at it keeps resolving through resolve_canonical_device_id()."""
+        pointed at it keeps resolving through resolve_canonical_device_id().
+
+        BUGFIX (2026-09-16, live IPv6-rollout verification -- found via a recurring
+        "merged_into_device_id cycle detected" warning, traced to a real 2-node
+        cycle dating back to 2026-09-06, ten days before this fix, so a pre-existing
+        latent bug rather than anything IPv6-related): this only ever checked for a
+        direct self-merge (orphan_id == canonical_id), never whether canonical_id is
+        ALREADY (transitively) merged into orphan_id. If some later re-identification
+        decision calls merge_device(orphan_id=B, canonical_id=A) after an earlier
+        cycle already wrote A -> B, the old code would happily write B -> A too,
+        creating exactly the 2-cycle resolve_canonical_device_id() then loops
+        forever on. Every real caller already wraps this in a broad
+        try/except Exception treating a graph-mirror failure as best-effort
+        (live_manager.py, pipeline.py, merge_fragmented_devices.py all log-and-
+        continue, never blocking the real v1 merge that already happened) -- so
+        refusing here is safe: it just skips the graph-side mirror for this one
+        conflicting call, exactly like any other best-effort graph write failure,
+        rather than silently corrupting the merge chain into an infinite loop."""
         if orphan_id == canonical_id:
             raise ValueError("cannot merge a device into itself")
+        try:
+            resolved_canonical = self.resolve_canonical_device_id(canonical_id)
+        except RuntimeError as e:
+            raise ValueError(
+                f"cannot merge '{orphan_id}' into '{canonical_id}': "
+                f"'{canonical_id}'s own merge chain already cycles ({e})"
+            ) from e
+        if resolved_canonical == orphan_id:
+            raise ValueError(
+                f"cannot merge '{orphan_id}' into '{canonical_id}': "
+                f"'{canonical_id}' is already (transitively) merged into '{orphan_id}' -- would create a cycle"
+            )
         ts = timestamp if timestamp is not None else time.time()
         self.upsert_device(orphan_id, timestamp=ts)
         self.upsert_device(canonical_id, timestamp=ts)

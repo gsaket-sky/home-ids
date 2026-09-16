@@ -117,14 +117,44 @@ try:
 except ValueError:
     check("merging a device into itself is rejected", True)
 
-# --- cycle detection ---
+# --- cycle prevention / detection ---
+# BUGFIX (2026-09-16, live IPv6-rollout verification): a real 2-node cycle was
+# found live on .94, dating back to 2026-09-06 -- merge_device() only ever
+# checked for a direct self-merge, never whether canonical_id was ALREADY
+# (transitively) merged into orphan_id, so a later, conflicting merge_device()
+# call could silently write the second half of a cycle. Now refused at write
+# time, not just detected after the fact.
+store.merge_device("cycleA", "cycleB", timestamp=600.0)
 try:
-    store.merge_device("cycleA", "cycleB", timestamp=600.0)
     store.merge_device("cycleB", "cycleA", timestamp=601.0)
-    store.resolve_canonical_device_id("cycleA")
-    check("a merge cycle is detected rather than infinite-looping", False, "no exception raised")
+    check("merge_device refuses to write the second half of a cycle "
+          "(cycleB into cycleA, when cycleA is already merged into cycleB)", False, "no exception raised")
+except ValueError as e:
+    check("merge_device refuses to write the second half of a cycle "
+          "(cycleB into cycleA, when cycleA is already merged into cycleB)", "cycle" in str(e).lower())
+check("REGRESSION GUARD: the refused merge left cycleB's own row untouched (still canonical, "
+      "not pointed anywhere) -- the write was rejected outright, not partially applied",
+      store._conn.execute("SELECT merged_into_device_id FROM devices WHERE device_id='cycleB'").fetchone()[0] is None)
+
+# Defense-in-depth: resolve_canonical_device_id() must still survive a cycle that
+# reaches the data some OTHER way (e.g. the exact real .94 cycle this fix was
+# built from predates this fix and had to be repaired via direct SQL, not through
+# merge_device() at all) -- simulate that directly, bypassing merge_device()'s new
+# guard entirely, and confirm the read path still degrades safely instead of
+# looping forever.
+store._conn.execute("INSERT OR REPLACE INTO devices (device_id, first_seen, last_seen) VALUES ('rawCycleA', 700.0, 700.0)")
+store._conn.execute("INSERT OR REPLACE INTO devices (device_id, first_seen, last_seen) VALUES ('rawCycleB', 700.0, 700.0)")
+# Both rows must already exist before either FK reference is set (merged_into_device_id
+# REFERENCES devices(device_id)), so the cross-pointing UPDATE has to come after both INSERTs.
+store._conn.execute("UPDATE devices SET merged_into_device_id = 'rawCycleB' WHERE device_id = 'rawCycleA'")
+store._conn.execute("UPDATE devices SET merged_into_device_id = 'rawCycleA' WHERE device_id = 'rawCycleB'")
+try:
+    store.resolve_canonical_device_id("rawCycleA")
+    check("resolve_canonical_device_id still detects a cycle written by some other means, "
+          "rather than infinite-looping", False, "no exception raised")
 except RuntimeError as e:
-    check("a merge cycle is detected rather than infinite-looping", "cycle" in str(e))
+    check("resolve_canonical_device_id still detects a cycle written by some other means, "
+          "rather than infinite-looping", "cycle" in str(e))
 
 # --- retention pruning ---
 now = 10_000_000.0
