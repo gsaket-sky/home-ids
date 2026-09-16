@@ -11,6 +11,7 @@ across cycles, preserving the pure-evaluation model HEE_ROADMAP.md said not to b
 """
 import contextlib
 import json
+import logging
 import sqlite3
 import time
 import uuid
@@ -19,6 +20,8 @@ from typing import Any, Dict, List, Optional
 
 from argus.evidence.model import Evidence, NO_DESTINATION
 from utils import is_local_or_multicast_destination
+
+LOGGER = logging.getLogger("home_ids.graph_store")
 
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
@@ -299,6 +302,26 @@ class GraphStore:
 
     def close(self) -> None:
         self._conn.close()
+
+    def checkpoint_wal(self) -> None:
+        """BUGFIX (2026-09-16, third-party audit finding P0 -- unbounded WAL
+        growth): defense-in-depth for the ONE long-lived GraphStore singleton in
+        this codebase (live_engine.py's own -- every other caller, including
+        every console-API request via middleware/graph_client.py, opens a
+        short-lived connection that's closed within one request/call, letting
+        SQLite's own default auto-checkpoint handle things normally). That
+        singleton's connection stays open for the life of the process (days of
+        uptime), so PASSIVE never blocks on a concurrent reader/writer and never
+        raises if one is active -- it just checkpoints whatever it safely can
+        right now, a no-op cost when there's nothing to do. Callers should rate-
+        limit calling this (see live_engine.py's own periodic call) rather than
+        call it every cycle; SQLite's own automatic checkpoint (default: every
+        ~1000 WAL pages) already handles the common case, this is a periodic
+        backstop, not a replacement for it. Best-effort: never raises."""
+        try:
+            self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception as e:
+            LOGGER.warning("WAL checkpoint failed for %r (non-fatal): %s", self.db_path, e)
 
     def _maybe_commit(self) -> None:
         """Every mutating method calls this instead of self._conn.commit() directly.

@@ -165,6 +165,7 @@ class HealthManager:
         self._critical_streak: int = 0
         self._alerted_pressure_level: Optional[str] = None
         self._process = psutil.Process() if psutil is not None else None
+        self._dns_evasion_audit_disabled: bool = False
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -282,6 +283,32 @@ class HealthManager:
         self._evaluate_probe_component("zeek", self._check_zeek_freshness())
         self._evaluate_probe_component("suricata", self._check_suricata())
         self._evaluate_probe_component("pihole", self._check_pihole())
+
+        # BUGFIX (2026-09-16, third-party audit finding P0 -- Pi-hole "isolation
+        # storm"): dns_evasion.py's blind-spot audit (fritzbox_capture.py:
+        # run_dns_evasion_audit) treats a device's recorded DNS query history as
+        # ground truth for what a real connection SHOULD have had a lookup for. If
+        # Pi-hole has stopped being POLLED successfully (pihole_poll heartbeat
+        # stale -- distinct from "pihole" above, which only checks the admin API
+        # used for blocking, not query-log ingestion), that history is stale/empty
+        # through no fault of any device -- every device captured in the next
+        # reactive-capture burst (a periodic whole-radio spotcheck, not a one-off)
+        # would be flagged "no DNS history" on perfectly normal traffic, which
+        # only needs one more weak signal to reach the 2-independent-sources HIGH
+        # bar and trigger containment network-wide. Same config-override channel
+        # _apply_pressure_level() already uses to reach into pipeline behavior
+        # from here -- gate the whole audit off rather than let it manufacture
+        # "unexplained connection" evidence from a DNS source known unreliable
+        # right now. Defaults back on (clears the override) the moment pihole_poll
+        # reports HEALTHY again, same as every other health-driven override here.
+        pihole_poll_state = self._component_state.get("pihole_poll", {}).get("state", HEALTHY)
+        should_disable = pihole_poll_state != HEALTHY
+        if should_disable != self._dns_evasion_audit_disabled:
+            if should_disable:
+                self._set_config_override("dns_evasion_audit_enabled", False)
+            else:
+                self._clear_config_override("dns_evasion_audit_enabled")
+            self._dns_evasion_audit_disabled = should_disable
 
         # read-only classification off existing files -- never re-alerts what
         # feed_health.py/job_health.json's own consumers already alert on

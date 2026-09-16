@@ -201,6 +201,30 @@ def _get_graph_store() -> GraphStore:
     return _graph_store
 
 
+# BUGFIX (2026-09-16, third-party audit finding P0 -- unbounded WAL growth):
+# this module's _graph_store singleton is the ONE GraphStore connection in the
+# whole codebase that stays open for the life of the process (every other
+# caller, e.g. the console API's middleware/graph_client.py, opens a fresh
+# connection per request and closes it). SQLite's own automatic WAL checkpoint
+# already handles the common case, so this is a periodic, rate-limited
+# backstop, not a fix for a confirmed live problem -- see checkpoint_wal()'s
+# own docstring for why. 600s: frequent enough to bound worst-case WAL size
+# without adding meaningful per-cycle overhead (PASSIVE never blocks).
+_WAL_CHECKPOINT_INTERVAL_SECONDS = 600.0
+_last_wal_checkpoint_ts: float = 0.0
+
+
+def _maybe_checkpoint_wal(now: float) -> None:
+    global _last_wal_checkpoint_ts
+    if now - _last_wal_checkpoint_ts < _WAL_CHECKPOINT_INTERVAL_SECONDS:
+        return
+    _last_wal_checkpoint_ts = now
+    try:
+        _get_graph_store().checkpoint_wal()
+    except Exception as e:
+        LOGGER.warning("Periodic WAL checkpoint failed (non-fatal): %s", e)
+
+
 def get_graph_store() -> GraphStore:
     """Public accessor for the SAME lazily-initialized GraphStore singleton this
     module's own evaluate() uses -- v13 full-architecture plan, Phase 3:
@@ -353,47 +377,64 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
     written &= current_fresh_keys  # forget anything EvidenceStore itself has let expire
     new_v2 = [ev for ev in fresh_v2 if _content_key(ev) not in written]
 
-    current_key = (decision["state"], decision["decision_path"])
-    decision_changed = _last_decision_key.get(device_id) != current_key
-    if not new_v2 and not decision_changed:
-        return
     try:
-        store = _get_graph_store()
-        with store.transaction():
-            for ev in new_v2:
-                store.insert_evidence(ev)
-            if decision_changed:
-                new_decision_id = store.insert_decision(
-                    device_id=device_id, timestamp=timestamp,
-                    state=decision["state"], decision_path=decision["decision_path"],
-                    confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
-                    risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
-                    raw_payload=decision,
-                    # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
-                    # (_inject_graph_derived_evidence()) that is deliberately never passed
-                    # to insert_evidence() above -- an evidence->decision 'supports' edge
-                    # for an evidence_id that was never actually persisted would be a
-                    # dangling reference. All three synthetic evidence types share the
-                    # "v13_live_engine:" provenance prefix, so filtering on that (rather
-                    # than threading a separate is-synthetic flag through several layers)
-                    # is enough to exclude them here.
-                    evidence_ids=[
-                        ev.evidence_id for ev in merged_v2
-                        if not ev.provenance.startswith("v13_live_engine:")
-                    ],
-                )
-                _last_decision_key[device_id] = current_key
-                _last_decision_id[device_id] = new_decision_id
-        # Only mark as written AFTER a successful commit -- a failed write leaves
-        # these keys untracked, so they're correctly retried next cycle instead of
-        # being silently lost from the graph forever.
-        written.update(_content_key(ev) for ev in new_v2)
-    except Exception as e:
-        LOGGER.error(
-            "Failed to write evidence/decision to GraphStore for device %r -- the live "
-            "decision itself is already made and unaffected by this: %s",
-            device_id, e, exc_info=True,
-        )
+        current_key = (decision["state"], decision["decision_path"])
+        decision_changed = _last_decision_key.get(device_id) != current_key
+        if not new_v2 and not decision_changed:
+            return
+        try:
+            store = _get_graph_store()
+            with store.transaction():
+                for ev in new_v2:
+                    store.insert_evidence(ev)
+                if decision_changed:
+                    new_decision_id = store.insert_decision(
+                        device_id=device_id, timestamp=timestamp,
+                        state=decision["state"], decision_path=decision["decision_path"],
+                        confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
+                        risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
+                        raw_payload=decision,
+                        # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
+                        # (_inject_graph_derived_evidence()) that is deliberately never passed
+                        # to insert_evidence() above -- an evidence->decision 'supports' edge
+                        # for an evidence_id that was never actually persisted would be a
+                        # dangling reference. All three synthetic evidence types share the
+                        # "v13_live_engine:" provenance prefix, so filtering on that (rather
+                        # than threading a separate is-synthetic flag through several layers)
+                        # is enough to exclude them here.
+                        evidence_ids=[
+                            ev.evidence_id for ev in merged_v2
+                            if not ev.provenance.startswith("v13_live_engine:")
+                        ],
+                    )
+                    _last_decision_key[device_id] = current_key
+                    _last_decision_id[device_id] = new_decision_id
+            # Only mark as written AFTER a successful commit -- a failed write leaves
+            # these keys untracked, so they're correctly retried next cycle instead of
+            # being silently lost from the graph forever.
+            written.update(_content_key(ev) for ev in new_v2)
+        except Exception as e:
+            LOGGER.error(
+                "Failed to write evidence/decision to GraphStore for device %r -- the live "
+                "decision itself is already made and unaffected by this: %s",
+                device_id, e, exc_info=True,
+            )
+    finally:
+        # BUGFIX (2026-09-16, third-party audit finding P1 -- unbounded memory
+        # growth): the prune above (`written &= current_fresh_keys`) empties
+        # `written` once EvidenceStore lets every item for this device expire,
+        # but never removed the now-empty set's OWN top-level device_id entry --
+        # mobile devices routinely rotate MAC addresses, so over weeks/months
+        # this dict accumulates one permanent empty-set entry per ephemeral MAC
+        # ever seen. Checked here, in `finally`, AFTER every write attempt above
+        # (written.update() may have just repopulated it this same call) so an
+        # in-flight write's own dedup bookkeeping is never discarded out from
+        # under it -- only a device_id whose set is STILL empty once this call
+        # is entirely done gets dropped. Re-created via setdefault() above the
+        # moment this device_id is active again, identical to a device seen for
+        # the first time.
+        if device_id in _written_evidence_keys and not _written_evidence_keys[device_id]:
+            del _written_evidence_keys[device_id]
 
 
 def _dga_shape_key(domain: str) -> str:
@@ -866,6 +907,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # fields via GraphStore.update_decision_payload(). None (never set) if
             # the graph write itself has never succeeded for this device yet.
             decision["_graph_decision_id"] = _last_decision_id.get(device_id)
+            _maybe_checkpoint_wal(ts)
 
         return decision
     except Exception as e:

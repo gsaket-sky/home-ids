@@ -210,6 +210,20 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         if explained:
             continue
         unexplained.append(ip)
+        # TRIED (P1, third-party audit, 2026-09-16) and REVERTED: a DoH analogue of
+        # the port-53/853 policy-bypass check below, treating a port-443 connection
+        # to a KNOWN_PUBLIC_DNS_RESOLVERS IP as evasion. Reverted after
+        # test_phase23_fritzbox_capture.py's own "clean device" fixture (a
+        # connection to 1.1.1.1:443 that reverse-DNS genuinely explains, via
+        # _reverse_dns_explains() above) failed against it -- Cloudflare/Google
+        # etc. are NOT single-purpose DNS infrastructure on port 443 the way they
+        # are on 53/853; 1.1.1.1 alone fronts unrelated CDN/proxy traffic, so this
+        # would have flagged ordinary HTTPS to those providers as "DNS policy
+        # bypass" alongside genuine DoH. A real fix needs TLS SNI/ALPN telemetry
+        # (which DeviceBurstAudit doesn't carry today) to actually distinguish a
+        # DoH handshake from ordinary HTTPS to the same IP -- not a port+IP
+        # heuristic alone. Left as a real, still-open gap; do not re-attempt this
+        # exact approach without that telemetry.
         if audit.dest_ports.get(ip) in (53, 853):
             policy_bypass_ips.append(ip)
         if ti_engine is not None:

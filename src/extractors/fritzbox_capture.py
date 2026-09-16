@@ -682,16 +682,33 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
                 if suricata_scratch is not None and suricata_scratch.exists():
                     shutil.rmtree(suricata_scratch, ignore_errors=True)
 
-    try:
-        summary["dns_evasion_findings"] = run_dns_evasion_audit(
-            zeek_fx, state_manager, evidence_store, burst_source_ips, capture_ts,
-            geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine,
+    # BUGFIX (2026-09-16, third-party audit finding P0 -- Pi-hole "isolation
+    # storm"): health_manager.py sets this override to False the moment
+    # pihole_poll's own heartbeat goes stale (Pi-hole down/crashed/desynced) --
+    # this audit's whole premise is that a device's recorded DNS query history is
+    # trustworthy ground truth, which is exactly what's NOT true while the poller
+    # that builds that history is itself unhealthy. Skipping rather than running
+    # it anyway avoids manufacturing "no DNS history" evidence for every device in
+    # this burst from a gap in the DNS collector, not the device. Reactive-capture
+    # still runs and ingests real Zeek events either way -- only this one audit is
+    # paused.
+    if config.get("dns_evasion_audit_enabled", True):
+        try:
+            summary["dns_evasion_findings"] = run_dns_evasion_audit(
+                zeek_fx, state_manager, evidence_store, burst_source_ips, capture_ts,
+                geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine,
+            )
+            reactive_capture_dns_evasion_findings_total.inc(sum(summary["dns_evasion_findings"].values()))
+        except Exception as exc:
+            LOGGER.error("DNS-evasion audit failed for this burst (non-fatal): %s", exc)
+            summary["errors"].append(f"dns_evasion_audit: {exc}")
+            reactive_capture_errors_total.labels(stage="dns_evasion_audit").inc()
+    else:
+        LOGGER.info(
+            "Skipping DNS-evasion audit for this burst -- Pi-hole polling is "
+            "currently unhealthy, so DNS query history can't be trusted as "
+            "ground truth right now (health_manager.py's pihole_poll signal)."
         )
-        reactive_capture_dns_evasion_findings_total.inc(sum(summary["dns_evasion_findings"].values()))
-    except Exception as exc:
-        LOGGER.error("DNS-evasion audit failed for this burst (non-fatal): %s", exc)
-        summary["errors"].append(f"dns_evasion_audit: {exc}")
-        reactive_capture_errors_total.labels(stage="dns_evasion_audit").inc()
 
     if suricata_evidence_by_device and evidence_store is not None:
         for dev_id, ev_list in suricata_evidence_by_device.items():
