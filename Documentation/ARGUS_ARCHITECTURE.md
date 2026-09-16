@@ -455,15 +455,35 @@ module) and `regime_id` defaults to a fixed `0` — both honestly first-pass, si
 full BOCPD/regime tracking that would feed richer versions of either only runs on the
 out-of-scope `.19` host, not in this live pipeline (see the correction below).
 
-**Correction (2026-09-15): Sheet 00 baseline scoring does not run on `.94` at all.**
-`BaselineEngine` (Gaussian/Beta/Poisson/BOCPD/Markov, described above as feeding the
-autotuner's `bocpd_hazard_rate` read) is only ever instantiated by
+**UPDATE (2026-09-16): Sheet 00 baseline scoring is now live on `.94`, superseding the
+2026-09-15 correction below (kept for the record, since it was accurate at the time).**
+`BaselineEngine` was previously only ever instantiated by `src/argus/ingest/daemon.py`
+(the standalone `.19` shadow host); `argus/ops/live_engine.py`'s `evaluate()` now also
+constructs one (`_get_baseline_engine()`, a process-lifetime singleton mirroring
+`_get_autotune_engine()`'s own pattern) and calls `_inject_baseline_evidence()` on every
+cycle a `device_id` is supplied, per user request ("implement... in `.94`, ignore
+`.19`"). This ports `daemon.py`'s own `_score_baselines()` call sequence — same
+metric -> model_kind mapping, same one-cycle-lagged `risk` Gaussian input (`.94`'s
+version uses its own `_last_risk_score` module dict, the identical circular-dependency
+workaround `daemon.py` already used), same fresh-cycle-only Poisson/Markov inputs —
+rather than reinventing it. `.94`'s real merged DNS+Zeek `features` dict already
+carried every raw input this needs, confirmed against a real live alert before writing
+any code. Config-gated: `baseline_scoring_enabled` (default `true`, `config.yaml`'s
+`detection_engine:` section, `[LIVE]` — takes effect immediately via
+`config_overrides.json`, no restart) is a plain rollback switch, matching this
+project's standing precedent for every other newly-cut-over subsystem. The
+`baseline_deviation`/`regime_change`/`markov_*` evidence types this doc's
+hypothesis-engine tables describe are now genuinely produced on `.94`, not just
+consumed-if-present. See `Documentation/PIPELINE_MATH_REFERENCE.md` §1 for the full
+math and `tests/test_argus_live_engine.py`'s Section J for the wiring-level test
+coverage (the underlying Bayesian/BOCPD math itself is covered separately by
+`test_argus_baseline_engine.py`/`test_argus_bayesian_baseline.py`, unaffected by this
+change).
+
+*(2026-09-15 correction, superseded above, kept for the record):* Sheet 00 baseline
+scoring did not run on `.94` at all. `BaselineEngine` was only ever instantiated by
 `src/argus/ingest/daemon.py` — the standalone `.19` shadow host — confirmed via a direct
-grep of `live_engine.py`/`pipeline.py` (zero references). The `baseline_deviation`/
-`regime_change`/`markov_*` evidence types this doc's hypothesis-engine tables describe
-are real and fully wired to be *consumed* if present, but nothing on `.94` currently
-*produces* them. Treat any future claim that "baseline scoring is live" as needing
-re-verification against `.94`'s actual pipeline, not this doc's own earlier prose.
+grep of `live_engine.py`/`pipeline.py` (zero references at the time).
 
 ## 6. Identity & Device Lifecycle
 

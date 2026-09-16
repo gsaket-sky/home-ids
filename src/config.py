@@ -102,6 +102,12 @@ DEFAULT_CONFIG = {
     "alert_threshold": 6.0,
     "threshold_std_dev": 3.0,
     "baseline_alpha": 0.05,
+    # 2026-09-16: rollback switch for argus/baseline/engine.py's Bayesian
+    # Gaussian/Beta/Poisson/Markov + BOCPD changepoint scoring, live-wired into
+    # argus/ops/live_engine.py's evaluate() this same day -- previously only ever run
+    # by the separate, out-of-scope `.19` ingest daemon. Matches this codebase's own
+    # standing precedent of a plain on/off switch for every newly-cut-over subsystem.
+    "baseline_scoring_enabled": True,
     "state_path": "state/ids_state.json",
     "model_path": "models/ids_model.pkl",
     "alert_json_path": "alerts.json",

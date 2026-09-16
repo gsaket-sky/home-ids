@@ -256,6 +256,14 @@ detection_engine:
   # the correct speed for this signal — don't change without reason. [LIVE]
   baseline_alpha: 0.05
 
+  # Rollback switch for the Bayesian Gaussian/Beta/Poisson/Markov + BOCPD
+  # changepoint baseline-scoring subsystem (argus/baseline/engine.py), live
+  # per-device per-cycle. Read fresh every cycle, so this takes effect
+  # immediately via the console/config_overrides.json without a restart —
+  # set false to fall back to "no baseline_deviation/regime_change/markov_*
+  # evidence this cycle" if it ever needs to be paused. [LIVE]
+  baseline_scoring_enabled: true
+
   # Decay factor for domain-count baselines — 0.995 gives a ~4.6 minute
   # half-life. [LIVE]
   decay_factor: 0.995

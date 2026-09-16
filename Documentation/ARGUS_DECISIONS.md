@@ -360,11 +360,13 @@ what was deliberately scoped in vs. left out, since the scoping reasoning still 
 not all four `TUNABLE_PARAMETERS` — the one parameter with a real signal in a backtest
 run's own synthetic-sweep data. `reputation_tier_suspicious_floor`/`high_floor` have no
 synthetic signal (the attack generators are behavioral, not IOC-based);
-`bocpd_hazard_rate` has **zero live consumer on `.94` today** — `BaselineEngine` (Sheet
-00) only runs on the out-of-scope `.19` host, confirmed by direct grep of
-`live_engine.py`/`pipeline.py` (zero references) — so tuning it would be motion with no
-real effect. Left genuinely untriggered because there's no sound signal, not deferred out
-of caution.
+`bocpd_hazard_rate` was left genuinely untriggered because the nightly synthetic sweep
+has no signal shaped for a regime-sensitivity knob, not because tuning it would be
+inert — **UPDATE 2026-09-16: `BaselineEngine` (Sheet 00) is now live on `.94` too**
+(wired into `live_engine.py`'s `evaluate()`, per user request; previously accurate that
+it only ran on the out-of-scope `.19` host), so `bocpd_hazard_rate` now has a real live
+consumer via `get_active_value()`. Still not triggered by the real proposer, same
+"no sound signal" reasoning as the other two untriggered parameters.
 
 Bidirectional: tightens immediately on any synthetic class under 70% detection (fails
 safe toward more detection). Loosens only when every class hits 100% AND

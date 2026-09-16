@@ -104,6 +104,8 @@ CONFIG_SCHEMA = [
      "desc": "Samples a device's ML model needs before active scoring (~2.8h at current traffic)."},
     {"s": "detection_engine", "k": "baseline_alpha", "t": "number", "def": 0.05,
      "desc": "EWMA smoothing factor for rate/entropy/unique-domain baselines -- don't change without reason."},
+    {"s": "detection_engine", "k": "baseline_scoring_enabled", "t": "bool", "def": True,
+     "desc": "Bayesian Gaussian/Beta/Poisson/Markov + BOCPD changepoint baseline scoring, live per-device per-cycle. Rollback switch, not a tuning knob."},
     {"s": "detection_engine", "k": "decay_factor", "t": "number", "def": 0.995,
      "desc": "Decay factor for domain-count baselines (~4.6 min half-life)."},
     {"s": "detection_engine", "k": "suspicious_escalation_seconds", "t": "number", "def": 600.0,

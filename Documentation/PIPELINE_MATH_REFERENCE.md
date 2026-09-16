@@ -104,18 +104,21 @@ division-by-near-zero blowup). This is computed fresh every pipeline cycle from 
 counts over a **5-minute (300s)** sliding window (`window_seconds` config, enforced in
 `extractors/dns_features.py`'s `FeatureExtractor.compute()`).
 
-### 1b. The Bayesian conjugate-model subsystem — real code, NOT running on `.94`
+### 1b. The Bayesian conjugate-model subsystem — live on `.94` as of 2026-09-16
 
 **File:** `src/argus/baseline/bayesian.py` (pure math), `src/argus/baseline/engine.py`
-(orchestration/persistence, `device_baselines`/`population_priors` tables). **Per
-`ARGUS_ARCHITECTURE.md` §5's own correction (2026-09-15, re-verified while writing this
-document): `BaselineEngine` is only ever instantiated by `src/argus/ingest/daemon.py`
-— the separate, out-of-scope `.19` shadow host. Zero references exist in `live_engine.py`
-or `pipeline.py`, the two modules that drive `.94`'s real live traffic.** Everything in
-this subsection is real, tested code — just not code that's currently touching `.94`'s
-real detections. Treat any of these formulas as describing `.19`'s (or a future `.94`
-cutover's) behavior, never as an explanation for a number currently showing up in a
-`.94` alert.
+(orchestration/persistence, `device_baselines`/`population_priors` tables). **UPDATE
+(2026-09-16, user request: "implement Bayesian Gaussian/Beta/Poisson/Markov + BOCPD
+changepoint-detection subsystem in `.94`, ignore `.19`"): superseding this section's
+own earlier "not running on `.94`" framing (accurate the day this doc was first
+written, one day prior).** `BaselineEngine` was previously only ever instantiated by
+`src/argus/ingest/daemon.py` (the separate `.19` shadow host); `argus/ops/live_engine.py`'s
+`evaluate()` now constructs one too and scores every device with real traffic, every
+cycle, via a new `_inject_baseline_evidence()` function that ports `daemon.py`'s own
+`_score_baselines()` call sequence. Config-gated (`baseline_scoring_enabled`, default
+`true`) — see `ARGUS_ARCHITECTURE.md` §5 for the full wiring writeup. Every formula
+below is now a real, live explanation for `baseline_deviation`/`regime_change`/
+`markov_*` evidence in a genuine `.94` alert, not just `.19`/future-cutover behavior.
 
 Four conjugate-prior model families, one row per `(device_id, metric, hour, regime_id)`
 in `device_baselines`:
@@ -183,8 +186,9 @@ ever reads" — display/Grafana-only, not a real detection input).
 
 ### 1c. Regime-change detection: Bayesian Online Changepoint Detection (BOCPD)
 
-**File:** `src/argus/baseline/bayesian.py`, `class BOCPDTracker` (same "not live on
-`.94`" caveat as §1b — this only ever runs where `BaselineEngine` runs).
+**File:** `src/argus/baseline/bayesian.py`, `class BOCPDTracker` (same "live on `.94`
+as of 2026-09-16" status as §1b — runs wherever `BaselineEngine` runs, now including
+`.94`'s own live per-cycle path).
 
 Standard BOCPD (Adams & MacKay 2007): maintains a set of hypotheses, each pairing a
 "run length" (cycles since the hypothesized last changepoint) with its own model
@@ -206,10 +210,14 @@ prune hypotheses below weight 1e-4, cap at 40 by weight (bounds memory/CPU)
 ```
 
 `hazard_rate` (default `1/500` — an expected ~500-cycle regime length) is one of the
-four live-tunable autotune parameters (`bocpd_hazard_rate`, §13) — **but per
-`ARGUS_ARCHITECTURE.md` §5, since `BaselineEngine` never runs on `.94`, tuning this
-parameter is currently motion with no live effect**, exactly the reason
-`backtest_job.py`'s real proposer (§13) deliberately never triggers it.
+four live-tunable autotune parameters (`bocpd_hazard_rate`, §13). **UPDATE
+(2026-09-16): now has a real live consumer on `.94`** (`BaselineEngine._load_tracker()`
+reads it via `get_active_value()` on every tracker construction) — the "motion with no
+live effect" framing this section carried until now is stale. `backtest_job.py`'s real
+proposer (§13) still doesn't trigger it, but for a different, still-accurate reason:
+the nightly synthetic attack sweep has no signal shaped for this parameter (it's a
+regime-sensitivity knob, not a detection-sensitivity one) — not because nothing would
+read a promoted value.
 
 **Regime-change confirmation is two-stage, not a single-cycle trigger** — the code's
 own docstring documents two real false-positive modes this closed (a single 4-sigma
@@ -258,10 +266,17 @@ writes to `population_priors` outside of a test fixture**
 (`tests/test_argus_baseline_engine.py`). The "clean backtest history" contributor-
 selection/aggregation job the schema comment describes does not exist yet — the table
 is real, queryable, and would work correctly the moment something populates it, but as
-of this writing nothing does. Combined with §1b's "not running on `.94` at all," this
-whole cold-start mechanism is two dependency-levels removed from live effect today:
-`.94` doesn't run `BaselineEngine`, and even `.19` (which does) has no
-`population_priors` rows to seed from.
+of this writing nothing does. **UPDATE (2026-09-16): this gap is now live-relevant,
+not just theoretical** — `BaselineEngine` runs on `.94` as of this same day (§1b), so
+every device's `_seeded_model()` call on `.94` now genuinely falls through to each
+model's own weak default prior (`_load_population_prior()` returns `None` for every
+`device_type`, since the table is still empty everywhere, `.94` included) rather than
+a real hierarchical cold-start. The hierarchical-shrinkage cold-start design is
+sound and the read path is correct; it's simply feeding from an empty table right now,
+on both `.94` and `.19`. Not addressed as part of the `.94` wiring work — the user's
+request was to wire the existing scoring subsystem into the live path, not to also
+build the separate priors-aggregation job this gap has needed since Sheet 00 first
+shipped. A natural, still-unclaimed follow-up.
 
 ---
 
@@ -1106,9 +1121,10 @@ every still-ongoing incident after a `soc.service` restart.
 | EWMA z-score decay (`alpha`) | 0.05 | `core/state.py` (live on `.94`) |
 | EWMA z-score: min samples / variance floor | n>=10 / 1e-4 | `core/pipeline.py`'s `calc_z()` (live on `.94`) |
 | DNS feature sliding window | 300s (5 min) | `argus/ingest/daemon.py` / `dns_features.py` |
-| Bayesian baseline models (Gaussian/Beta/Poisson/Markov), BOCPD | real code, **not running on `.94`** — `.19`-only | `argus/baseline/` |
-| BOCPD hazard rate (expected regime length) | 1/500 cycles | `argus/baseline/engine.py` (`.19`-only) |
-| BOCPD changepoint: candidate mass / confirm samples / confirm avg surprise | >=0.5 / 3 / >=3.0 | `argus/baseline/engine.py` (`.19`-only) |
+| Bayesian baseline models (Gaussian/Beta/Poisson/Markov), BOCPD | **live on `.94`** since 2026-09-16 (was `.19`-only before) | `argus/baseline/`, wired via `argus/ops/live_engine.py` |
+| BOCPD hazard rate (expected regime length) | 1/500 cycles | `argus/baseline/engine.py` |
+| BOCPD changepoint: candidate mass / confirm samples / confirm avg surprise | >=0.5 / 3 / >=3.0 | `argus/baseline/engine.py` |
+| `baseline_scoring_enabled` rollback switch | default `true` | `config.yaml`'s `detection_engine:` section |
 | `population_priors` cold-start table | real, queryable — **no writer exists anywhere in this repo** outside a test fixture | `argus/graph/schema.sql`, `argus/baseline/engine.py` |
 | Default evidence TTL | 600s | `hypotheses/engine.py` |
 | Reputation-family evidence TTL | 86400s | `hypotheses/engine.py` |

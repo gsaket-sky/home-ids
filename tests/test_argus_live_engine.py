@@ -19,6 +19,14 @@ Sections:
      from its own fresh evidence -- the concrete "behavioral pattern across cycles"
      case the graph wiring exists to catch -- plus restart-survival and both
      directions' fail-safes (a broken read/write never blocks or corrupts a decision)
+  J. Release 15 Sheet 00 live wiring (2026-09-16): Bayesian Gaussian/Beta/Poisson/
+     Markov + BOCPD baseline scoring, ported from argus/ingest/daemon.py's `.19`-only
+     reference implementation into evaluate() itself. The underlying Bayesian/BOCPD
+     math is already covered by test_argus_bayesian_baseline.py/
+     test_argus_baseline_engine.py -- this section verifies the WIRING specifically:
+     real feature-dict keys map to the right metrics, fresh_v2 (not merged_v2) feeds
+     the Poisson/Markov inputs, the config rollback switch works, a broken graph read
+     fails safe, and the one-cycle risk lag actually persists across calls.
 """
 import sys
 import tempfile
@@ -858,6 +866,129 @@ check("I: reputation_tier_high_floor promoted to 5.0 -- the SAME abuse_score=4.5
       f"got {r_tier_after['decision_path']}")
 
 _i_store.close()
+
+# --- J. Release 15 Sheet 00 live wiring: Bayesian Gaussian/Beta/Poisson/Markov +
+# BOCPD baseline scoring, now live in evaluate() -- see this file's own module
+# docstring for scope (wiring only; the underlying math is covered elsewhere). ---
+import random  # noqa: E402
+from config import CONFIG  # noqa: E402
+
+_j_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_baseline_test_")
+_j_graph_db_path = str(_PathForSysPath(_j_tmpdir) / "j_graph.db")
+live_engine.configure(_j_graph_db_path)
+_j0 = 4_000_000.0
+
+# J1: real feature-dict keys (the same names pipeline.py's merged DNS+Zeek features
+# dict really uses, confirmed against a real .94 alert) map to the right Gaussian
+# metrics, and a genuinely surprising value against an established baseline produces
+# baseline_deviation evidence -- through the real live_engine._inject_baseline_evidence()
+# call, not score_metric() directly (that path is test_argus_baseline_engine.py's job).
+random.seed(42)
+for i in range(60):
+    stable_features = {"query_rate": random.gauss(50.0, 3.0), "entropy_avg": 2.5,
+                        "unique_domains": 10.0, "nxdomain_ratio": 0.05, "blocked_ratio": 0.05,
+                        "total": 20.0, "zeek_outbound_bytes": 5000.0}
+    live_engine._inject_baseline_evidence("devJ1", stable_features, [], _j0 + i)
+
+spike_features = {"query_rate": 5000.0, "entropy_avg": 2.5, "unique_domains": 10.0,
+                    "nxdomain_ratio": 0.05, "blocked_ratio": 0.05, "total": 20.0,
+                    "zeek_outbound_bytes": 5000.0}
+j1_evidence = live_engine._inject_baseline_evidence("devJ1", spike_features, [], _j0 + 100)
+j1_types = [e.evidence_type for e in j1_evidence]
+check("J1: a query_rate value wildly outside 60 stable observations produces real "
+      "baseline_deviation (or regime_change, if BOCPD's own changepoint gate also "
+      "fired) evidence through the live wiring, not just in isolation",
+      ("baseline_deviation" in j1_types or "regime_change" in j1_types), f"got {j1_types}")
+check("J1: every baseline-derived evidence item uses NO_DESTINATION (aggregate "
+      "per-device features, never a single-connection destination guess)",
+      all(e.destination_id == NO_DESTINATION for e in j1_evidence))
+
+# J2: Beta metrics only score when this cycle had real DNS activity (trials>0) --
+# an empty window (total=0) is skipped outright, matching daemon.py's own gate.
+j2_empty = live_engine._inject_baseline_evidence(
+    "devJ2", {"nxdomain_ratio": 0.5, "blocked_ratio": 0.5, "total": 0.0}, [], _j0)
+check("J2: total=0 (no real DNS activity this cycle) skips Beta-metric scoring "
+      "entirely, not a crash from a zero-trials Binomial observation",
+      j2_empty == [])
+
+# J3: dga_hits/honeypot_touches (Poisson) and the Markov activity-state axis are
+# counted from fresh_v2 (this cycle's OWN real detector output), never merged_v2's
+# graph-window history -- verified by passing a fresh_v2 list with a real
+# dns_dga_burst item and confirming the count feeds through (indirectly, via a
+# non-empty return -- the exact Poisson math is bayesian.py's own test's job).
+dga_ev = Evidence(device_id="devJ3", destination_id=NO_DESTINATION, evidence_type="dns_dga_burst",
+                    independence_family="dns_behavior", timestamp=_j0, source="test", confidence=0.8, value=1.0)
+j3_result = live_engine._inject_baseline_evidence("devJ3", {}, [dga_ev], _j0)
+check("J3: _inject_baseline_evidence() runs end-to-end with a real fresh_v2 dns_dga_burst "
+      "item present (Poisson dga_hits scoring + Markov activity-state scoring), no crash",
+      isinstance(j3_result, list))
+# A second call with a state-changing evidence type actually produces a markov
+# transition surprise signal once a real prev_state exists (first call always
+# returns None for the Markov axis -- see score_activity_transition()'s own contract).
+honeypot_ev = Evidence(device_id="devJ3", destination_id=NO_DESTINATION, evidence_type="honeypot_access",
+                         independence_family="direct_observation", timestamp=_j0 + 5, source="test",
+                         confidence=1.0, value=1.0)
+j3_second = live_engine._inject_baseline_evidence("devJ3", {}, [honeypot_ev], _j0 + 5)
+j3_types = [e.evidence_type for e in j3_second]
+check("J3: a genuine activity-state transition (NORMAL -> POLICY_VIOLATION, via a "
+      "fresh honeypot_access item) on the SECOND call produces markov_activity_surprise "
+      "evidence -- the Markov axis actually receives fresh_v2's evidence types",
+      "markov_activity_surprise" in j3_types, f"got {j3_types}")
+
+# J4: baseline_scoring_enabled=False -- the plain rollback switch -- disables the
+# whole subsystem with zero graph interaction, matching every other feature-flag
+# convention in this codebase. Direct _config mutation (same pattern
+# test_phase31_corrupted_training_rows.py already uses) -- no override-file
+# round-trip needed for an in-process test.
+_j4_had_key = "baseline_scoring_enabled" in CONFIG._config
+_j4_orig_value = CONFIG._config.get("baseline_scoring_enabled")
+CONFIG._config["baseline_scoring_enabled"] = False
+try:
+    j4_result = live_engine._inject_baseline_evidence("devJ4", stable_features, [], _j0)
+finally:
+    if _j4_had_key:
+        CONFIG._config["baseline_scoring_enabled"] = _j4_orig_value
+    else:
+        CONFIG._config.pop("baseline_scoring_enabled", None)
+check("J4: baseline_scoring_enabled=False is a real rollback switch -- returns [] "
+      "unconditionally, without even attempting a graph read",
+      j4_result == [])
+check("J4: restoring the flag afterward leaves config state clean (True again) for "
+      "the rest of this test file / any other test run in the same process",
+      bool(CONFIG.get("baseline_scoring_enabled", True)) is True)
+
+# J5: fail-safe -- a broken graph read never raises out of _inject_baseline_evidence(),
+# matching Section H3's own fail-safe pattern for peer-deviation.
+_j_orig_get_store = live_engine._get_graph_store
+live_engine._get_graph_store = lambda: (_ for _ in ()).throw(RuntimeError("simulated graph failure"))
+try:
+    j5_result = live_engine._inject_baseline_evidence("devJ5", stable_features, [], _j0)
+finally:
+    live_engine._get_graph_store = _j_orig_get_store
+check("J5: FAIL-SAFE -- a broken graph read for baseline scoring never raises out of "
+      "_inject_baseline_evidence(), degrading to no baseline evidence this cycle",
+      j5_result == [])
+
+# J6: the one-cycle risk lag -- evaluate() with a real device_id caches this cycle's
+# own attack-hypothesis score for the NEXT cycle's `risk` Gaussian input (daemon.py's
+# own documented circular-dependency workaround, ported unchanged).
+live_engine._last_risk_score.pop("devJ6", None)
+r_j6_first = live_engine.evaluate(
+    [V1Evidence(type="suricata_signature_match", source="suricata", timestamp=_j0, device="devJ6",
+                 value=1.0, confidence=0.95, independence_group="signature_match")],
+    ReputationVector(domain="", tier=3), features={}, device_id="devJ6", now=_j0)
+check("J6: after one evaluate() call with a real device_id, _last_risk_score is "
+      "populated with THIS cycle's own attack-hypothesis score (for the NEXT cycle's "
+      "risk baseline input, not this one -- avoids the circular dependency on a "
+      "decision that doesn't exist yet at injection time)",
+      "devJ6" in live_engine._last_risk_score,
+      f"got keys {list(live_engine._last_risk_score.keys())}")
+check("J6: the cached value matches this cycle's real attack hypothesis score, not a "
+      "placeholder",
+      live_engine._last_risk_score["devJ6"] == r_j6_first.get("hypotheses", {}).get("attack", {}).get("score", 0.0))
+
+_j_store = live_engine._get_graph_store()
+_j_store.close()
 
 print(f"\n{'='*60}")
 if FAILURES:

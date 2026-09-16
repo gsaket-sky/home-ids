@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from argus.autotune.engine import AutotuneEngine
+from argus.baseline.engine import BaselineEngine
 from argus.evidence.ingest import convert_list
 from argus.evidence.model import Evidence, NO_DESTINATION
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
@@ -62,6 +63,7 @@ from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS
 from argus.graph.window import RollingWindowView
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import MLScorer
+from config import CONFIG
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.reputation.classifier import ReputationClassifier
 from utils import is_cloud_cdn_provider_org
@@ -225,6 +227,16 @@ def _get_autotune_engine() -> AutotuneEngine:
     if _autotune_engine is None or _autotune_engine.store is not _get_graph_store():
         _autotune_engine = AutotuneEngine(_get_graph_store())
     return _autotune_engine
+
+
+_baseline_engine: Optional[BaselineEngine] = None
+
+
+def _get_baseline_engine() -> BaselineEngine:
+    global _baseline_engine
+    if _baseline_engine is None or _baseline_engine.store is not _get_graph_store():
+        _baseline_engine = BaselineEngine(_get_graph_store())
+    return _baseline_engine
 
 
 def _tuned_rep_vector(rep_vector, device_id: Optional[str], autotune: AutotuneEngine):
@@ -649,6 +661,101 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
     return []
 
 
+# Release 15 Sheet 00, live wiring (2026-09-16, user request: "implement Bayesian
+# Gaussian/Beta/Poisson/Markov + BOCPD changepoint-detection subsystem in .94, ignore
+# .19"): argus/baseline/engine.py's BaselineEngine has been real, tested code since
+# Sheet 00 shipped -- but its only real caller was argus/ingest/daemon.py, the
+# separate, out-of-scope `.19` shadow host (confirmed by grep before this change:
+# zero references from live_engine.py/pipeline.py). This ports daemon.py's own
+# _score_baselines() call sequence -- same metric -> model_kind mapping, same
+# one-cycle-lagged `risk` Gaussian input, same activity-transition scoring from this
+# cycle's own fresh evidence types -- into the live per-cycle path, rather than
+# reinventing it. `.94`'s real `features` dict already carries every raw input this
+# needs (query_rate/entropy_avg/unique_domains/nxdomain_ratio/blocked_ratio/total/
+# zeek_outbound_bytes all confirmed present in a real .94 alert's features dict, since
+# pipeline.py already merges DNS + Zeek features into one dict before calling
+# evaluate()) -- no new feature extraction required, only the scoring call sequence.
+_GAUSSIAN_INPUT_KEYS = {
+    "query_rate": "query_rate", "entropy_avg": "entropy_avg", "unique_domains": "unique_domains",
+    "outbound_bytes": "zeek_outbound_bytes",
+}
+_BETA_INPUT_KEYS = {"nxdomain_ratio": "nxdomain_ratio", "blocked_ratio": "blocked_ratio"}
+
+# device_id -> the attack hypothesis score `_v13_engine.evaluate()` computed on the
+# device's PREVIOUS cycle -- daemon.py's own documented trade-off, ported unchanged:
+# `risk` (the 5th Gaussian baseline metric) depends on THIS cycle's own decision, which
+# doesn't exist yet at the point baseline evidence needs to be injected into merged_v2
+# (before _v13_engine.evaluate() runs) -- scoring it live would force a circular
+# dependency. A one-poll-interval lag is the honest trade-off daemon.py already made
+# and ships with; this file makes the identical trade-off, not a different one.
+_last_risk_score: Dict[str, float] = {}
+
+
+def _inject_baseline_evidence(device_id: str, features: dict, fresh_v2: List, ts: float) -> List[Evidence]:
+    """Sheet 00 baseline/BOCPD scoring, now live on `.94` -- see the module comment
+    above this function for the full porting rationale. Best-effort, matching every
+    other graph-touching injection in this module: any failure degrades to 'no
+    baseline evidence this cycle', never blocks the real decision.
+
+    Config-gated (`baseline_scoring_enabled`, default True) -- a plain rollback switch
+    for a genuinely new, first-time-live subsystem, matching this codebase's own
+    standing precedent for every other newly-cut-over subsystem (engine/
+    cl_afpe_engine/reactive_capture_*/health_manager_enabled all ship with one)."""
+    if not CONFIG.get("baseline_scoring_enabled", True):
+        return []
+    try:
+        engine = _get_baseline_engine()
+        hour = time.localtime(ts).tm_hour
+        new_evidence: List[Evidence] = []
+
+        gaussian_inputs = {metric: features.get(feature_key) for metric, feature_key in _GAUSSIAN_INPUT_KEYS.items()}
+        gaussian_inputs["risk"] = _last_risk_score.get(device_id)
+        for metric, value in gaussian_inputs.items():
+            if value is None:
+                continue
+            ev = engine.score_metric(device_id, metric, "gaussian", (float(value),), hour, now=ts)
+            if ev is not None:
+                new_evidence.append(ev)
+
+        # Beta-Binomial metrics need the real per-cycle trial count, not a fixed
+        # trials=1.0 -- skipped outright when this cycle had no DNS activity at all
+        # (an empty window carries no real Binomial observation to update on), same
+        # gate daemon.py's own _score_baselines() uses.
+        trials = float(features.get("total", 0.0) or 0.0)
+        if trials > 0:
+            for metric, feature_key in _BETA_INPUT_KEYS.items():
+                ratio = features.get(feature_key)
+                if ratio is None:
+                    continue
+                successes = float(ratio) * trials
+                ev = engine.score_metric(device_id, metric, "beta", (successes, trials), hour, now=ts)
+                if ev is not None:
+                    new_evidence.append(ev)
+
+        # fresh_v2, not merged_v2 -- this cycle's OWN real detector output, matching
+        # daemon.py's own evidence_items (this cycle's fresh items only, never the
+        # graph-window history merged_v2 also carries).
+        dga_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "dns_dga_burst")
+        honeypot_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "honeypot_access")
+        for metric, count in (("dga_hits", dga_count), ("honeypot_touches", honeypot_count)):
+            ev = engine.score_metric(device_id, metric, "poisson", (float(count),), hour, now=ts)
+            if ev is not None:
+                new_evidence.append(ev)
+
+        activity_types = [ev.evidence_type for ev in fresh_v2]
+        markov_ev = engine.score_activity_transition(device_id, activity_types, now=ts)
+        if markov_ev is not None:
+            new_evidence.append(markov_ev)
+
+        return new_evidence
+    except Exception as e:
+        LOGGER.warning(
+            "Baseline/BOCPD scoring failed for device %r (non-fatal, deciding without "
+            "it this cycle): %s", device_id, e,
+        )
+        return []
+
+
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
              is_safe: bool = False, fallback_evaluate=None,
@@ -701,6 +808,13 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # framing and why PeerDeviationHypothesis is deliberately capped low.
             merged_v2 = merged_v2 + _inject_peer_deviation_evidence(device_id, device_type, ts)
 
+            # Release 15 Sheet 00, live wiring (2026-09-16): Bayesian Gaussian/Beta/
+            # Poisson/Markov + BOCPD changepoint scoring -- see
+            # _inject_baseline_evidence()'s own docstring for the full porting
+            # rationale from argus/ingest/daemon.py's (`.19`-only) reference
+            # implementation.
+            merged_v2 = merged_v2 + _inject_baseline_evidence(device_id, features or {}, fresh_v2, ts)
+
         # Sheet 03a live-wiring follow-up: same `if device_id:` gate as every other
         # graph-touching feature above -- omitting device_id means ZERO graph
         # interaction (this function's own pre-Phase-1 contract, still enforced by
@@ -737,6 +851,12 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         )
 
         if device_id:
+            # Feeds the NEXT cycle's `risk` baseline metric (see
+            # _inject_baseline_evidence()'s own module comment on why this must be
+            # one-cycle-lagged) -- same risk_score definition daemon.py's own
+            # _run_cycle() caches for the identical reason.
+            _last_risk_score[device_id] = float(
+                decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0)
             _write_graph(device_id, ts, fresh_v2, merged_v2, decision)
             # v13 full-architecture plan, alert/decision unification (Phase 2): the
             # most recently written decision_id for this device, whether or not
