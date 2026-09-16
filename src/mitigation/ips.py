@@ -452,8 +452,78 @@ class IPSMitigator:
                     target["dev_id"] = dev_id or target.get("dev_id", dev_id)
             self._save_queues()
 
+    def _arm_tarpit_for_dual_stack_coverage(self, client_ip: str, mac_addr: str, hostname: str,
+                                              dev_id: str, reason: str) -> bool:
+        """Registers `client_ip` as a Layer-2 ARP/NDP tarpit target as a side effect of a
+        SEPARATE containment decision (router isolation) that already decided this device
+        is severe enough to cut off -- not gated on the tarpit mechanism's own,
+        independently-tuned risk_score threshold.
+
+        2026-09-16 (router-agnostic IPv6 device-identity plan,
+        Documentation/IPV6_DEVICE_IDENTITY_PLAN.md): router isolation is a real
+        requests.post() to Fritz!Box's TR-064 `DisallowWANAccessByIP` action -- IPv4-only
+        by construction (the parameter is literally NewIPv4Address; see
+        middleware/routers/fritzbox_api.py's execute_fritzbox_isolation()). Once a device
+        is dual-stack, that call blocks its IPv4 WAN path but leaves its IPv6 path
+        completely open -- a real bypass for the exact device a containment decision just
+        judged severe enough to isolate. Confirmed live in mitigate() before this fix:
+        router isolation fires at risk_score>=8.5, but the tarpit block below has its OWN,
+        stricter, separate risk_score>=9.0 gate -- so a device isolated at 8.5-8.99 got
+        ZERO IPv6 coverage at all, not partial.
+
+        Rather than chasing an AVM-specific IPv6 TR-064 action (undocumented, vendor-
+        specific, exactly what feedback_network_agnostic_design warns against), the fix is
+        router-agnostic: this box's own Layer-2 ARP/NDP tarpit (_ndp_tarpit_loop, raw
+        sockets directly on this box's own NIC, no router cooperation needed at all)
+        already covers IPv6 neighbor-discovery disruption for ANY router vendor -- it just
+        needs to be armed here too, as a direct consequence of "we decided to isolate this
+        device," not left to its own separate score bar. Both callers (mitigate()'s
+        autonomous path and operator_isolate_router()'s console-button path) get identical
+        coverage this way. Idempotent against mitigate()'s own later, independent tarpit
+        block (whichever runs first wins; both check `client_ip not in
+        _tarpit_active_targets` the same way) and against calling this twice for the same
+        device (e.g. an operator re-clicking Isolate on an already-isolated one).
+
+        Silently no-ops (not an error) when tarpit itself is disabled/unavailable, or when
+        the operator has explicitly opted out of this specific coupling via
+        ips_tarpit_follows_router_isolation=false -- router isolation's OWN success is
+        never affected either way, this only ever adds coverage on top of it. Returns
+        True only when it genuinely armed a NEW tarpit target just now (so a caller like
+        operator_isolate_router() can tell the operator honestly whether dual-stack
+        coverage was actually applied, not just attempted) -- False for every no-op
+        reason (disabled, unavailable, already tarpitted, missing identifiers)."""
+        if not bool(self.config.get("ips_tarpit_follows_router_isolation", True)):
+            return False
+        if not bool(self.config.get("ips_tarpit_enabled", True)):
+            return False
+        if not (SCAPY_AVAILABLE or bool(self.config.get("simulation_mode", False))):
+            return False
+        if not client_ip or client_ip == "unknown" or not mac_addr or mac_addr == "unknown":
+            return False
+        with self._lock:
+            if client_ip in self._tarpit_active_targets:
+                return False
+            graph_action_id = self._mirror_containment(
+                dev_id, action_type="tarpit", status="active", target=client_ip, reason=reason)
+            self._tarpit_active_targets[client_ip] = {
+                "mac": mac_addr, "hostname": hostname, "dev_id": dev_id,
+                "_graph_action_id": graph_action_id,
+            }
+            self._save_queues()
+        try:
+            ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
+            ips_tarpit_activations_total.labels(device=dev_id, hostname=hostname, mac=mac_addr).inc()
+        except Exception:
+            pass
+        LOGGER.critical(
+            "⚠️ [DUAL-STACK COVERAGE] Layer-2 tarpit also armed for %s (%s) alongside router "
+            "isolation -- covers this device's IPv6 path, which the router-level block alone cannot.",
+            hostname, client_ip)
+        return True
+
     def get_containment_status(self, client_ip: str, mac_addr: str = "unknown", domain: str = "", dev_id: str = "") -> str:
-        """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, DOMAIN BLOCKED, or UNBLOCKED).
+        """Returns readable Telegram containment badge (TARPITTED, ROUTER ISOLATED, both
+        together, DOMAIN BLOCKED, or UNBLOCKED).
 
         Dashboard/alert-buttons fix: added a dev_id fallback. The primary lookups are
         keyed by raw client_ip (tarpit) / mac_addr (router isolation), which can miss a
@@ -462,17 +532,34 @@ class IPSMitigator:
         in an earlier incident (a DHCP lease change, or the MAC not yet re-resolved this
         cycle). Both _tarpit_active_targets/_router_isolated_devices entries already
         store a "dev_id" field (see mitigate()), so when the direct key misses, scan by
-        dev_id instead before concluding the device is genuinely unblocked."""
+        dev_id instead before concluding the device is genuinely unblocked.
+
+        BUGFIX (2026-09-16, router-agnostic IPv6 device-identity plan): this used to
+        return ONLY "TARPITTED" whenever tarpit was active, even if router isolation was
+        ALSO active for the same device -- true and harmless back when the two mechanisms
+        fired independently on different, disjoint conditions, but actively misleading now
+        that _arm_tarpit_for_dual_stack_coverage() makes "tarpitted alongside router
+        isolation" the routine case, not a rare coincidence. An operator reading only
+        "TARPITTED" would have no way to know the device's IPv4 WAN path was ALSO cut off
+        at the router -- an understatement of what containment is actually in place, the
+        same class of accuracy bug this session's earlier WHY-block fix closed for
+        evidence text. Checks both independently now and joins whichever are true, instead
+        of returning on the first match."""
         with self._lock:
-            if client_ip in self._tarpit_active_targets:
+            is_tarpitted = client_ip in self._tarpit_active_targets or (
+                dev_id and dev_id != "unknown"
+                and any(target.get("dev_id") == dev_id for target in self._tarpit_active_targets.values())
+            )
+            is_router_isolated = (mac_addr and mac_addr != "unknown" and mac_addr in self._router_isolated_devices) or (
+                dev_id and dev_id != "unknown"
+                and any(target.get("dev_id") == dev_id for target in self._router_isolated_devices.values())
+            )
+            if is_tarpitted and is_router_isolated:
+                return "🔒 ROUTER ISOLATED (Fritz!Box WAN) + TARPITTED (Layer-2 ARP/NDP, IPv6 coverage)"
+            if is_tarpitted:
                 return "🔒 TARPITTED (Layer-2 ARP/NDP)"
-            if mac_addr and mac_addr != "unknown" and mac_addr in self._router_isolated_devices:
+            if is_router_isolated:
                 return "🔒 ROUTER ISOLATED (Fritz!Box WAN)"
-            if dev_id and dev_id != "unknown":
-                if any(target.get("dev_id") == dev_id for target in self._tarpit_active_targets.values()):
-                    return "🔒 TARPITTED (Layer-2 ARP/NDP)"
-                if any(target.get("dev_id") == dev_id for target in self._router_isolated_devices.values()):
-                    return "🔒 ROUTER ISOLATED (Fritz!Box WAN)"
         # C5 FIX: _blocked_domains was never an attribute on IPSMitigator;
         # blocked domains live in state_manager IPS state.
         if domain and domain not in ("unknown", ""):
@@ -634,6 +721,9 @@ class IPSMitigator:
                                 "_graph_action_id": graph_action_id,
                             }
                             self._save_queues()
+                        self._arm_tarpit_for_dual_stack_coverage(
+                            client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id,
+                            reason=f"IPv6 coverage for router isolation: {reason}")
 
         tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True))
         is_sim = bool(self.config.get("simulation_mode", False))
@@ -699,6 +789,16 @@ class IPSMitigator:
             ips_router_isolated_active.labels(dev_id, hostname, mac).set(1.0)
         except Exception:
             pass
+        # 2026-09-16 (router-agnostic IPv6 device-identity plan): same dual-stack
+        # coverage mitigate()'s own autonomous router-isolation path now gets -- a human
+        # operator clicking this button gets identical IPv6 coverage without needing to
+        # separately click "Tarpit (Layer-2)" too. See _arm_tarpit_for_dual_stack_coverage()'s
+        # own docstring for why Fritz!Box's TR-064 action alone can't cover this.
+        tarpit_armed = self._arm_tarpit_for_dual_stack_coverage(
+            client_ip=ip, mac_addr=mac, hostname=hostname, dev_id=dev_id,
+            reason=f"IPv6 coverage for router isolation: {reason}")
+        if tarpit_armed:
+            return True, "Isolated via Fritz!Box (IPv4) + Layer-2 tarpit armed (covers IPv6)."
         return True, "Isolated via Fritz!Box."
 
     def operator_tarpit(self, dev_id: str, ip: str, mac: str, hostname: str,

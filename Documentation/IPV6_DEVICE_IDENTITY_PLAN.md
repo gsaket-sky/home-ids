@@ -1,8 +1,11 @@
 # IPv6 on Fritz!Box: Device-Identity Handling Plan
 
-Status: **plan only, nothing implemented yet.** Written in response to: "i want to
-enable ipv6 on fritzbox. make a plan how to handle device identity with ipv6
-enabled in fritz. right now it is disabled."
+Status: **the one real gap (mitigation) is now IMPLEMENTED and tested — see "Mitigation
+gap: FIXED" below.** Everything else was already built before this plan existed.
+Originally written in response to: "i want to enable ipv6 on fritzbox. make a plan how
+to handle device identity with ipv6 enabled in fritz. right now it is disabled," then
+revised for router-agnosticism, then implemented on "implement the router-agnostic
+IPv6 plan."
 
 ## Bottom line up front
 
@@ -160,23 +163,55 @@ first-class part of the interface from the start rather than bolted on later:
   behavior (with no router-level component at all) on someone else's OpenWrt or
   UniFi network.
 
-This is real implementation work — introducing the adapter interface, moving
-the two existing capabilities (Fritz!Box TR-064, hosts polling) behind it, and
-making NDP-tarpit arming unconditional on `isolate()` rather than router-vendor
-conditional. Appropriately scoped as its own piece of work, not squeezed into
-this planning pass, and worth sequencing before or alongside the pre-flight
-checklist below rather than after IPv6 is already live, since the safe default
-(local tarpit always arms) doesn't need the router to be inspected first.
+### Mitigation gap: FIXED (2026-09-16)
+
+Implemented the minimum load-bearing slice described above — not the full
+`RouterAdapter` interface (still out of scope, see Non-goals), just making
+NDP-tarpit arming unconditional on a successful router isolation, since that's
+the actual gap with security consequences:
+
+- **`mitigation/ips.py`**: new `_arm_tarpit_for_dual_stack_coverage()` — called
+  from both `mitigate()`'s autonomous router-isolation branch (fires at
+  risk_score≥8.5) and `operator_isolate_router()` (the console "Isolate via
+  Fritz!Box" button). Previously, tarpit only fired on its OWN, separate,
+  stricter risk_score≥9.0 gate — meaning any device isolated at risk 8.5-8.99
+  got the Fritz!Box IPv4 block with **zero** IPv6 coverage, not partial. Now
+  every successful router isolation also arms the local Layer-2 ARP/NDP
+  tarpit for that device (idempotent against the tarpit's own separate trigger
+  firing too), unless the operator explicitly opts out via the new
+  `ips_tarpit_follows_router_isolation` config key (default `true`).
+- **`get_containment_status()`**: used to return only the FIRST matching badge
+  (TARPITTED checked before ROUTER ISOLATED), silently hiding that a device
+  might now genuinely have both active — the routine case now, not a rare
+  coincidence. Returns a combined
+  `"ROUTER ISOLATED (Fritz!Box WAN) + TARPITTED (Layer-2 ARP/NDP, IPv6
+  coverage)"` badge when both are true, so the Telegram/console text is
+  honest about what's actually blocked.
+- **`web/console.html`**: the Isolate button's success toast now shows the
+  backend's real `detail` text (which honestly reflects whether tarpit was
+  also armed) instead of a static "Isolated via Fritz!Box." string that would
+  otherwise always undersell what happened.
+- Release symmetry needed **no changes** — `release_device()`/`unisolate_all()`
+  already tear down both `_tarpit_active_targets` and `_router_isolated_devices`
+  in one call (confirmed by reading both in full before making any change), so
+  a single Release action already correctly undoes both layers.
+- **Tests**: 15 new checks in `tests/test_ips_operator_actions.py` (the helper's
+  own no-op conditions, the `mitigate()` end-to-end case at risk 8.7 — below
+  tarpit's own bar, proving the fix — the opt-out config key, and
+  `get_containment_status()`'s combined-badge logic), all passing, plus the
+  full existing IPS/mitigation/containment-sync test files re-run clean.
+
+Deliberately NOT built: a genuine IPv6-native or MAC-based Fritz!Box TR-064
+action (still unconfirmed whether this firmware even exposes one — that's a
+live-firmware check for after IPv6 is on, not something to guess at now), and
+the full multi-vendor `RouterAdapter` interface (out of scope, see Non-goals).
 
 ## Phased checklist for when IPv6 actually gets enabled
 
 **Before flipping the switch:**
-1. Confirm this plan's mitigation gap (above) is either accepted as a known,
-   temporary limitation, or fixed first — this is the one item with real
-   security consequences, not just an observability nice-to-have. The
-   router-agnostic fix (unconditional NDP-tarpit arming on isolate) doesn't
-   require inspecting the Fritz!Box at all, so it can land before IPv6 is even
-   turned on.
+1. ✅ DONE (2026-09-16): the mitigation gap is fixed — see "Mitigation gap:
+   FIXED" above. Tested and shipped to `main`/GitHub; confirm it's actually
+   deployed to `.94` (check the running commit) before relying on it live.
 2. No code changes are required for identity resolution/correlation itself — it
    is already IPv6-ready, live-verified tonight, and already router-agnostic
    (depends only on Zeek, not on the Fritz!Box).

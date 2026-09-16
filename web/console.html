@@ -1950,8 +1950,15 @@ var app = {
   _runDeviceAction: async function(deviceId, actionName, path, successMsg, method, body){
     state.deviceActionBusy = actionName; render();
     try {
-      await apiFetch(path, { method: method || 'POST', body: JSON.stringify(body || {}) });
-      showToast('success', '✓ ' + successMsg);
+      // 2026-09-16 (router-agnostic IPv6 device-identity plan): isolate_router can now
+      // also arm the Layer-2 tarpit as a side effect (dual-stack coverage), so the
+      // backend's own `detail` text -- which honestly reflects whether that actually
+      // happened this time -- is a better toast than the static successMsg fallback,
+      // which would otherwise always say just "Isolated via Fritz!Box." even when the
+      // tarpit was ALSO armed. Falls back to successMsg for actions/responses that
+      // don't carry a meaningful detail string.
+      var resp = await apiFetch(path, { method: method || 'POST', body: JSON.stringify(body || {}) });
+      showToast('success', '✓ ' + ((resp && resp.detail) || successMsg));
       if (state.deviceDetail && state.deviceDetail.device_id === deviceId) await loadDeviceDetail(deviceId);
       if (state.devicesLoaded) await loadDevices();
       if (state.blockingLoaded) await loadBlockingState();

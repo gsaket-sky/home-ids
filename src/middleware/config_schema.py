@@ -151,6 +151,8 @@ CONFIG_SCHEMA = [
      "desc": "Controls Fritz!Box hardware WAN-access isolation specifically."},
     {"s": "ips_mitigation", "k": "ips_tarpit_enabled", "t": "bool", "def": True,
      "desc": "Controls the Layer-2 ARP-tarpit response specifically."},
+    {"s": "ips_mitigation", "k": "ips_tarpit_follows_router_isolation", "t": "bool", "def": True,
+     "desc": "Router-level isolation (Fritz!Box TR-064) only blocks IPv4 -- when true, a router isolation also arms the Layer-2 tarpit for the same device, covering its IPv6 path too (router-agnostic; works regardless of the tarpit's own risk-score threshold). False restores the old behavior where each mechanism only fires on its own separate trigger."},
     {"s": "ips_mitigation", "k": "interactive_blocking_enabled", "t": "bool", "def": False,
      "desc": "True = a human must approve a hardware isolation action in Telegram before it executes. False = fully autonomous auto-block."},
     {"s": "ips_mitigation", "k": "operator_release_cooldown_seconds", "t": "number", "def": 3600.0,
