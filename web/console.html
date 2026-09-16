@@ -275,8 +275,11 @@ var state = {
   healthLoading: false, healthLoaded: false, healthLoadError: null, healthData: null,
 
   overviewLoading: false, overviewLoaded: false, overviewLoadError: null, overviewData: null,
+  overviewSelectedDay: null, // YYYY-MM-DD, or null for the whole scanned window -- 2026-09-16 clickable-date filter
 
   autonomyLoading: false, autonomyLoaded: false, autonomyLoadError: null, autonomyData: null,
+  autonomyByDeviceLoading: false, autonomyByDeviceLoaded: false, autonomyByDeviceLoadError: null, autonomyByDeviceData: null,
+  autonomyExpandedDeviceId: null, // 2026-09-16 per-device panel: which device's own grant/building-trust detail is expanded
 
   huntMode: 'touching',
   huntDest: '',
@@ -545,6 +548,22 @@ async function loadAutonomy(){
     state.autonomyLoadError = err.message || String(err);
   } finally {
     state.autonomyLoading = false; render();
+  }
+}
+
+// 2026-09-16 (user request: "in autonomy, i want to see per device effect/
+// status") -- separate load/state from the global timeline above, same
+// pattern as every other view's own loader, so a slow/failed per-device fetch
+// never blocks the (already-working) timeline panels from rendering.
+async function loadAutonomyByDevice(){
+  state.autonomyByDeviceLoading = true; state.autonomyByDeviceLoadError = null; render();
+  try {
+    state.autonomyByDeviceData = await apiFetch('/api/autonomy/devices');
+    state.autonomyByDeviceLoaded = true;
+  } catch (err) {
+    state.autonomyByDeviceLoadError = err.message || String(err);
+  } finally {
+    state.autonomyByDeviceLoading = false; render();
   }
 }
 
@@ -1006,12 +1025,23 @@ function renderSuricataView(){
 
 /* ============================= overview (security summary) view ============================= */
 
-function statTile(label, value, sinceRestart){
+function statTile(label, value, sinceRestart, captionOverride){
   return '<div style="background:var(--bg-panel);border:1px solid var(--border-soft);border-radius:6px;padding:12px 14px;">'
     + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">'+esc(label)+'</div>'
     + '<div class="cell-mono" style="font-size:20px;font-weight:600;color:var(--text);">'+esc(String(value))+'</div>'
-    + (sinceRestart ? '<div style="font-size:9.5px;color:var(--text-faint);margin-top:2px;">since restart</div>' : '')
+    + (captionOverride ? '<div style="font-size:9.5px;color:var(--text-faint);margin-top:2px;">'+esc(captionOverride)+'</div>'
+        : sinceRestart ? '<div style="font-size:9.5px;color:var(--text-faint);margin-top:2px;">since restart</div>' : '')
     + '</div>';
+}
+// 2026-09-16 (user request: clickable Overview dates): renders one stat tile
+// that's either day-filtered (a real per-day number exists) or, for the 6
+// Prometheus since-restart counters with no per-day history at all, an
+// honest "N/A" rather than silently re-showing the whole-window aggregate
+// under a day label that would misleadingly imply it's day-scoped.
+function statTileDayAware(label, aggregateValue, byDayDict, selectedDay, sinceRestart){
+  if (!selectedDay) return statTile(label, fmtCount(aggregateValue), sinceRestart);
+  if (byDayDict) return statTile(label, fmtCount(byDayDict[selectedDay] || 0), false, selectedDay);
+  return statTile(label, '—', false, 'no daily history (restart counter)');
 }
 function statGrid(tiles){
   return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;">'+tiles.join('')+'</div>';
@@ -1021,24 +1051,42 @@ function fmtCount(n){
   return n.toLocaleString();
 }
 
-function alertVolumeBarChart(byDay){
+function alertVolumeBarChart(byDay, selectedDay){
   var days = Object.keys(byDay || {}).sort();
   if (!days.length) return '<div class="empty-state">No alert data available for this window.</div>';
   var maxVal = Math.max.apply(null, days.map(function(d){ return byDay[d]; }));
   var barW = 28, gap = 10, chartH = 120, padTop = 22, padBottom = 22, padLeft = 6;
   var chartW = days.length * (barW + gap) - gap + padLeft * 2;
+  // 2026-09-16 (user request: "i want the dates to be clickable so that only
+  // values for those days are shown"): each bar+label is wrapped in a <g> with
+  // its own click handler (selectOverviewDay toggles the filter, clicking the
+  // already-selected day clears it) and a wider, invisible hit-rect so the
+  // gap between bars is clickable too, not just the bar itself. The selected
+  // bar gets a distinct fill + a highlight ring so it's obvious which day
+  // (if any) the panels above are currently scoped to.
   var bars = days.map(function(d, i){
     var val = byDay[d];
     var h = maxVal > 0 ? Math.max(2, (val / maxVal) * chartH) : 2;
     var x = padLeft + i * (barW + gap);
     var y = padTop + (chartH - h);
     var label = d.slice(5); // MM-DD
-    return '<rect x="'+x+'" y="'+y+'" width="'+barW+'" height="'+h+'" rx="2" fill="var(--accent)" opacity="0.85"></rect>'
+    var isSelected = d === selectedDay;
+    var barFill = 'var(--accent)';
+    var barOpacity = isSelected ? '1' : '0.85';
+    var ring = isSelected
+      ? '<rect x="'+(x-2)+'" y="'+(y-2)+'" width="'+(barW+4)+'" height="'+(h+4)+'" rx="3" fill="none" stroke="var(--accent)" stroke-width="1.5"></rect>'
+      : '';
+    return '<g class="ov-day-bar" onclick="app.selectOverviewDay(\''+d+'\')" style="cursor:pointer;" role="button" aria-label="Show only '+esc(d)+'">'
+      + '<rect x="'+x+'" y="'+padTop+'" width="'+barW+'" height="'+chartH+'" fill="transparent"></rect>'
+      + ring
+      + '<rect x="'+x+'" y="'+y+'" width="'+barW+'" height="'+h+'" rx="2" fill="'+barFill+'" opacity="'+barOpacity+'"></rect>'
       + '<text x="'+(x+barW/2)+'" y="'+(y-5)+'" text-anchor="middle" font-size="10" fill="var(--text-dim)" font-family="var(--font-mono)">'+fmtCount(val)+'</text>'
-      + '<text x="'+(x+barW/2)+'" y="'+(padTop+chartH+16)+'" text-anchor="middle" font-size="9.5" fill="var(--text-faint)" font-family="var(--font-mono)">'+esc(label)+'</text>';
+      + '<text x="'+(x+barW/2)+'" y="'+(padTop+chartH+16)+'" text-anchor="middle" font-size="9.5" font-weight="'+(isSelected?'700':'400')+'" fill="'+(isSelected?'var(--text)':'var(--text-faint)')+'" font-family="var(--font-mono)">'+esc(label)+'</text>'
+      + '</g>';
   }).join('');
   var baseline = '<line x1="'+padLeft+'" y1="'+(padTop+chartH)+'" x2="'+(chartW-padLeft)+'" y2="'+(padTop+chartH)+'" stroke="var(--border-soft)" stroke-width="1"></line>';
-  return '<div style="overflow-x:auto;"><svg width="'+chartW+'" height="'+(padTop+chartH+padBottom)+'" viewBox="0 0 '+chartW+' '+(padTop+chartH+padBottom)+'">'+baseline+bars+'</svg></div>';
+  return '<div style="overflow-x:auto;"><svg width="'+chartW+'" height="'+(padTop+chartH+padBottom)+'" viewBox="0 0 '+chartW+' '+(padTop+chartH+padBottom)+'">'+baseline+bars+'</svg></div>'
+    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:6px;">Click a day to filter the panels above to just that day\'s numbers (where daily history exists). Click it again, or "Clear" above, to go back to the full window.</div>';
 }
 
 function renderOverviewView(){
@@ -1054,19 +1102,31 @@ function renderOverviewView(){
   var d = state.overviewData || {};
   var sec = d.security || {};
   var heal = d.self_healing || {};
+  var selectedDay = state.overviewSelectedDay;
   var scrapeWarning = d.counters_available
     ? ''
     : '<div style="font-size:11px;color:'+sevColor('SUSPICIOUS')+';margin-top:8px;">⚠️ Could not reach the local metrics endpoint — the "since restart" tiles below are showing as 0, not actually zero.</div>';
   var restartNote = '<div style="font-size:10.5px;color:var(--text-faint);margin-top:8px;">Tiles marked "since restart" reset on every engine restart, not a lifetime total. Alerts triaged / evaluations / suppressed / confirmed threats come from the alert log instead and don\'t reset.</div>';
 
+  // 2026-09-16 (user request: "i want the dates to be clickable so that only
+  // values for those days are shown"): banner shown above the panels while a
+  // day filter is active, with the one control to clear it -- placed once,
+  // above both panels, rather than duplicated per-panel.
+  var dayFilterBanner = selectedDay
+    ? '<div style="display:flex;align-items:center;gap:10px;background:var(--bg-panel);border:1px solid var(--accent);border-radius:6px;padding:8px 14px;margin-bottom:16px;">'
+      + '<span style="font-size:12.5px;color:var(--text);">Showing <strong class="cell-mono">'+esc(selectedDay)+'</strong> only</span>'
+      + '<button class="btn btn-sm" style="margin-left:auto;" onclick="app.clearOverviewDay()">Clear filter — show full window</button>'
+      + '</div>'
+    : '';
+
   var securityPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Security posture</div></div>'
     + '<div class="panel-body">'
     + statGrid([
-        statTile('Alerts triaged', fmtCount(sec.alerts_triaged)),
-        statTile('Pi-hole blocks', fmtCount(sec.pihole_blocks), true),
-        statTile('Router isolations', fmtCount(sec.router_isolations), true),
-        statTile('Tarpit activations', fmtCount(sec.tarpit_activations), true),
-        statTile('IPS errors', fmtCount(sec.ips_errors), true),
+        statTileDayAware('Alerts triaged', sec.alerts_triaged, d.alert_volume_by_day, selectedDay, false),
+        statTileDayAware('Pi-hole blocks', sec.pihole_blocks, null, selectedDay, true),
+        statTileDayAware('Router isolations', sec.router_isolations, null, selectedDay, true),
+        statTileDayAware('Tarpit activations', sec.tarpit_activations, null, selectedDay, true),
+        statTileDayAware('IPS errors', sec.ips_errors, null, selectedDay, true),
       ])
     + scrapeWarning
     + restartNote
@@ -1075,21 +1135,21 @@ function renderOverviewView(){
   var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-healing (autonomous FP engine)</div></div>'
     + '<div class="panel-body">'
     + statGrid([
-        statTile('Evaluations', fmtCount(heal.fp_evaluations)),
-        statTile('Suppressed (FP)', fmtCount(heal.fp_suppressed)),
-        statTile('Confirmed threats', fmtCount(heal.fp_confirmed_threats)),
-        statTile('Domains immunized', fmtCount(heal.domains_immunized), true),
-        statTile('Sensitivity adjustments', fmtCount(heal.sigma_shifts), true),
+        statTileDayAware('Evaluations', heal.fp_evaluations, d.fp_evaluations_by_day, selectedDay, false),
+        statTileDayAware('Suppressed (FP)', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
+        statTileDayAware('Confirmed threats', heal.fp_confirmed_threats, d.fp_confirmed_threats_by_day, selectedDay, false),
+        statTileDayAware('Domains immunized', heal.domains_immunized, null, selectedDay, true),
+        statTileDayAware('Sensitivity adjustments', heal.sigma_shifts, null, selectedDay, true),
       ])
     + '</div></div>';
 
   var volumePanel = '<div class="panel"><div class="panel-header"><div class="panel-title">Alert volume</div></div>'
     + '<div class="panel-body">'
-    + alertVolumeBarChart(d.alert_volume_by_day)
+    + alertVolumeBarChart(d.alert_volume_by_day, selectedDay)
     + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(d.alert_volume_note||'')+'</div>'
     + '</div></div>';
 
-  return topbarHead + '<div class="content">' + securityPanel + healingPanel + volumePanel + '</div>';
+  return topbarHead + '<div class="content">' + dayFilterBanner + securityPanel + healingPanel + volumePanel + '</div>';
 }
 
 /* ============================= health / heartbeat view ============================= */
@@ -1301,12 +1361,87 @@ function renderAutonomyView(){
 
   return topbarHead + '<div class="content">'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autotuner history</div></div>'
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Global -- these threshold changes apply to every device\'s decisions equally, not to one device specifically (see "Per-device status" below for what IS per-device).</div>'
     + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'+autotuneRows+'</tbody></table></div></div>'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — resolved</div></div>'
     + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Destination</th><th>Hypothesis</th><th>How it was resolved</th><th>Granted</th></tr></thead><tbody>'+trustRows+'</tbody></table></div></div>'
-    + '<div class="panel"><div class="panel-header"><div class="panel-title">Composite trust — still building</div></div>'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — still building</div></div>'
     + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Hypothesis</th><th>Destination class / family</th><th>Progress toward auto-resolution</th><th>Updated</th></tr></thead><tbody>'+buildingRows+'</tbody></table></div></div>'
+    + renderAutonomyByDevicePanel()
     + '</div>';
+}
+
+// 2026-09-16 (user request: "in autonomy, i want to see per device effect/
+// status"): same composite-trust data as the two "Composite trust" panels
+// above, grouped by device instead of one mixed-device timeline -- "what has
+// autonomy actually done for/about THIS device" directly, not something to
+// eyeball out of a shared table. Autotuner is deliberately excluded (global,
+// not per-device -- see the note on the Autotuner history panel above and
+// autonomy_is_global_note from the API).
+function renderAutonomyByDevicePanel(){
+  var headerRight = '<button class="btn btn-sm" onclick="app.reloadAutonomyByDevice()" '+(state.autonomyByDeviceLoading?'disabled':'')+'>'+(state.autonomyByDeviceLoading?'Loading…':'Refresh')+'</button>';
+  var header = '<div class="panel-header"><div class="panel-title">Per-device status</div>'+headerRight+'</div>';
+
+  if (state.autonomyByDeviceLoadError) {
+    return '<div class="panel" style="margin-top:16px;">'+header+'<div class="panel-body"><div class="error-banner">Could not load per-device autonomy data: '+esc(state.autonomyByDeviceLoadError)+'.</div></div></div>';
+  }
+  if (state.autonomyByDeviceLoading && !state.autonomyByDeviceLoaded) {
+    return '<div class="panel" style="margin-top:16px;">'+header+'<div class="panel-body"><div class="empty-state">Loading per-device status…</div></div></div>';
+  }
+
+  var dd = state.autonomyByDeviceData || {};
+  var devices = dd.devices || [];
+  if (!devices.length) {
+    return '<div class="panel" style="margin-top:16px;">'+header+'<div class="panel-body"><div class="empty-state">No device has any composite-trust activity yet.</div></div></div>';
+  }
+
+  var rows = devices.map(function(dev){
+    var isExpanded = state.autonomyExpandedDeviceId === dev.device_id;
+    var summaryRow = '<tr style="cursor:pointer;" onclick="app.toggleAutonomyDevice(\''+esc(dev.device_id)+'\')">'
+      + '<td><div class="cell-title">'+esc(dev.hostname)+'</div><div class="cell-mono" style="font-size:11px;color:var(--text-faint);">'+esc(dev.device_id)+'</div></td>'
+      + '<td class="cell-mono">'+dev.trust_grants_count+'</td>'
+      + '<td class="cell-mono">'+dev.building_trust_count+'</td>'
+      + '<td class="cell-mono">'+agoText(dev.last_activity_at)+'</td>'
+      + '<td style="color:var(--accent);font-size:12px;">'+(isExpanded?'▾ hide':'▸ detail')+'</td></tr>';
+
+    if (!isExpanded) return summaryRow;
+
+    var grantsDetail = dev.trust_grants.length
+      ? '<table style="width:100%;"><thead><tr><th>Destination</th><th>Hypothesis</th><th>How it was resolved</th><th>Granted</th></tr></thead><tbody>'
+        + dev.trust_grants.map(function(row){
+            return '<tr><td class="cell-mono">'+esc(row.destination_id||'')+'</td>'
+              + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
+              + '<td><span class="tag">'+esc(row.source_label)+'</span></td>'
+              + '<td class="cell-mono">'+agoText(row.granted_at)+'</td></tr>';
+          }).join('')
+        + '</tbody></table>'
+      : '<div class="empty-state" style="padding:8px 0;">No resolved trust grants for this device.</div>';
+
+    var buildingDetail = dev.building_trust.length
+      ? '<table style="width:100%;"><thead><tr><th>Hypothesis</th><th>Destination class / family</th><th>Progress</th><th>Updated</th></tr></thead><tbody>'
+        + dev.building_trust.map(function(row){
+            var pct = Math.round((row.progress_fraction||0)*100);
+            var bar = '<div style="width:80px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;display:inline-block;vertical-align:middle;">'
+              + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
+            return '<tr><td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
+              + '<td style="font-size:11.5px;">'+esc(row.destination_class||'')+' / '+esc(row.evidence_family||'')+'</td>'
+              + '<td>'+bar+'<span class="cell-mono" style="font-size:11px;margin-left:6px;">'+pct+'%</span></td>'
+              + '<td class="cell-mono">'+agoText(row.last_updated)+'</td></tr>';
+          }).join('')
+        + '</tbody></table>'
+      : '<div class="empty-state" style="padding:8px 0;">Nothing currently accumulating for this device.</div>';
+
+    return summaryRow + '<tr><td colspan="5" style="background:var(--bg-hover);padding:12px 16px;">'
+      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Resolved trust grants</div>'
+      + grantsDetail
+      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Still building</div>'
+      + buildingDetail
+      + '</td></tr>';
+  }).join('');
+
+  return '<div class="panel" style="margin-top:16px;">'+header
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">'+esc(dd.autotuner_is_global_note||'')+' Click a device to see its own grants and in-progress trust.</div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Building trust</th><th>Last activity</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
 }
 
 function renderGraphView(){
@@ -1766,6 +1901,7 @@ var app = {
     if (v === 'health' && !state.healthLoading) loadHealth();
     if (v === 'overview' && !state.overviewLoading) loadOverview();
     if (v === 'autonomy' && !state.autonomyLoading) loadAutonomy();
+    if (v === 'autonomy' && !state.autonomyByDeviceLoading) loadAutonomyByDevice();
   },
   selectDevice: function(id){
     state.activeView='deviceDetail'; state.selectedDeviceId=id;
@@ -2022,7 +2158,17 @@ var app = {
   reloadSuricata: function(){ loadSuricata(); },
   reloadHealth: function(){ loadHealth(); },
   reloadAutonomy: function(){ loadAutonomy(); },
+  reloadAutonomyByDevice: function(){ loadAutonomyByDevice(); },
+  toggleAutonomyDevice: function(deviceId){
+    state.autonomyExpandedDeviceId = (state.autonomyExpandedDeviceId === deviceId) ? null : deviceId;
+    render();
+  },
   reloadOverview: function(){ loadOverview(); },
+  selectOverviewDay: function(day){
+    state.overviewSelectedDay = (state.overviewSelectedDay === day) ? null : day; // click again to clear
+    render();
+  },
+  clearOverviewDay: function(){ state.overviewSelectedDay = null; render(); },
 
   /* ---- Evidence Graph: pan/zoom/drag/group-select ---- */
   graphZoomBy: function(factor){

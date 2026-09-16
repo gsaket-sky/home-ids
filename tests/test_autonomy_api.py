@@ -20,6 +20,7 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from argus.graph.store import GraphStore  # noqa: E402
+from core.state_guard import StateManager  # noqa: E402
 from middleware import graph_client  # noqa: E402
 from middleware.routers import autonomy_api  # noqa: E402
 
@@ -126,3 +127,90 @@ def test_autonomy_building_trust_reports_progress_toward_the_floor(graph_db):
 def test_autonomy_respects_limit(graph_db):
     result = autonomy_api.get_autonomy(limit=1, token="test")
     assert len(result["autotuner"]) == 1
+
+
+# --- /api/autonomy/devices (2026-09-16, user request: "in autonomy, i want to
+# see per device effect/status") --------------------------------------------
+
+@pytest.fixture
+def state_file(tmp_path, monkeypatch):
+    path = tmp_path / "ids_state.json"
+    sm = StateManager(state_path=str(path))
+    sm.get_or_create("dev_a", "192.168.1.50", "workstation-1")
+    sm.flush_to_disk()
+    monkeypatch.setattr(autonomy_api, "CONFIG", type("C", (), {
+        "get": staticmethod(lambda k, d=None: str(path) if k == "state_path" else d)
+    })())
+    return path
+
+
+def test_autonomy_by_device_empty_store(tmp_path, monkeypatch):
+    monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", tmp_path / "does_not_exist.db")
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    assert result["devices"] == []
+    assert result["autotuner_is_global"] is True
+
+
+def test_autonomy_by_device_groups_by_device_not_globally(graph_db, state_file):
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    by_id = {d["device_id"]: d for d in result["devices"]}
+    assert set(by_id.keys()) == {"dev_a", "dev_b"}
+
+    dev_a = by_id["dev_a"]
+    assert dev_a["trust_grants_count"] == 1
+    assert dev_a["building_trust_count"] == 0
+    assert dev_a["trust_grants"][0]["destination_id"] == "192.168.1.41"
+
+    dev_b = by_id["dev_b"]
+    assert dev_b["trust_grants_count"] == 0
+    assert dev_b["building_trust_count"] == 1
+    assert dev_b["building_trust"][0]["trust_value"] == pytest.approx(0.3)
+
+
+def test_autonomy_by_device_resolves_real_hostname_from_state_manager(graph_db, state_file):
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    by_id = {d["device_id"]: d for d in result["devices"]}
+    assert by_id["dev_a"]["hostname"] == "workstation-1"
+    # dev_b has no StateManager entry in this fixture -- falls back to its own
+    # device_id, same "last-resort, never crash" convention devices_api.py uses.
+    assert by_id["dev_b"]["hostname"] == "dev_b"
+
+
+def test_autonomy_by_device_sorted_by_most_recent_activity_first(graph_db, state_file):
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    # dev_a's trust grant and dev_b's building-trust row were both inserted "now"
+    # in the fixture -- just confirms sorting doesn't crash and both are present,
+    # ordered by last_activity_at descending (ties broken by dict iteration order,
+    # not asserted here since it's not a meaningful distinction for equal timestamps).
+    assert [d["device_id"] for d in result["devices"]] != []
+    activity_times = [d["last_activity_at"] for d in result["devices"]]
+    assert activity_times == sorted(activity_times, reverse=True)
+
+
+def test_autonomy_by_device_states_autotuner_is_global(graph_db):
+    """The autotuner timeline is deliberately NOT grouped per device here --
+    threshold_history.device_id is NULL for every real row (global parameters),
+    confirmed live against .94's actual data. Must say so explicitly rather than
+    silently returning an empty per-device autotuner list the console could
+    misread as 'no autotuner activity for this device' instead of 'not
+    applicable, it's global.'"""
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    assert result["autotuner_is_global"] is True
+    assert "global" in result["autotuner_is_global_note"].lower()
+    for d in result["devices"]:
+        assert "autotuner" not in d  # no per-device autotuner key to misread as empty-but-applicable
+
+
+def test_autonomy_by_device_unattributed_trust_grants_bucketed_together(graph_db, state_file):
+    """A trust grant with no real device_id (src_id=='unattributed', a real shape
+    seen live on .94) must not crash or silently vanish -- it gets its own
+    bucket, same as any other device_id."""
+    with graph_client.open_store() as store:
+        store.upsert_destination("9.9.9.9", "ip", timestamp=time.time())
+        store.add_edge("device", "unattributed", "destination", "9.9.9.9", "trusts", timestamp=time.time(),
+                        metadata={"source": "migrated_from_v1", "hypothesis": "COORDINATED_TARGETING"})
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    by_id = {d["device_id"]: d for d in result["devices"]}
+    assert "unattributed" in by_id
+    assert by_id["unattributed"]["trust_grants_count"] == 1
+    assert by_id["unattributed"]["hostname"] == "unattributed"

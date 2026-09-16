@@ -155,10 +155,30 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     since-restart, and the volume trend, always file-based-today, could
     disagree after any recent deploy restart; both now come from this same
     scan of the same file, so they can't disagree with each other again)."""
-    empty = {"by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0}
+    empty = {
+        "by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0,
+        "fp_evaluations_by_day": {}, "fp_suppressed_by_day": {}, "fp_confirmed_threats_by_day": {},
+    }
     if not alerts_path.exists():
         return dict(empty, note=f"No alert log found at {alerts_path}.")
     by_day: Dict[str, int] = {}
+    # 2026-09-16 (user request: "i want the dates to be clickable so that only
+    # values for those days are shown" -- Overview's alert-volume chart). These
+    # three mirror by_day's own shape -- same source scan, same day key --
+    # so the console can show a click-selected day's real fp_evaluations/
+    # fp_suppressed/fp_confirmed_threats instead of the whole scanned window's
+    # totals. Deliberately NOT extended to the 6 Prometheus-sourced counters in
+    # _SECURITY_COUNTER_NAMES/_SELF_HEALING_COUNTER_NAMES (pihole_blocks,
+    # router_isolations, tarpit_activations, ips_errors, domains_immunized,
+    # sigma_shifts) -- those are in-process Counter objects with no historical
+    # per-day series at all (reset to 0 on every restart), so there is no
+    # honest per-day number to show for them; the console marks those as
+    # unavailable when a day is selected rather than silently showing the
+    # same restart-scoped total under a day label that would misleadingly
+    # imply it's day-scoped.
+    fp_evaluations_by_day: Dict[str, int] = {}
+    fp_suppressed_by_day: Dict[str, int] = {}
+    fp_confirmed_threats_by_day: Dict[str, int] = {}
     fp_evaluations = 0
     fp_suppressed = 0
     fp_confirmed_threats = 0
@@ -174,6 +194,7 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
                 continue
 
             ts = rec.get("timestamp")
+            day = None
             if ts is not None:
                 day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
                 by_day[day] = by_day.get(day, 0) + 1
@@ -181,10 +202,16 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
             verdict = (rec.get("fp_verdict") or {}).get("verdict")
             if verdict is not None:
                 fp_evaluations += 1
+                if day is not None:
+                    fp_evaluations_by_day[day] = fp_evaluations_by_day.get(day, 0) + 1
                 if verdict == "FALSE_POSITIVE":
                     fp_suppressed += 1
+                    if day is not None:
+                        fp_suppressed_by_day[day] = fp_suppressed_by_day.get(day, 0) + 1
                 elif verdict == "CONFIRMED_THREAT":
                     fp_confirmed_threats += 1
+                    if day is not None:
+                        fp_confirmed_threats_by_day[day] = fp_confirmed_threats_by_day.get(day, 0) + 1
 
             if len(by_day) > _ALERT_VOLUME_MAX_DAYS:
                 break
@@ -196,6 +223,9 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
         "fp_evaluations": fp_evaluations,
         "fp_suppressed": fp_suppressed,
         "fp_confirmed_threats": fp_confirmed_threats,
+        "fp_evaluations_by_day": fp_evaluations_by_day,
+        "fp_suppressed_by_day": fp_suppressed_by_day,
+        "fp_confirmed_threats_by_day": fp_confirmed_threats_by_day,
         "scanned_lines": scanned_lines,
         "note": (
             f"Computed from the most recent ~{_ALERT_VOLUME_MAX_SCAN_BYTES // (1024 * 1024)}MB "
@@ -238,4 +268,17 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
         "self_healing": self_healing,
         "alert_volume_by_day": stats["by_day"],
         "alert_volume_note": stats.get("note", ""),
+        # 2026-09-16: per-day breakdowns for the console's clickable date filter.
+        # alerts_triaged's own per-day numbers ARE alert_volume_by_day (identical
+        # source, no separate field needed). day_filterable_metrics tells the
+        # console exactly which `security`/`self_healing` keys have real
+        # per-day data behind them -- pihole_blocks/router_isolations/
+        # tarpit_activations/ips_errors/domains_immunized/sigma_shifts are
+        # deliberately absent (Prometheus since-restart counters, no per-day
+        # history exists to show) rather than the console having to guess or
+        # hardcode that list itself.
+        "fp_evaluations_by_day": stats["fp_evaluations_by_day"],
+        "fp_suppressed_by_day": stats["fp_suppressed_by_day"],
+        "fp_confirmed_threats_by_day": stats["fp_confirmed_threats_by_day"],
+        "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"],
     }

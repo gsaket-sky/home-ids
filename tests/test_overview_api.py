@@ -123,6 +123,53 @@ def test_alert_stats_fp_evaluations_can_be_lower_than_total_alert_count(tmp_path
     assert result["fp_evaluations"] == 0
 
 
+# --- _alert_stats: per-day fp_verdict breakdowns (2026-09-16, user request: --
+# "i want the dates to be clickable so that only values for those days are
+# shown" on Overview's alert-volume chart) ----------------------------------
+
+def test_alert_stats_fp_verdicts_bucketed_by_day(tmp_path):
+    path = tmp_path / "alerts.json"
+    _write_jsonl(path, [
+        {"timestamp": _day_ts(0), "fp_verdict": {"verdict": "FALSE_POSITIVE"}},
+        {"timestamp": _day_ts(0), "fp_verdict": {"verdict": "CONFIRMED_THREAT"}},
+        {"timestamp": _day_ts(1), "fp_verdict": {"verdict": "FALSE_POSITIVE"}},
+    ])
+    result = overview_api._alert_stats(path)
+    today = datetime.fromtimestamp(_day_ts(0), tz=timezone.utc).strftime("%Y-%m-%d")
+    yesterday = datetime.fromtimestamp(_day_ts(1), tz=timezone.utc).strftime("%Y-%m-%d")
+    assert result["fp_evaluations_by_day"][today] == 2
+    assert result["fp_evaluations_by_day"][yesterday] == 1
+    assert result["fp_suppressed_by_day"][today] == 1
+    assert result["fp_suppressed_by_day"][yesterday] == 1
+    assert result["fp_confirmed_threats_by_day"][today] == 1
+    assert yesterday not in result["fp_confirmed_threats_by_day"]  # no CONFIRMED_THREAT that day
+
+
+def test_alert_stats_per_day_sums_match_aggregate_totals(tmp_path):
+    """The per-day breakdowns must always sum to the SAME aggregate totals
+    already returned -- an internal-consistency invariant, same spirit as
+    test_get_overview_summary_alerts_triaged_matches_volume_trend_sum below."""
+    path = tmp_path / "alerts.json"
+    _write_jsonl(path, [
+        {"timestamp": _day_ts(0), "fp_verdict": {"verdict": "FALSE_POSITIVE"}},
+        {"timestamp": _day_ts(1), "fp_verdict": {"verdict": "CONFIRMED_THREAT"}},
+        {"timestamp": _day_ts(2), "fp_verdict": {"verdict": "UNCERTAIN"}},
+    ])
+    result = overview_api._alert_stats(path)
+    assert sum(result["fp_evaluations_by_day"].values()) == result["fp_evaluations"]
+    assert sum(result["fp_suppressed_by_day"].values()) == result["fp_suppressed"]
+    assert sum(result["fp_confirmed_threats_by_day"].values()) == result["fp_confirmed_threats"]
+
+
+def test_alert_stats_per_day_breakdowns_empty_when_no_fp_verdict_anywhere(tmp_path):
+    path = tmp_path / "alerts.json"
+    _write_jsonl(path, [{"timestamp": _day_ts(0)}])
+    result = overview_api._alert_stats(path)
+    assert result["fp_evaluations_by_day"] == {}
+    assert result["fp_suppressed_by_day"] == {}
+    assert result["fp_confirmed_threats_by_day"] == {}
+
+
 # --- _scrape_counters ------------------------------------------------------------
 # Only pihole_blocks/router_isolations/tarpit_activations/ips_errors/
 # domains_immunized/sigma_shifts are scraped now -- alerts_total/
@@ -253,6 +300,31 @@ def test_get_overview_summary_alerts_triaged_matches_volume_trend_sum(tmp_path, 
 
     result = overview_api.get_overview_summary(token="test")
     assert result["security"]["alerts_triaged"] == sum(result["alert_volume_by_day"].values())
+
+
+def test_get_overview_summary_exposes_day_filterable_metrics_and_breakdowns(tmp_path, monkeypatch):
+    monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
+        text=_SAMPLE_METRICS_TEXT, raise_for_status=lambda: None,
+    ))
+    alerts_path = tmp_path / "alerts.json"
+    _write_jsonl(alerts_path, [
+        {"timestamp": _day_ts(0), "fp_verdict": {"verdict": "FALSE_POSITIVE"}},
+    ])
+    monkeypatch.setattr(overview_api.CONFIG, "get", lambda key, default=None: {
+        "metrics_port": 9105, "alert_json_path": str(alerts_path),
+    }.get(key, default))
+
+    result = overview_api.get_overview_summary(token="test")
+    today = datetime.fromtimestamp(_day_ts(0), tz=timezone.utc).strftime("%Y-%m-%d")
+    assert result["fp_suppressed_by_day"][today] == 1
+    # Only the 4 metrics with a REAL per-day source are advertised as
+    # filterable -- the 6 Prometheus since-restart counters (pihole_blocks
+    # etc., all present and non-zero in _SAMPLE_METRICS_TEXT above) must NOT
+    # be in this list, since there is no honest per-day number for them.
+    assert set(result["day_filterable_metrics"]) == {
+        "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"
+    }
+    assert "pihole_blocks" not in result["day_filterable_metrics"]
 
 
 if __name__ == "__main__":

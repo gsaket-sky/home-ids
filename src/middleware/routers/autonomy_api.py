@@ -29,10 +29,11 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, Query
 
-from middleware.auth import verify_token
+from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from argus.autotune.engine import TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
 from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR
+from core.state_guard import StateManager
 
 router = APIRouter()
 
@@ -141,4 +142,96 @@ def get_autonomy(limit: int = Query(50, ge=1, le=200), token: str = Depends(veri
         "autotuner": _serialize_threshold_history(threshold_rows),
         "trust_grants": _serialize_trust_grants(trust_edges),
         "building_trust": _serialize_building_trust(building_trust_rows),
+    }
+
+
+def _load_state_manager() -> StateManager:
+    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
+    sm.load_from_disk()
+    return sm
+
+
+def _resolve_hostname(sm: StateManager, device_id: str) -> str:
+    """Same 'StateManager is the live hostname source, device_id is the last-resort
+    fallback' convention devices_api.py's list_devices() already uses -- no need for
+    a second, graph-side display_label lookup here since composite trust/autotuner
+    data is only ever interesting for a device StateManager still actively tracks."""
+    if device_id and device_id != "unattributed" and sm.has_device(device_id):
+        with sm.lock_device(device_id) as st:
+            hostname = st.hostname
+            if hostname and hostname != "unknown":
+                return hostname
+    return device_id or "unattributed"
+
+
+@router.get("/api/autonomy/devices")
+def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = Depends(verify_token)):
+    """2026-09-16 (user request: "in autonomy, i want to see per device effect/
+    status"): groups the SAME composite-trust data /api/autonomy already exposes
+    by device, instead of one global timeline -- so "what has autonomy actually
+    done for/about THIS device" is directly answerable per device, not something
+    the operator has to eyeball out of a mixed-device event log.
+
+    Deliberately does NOT try to group the autotuner timeline by device -- checked
+    directly against the live graph (threshold_history.device_id is NULL for
+    every real row): autotuner changes are global parameters applied to every
+    device equally, not a per-device effect at all. `autotuner_is_global` says so
+    explicitly rather than the console having to infer it from an empty grouping.
+
+    limit here bounds the RAW trust_grants/building_trust rows pulled from the
+    graph before grouping (default 200, wider than /api/autonomy's own 50) --
+    grouping by device means a handful of very active devices could otherwise
+    starve a real but quieter device's own history out of a small global cap."""
+    with open_store() as store:
+        if store is None:
+            return {"devices": [], "autotuner_is_global": True, "autotuner_is_global_note": ""}
+        trust_edges = store.get_edges(relation="trusts", limit_most_recent=limit)
+        building_trust_rows = store.get_recent_composite_trust(limit)
+
+    sm = _load_state_manager()
+    grants = _serialize_trust_grants(trust_edges)
+    building = _serialize_building_trust(building_trust_rows)
+
+    by_device: Dict[str, Dict[str, Any]] = {}
+
+    def _bucket(device_id: str) -> Dict[str, Any]:
+        if device_id not in by_device:
+            by_device[device_id] = {
+                "device_id": device_id,
+                "hostname": _resolve_hostname(sm, device_id),
+                "trust_grants": [],
+                "building_trust": [],
+                "last_activity_at": None,
+            }
+        return by_device[device_id]
+
+    for g in grants:
+        bucket = _bucket(g.get("device_id") or "unattributed")
+        bucket["trust_grants"].append(g)
+        ts = g.get("granted_at")
+        if ts is not None and (bucket["last_activity_at"] is None or ts > bucket["last_activity_at"]):
+            bucket["last_activity_at"] = ts
+
+    for b in building:
+        bucket = _bucket(b.get("device_id") or "unattributed")
+        bucket["building_trust"].append(b)
+        ts = b.get("last_updated")
+        if ts is not None and (bucket["last_activity_at"] is None or ts > bucket["last_activity_at"]):
+            bucket["last_activity_at"] = ts
+
+    devices_out = []
+    for entry in by_device.values():
+        entry["trust_grants_count"] = len(entry["trust_grants"])
+        entry["building_trust_count"] = len(entry["building_trust"])
+        devices_out.append(entry)
+    devices_out.sort(key=lambda e: e["last_activity_at"] or 0, reverse=True)
+
+    return {
+        "devices": devices_out,
+        "autotuner_is_global": True,
+        "autotuner_is_global_note": (
+            "Autotuner threshold changes (see the Autotuner Timeline) apply globally, to "
+            "every device's decisions equally -- there is no per-device autotuner effect "
+            "to show here, confirmed against the real threshold_history data."
+        ),
     }
