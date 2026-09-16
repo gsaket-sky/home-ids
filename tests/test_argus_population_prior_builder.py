@@ -360,6 +360,51 @@ check("L: BUGFIX -- once only 1 eligible contributor remains, the STALE row is "
 check("L: the deletion is correctly counted in the return dict",
       result_l2["removed_stale"] >= 1, f"got {result_l2}")
 
+# =============================================================================
+# M. REGRESSION GUARD -- device_type sourced from metadata_json, not the
+# devices.device_type COLUMN. Found live on `.94` while dry-running this module
+# against real production data, 2026-09-16, BEFORE the writer's first scheduled
+# run: every real device on `.94` has device_type=NULL in the column -- the live
+# pipeline only ever writes it into metadata_json (live_engine.py's peer-deviation
+# injection, via update_device_metadata()), never the column. The first version of
+# this test file used store.upsert_device(..., device_type=...) everywhere, which
+# DOES set the column -- masking exactly the gap that made the writer permanently
+# inert on real data. This section seeds device_type ONLY into metadata_json,
+# matching real production shape, to make sure this specific regression can never
+# silently recur.
+# =============================================================================
+random.seed(777)  # isolate from prior sections' cumulative draws -- this section's
+                   # own correctness must not depend on how much random state every
+                   # earlier section happened to consume first.
+store_m = GraphStore(":memory:")
+engine_m = BaselineEngine(store_m)
+for dev, mean in (("devM1", 60.0), ("devM2", 64.0)):
+    # upsert_device() WITHOUT device_type (matches score_metric()'s own real FK-fix
+    # upsert call, which never passes it either) -- then set it ONLY via
+    # metadata_json, the real production path.
+    store_m.upsert_device(dev, timestamp=NOW)
+    store_m.update_device_metadata(dev, {"device_type": "printer"}, timestamp=NOW)
+    for i in range(50):
+        engine_m.score_metric(dev, "query_rate", "gaussian", (random.gauss(mean, 2.0),), 10, now=NOW + i)
+
+col_check = store_m._conn.execute(
+    "SELECT device_type FROM devices WHERE device_id='devM1'"
+).fetchone()
+check("M: setup sanity check -- devM1's devices.device_type COLUMN is genuinely "
+      "NULL (matching real .94 production shape), only metadata_json carries it",
+      col_check["device_type"] is None, f"got {col_check['device_type']!r}")
+
+result_m = ppb.build_population_priors(store_m, now=NOW + 1000)
+row_m = store_m._conn.execute(
+    "SELECT contributed_by_json FROM population_priors "
+    "WHERE device_type='printer' AND metric='query_rate' AND hour=10"
+).fetchone()
+check("M: REGRESSION GUARD -- devices whose device_type lives ONLY in "
+      "metadata_json (the real production shape) ARE correctly found and pooled, "
+      "not silently skipped the way a devices.device_type-COLUMN-only query would",
+      row_m is not None and sorted(json.loads(row_m["contributed_by_json"])) == ["devM1", "devM2"],
+      f"got {row_m}")
+
 store.close()
 store_d.close()
 store_e.close()
@@ -367,6 +412,7 @@ store_f.close()
 store_g.close()
 store_h.close()
 store_l.close()
+store_m.close()
 store_k.close()
 
 print(f"\n{'='*60}")

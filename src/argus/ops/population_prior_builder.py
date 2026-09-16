@@ -124,21 +124,66 @@ def _device_is_currently_clean(store: GraphStore, device_id: str) -> bool:
     return latest.get("state") not in _INCIDENT_STATES
 
 
-def _eligible_contributors(store: GraphStore, device_type: str, metric: str, hour: int,
+def _device_type_map(store: GraphStore) -> Dict[str, str]:
+    """device_id -> effective device_type, mirroring _seeded_model()'s own read
+    precedence exactly (baseline/engine.py: metadata_json's own "device_type" key
+    first, the devices.device_type COLUMN as fallback).
+
+    BUGFIX (found live on `.94` while dry-running this module against real
+    production data before the first scheduled run, 2026-09-16): the first version
+    of this function queried the devices.device_type COLUMN directly in SQL
+    (`JOIN devices d ON ... WHERE d.device_type = ?`). Confirmed live: on `.94`'s
+    real graph, EVERY one of 86 real devices has device_type=NULL in that column --
+    the column is never actually written by the live pipeline (score_metric()'s own
+    upsert_device() call never passes device_type; live_engine.py's peer-deviation
+    injection writes it into metadata_json via update_device_metadata(), never the
+    column). A column-only query would have matched zero devices, ever, making the
+    whole writer permanently inert on real data -- caught before the first scheduled
+    run only because this was dry-run against `.94` directly as part of the deploy,
+    not because any test caught it (every test in this module's own suite builds its
+    devices via store.upsert_device(..., device_type=...), which DOES set the
+    column -- a real gap in that test fixture's realism, not just in the production
+    code).
+
+    Deliberately NOT a SQL json_extract() query -- matches this codebase's own
+    established policy (GraphStore.get_devices_with_metadata_value()'s own
+    documented reasoning: JSON1 extension availability isn't guaranteed on every
+    deployment's SQLite build). A full-table Python-side scan, same shape as that
+    method, is cheap at the device counts (tens, not thousands) this project
+    targets, and this runs once a day, not in a hot per-cycle loop."""
+    rows = store._conn.execute("SELECT device_id, device_type, metadata_json FROM devices").fetchall()
+    out: Dict[str, str] = {}
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except (TypeError, ValueError):
+            meta = {}
+        dtype = meta.get("device_type") or row["device_type"]
+        if dtype:
+            out[row["device_id"]] = dtype
+    return out
+
+
+def _eligible_contributors(store: GraphStore, device_ids: List[str], metric: str, hour: int,
                              model_kind: str) -> List[Tuple[str, dict]]:
-    """Real device_baselines rows for this (device_type, metric, hour, model_kind),
-    the most-recent regime_id per device, filtered to devices with enough of their
-    own history AND a currently-clean incident state. Returns
-    [(device_id, posterior_params_dict), ...] -- best-effort per row: a device whose
-    posterior_params_json fails to parse is skipped, never aborts the whole pool."""
+    """Real device_baselines rows for this specific set of device_ids (already
+    filtered to one device_type by the caller, via _device_type_map()) at
+    (metric, hour, model_kind), the most-recent regime_id per device, filtered to
+    devices with enough of their own history AND a currently-clean incident state.
+    Returns [(device_id, posterior_params_dict), ...] -- best-effort per row: a
+    device whose posterior_params_json fails to parse is skipped, never aborts the
+    whole pool."""
+    if not device_ids:
+        return []
+    placeholders = ",".join("?" * len(device_ids))
     rows = store._conn.execute(
-        "SELECT db.device_id, db.n, db.posterior_params_json FROM device_baselines db "
-        "JOIN devices d ON d.device_id = db.device_id "
-        "WHERE d.device_type = ? AND db.metric = ? AND db.hour = ? AND db.model_kind = ? "
-        "AND db.regime_id = (SELECT MAX(regime_id) FROM device_baselines db2 "
-        "                     WHERE db2.device_id = db.device_id AND db2.metric = db.metric "
-        "                     AND db2.hour = db.hour AND db2.model_kind = db.model_kind)",
-        (device_type, metric, hour, model_kind),
+        f"SELECT db.device_id, db.n, db.posterior_params_json FROM device_baselines db "
+        f"WHERE db.device_id IN ({placeholders}) AND db.metric = ? AND db.hour = ? "
+        f"AND db.model_kind = ? "
+        f"AND db.regime_id = (SELECT MAX(regime_id) FROM device_baselines db2 "
+        f"                     WHERE db2.device_id = db.device_id AND db2.metric = db.metric "
+        f"                     AND db2.hour = db.hour AND db2.model_kind = db.model_kind)",
+        (*device_ids, metric, hour, model_kind),
     ).fetchall()
     out: List[Tuple[str, dict]] = []
     for row in rows:
@@ -268,18 +313,27 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
     removed_stale = 0
     failed = 0
 
-    groups = store._conn.execute(
-        "SELECT DISTINCT d.device_type, db.metric, db.hour, db.model_kind "
-        "FROM device_baselines db JOIN devices d ON d.device_id = db.device_id "
-        "WHERE d.device_type IS NOT NULL AND d.device_type != '' AND d.device_type != 'unknown' "
-        "AND db.model_kind IN ('gaussian', 'beta', 'poisson')"
-    ).fetchall()
+    # device_type per device is resolved ONCE, in Python (see _device_type_map()'s
+    # own docstring for why this isn't a SQL join on the devices.device_type
+    # column) -- every group enumeration below groups by this map, not by a SQL
+    # DISTINCT on a column that's NULL for every real device on `.94`.
+    dtype_map = _device_type_map(store)
 
-    for group in groups:
-        device_type, metric, hour, model_kind = (
-            group["device_type"], group["metric"], group["hour"], group["model_kind"])
+    raw_rows = store._conn.execute(
+        "SELECT DISTINCT device_id, metric, hour, model_kind FROM device_baselines "
+        "WHERE model_kind IN ('gaussian', 'beta', 'poisson')"
+    ).fetchall()
+    groups_seen: Dict[Tuple[str, str, int, str], List[str]] = {}
+    for row in raw_rows:
+        dtype = dtype_map.get(row["device_id"])
+        if not dtype or dtype == "unknown":
+            continue
+        key = (dtype, row["metric"], row["hour"], row["model_kind"])
+        groups_seen.setdefault(key, []).append(row["device_id"])
+
+    for (device_type, metric, hour, model_kind), device_ids in groups_seen.items():
         try:
-            contributors = _eligible_contributors(store, device_type, metric, hour, model_kind)
+            contributors = _eligible_contributors(store, device_ids, metric, hour, model_kind)
             if len(contributors) < _MIN_CONTRIBUTORS:
                 skipped_insufficient += 1
                 if _delete_population_prior_if_present(store, device_type, metric, hour):
@@ -307,16 +361,21 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
 
     # Markov axis: a separate pass -- hour is fixed at 0 (matches baseline/engine.py's
     # own _load_markov() read convention: the Markov axis has no diurnal bucketing).
-    markov_groups = store._conn.execute(
-        "SELECT DISTINCT d.device_type, db.metric FROM device_baselines db "
-        "JOIN devices d ON d.device_id = db.device_id "
-        "WHERE d.device_type IS NOT NULL AND d.device_type != '' AND d.device_type != 'unknown' "
-        "AND db.model_kind = 'markov'"
+    # Same Python-side device_type resolution as the pass above, not a SQL join.
+    markov_raw_rows = store._conn.execute(
+        "SELECT DISTINCT device_id, metric FROM device_baselines WHERE model_kind = 'markov'"
     ).fetchall()
-    for row in markov_groups:
-        device_type, axis = row["device_type"], row["metric"]
+    markov_groups_seen: Dict[Tuple[str, str], List[str]] = {}
+    for row in markov_raw_rows:
+        dtype = dtype_map.get(row["device_id"])
+        if not dtype or dtype == "unknown":
+            continue
+        key = (dtype, row["metric"])
+        markov_groups_seen.setdefault(key, []).append(row["device_id"])
+
+    for (device_type, axis), device_ids in markov_groups_seen.items():
         try:
-            contributors = _eligible_contributors(store, device_type, axis, 0, "markov")
+            contributors = _eligible_contributors(store, device_ids, axis, 0, "markov")
             if len(contributors) < _MIN_CONTRIBUTORS:
                 skipped_insufficient += 1
                 if _delete_population_prior_if_present(store, device_type, axis, 0):
@@ -340,7 +399,7 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
         "skipped_insufficient_contributors": skipped_insufficient,
         "removed_stale": removed_stale,
         "failed": failed,
-        "groups_considered": len(groups) + len(markov_groups),
+        "groups_considered": len(groups_seen) + len(markov_groups_seen),
     }
 
 
