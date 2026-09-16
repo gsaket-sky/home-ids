@@ -1321,7 +1321,14 @@ function renderAutonomyView(){
   }
 
   var d = state.autonomyData || {};
-  var autotuner = d.autotuner || [];
+  // 2026-09-16 (per-device/category autotuning plan): /api/autonomy's own
+  // autotuner list now includes device- and category-scoped rows too (both
+  // tiers write into the same threshold_history table) -- this panel shows
+  // GLOBAL scope only (device_id and device_type both absent); scoped rows
+  // have their own panels below (Per-device status / Per-category autotuner
+  // status), so filtering here avoids showing the same row twice under two
+  // different framings.
+  var autotuner = (d.autotuner || []).filter(function(row){ return !row.device_id && !row.device_type; });
   var trustGrants = d.trust_grants || [];
   var buildingTrust = d.building_trust || [];
 
@@ -1361,7 +1368,7 @@ function renderAutonomyView(){
 
   return topbarHead + '<div class="content">'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autotuner history</div></div>'
-    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Global -- these threshold changes apply to every device\'s decisions equally, not to one device specifically (see "Per-device status" below for what IS per-device).</div>'
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Global scope only -- these threshold changes apply to every device\'s decisions equally. Device- and category-scoped changes (a more targeted tuning tier, added 2026-09-16) show separately in "Per-device status" and "Per-category autotuner status" below.</div>'
     + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'+autotuneRows+'</tbody></table></div></div>'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — resolved</div></div>'
     + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Destination</th><th>Hypothesis</th><th>How it was resolved</th><th>Granted</th></tr></thead><tbody>'+trustRows+'</tbody></table></div></div>'
@@ -1391,16 +1398,39 @@ function renderAutonomyByDevicePanel(){
 
   var dd = state.autonomyByDeviceData || {};
   var devices = dd.devices || [];
-  if (!devices.length) {
-    return '<div class="panel" style="margin-top:16px;">'+header+'<div class="panel-body"><div class="empty-state">No device has any composite-trust activity yet.</div></div></div>';
+  var categories = dd.by_category || [];
+  if (!devices.length && !categories.length) {
+    return '<div class="panel" style="margin-top:16px;">'+header+'<div class="panel-body"><div class="empty-state">No device or category has any composite-trust or autotuner activity yet.</div></div></div>';
   }
 
-  var rows = devices.map(function(dev){
+  // Shared by both the per-device and per-category detail expansions --
+  // 2026-09-16 (per-device/category autotuning plan): reuses the exact same
+  // directionBadge()/statusBadge()/fmtParamValue() helpers the global
+  // Autotuner Timeline panel above already uses, so a scoped change reads
+  // identically to a global one, just in its own scope's table.
+  function autotunerDetailTable(rows){
+    if (!rows.length) return '<div class="empty-state" style="padding:8px 0;">No autotuner activity at this scope.</div>';
+    return '<table style="width:100%;"><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'
+      + rows.map(function(row){
+          return '<tr><td class="cell-mono">'+esc(row.parameter)+'</td>'
+            + '<td>'+directionBadge(row.direction)+'</td>'
+            + '<td class="cell-mono">'+fmtParamValue(row.old_value)+' → '+fmtParamValue(row.new_value)+'</td>'
+            + '<td>'+statusBadge(row.status)+'</td>'
+            + '<td style="font-size:11.5px;color:var(--text-dim);max-width:280px;">'+esc(row.reason||'')+'</td>'
+            + '<td class="cell-mono">'+agoText(row.proposed_at)+'</td></tr>';
+        }).join('')
+      + '</tbody></table>';
+  }
+
+  var deviceRows = !devices.length
+    ? '<tr><td colspan="6"><div class="empty-state">No device has any composite-trust or autotuner activity yet.</div></td></tr>'
+    : devices.map(function(dev){
     var isExpanded = state.autonomyExpandedDeviceId === dev.device_id;
     var summaryRow = '<tr style="cursor:pointer;" onclick="app.toggleAutonomyDevice(\''+esc(dev.device_id)+'\')">'
       + '<td><div class="cell-title">'+esc(dev.hostname)+'</div><div class="cell-mono" style="font-size:11px;color:var(--text-faint);">'+esc(dev.device_id)+'</div></td>'
       + '<td class="cell-mono">'+dev.trust_grants_count+'</td>'
       + '<td class="cell-mono">'+dev.building_trust_count+'</td>'
+      + '<td class="cell-mono">'+dev.autotuner_count+'</td>'
       + '<td class="cell-mono">'+agoText(dev.last_activity_at)+'</td>'
       + '<td style="color:var(--accent);font-size:12px;">'+(isExpanded?'▾ hide':'▸ detail')+'</td></tr>';
 
@@ -1431,17 +1461,43 @@ function renderAutonomyByDevicePanel(){
         + '</tbody></table>'
       : '<div class="empty-state" style="padding:8px 0;">Nothing currently accumulating for this device.</div>';
 
-    return summaryRow + '<tr><td colspan="5" style="background:var(--bg-hover);padding:12px 16px;">'
+    return summaryRow + '<tr><td colspan="6" style="background:var(--bg-hover);padding:12px 16px;">'
       + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Resolved trust grants</div>'
       + grantsDetail
       + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Still building</div>'
       + buildingDetail
+      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Autotuner changes for THIS device</div>'
+      + autotunerDetailTable(dev.autotuner)
+      + '</td></tr>';
+  }).join('');
+
+  // 2026-09-16 (per-device/category autotuning plan): category is the OTHER
+  // real tier the autotuner now writes to -- distinct from the per-device
+  // panel above, since a category-scoped change applies to every device of
+  // that type, not one specific device. No composite-trust data here (that
+  // system is device-scoped only, by design -- see the plan doc).
+  var categoryHeaderRight = '';
+  var categoryHeader = '<div class="panel-header"><div class="panel-title">Per-category autotuner status</div>'+categoryHeaderRight+'</div>';
+  var categoryRows = !categories.length
+    ? '<tr><td colspan="3"><div class="empty-state">No category has any autotuner activity yet.</div></td></tr>'
+    : categories.map(function(cat){
+    var isExpanded = state.autonomyExpandedDeviceId === ('category:'+cat.device_type);
+    var summaryRow = '<tr style="cursor:pointer;" onclick="app.toggleAutonomyDevice(\'category:'+esc(cat.device_type)+'\')">'
+      + '<td class="cell-title">'+esc(cat.device_type)+'</td>'
+      + '<td class="cell-mono">'+cat.autotuner_count+'</td>'
+      + '<td class="cell-mono">'+agoText(cat.last_activity_at)+'</td>'
+      + '<td style="color:var(--accent);font-size:12px;">'+(isExpanded?'▾ hide':'▸ detail')+'</td></tr>';
+    if (!isExpanded) return summaryRow;
+    return summaryRow + '<tr><td colspan="4" style="background:var(--bg-hover);padding:12px 16px;">'
+      + autotunerDetailTable(cat.autotuner)
       + '</td></tr>';
   }).join('');
 
   return '<div class="panel" style="margin-top:16px;">'+header
-    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">'+esc(dd.autotuner_is_global_note||'')+' Click a device to see its own grants and in-progress trust.</div>'
-    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Building trust</th><th>Last activity</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Composite trust is device-scoped only. Autotuner changes shown here are DEVICE-scoped specifically -- see "Per-category autotuner status" below for category-wide changes, and the Autotuner history panel above for global ones. Click a row to see its own detail.</div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Building trust</th><th>Autotuner (device)</th><th>Last activity</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
+    + '<div class="panel" style="margin-top:16px;">'+categoryHeader
+    + '<div class="table-wrap"><table><thead><tr><th>Category (device type)</th><th>Autotuner changes</th><th>Last activity</th><th></th></tr></thead><tbody>'+categoryRows+'</tbody></table></div></div>';
 }
 
 function renderGraphView(){

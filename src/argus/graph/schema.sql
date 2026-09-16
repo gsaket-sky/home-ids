@@ -244,9 +244,17 @@ CREATE INDEX IF NOT EXISTS idx_cl_afpe_trust_device ON cl_afpe_trust(device_id);
 -- Autotuner's own versioned parameter history (Sheet 03) -- every threshold change,
 -- bounded-step, canaried, backtest-gated. snapshot_id links back to the exact
 -- baseline_snapshots row that was live when this change was proposed.
+-- device_type: 2026-09-16, per-device/category autotuning plan (Documentation/
+-- PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md) -- a row has AT MOST ONE of device_id /
+-- device_type set (a device-specific override, a category-wide override, or
+-- neither = the global default), never both. Enforced in Python
+-- (AutotuneEngine.propose_change()), not a CHECK constraint here -- SQLite CHECK
+-- constraints on "at most one of two nullable columns" are awkward, and every
+-- other invariant in this table is already validated in Python.
 CREATE TABLE IF NOT EXISTS threshold_history (
     change_id       TEXT PRIMARY KEY,
     device_id       TEXT REFERENCES devices(device_id),  -- NULL for a fleet/cohort-level parameter
+    device_type      TEXT,                                 -- NULL unless this is a category-wide override
     parameter        TEXT NOT NULL,
     old_value        REAL,
     new_value        REAL,
@@ -259,6 +267,7 @@ CREATE TABLE IF NOT EXISTS threshold_history (
     snapshot_id      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_threshold_history_device ON threshold_history(device_id, proposed_at);
+CREATE INDEX IF NOT EXISTS idx_threshold_history_device_type ON threshold_history(device_type, proposed_at);
 
 -- Per-device/cohort versioned snapshots (Sheet 04) -- taken before every regime
 -- promotion, autotune batch, and CL-AFPE suppression decision, plus periodic/manual.

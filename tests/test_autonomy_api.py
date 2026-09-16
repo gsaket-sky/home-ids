@@ -148,7 +148,7 @@ def test_autonomy_by_device_empty_store(tmp_path, monkeypatch):
     monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", tmp_path / "does_not_exist.db")
     result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
     assert result["devices"] == []
-    assert result["autotuner_is_global"] is True
+    assert result["by_category"] == []
 
 
 def test_autonomy_by_device_groups_by_device_not_globally(graph_db, state_file):
@@ -187,18 +187,55 @@ def test_autonomy_by_device_sorted_by_most_recent_activity_first(graph_db, state
     assert activity_times == sorted(activity_times, reverse=True)
 
 
-def test_autonomy_by_device_states_autotuner_is_global(graph_db):
-    """The autotuner timeline is deliberately NOT grouped per device here --
-    threshold_history.device_id is NULL for every real row (global parameters),
-    confirmed live against .94's actual data. Must say so explicitly rather than
-    silently returning an empty per-device autotuner list the console could
-    misread as 'no autotuner activity for this device' instead of 'not
-    applicable, it's global.'"""
+def test_autonomy_by_device_global_autotuner_changes_excluded_from_both_groupings(graph_db, state_file):
+    """graph_db's fixture threshold_history rows are both global-scope
+    (device_id=NULL, device_type=NULL) -- they belong in /api/autonomy's own
+    Autotuner Timeline panel only, never duplicated into a device's or a
+    category's own autotuner list here."""
     result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
-    assert result["autotuner_is_global"] is True
-    assert "global" in result["autotuner_is_global_note"].lower()
     for d in result["devices"]:
-        assert "autotuner" not in d  # no per-device autotuner key to misread as empty-but-applicable
+        assert d["autotuner"] == []
+        assert d["autotuner_count"] == 0
+    assert result["by_category"] == []  # no category-scoped rows exist in this fixture at all
+
+
+def test_autonomy_by_device_device_scoped_autotuner_change_appears_on_its_device(graph_db, state_file):
+    with graph_client.open_store() as store:
+        store._conn.execute(
+            "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+            "proposed_at, canary_until, promoted_at, reason, backtest_run_id) VALUES "
+            "('chg_dev_a', 'dev_a', NULL, 'hard_stop_candidate_sensitivity', 0.9, 0.85, ?, ?, ?, "
+            "'device-scoped tightening', 'run_dev')",
+            (time.time(), time.time(), time.time()),
+        )
+        store._maybe_commit()
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    by_id = {d["device_id"]: d for d in result["devices"]}
+    assert by_id["dev_a"]["autotuner_count"] == 1
+    assert by_id["dev_a"]["autotuner"][0]["change_id"] == "chg_dev_a"
+    assert by_id["dev_a"]["autotuner"][0]["device_type"] is None
+    # a device-scoped change must never leak into the category grouping
+    assert result["by_category"] == []
+
+
+def test_autonomy_by_device_category_scoped_autotuner_change_appears_in_by_category(graph_db, state_file):
+    with graph_client.open_store() as store:
+        store._conn.execute(
+            "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+            "proposed_at, canary_until, promoted_at, reason, backtest_run_id) VALUES "
+            "('chg_iot', NULL, 'iot', 'hard_stop_candidate_sensitivity', 0.9, 0.85, ?, ?, ?, "
+            "'category-scoped tightening', 'run_cat')",
+            (time.time(), time.time(), time.time()),
+        )
+        store._maybe_commit()
+    result = autonomy_api.get_autonomy_by_device(limit=200, token="test")
+    by_cat = {c["device_type"]: c for c in result["by_category"]}
+    assert "iot" in by_cat
+    assert by_cat["iot"]["autotuner_count"] == 1
+    assert by_cat["iot"]["autotuner"][0]["change_id"] == "chg_iot"
+    # a category-scoped change must never leak into any device's own grouping
+    for d in result["devices"]:
+        assert d["autotuner"] == []
 
 
 def test_autonomy_by_device_unattributed_trust_grants_bucketed_together(graph_db, state_file):

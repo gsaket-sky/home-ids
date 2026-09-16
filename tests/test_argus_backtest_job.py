@@ -105,6 +105,177 @@ if row is not None:
           stored_golden["ran"] is True)
 
 
+# =============================================================================
+# _hits_and_totals_by_class / _decide_scoped_change -- the safe-threshold gate
+# (Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §3b, user-requested
+# "safe threshold value for enough real data to back a promotion"). Pure unit
+# tests against hand-built trial data -- no real sweep() call needed, since
+# these functions only ever consume the (device_id/device_type/result) shape
+# _flatten_trials() already produces, tested separately below.
+# =============================================================================
+def _fake_trial(device_id, device_type, detected_by_class):
+    return {"device_id": device_id, "device_type": device_type,
+             "result": {"attack_results": {cls: {"detected": d} for cls, d in detected_by_class.items()}}}
+
+
+totals = backtest_job._hits_and_totals_by_class([
+    _fake_trial("d1", "iot", {"a": True, "b": False}),
+    _fake_trial("d2", "iot", {"a": True, "b": True}),
+])
+check("_hits_and_totals_by_class: aggregates hits/n correctly across trials",
+      totals == {"a": (2, 2), "b": (1, 2)}, f"got {totals}")
+check("_hits_and_totals_by_class: an empty trial list produces an empty dict, not a crash",
+      backtest_job._hits_and_totals_by_class([]) == {})
+
+_bounds = {"min": 0.5, "max": 0.99, "max_step": 0.05}
+_direction = 1
+
+# Tighten: fires on ANY miss, with NO minimum sample size -- a single trial is enough.
+d1 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (0, 1)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: tightens off a SINGLE miss (n=1) -- tightening "
+      "needs no sample floor, by design", d1 is not None and d1[0] < 0.80, f"got {d1}")
+
+# Loosen blocked: below _MIN_TRIALS_FOR_LOOSENING even at a perfect raw rate.
+below_floor_n = backtest_job._MIN_TRIALS_FOR_LOOSENING - 1
+d2 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (below_floor_n, below_floor_n)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: refuses to loosen below _MIN_TRIALS_FOR_LOOSENING "
+      "even at a perfect 100% raw rate -- the coarse pre-filter",
+      d2 is None, f"got {d2}")
+
+# Loosen blocked: enough trials, perfect raw rate, but the Wilson lower bound
+# doesn't clear _TUNE_LOOSEN_WILSON_FLOOR yet (right at the coarse floor, not
+# comfortably past it -- see that constant's own docstring for why 20 alone
+# isn't quite enough in practice).
+at_floor_n = backtest_job._MIN_TRIALS_FOR_LOOSENING
+d3 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (at_floor_n, at_floor_n)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: at EXACTLY _MIN_TRIALS_FOR_LOOSENING trials, a "
+      "perfect record's Wilson lower bound still doesn't clear "
+      "_TUNE_LOOSEN_WILSON_FLOOR -- the real statistical gate, not just the "
+      "coarse n-based pre-filter",
+      d3 is None, f"got {d3}")
+
+# Loosen succeeds: comfortably more trials, perfect rate, no drift.
+comfortable_n = 40
+d4 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (comfortable_n, comfortable_n)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: loosens once a comfortably large perfect-rate "
+      "sample clears the Wilson floor, with no drift",
+      d4 is not None and d4[0] > 0.80, f"got {d4}")
+
+# Loosen blocked by drift even with plenty of trials at a perfect rate.
+d5 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (comfortable_n, comfortable_n)},
+                                           drift_at_scope=True, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: refuses to loosen when drift is flagged for "
+      "THIS scope, even with plenty of trials at a perfect rate",
+      d5 is None, f"got {d5}")
+
+# Loosen blocked: an imperfect raw rate never loosens, no matter how many trials.
+d6 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (comfortable_n - 1, comfortable_n)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=True)
+check("_decide_scoped_change: an imperfect raw rate (39/40) never loosens, "
+      "regardless of sample size -- _TUNE_LOOSEN_CEILING's raw-rate "
+      "requirement is unchanged from the original global-only logic",
+      d6 is None, f"got {d6}")
+
+# allow_loosen=False: caller can suppress loosening entirely for a scope
+# where it structurally doesn't apply, without touching the tighten path.
+d7 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (comfortable_n, comfortable_n)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=False)
+check("_decide_scoped_change: allow_loosen=False suppresses loosening even "
+      "when every other condition would otherwise allow it",
+      d7 is None, f"got {d7}")
+d8 = backtest_job._decide_scoped_change(0.80, _bounds, _direction, {"a": (0, 1)},
+                                           drift_at_scope=False, scope_label="t", run_id="r", allow_loosen=False)
+check("_decide_scoped_change: allow_loosen=False does NOT suppress tightening",
+      d8 is not None, f"got {d8}")
+
+check("_decide_scoped_change: no trial data at all returns None, not a crash",
+      backtest_job._decide_scoped_change(0.80, _bounds, _direction, {}, False, "t", "r", True) is None)
+
+
+# =============================================================================
+# _scope_has_drift -- reads compute_drift_result()'s own finding shape
+# =============================================================================
+fake_drift = {"drift_detected": True, "findings": [
+    {"parameter": "hard_stop_candidate_sensitivity", "device_id": "dev1", "device_type": None},
+    {"parameter": "hard_stop_candidate_sensitivity", "device_id": None, "device_type": "iot"},
+]}
+check("_scope_has_drift: matches a device-scoped finding for the right device",
+      backtest_job._scope_has_drift(fake_drift, "hard_stop_candidate_sensitivity", "dev1", None) is True)
+check("_scope_has_drift: matches a category-scoped finding for the right category",
+      backtest_job._scope_has_drift(fake_drift, "hard_stop_candidate_sensitivity", None, "iot") is True)
+check("_scope_has_drift: does NOT match a DIFFERENT device just because "
+      "drift_detected is True somewhere else on the network -- the real bug "
+      "this closes (a global drift_detected boolean would have wrongly "
+      "blocked an unrelated scope's loosening proposal)",
+      backtest_job._scope_has_drift(fake_drift, "hard_stop_candidate_sensitivity", "dev2", None) is False)
+check("_scope_has_drift: does NOT match a different category",
+      backtest_job._scope_has_drift(fake_drift, "hard_stop_candidate_sensitivity", None, "router") is False)
+check("_scope_has_drift: does NOT match the global scope when only "
+      "device/category findings exist",
+      backtest_job._scope_has_drift(fake_drift, "hard_stop_candidate_sensitivity", None, None) is False)
+
+
+# =============================================================================
+# augment_small_category_sweeps / _propose_scoped_tuning_changes -- lightweight
+# real integration check (real sweep() calls, real devices, real store) --
+# confirms the wiring end-to-end without asserting a specific accept/reject
+# outcome (real synthetic attack detection has some run-to-run variance, same
+# "loose bound, not an exact value" convention run_synthetic_sweep's own test
+# above already uses for avg_detection_rate).
+# =============================================================================
+store_scoped = GraphStore(":memory:")
+store_scoped._conn.execute(
+    "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES (?, ?, ?, ?)",
+    ("bt_scoped", NOW, NOW, 1),
+)
+store_scoped._maybe_commit()
+
+scoped_device_ids = []
+for i in range(2):
+    dev = f"dev_scoped_{i}"
+    store_scoped.upsert_device(dev, device_type="smart_tv", timestamp=NOW)
+    scoped_device_ids.append(dev)
+
+scoped_synthetic = backtest_job.run_synthetic_sweep(store_scoped, scoped_device_ids, now=NOW)
+scoped_drift = {"drift_detected": False, "findings": []}
+device_type_of = backtest_job._device_type_lookup(store_scoped, scoped_device_ids)
+check("_device_type_lookup: resolves the real device_type for every requested device",
+      device_type_of == {"dev_scoped_0": "smart_tv", "dev_scoped_1": "smart_tv"}, f"got {device_type_of}")
+
+all_trials = backtest_job.augment_small_category_sweeps(store_scoped, scoped_synthetic, device_type_of, now=NOW)
+check("augment_small_category_sweeps: returns at least the base pass's own "
+      "trial count (2 devices) -- augmentation only ever ADDS trials",
+      len(all_trials) >= 2, f"got {len(all_trials)}")
+check("augment_small_category_sweeps: a 2-device category stays below "
+      "_MIN_TRIALS_FOR_LOOSENING even after augmentation, capped by "
+      "_MAX_SWEEP_REPETITIONS_PER_DEVICE -- the honest 'not enough devices "
+      "in this category, ever' outcome, not an infinite retry loop",
+      len(all_trials) <= 2 * backtest_job._MAX_SWEEP_REPETITIONS_PER_DEVICE, f"got {len(all_trials)}")
+check("augment_small_category_sweeps: every trial is correctly tagged with "
+      "the real category",
+      all(t["device_type"] == "smart_tv" for t in all_trials))
+
+scoped_proposals = backtest_job._propose_scoped_tuning_changes(store_scoped, all_trials, scoped_drift,
+                                                                   "bt_scoped", NOW)
+check("_propose_scoped_tuning_changes: runs end-to-end without crashing "
+      "against real sweep data, returning a list (possibly empty -- 2 "
+      "devices can't reach the loosening floor, and may not show a weak "
+      "enough class to tighten on either, depending on this run's real "
+      "synthetic results)",
+      isinstance(scoped_proposals, list))
+for p in scoped_proposals:
+    has_device = bool(p.get("device_id"))
+    has_category = bool(p.get("device_type"))
+    check(f"_propose_scoped_tuning_changes: proposal {p.get('change_id')} is scoped "
+           f"to EXACTLY one of device_id/device_type -- never both, never neither "
+           f"(never a stray global proposal from this function)",
+          has_device != has_category, f"got device_id={p.get('device_id')} device_type={p.get('device_type')}")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

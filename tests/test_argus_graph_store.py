@@ -775,6 +775,40 @@ check("delete_decisions with an empty list is a safe no-op", archive_store.delet
 
 archive_store.close()
 
+# =============================================================================
+# threshold_history.device_type migration -- 2026-09-16, per-device/category
+# autotuning plan. ALTER TABLE ADD COLUMN has no "IF NOT EXISTS" in SQLite;
+# _migrate_existing_db() wraps it in try/except OperationalError -- confirm
+# that's actually idempotent (re-opening a db that already has the column
+# doesn't raise) using a REAL FILE-backed db, since :memory: can't be
+# reopened to exercise this at all (every other test in this file already
+# implicitly exercises the "column already exists" path once per :memory:
+# instance, just never a genuine SECOND open of the SAME db).
+# =============================================================================
+with tempfile.TemporaryDirectory() as tmpdir:
+    migration_db_path = str(_PathForSysPath(tmpdir) / "migration_test.db")
+    first_open = GraphStore(migration_db_path)
+    check("threshold_history has the device_type column on first open (fresh db, via schema.sql)",
+          any(row[1] == "device_type" for row in first_open._conn.execute("PRAGMA table_info(threshold_history)")))
+    first_open.close()
+
+    try:
+        second_open = GraphStore(migration_db_path)
+        reopened_ok = True
+    except Exception as exc:
+        reopened_ok = False
+        second_open = None
+        _reopen_error = exc
+    check("threshold_history migration is idempotent -- reopening a db that "
+          "already has device_type does not raise",
+          reopened_ok, "" if reopened_ok else str(_reopen_error))
+    if second_open is not None:
+        check("threshold_history still has exactly one device_type column after "
+              "a second open (no duplicate-column corruption)",
+              sum(1 for row in second_open._conn.execute("PRAGMA table_info(threshold_history)")
+                   if row[1] == "device_type") == 1)
+        second_open.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

@@ -68,6 +68,44 @@ _LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
 _MIN_PROMOTIONS_FOR_TREND = 3  # first-pass, not-yet-empirically-tuned (same honesty framing)
 _DEFAULT_DRIFT_LOOKBACK_SECONDS = 7 * 86400.0
 
+# 2026-09-16, per-device/category autotuning (Documentation/
+# PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md): the safe-threshold value for trusting a
+# LOOSENING proposal at any scope (device, category, or global) -- tightening
+# needs no such floor (see propose_scoped_change()'s own docstring for why that
+# asymmetry is deliberate, not an oversight). First-pass, not-yet-empirically-
+# tuned constant, same honesty framing as _DEFAULT_ATTACK_FLOOR/
+# _MIN_PROMOTIONS_FOR_TREND above.
+_MIN_TRIALS_FOR_LOOSENING = 20
+_WILSON_Z_95 = 1.959963984540054  # standard normal quantile for a 95% two-sided CI
+
+# A scoped (device- or category-level) value may never diverge from its PARENT
+# tier's current value by more than this many max_steps, in the less-sensitive
+# direction -- the trust-radius failsafe. Guards against one statistical fluke
+# (or a mis-classified device_type) pushing a single scope's threshold to an
+# extreme the rest of the network never validated. Tightening beyond the parent
+# tier is never capped -- becoming MORE cautious than the network-wide default
+# is always safe, symmetric with the "tightening needs no sample floor" rule.
+_TRUST_RADIUS_MAX_STEPS = 2.0
+
+
+def wilson_lower_bound(hits: int, n: int, z: float = _WILSON_Z_95) -> float:
+    """The lower bound of the Wilson score confidence interval for a binomial
+    proportion (hits/n) -- the textbook-correct way to avoid trusting a small-
+    sample rate at face value. At n=20/20 (100% raw) this is ~0.836; at
+    n=100/100 it's ~0.963 -- the SAME raw rate produces a stricter, more honest
+    bar for a scope backed by fewer samples, rather than either trusting a
+    small sample fully or blocking it outright. Returns 0.0 for n<=0 (nothing
+    to estimate from -- the caller's own _MIN_TRIALS_FOR_LOOSENING gate should
+    already have excluded this case, this is defense-in-depth, not the
+    intended gate)."""
+    if n <= 0:
+        return 0.0
+    phat = hits / n
+    denom = 1.0 + z * z / n
+    center = phat + z * z / (2 * n)
+    margin = z * ((phat * (1 - phat) / n + z * z / (4 * n * n)) ** 0.5)
+    return max(0.0, (center - margin) / denom)
+
 
 @dataclass
 class ProposalResult:
@@ -92,47 +130,110 @@ class AutotuneEngine:
 
     # ---------------------------------------------------------- reads
 
-    def get_active_value(self, parameter: str, device_id: Optional[str] = None,
-                            default: Optional[float] = None) -> Optional[float]:
-        """The most recently PROMOTED (not merely proposed) value for
-        `parameter` -- a promoted-but-later-rolled-back change does not
-        count (rolled_back_at IS NULL is required), so a rollback takes
-        effect for readers immediately, not just in the audit trail."""
+    def _promoted_value_at_scope(self, parameter: str, device_id: Optional[str],
+                                    device_type: Optional[str]) -> Optional[float]:
+        """One exact-scope lookup -- device-specific (device_id set, device_type
+        NULL), category-specific (device_type set, device_id NULL), or global
+        (both NULL). Never falls back on its own; get_active_value() below is
+        what walks the tiers."""
         row = self.store._conn.execute(
             "SELECT new_value FROM threshold_history WHERE parameter=? AND "
             "(device_id=? OR (device_id IS NULL AND ? IS NULL)) AND "
+            "(device_type=? OR (device_type IS NULL AND ? IS NULL)) AND "
             "promoted_at IS NOT NULL AND rolled_back_at IS NULL "
             "ORDER BY promoted_at DESC LIMIT 1",
-            (parameter, device_id, device_id),
+            (parameter, device_id, device_id, device_type, device_type),
         ).fetchone()
-        return float(row["new_value"]) if row is not None else default
+        return float(row["new_value"]) if row is not None else None
 
-    def _last_proposal_time(self, parameter: str, device_id: Optional[str]) -> Optional[float]:
+    def get_active_value(self, parameter: str, device_id: Optional[str] = None,
+                            device_type: Optional[str] = None,
+                            default: Optional[float] = None) -> Optional[float]:
+        """The most recently PROMOTED (not merely proposed) value for
+        `parameter`, walking a 3-tier fallback: device-specific -> category-
+        specific -> global -> `default`. A promoted-but-later-rolled-back
+        change does not count at any tier (rolled_back_at IS NULL is
+        required), so a rollback takes effect for readers immediately, not
+        just in the audit trail.
+
+        2026-09-16 (per-device/category autotuning plan): device_type is new;
+        every pre-existing caller that only ever passed device_id keeps
+        working unchanged (device_type defaults to None, which simply skips
+        the category tier and falls straight through device -> global, the
+        exact original 2-tier behavior)."""
+        if device_id:
+            value = self._promoted_value_at_scope(parameter, device_id, None)
+            if value is not None:
+                return value
+        if device_type:
+            value = self._promoted_value_at_scope(parameter, None, device_type)
+            if value is not None:
+                return value
+        value = self._promoted_value_at_scope(parameter, None, None)
+        return value if value is not None else default
+
+    def _last_proposal_time(self, parameter: str, device_id: Optional[str],
+                              device_type: Optional[str] = None) -> Optional[float]:
+        """Cooldown lookup is an EXACT scope match, deliberately not a fallback --
+        a pending device-scoped proposal's cooldown must never be confused with
+        its category's own, separate cooldown clock."""
         row = self.store._conn.execute(
             "SELECT proposed_at FROM threshold_history WHERE parameter=? AND "
-            "(device_id=? OR (device_id IS NULL AND ? IS NULL)) "
+            "(device_id=? OR (device_id IS NULL AND ? IS NULL)) AND "
+            "(device_type=? OR (device_type IS NULL AND ? IS NULL)) "
             "ORDER BY proposed_at DESC LIMIT 1",
-            (parameter, device_id, device_id),
+            (parameter, device_id, device_id, device_type, device_type),
         ).fetchone()
         return float(row["proposed_at"]) if row is not None else None
 
     # ---------------------------------------------------------- propose / canary / promote / rollback
 
     def propose_change(self, parameter: str, new_value: float, reason: str,
-                         device_id: Optional[str] = None, backtest_run_id: Optional[str] = None,
+                         device_id: Optional[str] = None, device_type: Optional[str] = None,
+                         backtest_run_id: Optional[str] = None,
                          snapshot_id: Optional[str] = None, now: Optional[float] = None) -> ProposalResult:
-        """Proposes a bounded-step change. Rejected outright (not silently
-        clamped to a no-op) if: the parameter isn't on the allowlist, the
-        cooldown since the last proposal for this exact (parameter,
-        device_id) hasn't elapsed, or backtest_run_id is missing/failed --
-        this is the concrete backtest-gating the plan requires: a proposal
-        cannot even be CREATED off a failing or absent backtest, not just
-        blocked at promotion time."""
+        """Proposes a bounded-step change. `device_id` alone determines WHICH
+        SCOPE this proposal actually writes to: global (both args None),
+        category (device_type given, device_id absent), or device (device_id
+        given) -- matching the schema's own "at most one of device_id/
+        device_type on the written row" invariant (schema.sql's comment on
+        threshold_history.device_type).
+
+        When device_id IS given, `device_type` may ALSO be passed alongside it
+        -- purely as a HINT for correctly resolving that device's PARENT tier
+        (its category) for old_value/trust-radius purposes, never written to
+        the row itself (the row's own device_type column stays NULL for a
+        device-scoped proposal, always). Without this hint, a device proposal
+        would incorrectly skip straight to the global tier for its parent
+        lookup, treating a device with an already-tuned category as if that
+        category didn't exist -- found and fixed while writing this same
+        session's own test coverage, not a design that shipped untested.
+
+        Rejected outright (not silently clamped to a no-op) if: the parameter
+        isn't on the allowlist, the cooldown since the last proposal for this
+        EXACT written scope hasn't elapsed, backtest_run_id is missing/failed,
+        or (device/category scope only, loosening direction only) the trust-
+        radius cap would be exceeded -- this is the concrete backtest-gating
+        the plan requires: a proposal cannot even be CREATED off a failing or
+        absent backtest, not just blocked at promotion time.
+
+        2026-09-16 (per-device/category autotuning plan): device_type is new.
+        Every pre-existing caller (global-only, device_id-only, no
+        device_type hint) keeps working unchanged -- the trust-radius check
+        below only ever engages for a scope that actually HAS a parent tier
+        to diverge from (device_id or device_type set), so a global
+        proposal's behavior is byte-for-byte identical to before this
+        change."""
         now = now if now is not None else time.time()
         if parameter not in TUNABLE_PARAMETERS:
             return ProposalResult(False, reason=f"'{parameter}' is not on the tunable allowlist")
 
-        last_proposed = self._last_proposal_time(parameter, device_id)
+        # The row's OWN scope -- device_id wins if given (device_type, if also
+        # given, is a parent-resolution hint only, never written).
+        row_device_id = device_id
+        row_device_type = device_type if device_id is None else None
+
+        last_proposed = self._last_proposal_time(parameter, row_device_id, row_device_type)
         if last_proposed is not None and (now - last_proposed) < _COOLDOWN_SECONDS:
             return ProposalResult(False, reason=f"cooldown active ({now - last_proposed:.0f}s < {_COOLDOWN_SECONDS:.0f}s)")
 
@@ -144,17 +245,54 @@ class AutotuneEngine:
         if backtest_row is None or not backtest_row["overall_pass"]:
             return ProposalResult(False, reason=f"backtest_run_id {backtest_run_id} did not pass")
 
-        old_value = self.get_active_value(parameter, device_id, default=(
-            TUNABLE_PARAMETERS[parameter]["min"] + TUNABLE_PARAMETERS[parameter]["max"]) / 2.0)
+        bounds = TUNABLE_PARAMETERS[parameter]
+        default_mid = (bounds["min"] + bounds["max"]) / 2.0
+        # Full 3-tier fallback for old_value -- uses BOTH raw args (device_type
+        # as a hint is exactly what lets a device proposal correctly inherit
+        # its category's value here, not skip straight to global).
+        old_value = self.get_active_value(parameter, device_id, device_type, default=default_mid)
         clamped_new_value = _clamp_step(parameter, old_value, new_value)
+
+        # Trust-radius failsafe: a device-scoped value may never diverge from
+        # its category's current value (or global, if no category value
+        # exists), and a category-scoped value may never diverge from global,
+        # by more than _TRUST_RADIUS_MAX_STEPS max_steps in the LESS-SENSITIVE
+        # direction. Only engages for a scoped proposal that's actually moving
+        # less-sensitive -- tightening beyond the parent tier is always safe
+        # (becoming MORE cautious than the network-wide default needs no cap,
+        # symmetric with the "tightening needs no sample floor" rule
+        # elsewhere in this plan) and a global proposal has no parent tier to
+        # diverge from at all.
+        if row_device_id or row_device_type:
+            direction = _LESS_SENSITIVE_DIRECTION.get(parameter, 1)
+            moved_less_sensitive = (clamped_new_value - old_value) != 0 and \
+                ((clamped_new_value - old_value > 0) == (direction > 0))
+            if moved_less_sensitive:
+                # Parent tier: a device's parent is its category (using the
+                # device_type HINT, whether or not it matches row_device_type
+                # -- row_device_type is always None here since row_device_id
+                # is set) or global if no category hint was given; a
+                # category's parent is always global.
+                parent_device_type = device_type if row_device_id else None
+                parent_value = self.get_active_value(parameter, device_id=None, device_type=parent_device_type,
+                                                        default=default_mid)
+                radius = _TRUST_RADIUS_MAX_STEPS * bounds["max_step"]
+                divergence = (clamped_new_value - parent_value) * direction  # positive = less-sensitive divergence
+                if divergence > radius:
+                    scope_label = f"device {row_device_id}" if row_device_id else f"category {row_device_type}"
+                    return ProposalResult(False, reason=(
+                        f"trust-radius exceeded: {scope_label}'s proposed value {clamped_new_value:.4f} would "
+                        f"diverge from its parent tier's value {parent_value:.4f} by more than "
+                        f"{_TRUST_RADIUS_MAX_STEPS:.0f} max_steps in the less-sensitive direction"
+                    ))
 
         change_id = uuid.uuid4().hex
         self.store._conn.execute(
             "INSERT INTO threshold_history "
-            "(change_id, device_id, parameter, old_value, new_value, proposed_at, canary_until, "
-            "reason, backtest_run_id, snapshot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (change_id, device_id, parameter, old_value, clamped_new_value, now, now + _DEFAULT_CANARY_SECONDS,
-             reason, backtest_run_id, snapshot_id),
+            "(change_id, device_id, device_type, parameter, old_value, new_value, proposed_at, canary_until, "
+            "reason, backtest_run_id, snapshot_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (change_id, row_device_id, row_device_type, parameter, old_value, clamped_new_value, now,
+             now + _DEFAULT_CANARY_SECONDS, reason, backtest_run_id, snapshot_id),
         )
         self.store._maybe_commit()
         return ProposalResult(True, change_id=change_id)
@@ -270,46 +408,62 @@ def compute_drift_result(store: GraphStore, lookback_seconds: float = _DEFAULT_D
     to persist drift_result_json as an empty {} placeholder every run.
 
     For each TUNABLE_PARAMETERS entry, groups PROMOTED (never canary-only --
-    those aren't live yet) changes within `lookback_seconds` by device_id
-    (None = a device-independent/global change, its own group), and flags a
-    group whose values moved strictly, monotonically toward
-    _LESS_SENSITIVE_DIRECTION across at least _MIN_PROMOTIONS_FOR_TREND
-    promotions -- UNLESS a real regime_change evidence item for that same
-    device (or anywhere, for a global change) in the same window explains
+    those aren't live yet) changes within `lookback_seconds` by scope
+    (device_id / device_type / neither=global, each its own group -- a row
+    has at most one of the first two set), and flags a group whose values
+    moved strictly, monotonically toward _LESS_SENSITIVE_DIRECTION across at
+    least _MIN_PROMOTIONS_FOR_TREND promotions -- UNLESS a real regime_change
+    evidence item for that same scope (that one device; every device of that
+    category; or anywhere, for a global change) in the same window explains
     it. A genuine firmware/OS-update-driven regime shift is a legitimate
     reason for thresholds to relax repeatedly; an unexplained one is exactly
     the "quietly getting less sensitive for no real reason" failure mode
     this check exists to catch -- run_backtest()'s own `overall_pass` does
     NOT gate on this (a real, deliberate scope limit: drift is a flag for
     operator review, not yet wired as its own pass/fail bar -- see this
-    function's caller)."""
+    function's caller).
+
+    2026-09-16 (per-device/category autotuning plan): grouping extended from
+    device_id-only to (device_id, device_type) -- every pre-existing global/
+    device-scoped row (device_type always NULL until this plan's proposal
+    path starts writing category-scoped ones) groups and explains exactly as
+    before; category-scoped rows are new groups, not a change to old ones."""
     now = now if now is not None else time.time()
     since = now - lookback_seconds
     findings: List[Dict[str, Any]] = []
 
     for parameter, direction in _LESS_SENSITIVE_DIRECTION.items():
         rows = store._conn.execute(
-            "SELECT device_id, new_value, promoted_at FROM threshold_history WHERE parameter=? "
+            "SELECT device_id, device_type, new_value, promoted_at FROM threshold_history WHERE parameter=? "
             "AND promoted_at IS NOT NULL AND promoted_at >= ? AND rolled_back_at IS NULL "
             "ORDER BY promoted_at ASC",
             (parameter, since),
         ).fetchall()
 
-        by_device: Dict[Optional[str], List[float]] = {}
+        by_scope: Dict[tuple, List[float]] = {}
         for row in rows:
-            by_device.setdefault(row["device_id"], []).append(float(row["new_value"]))
+            scope_key = (row["device_id"], row["device_type"])
+            by_scope.setdefault(scope_key, []).append(float(row["new_value"]))
 
-        for device_id, values in by_device.items():
+        for (device_id, device_type), values in by_scope.items():
             if len(values) < _MIN_PROMOTIONS_FOR_TREND:
                 continue
             if not _is_monotonic_less_sensitive(values, direction):
                 continue
-            scope_devices = [device_id] if device_id is not None else []
+            if device_id is not None:
+                scope_devices = [device_id]
+            elif device_type is not None:
+                scope_devices = [r["device_id"] for r in store._conn.execute(
+                    "SELECT device_id FROM devices WHERE device_type=? AND merged_into_device_id IS NULL",
+                    (device_type,),
+                ).fetchall()]
+            else:
+                scope_devices = []
             if _has_regime_change_explanation(store, scope_devices, since, now):
                 continue
             findings.append({
-                "parameter": parameter, "device_id": device_id, "promotions": len(values),
-                "first_value": values[0], "last_value": values[-1],
+                "parameter": parameter, "device_id": device_id, "device_type": device_type,
+                "promotions": len(values), "first_value": values[0], "last_value": values[-1],
             })
 
     return {"drift_detected": bool(findings), "findings": findings, "lookback_seconds": lookback_seconds}

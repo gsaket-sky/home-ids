@@ -51,6 +51,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from argus.autotune.engine import (  # noqa: E402
     AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION, compute_drift_result,
+    wilson_lower_bound, _MIN_TRIALS_FOR_LOOSENING,
 )
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
@@ -82,52 +83,292 @@ _DEFAULT_ATTACK_FLOOR = 0.5
 # on, not silently deferred out of caution -- see ARGUS_DECISIONS.md.
 _TUNE_PARAMETER = "hard_stop_candidate_sensitivity"
 _TUNE_TIGHTEN_FLOOR = 0.70   # any class below this proposes tightening
-_TUNE_LOOSEN_CEILING = 1.0   # every class must be at 100% to even consider loosening
+_TUNE_LOOSEN_CEILING = 1.0   # every class's RAW detection rate must be at 100% to even consider loosening
 _TUNE_DEFAULT_SENSITIVITY = 0.9  # matches decision/engine.py's own hardcoded default
+
+# 2026-09-16, per-device/category autotuning (Documentation/
+# PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §3b): the safe-threshold gate this plan's
+# user request explicitly asked for -- closes a real gap that existed even for
+# the GLOBAL-only tuning above: _TUNE_LOOSEN_CEILING alone never checked HOW MANY
+# synthetic trials backed a "100%" rate, so 1/1 counted identically to 200/200.
+#
+# _MIN_TRIALS_FOR_LOOSENING (imported from autotune.engine, shared with its own
+# trust-radius/scope logic) is a coarse PRE-filter: below it, a scope isn't even
+# considered for loosening. The real statistical gate is
+# _TUNE_LOOSEN_WILSON_FLOOR, checked against the Wilson score interval's 95%
+# lower bound of the observed rate (wilson_lower_bound()), not the raw rate --
+# since _TUNE_LOOSEN_CEILING already requires a perfect 100% raw rate first, the
+# Wilson lower bound at that point is a pure function of n:
+# wilson_lower_bound(n, n) = 1 / (1 + z^2/n). At n=_MIN_TRIALS_FOR_LOOSENING (20),
+# that's ~0.836 -- deliberately BELOW this floor, so 20 alone is necessary but not
+# sufficient; a perfect record needs ~22 trials in practice to actually clear
+# 0.85. This is intentional: the coarse pre-filter and the real statistical gate
+# are meant to disagree slightly, so the system asks for a bit more evidence than
+# the bare minimum before actually trusting a loosening move.
+_TUNE_LOOSEN_WILSON_FLOOR = 0.85
+
+# Caps how many additional synthetic sweep passes a small category's devices get
+# in one night (beyond the base run_synthetic_sweep() pass every device already
+# gets) purely to accumulate enough trials to be EVALUATED for loosening -- see
+# augment_small_category_sweeps(). A category with too few devices to reach
+# _MIN_TRIALS_FOR_LOOSENING even at this cap correctly stays below it and
+# inherits its parent tier -- the honest outcome for a category this network
+# genuinely doesn't have enough of to specialize a threshold for, not a bug to
+# engineer around further.
+_MAX_SWEEP_REPETITIONS_PER_DEVICE = 5
+
+
+def _device_type_lookup(store: GraphStore, device_ids: List[str]) -> Dict[str, Optional[str]]:
+    """device_id -> device_type (or None) for the given devices, one query."""
+    if not device_ids:
+        return {}
+    placeholders = ",".join("?" * len(device_ids))
+    rows = store._conn.execute(
+        f"SELECT device_id, device_type FROM devices WHERE device_id IN ({placeholders})",
+        device_ids,
+    ).fetchall()
+    return {r["device_id"]: r["device_type"] for r in rows}
+
+
+def _flatten_trials(per_device: Dict[str, Any], device_type_of: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
+    """One entry per real sweep result (device_id/device_type/result), skipping
+    error entries (no attack_results to learn anything from)."""
+    out = []
+    for device_id, result in per_device.items():
+        if "attack_results" not in result:
+            continue
+        out.append({"device_id": device_id, "device_type": device_type_of.get(device_id), "result": result})
+    return out
+
+
+def augment_small_category_sweeps(store: GraphStore, base_synthetic: Dict[str, Any],
+                                     device_type_of: Dict[str, Optional[str]],
+                                     now: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Runs additional synthetic sweep passes against devices in any category
+    whose base-pass trial count is below _MIN_TRIALS_FOR_LOOSENING, up to
+    _MAX_SWEEP_REPETITIONS_PER_DEVICE total passes per device (including the
+    base pass already run by run_synthetic_sweep()) -- see Documentation/
+    PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §3b. Deliberately does NOT try to force
+    every category up to the floor -- a category with too few devices to ever
+    reach it even at the repetition cap correctly stays below it (inherits its
+    parent tier), which is the honest, intended outcome, not a bug.
+
+    Returns the FULL flat trial list (base pass + every repeat), each entry
+    tagged with device_id/device_type -- the single input every scope's rate
+    calculation below reads from, so nothing downstream has to know which
+    entries came from the base pass vs. a repeat."""
+    now = now if now is not None else time.time()
+    base_trials = _flatten_trials(base_synthetic.get("per_device", {}), device_type_of)
+
+    devices_by_category: Dict[str, List[str]] = {}
+    for entry in base_trials:
+        if entry["device_type"]:
+            devices_by_category.setdefault(entry["device_type"], []).append(entry["device_id"])
+
+    all_trials = list(base_trials)
+    for category, device_ids in devices_by_category.items():
+        base_count = len(device_ids)  # each device contributes exactly 1 trial/class in one pass
+        if base_count >= _MIN_TRIALS_FOR_LOOSENING:
+            continue  # already enough from the base pass alone -- no repeats needed
+        passes_needed = -(-_MIN_TRIALS_FOR_LOOSENING // base_count)  # ceil(floor / base_count)
+        extra_passes = max(0, min(passes_needed - 1, _MAX_SWEEP_REPETITIONS_PER_DEVICE - 1))
+        for _ in range(extra_passes):
+            for device_id in device_ids:
+                try:
+                    result = sweep(store, device_id, now=now)
+                except Exception as exc:
+                    LOGGER.warning("Repeat sweep failed for %s (category %s), recorded as fewer trials, "
+                                     "not a hard failure: %s", device_id, category, exc)
+                    continue
+                all_trials.append({"device_id": device_id, "device_type": category, "result": result})
+    return all_trials
+
+
+def _hits_and_totals_by_class(trials: List[Dict[str, Any]]) -> Dict[str, "tuple[int, int]"]:
+    """(hits, n) per attack class from a flat trial list already filtered to
+    the desired scope by the caller."""
+    by_class: Dict[str, List[bool]] = {}
+    for entry in trials:
+        for cls, r in entry["result"].get("attack_results", {}).items():
+            if isinstance(r, dict) and "detected" in r:
+                by_class.setdefault(cls, []).append(bool(r["detected"]))
+    return {cls: (sum(hits), len(hits)) for cls, hits in by_class.items() if hits}
+
+
+def _scope_has_drift(drift: Dict[str, Any], parameter: str, device_id: Optional[str],
+                       device_type: Optional[str]) -> bool:
+    """True if compute_drift_result()'s findings include THIS exact scope --
+    not just drift.get('drift_detected') anywhere on the network, which would
+    incorrectly block an unrelated scope's loosening proposal over a totally
+    different device/category's drift."""
+    for finding in drift.get("findings", []):
+        if finding.get("parameter") == parameter and finding.get("device_id") == device_id \
+                and finding.get("device_type") == device_type:
+            return True
+    return False
+
+
+def _decide_scoped_change(current: float, bounds: Dict[str, float], direction: int,
+                             class_hits_totals: Dict[str, "tuple[int, int]"],
+                             drift_at_scope: bool, scope_label: str, run_id: str,
+                             allow_loosen: bool) -> Optional["tuple[float, str]"]:
+    """The shared tighten/loosen decision for ANY scope (global, category, or
+    device) -- deliberately asymmetric, matching the plan's own safe-threshold
+    design:
+
+    TIGHTEN: fires on any class whose RAW rate falls below _TUNE_TIGHTEN_FLOOR,
+    with NO minimum sample size -- a single confirmed miss is real information
+    worth tightening on immediately ("fails safe toward more detection, no
+    waiting"). Under-reacting to a miss is the actually-dangerous failure mode,
+    not over-reacting to a small sample.
+
+    LOOSEN: requires EVERY class to (a) have at least _MIN_TRIALS_FOR_LOOSENING
+    trials, (b) show a perfect _TUNE_LOOSEN_CEILING raw rate (unchanged from
+    the original global-only logic), AND (c) have a Wilson-lower-bound rate
+    clearing _TUNE_LOOSEN_WILSON_FLOOR -- see that constant's own docstring for
+    why both (b) and (c) are needed together. `allow_loosen=False` lets a
+    caller skip loosening evaluation entirely for a scope where it structurally
+    doesn't apply (kept as an explicit caller decision, not inferred here)."""
+    if not class_hits_totals:
+        return None
+    worst_cls, (worst_hits, worst_n) = min(
+        class_hits_totals.items(), key=lambda kv: (kv[1][0] / kv[1][1]) if kv[1][1] else 1.0
+    )
+    worst_rate = (worst_hits / worst_n) if worst_n else 1.0
+
+    if worst_rate < _TUNE_TIGHTEN_FLOOR:
+        new_value = current - direction * bounds["max_step"]
+        reason = (f"backtest {run_id} [{scope_label}]: synthetic detection for '{worst_cls}' fell to "
+                   f"{worst_rate:.2f} (floor {_TUNE_TIGHTEN_FLOOR}, n={worst_n}) -- tightening")
+        return new_value, reason
+
+    if not allow_loosen:
+        return None
+    if any(n < _MIN_TRIALS_FOR_LOOSENING for _, n in class_hits_totals.values()):
+        return None  # not enough evidence anywhere to even evaluate loosening for this scope
+    if worst_rate < _TUNE_LOOSEN_CEILING:
+        return None
+    min_wilson = min(wilson_lower_bound(hits, n) for hits, n in class_hits_totals.values())
+    if min_wilson >= _TUNE_LOOSEN_WILSON_FLOOR and not drift_at_scope:
+        min_n = min(n for _, n in class_hits_totals.values())
+        new_value = current + direction * bounds["max_step"]
+        reason = (f"backtest {run_id} [{scope_label}]: every synthetic class at "
+                   f"{_TUNE_LOOSEN_CEILING:.0%} raw detection with a Wilson-lower-bound rate "
+                   f">= {_TUNE_LOOSEN_WILSON_FLOOR:.0%} (min n={min_n}), no drift detected for this "
+                   f"scope -- easing back toward its parent tier")
+        return new_value, reason
+    return None
 
 
 def _propose_tuning_change(store: GraphStore, synthetic: Dict[str, Any], drift: Dict[str, Any],
                               run_id: str, now: float) -> Optional[Dict[str, Any]]:
-    """Evaluates this run's real synthetic per-class detection rates against
-    _TUNE_PARAMETER's bounds and proposes a bounded step in either direction --
-    tightens immediately on any weak class (fails safe toward more detection,
-    no waiting), loosens only when every class hit 100% AND compute_drift_result()
-    shows no concerning trend, and even then only ever within this parameter's own
-    existing [min, max] -- never a new, wider bound. Returns the ProposalResult as
-    a plain dict (JSON-friendly for the backtest_runs row), or None if no class
-    data was available to evaluate at all."""
+    """GLOBAL-scope proposal -- unchanged in shape/behavior from before this
+    session's per-device/category work, EXCEPT the loosening path now also
+    requires _MIN_TRIALS_FOR_LOOSENING/_TUNE_LOOSEN_WILSON_FLOOR (a real,
+    pre-existing gap: this direction previously trusted a 100% raw rate off as
+    few as 1-2 synthetic trials). Tightening's behavior is byte-for-byte
+    identical to before -- no sample floor there, by design (see
+    _decide_scoped_change()'s own docstring)."""
     by_class: Dict[str, List[bool]] = {}
     for device_result in synthetic.get("per_device", {}).values():
         for cls, r in device_result.get("attack_results", {}).items():
             if isinstance(r, dict) and "detected" in r:
                 by_class.setdefault(cls, []).append(bool(r["detected"]))
-
-    class_rates = {cls: (sum(hits) / len(hits)) for cls, hits in by_class.items() if hits}
-    if not class_rates:
+    class_hits_totals = {cls: (sum(hits), len(hits)) for cls, hits in by_class.items() if hits}
+    if not class_hits_totals:
         return None
 
     engine = AutotuneEngine(store)
     bounds = TUNABLE_PARAMETERS[_TUNE_PARAMETER]
     direction = _LESS_SENSITIVE_DIRECTION[_TUNE_PARAMETER]
     current = engine.get_active_value(_TUNE_PARAMETER, default=_TUNE_DEFAULT_SENSITIVITY)
-    min_class, min_rate = min(class_rates.items(), key=lambda kv: kv[1])
 
-    if min_rate < _TUNE_TIGHTEN_FLOOR:
-        new_value = current - direction * bounds["max_step"]
-        reason = (f"backtest {run_id}: synthetic detection for '{min_class}' fell to "
-                   f"{min_rate:.2f} (floor {_TUNE_TIGHTEN_FLOOR}) -- tightening")
-    elif min_rate >= _TUNE_LOOSEN_CEILING and not drift.get("drift_detected") \
-            and current != _TUNE_DEFAULT_SENSITIVITY:
-        new_value = current + direction * bounds["max_step"]
-        reason = (f"backtest {run_id}: every synthetic class at {_TUNE_LOOSEN_CEILING:.0%} detection, "
-                   f"no drift detected -- easing back toward default")
-    else:
+    decision = _decide_scoped_change(
+        current, bounds, direction, class_hits_totals,
+        drift_at_scope=_scope_has_drift(drift, _TUNE_PARAMETER, None, None),
+        scope_label="global", run_id=run_id,
+        allow_loosen=(current != _TUNE_DEFAULT_SENSITIVITY),  # unchanged global-only guard
+    )
+    if decision is None:
         return None
+    new_value, reason = decision
 
     result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason,
                                      backtest_run_id=run_id, now=now)
     return {"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
             "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value}
+
+
+def _propose_scoped_tuning_changes(store: GraphStore, all_trials: List[Dict[str, Any]], drift: Dict[str, Any],
+                                      run_id: str, now: float) -> List[Dict[str, Any]]:
+    """Category- and device-scoped proposals -- the actual per-device/category
+    half of this plan, layered on TOP of _propose_tuning_change()'s existing
+    global proposal, never replacing it. Each scope is evaluated completely
+    independently (its own trial count, its own Wilson bound, its own drift
+    check, its own trust-radius cap enforced inside AutotuneEngine.
+    propose_change() itself) -- a category or device with too little data
+    simply produces no proposal at all and silently keeps inheriting its
+    parent tier via get_active_value()'s own fallback, exactly the intended
+    behavior, not an error.
+
+    Returns the list of accepted-or-rejected proposal dicts (same shape as
+    _propose_tuning_change()'s single return, one per scope actually
+    evaluated) for backtest_runs' own record."""
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_TUNE_PARAMETER]
+    direction = _LESS_SENSITIVE_DIRECTION[_TUNE_PARAMETER]
+    results: List[Dict[str, Any]] = []
+
+    # --- category scope ---
+    by_category: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in all_trials:
+        if entry["device_type"]:
+            by_category.setdefault(entry["device_type"], []).append(entry)
+    for category, entries in by_category.items():
+        class_hits_totals = _hits_and_totals_by_class(entries)
+        current = engine.get_active_value(_TUNE_PARAMETER, device_type=category, default=_TUNE_DEFAULT_SENSITIVITY)
+        decision = _decide_scoped_change(
+            current, bounds, direction, class_hits_totals,
+            drift_at_scope=_scope_has_drift(drift, _TUNE_PARAMETER, None, category),
+            scope_label=f"category:{category}", run_id=run_id, allow_loosen=True,
+        )
+        if decision is None:
+            continue
+        new_value, reason = decision
+        result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason, device_type=category,
+                                         backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value,
+                          "device_type": category})
+
+    # --- device scope ---
+    by_device: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in all_trials:
+        by_device.setdefault(entry["device_id"], []).append(entry)
+    for device_id, entries in by_device.items():
+        device_type = entries[0]["device_type"]
+        class_hits_totals = _hits_and_totals_by_class(entries)
+        current = engine.get_active_value(_TUNE_PARAMETER, device_id=device_id, device_type=device_type,
+                                             default=_TUNE_DEFAULT_SENSITIVITY)
+        decision = _decide_scoped_change(
+            current, bounds, direction, class_hits_totals,
+            drift_at_scope=_scope_has_drift(drift, _TUNE_PARAMETER, device_id, None),
+            scope_label=f"device:{device_id}", run_id=run_id, allow_loosen=True,
+        )
+        if decision is None:
+            continue
+        new_value, reason = decision
+        # device_type passed alongside device_id as a parent-tier resolution
+        # HINT only (propose_change() never writes it to a device-scoped row)
+        # -- without it, old_value/trust-radius would incorrectly skip this
+        # device's own category tier and compare straight against global.
+        result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason, device_id=device_id,
+                                         device_type=device_type, backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value,
+                          "device_id": device_id})
+
+    return results
 
 
 def _promote_eligible_tuning_changes(store: GraphStore, run_id: str, now: float) -> List[str]:
@@ -269,12 +510,24 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     # regressions matter at that point. Best-effort -- a failure here must never take
     # down the backtest run itself, which has already committed its own row above.
     tuning_proposal = None
+    scoped_tuning_proposals: List[Dict[str, Any]] = []
     tuning_promoted: List[str] = []
     if overall_pass:
         try:
             tuning_proposal = _propose_tuning_change(store, synthetic, drift, run_id, now)
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] tuning proposal evaluation failed, non-fatal")
+        # 2026-09-16, per-device/category autotuning (Documentation/
+        # PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md): layered ON TOP of the global
+        # proposal above, never replacing it -- augments small categories with
+        # repeat sweep passes, then evaluates every category and device scope
+        # independently. Best-effort, same "never take down the run" framing.
+        try:
+            device_type_of = _device_type_lookup(store, synthetic["devices_covered"])
+            all_trials = augment_small_category_sweeps(store, synthetic, device_type_of, now=now)
+            scoped_tuning_proposals = _propose_scoped_tuning_changes(store, all_trials, drift, run_id, now)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] scoped (per-device/category) tuning proposal evaluation failed, non-fatal")
         try:
             tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
         except Exception:
@@ -297,6 +550,7 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
 
     return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift,
             "overall_pass": overall_pass, "tuning_proposal": tuning_proposal,
+            "scoped_tuning_proposals": scoped_tuning_proposals,
             "tuning_promoted": tuning_promoted}
 
 
@@ -322,6 +576,8 @@ def main() -> None:
         LOGGER.warning("Posterior-trajectory drift detected: %s", result["drift"]["findings"])
     if result["tuning_proposal"]:
         LOGGER.info("[AUTOTUNE_TRIGGER] %s", result["tuning_proposal"])
+    if result["scoped_tuning_proposals"]:
+        LOGGER.info("[AUTOTUNE_TRIGGER] per-device/category: %s", result["scoped_tuning_proposals"])
     if result["tuning_promoted"]:
         LOGGER.info("[AUTOTUNE_TRIGGER] promoted: %s", result["tuning_promoted"])
     if not result["overall_pass"]:

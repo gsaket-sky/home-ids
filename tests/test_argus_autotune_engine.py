@@ -28,7 +28,10 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, compute_drift_result  # noqa: E402
+from argus.autotune.engine import (  # noqa: E402
+    AutotuneEngine, TUNABLE_PARAMETERS, compute_drift_result, wilson_lower_bound,
+    _MIN_TRIALS_FOR_LOOSENING, _TRUST_RADIUS_MAX_STEPS,
+)
 from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 
@@ -222,6 +225,213 @@ check("compute_drift_result: fewer than _MIN_PROMOTIONS_FOR_TREND promotions is 
       device_drift_sparse not in flagged_devices, f"got {flagged_devices}")
 check("compute_drift_result: drift_detected is True when any finding exists",
       drift["drift_detected"] is True)
+
+
+# =============================================================================
+# wilson_lower_bound() -- the safe-threshold statistic (Documentation/
+# PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §3b, user-requested "safe threshold
+# value for enough real data to back a promotion")
+# =============================================================================
+check("wilson_lower_bound: n=0 is 0.0, not a crash or a divide-by-zero",
+      wilson_lower_bound(0, 0) == 0.0)
+check("wilson_lower_bound: a perfect n=20/20 record sits noticeably BELOW the "
+      "raw 1.0 rate -- the whole point of using this over the raw rate",
+      0.80 < wilson_lower_bound(20, 20) < 0.90, f"got {wilson_lower_bound(20, 20):.4f}")
+check("wilson_lower_bound: the SAME perfect raw rate gets a HIGHER (more "
+      "trusted) lower bound as n grows -- more evidence should read as more "
+      "trustworthy, not the same",
+      wilson_lower_bound(100, 100) > wilson_lower_bound(20, 20) > wilson_lower_bound(5, 5))
+check("wilson_lower_bound: an imperfect record (19/20) scores lower than a "
+      "perfect one at the same n",
+      wilson_lower_bound(19, 20) < wilson_lower_bound(20, 20))
+check("wilson_lower_bound: never negative and never exceeds the raw rate "
+      "(a lower CONFIDENCE bound, by definition)",
+      0.0 <= wilson_lower_bound(7, 10) <= 0.7)
+
+
+# =============================================================================
+# get_active_value() -- 3-tier fallback: device -> category -> global
+# (Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md)
+# =============================================================================
+store3 = GraphStore(":memory:")
+engine3 = AutotuneEngine(store3)
+_insert_backtest(store3, "bt3", True, at=NOW)
+
+store3.upsert_device("tier_dev_a", device_type="iot", timestamp=NOW)
+store3.upsert_device("tier_dev_b", device_type="iot", timestamp=NOW)  # same category, no device override
+
+check("get_active_value: falls through all 3 tiers to the caller's default "
+      "when nothing has ever been promoted at any scope",
+      engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="tier_dev_a",
+                                 device_type="iot", default=0.9) == 0.9)
+
+r_global = engine3.propose_change("hard_stop_candidate_sensitivity", 0.80, "global tighten",
+                                     backtest_run_id="bt3", now=NOW)
+check("propose_change (global): accepted", r_global.accepted, r_global.reason)
+# Canary hasn't elapsed yet -- promote directly via SQL instead, matching this
+# file's own _promote_directly() convention, to isolate THIS test from the
+# canary-timing tests already covered above.
+store3._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (NOW, r_global.change_id))
+store3._maybe_commit()
+# 0.80 requested from a default_mid of 0.745 (bounds are 0.5-0.99) is a 0.055
+# step -- BEYOND max_step (0.05), so it's clamped to 0.795, not applied as
+# requested. Reading back the real clamped value here (rather than hardcoding
+# 0.80) so this test can't silently drift from _clamp_step()'s own behavior.
+GLOBAL3 = engine3.get_active_value("hard_stop_candidate_sensitivity", default=0.9)
+check("get_active_value: a device+category with no scoped override of their "
+      "own falls through to the GLOBAL value once one is promoted",
+      abs(GLOBAL3 - 0.795) < 1e-9, f"got {GLOBAL3}")
+
+r_cat = engine3.propose_change("hard_stop_candidate_sensitivity", 0.75, "category tighten",
+                                  device_type="iot", backtest_run_id="bt3", now=NOW)
+check("propose_change (category): accepted", r_cat.accepted, r_cat.reason)
+store3._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (NOW, r_cat.change_id))
+store3._maybe_commit()
+
+check("get_active_value: a device with no override of its own, but whose "
+      "CATEGORY has one, gets the category value -- not global",
+      abs(engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="tier_dev_a",
+                                      device_type="iot", default=0.9) - 0.75) < 1e-9)
+check("get_active_value: a DIFFERENT device of the SAME category also gets "
+      "that category's value -- the whole point of category-level tuning",
+      abs(engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="tier_dev_b",
+                                      device_type="iot", default=0.9) - 0.75) < 1e-9)
+check("get_active_value: a device of a DIFFERENT category is unaffected -- "
+      "falls through to global, not the 'iot' category's value",
+      abs(engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="some_other_dev",
+                                      device_type="router", default=0.9) - GLOBAL3) < 1e-9)
+
+# device_type="iot" passed ALONGSIDE device_id -- a parent-tier resolution
+# HINT only (see propose_change()'s own docstring for the bug this closes:
+# without it, old_value here would incorrectly skip the category tier
+# entirely and compare against global instead of the real parent, 0.75).
+r_dev = engine3.propose_change("hard_stop_candidate_sensitivity", 0.72, "device tighten",
+                                  device_id="tier_dev_a", device_type="iot", backtest_run_id="bt3", now=NOW)
+check("propose_change (device, with category hint): accepted", r_dev.accepted, r_dev.reason)
+store3._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (NOW, r_dev.change_id))
+store3._maybe_commit()
+
+check("propose_change: the device_type HINT is never written to a device-"
+      "scoped row -- the row's own device_type stays NULL",
+      store3._conn.execute("SELECT device_type FROM threshold_history WHERE change_id=?",
+                              (r_dev.change_id,)).fetchone()["device_type"] is None)
+check("get_active_value: a device with its OWN override wins over its "
+      "category's -- the most specific tier available",
+      abs(engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="tier_dev_a",
+                                      device_type="iot", default=0.9) - 0.72) < 1e-9)
+check("get_active_value: the OTHER device in the same category is unaffected "
+      "by tier_dev_a's own device-specific override -- still sees the category value",
+      abs(engine3.get_active_value("hard_stop_candidate_sensitivity", device_id="tier_dev_b",
+                                      device_type="iot", default=0.9) - 0.75) < 1e-9)
+
+r_no_hint = engine3.propose_change("hard_stop_candidate_sensitivity", 0.70, "device proposal, no category hint given",
+                                      device_id="tier_dev_b", backtest_run_id="bt3", now=NOW)
+check("propose_change (device, WITHOUT the category hint): still accepted -- "
+      "omitting device_type is not an error, it just means old_value falls "
+      "through device -> global directly, skipping the category tier "
+      "(REGRESSION GUARD for every pre-existing caller that never passes it)",
+      r_no_hint.accepted, r_no_hint.reason)
+
+
+# =============================================================================
+# Trust-radius failsafe -- a scoped value may never diverge from its parent
+# tier by more than _TRUST_RADIUS_MAX_STEPS max_steps in the less-sensitive
+# direction (Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §4)
+# =============================================================================
+store4 = GraphStore(":memory:")
+engine4 = AutotuneEngine(store4)
+_insert_backtest(store4, "bt4", True, at=NOW)
+bounds4 = TUNABLE_PARAMETERS["hard_stop_candidate_sensitivity"]  # direction +1: higher == less sensitive
+max_step4 = bounds4["max_step"]
+radius4 = _TRUST_RADIUS_MAX_STEPS * max_step4
+
+# Clean, known anchor: global promoted to 0.70 directly (bypassing propose_
+# change()'s own step-clamp, which is irrelevant to what THIS test is
+# isolating -- matches this file's own _promote_directly() convention).
+_promote_directly(store4, None, "hard_stop_candidate_sensitivity", 0.70, NOW)
+GLOBAL4 = 0.70
+
+# "phone" category sits ONE max_step short of the radius edge -- set up
+# directly, not via propose_change(), so the test below exercises ONE clean
+# real move (not a 0-step no-op) that lands EXACTLY on the edge.
+store4._conn.execute(
+    "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+    "proposed_at, canary_until, promoted_at, reason) VALUES ('phone_setup', NULL, 'phone', "
+    "'hard_stop_candidate_sensitivity', ?, ?, ?, ?, ?, 'test setup')",
+    (GLOBAL4, GLOBAL4 + radius4 - max_step4, NOW, NOW, NOW),
+)
+store4._maybe_commit()
+
+r_within = engine4.propose_change("hard_stop_candidate_sensitivity", GLOBAL4 + radius4,
+                                     "one real max_step move that lands exactly on the radius edge",
+                                     device_type="phone", backtest_run_id="bt4", now=NOW + 4000)
+check("propose_change: a category-scoped move that lands exactly AT (not "
+      "beyond) the trust-radius edge is accepted -- the cap is a hard limit, "
+      "not an off-by-one under-restriction",
+      r_within.accepted, r_within.reason)
+# Promote it directly (canary hasn't elapsed) so the NEXT proposal below
+# resolves its own old_value from THIS edge-sitting value, not the
+# still-unpromoted setup row -- get_active_value() only ever reads promoted
+# rows, matching every other test in this file.
+store4._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (NOW + 4000, r_within.change_id))
+store4._maybe_commit()
+
+r_beyond = engine4.propose_change("hard_stop_candidate_sensitivity", GLOBAL4 + radius4 + max_step4,
+                                     "one more max_step beyond the radius edge",
+                                     device_type="phone", backtest_run_id="bt4", now=NOW + 8000)
+check("propose_change: a category-scoped LOOSENING move that would push "
+      "beyond the trust-radius is REJECTED outright, not silently clamped "
+      "to the radius edge",
+      r_beyond.accepted is False and "trust-radius" in r_beyond.reason, r_beyond.reason)
+
+# Tightening (moving in the MORE-sensitive direction, i.e. down for this
+# parameter) is never capped, at any distance from the parent tier.
+store4._conn.execute(
+    "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+    "proposed_at, canary_until, promoted_at, reason) VALUES ('server_setup', NULL, 'server', "
+    "'hard_stop_candidate_sensitivity', ?, ?, ?, ?, ?, 'test setup')",
+    (GLOBAL4, bounds4["min"] + max_step4, NOW, NOW, NOW),
+)
+store4._maybe_commit()
+r_tighten_far = engine4.propose_change("hard_stop_candidate_sensitivity", bounds4["min"],
+                                          "tighten hard, far below the parent tier",
+                                          device_type="server", backtest_run_id="bt4", now=NOW + 12000)
+check("propose_change: a category-scoped TIGHTENING move is accepted "
+      "regardless of how far it diverges from the parent tier -- the trust-"
+      "radius cap only ever engages for the less-sensitive direction "
+      "(becoming MORE cautious than the network default needs no cap)",
+      r_tighten_far.accepted, r_tighten_far.reason)
+
+
+# =============================================================================
+# compute_drift_result() -- category-scoped grouping
+# (Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §4)
+# =============================================================================
+store5 = GraphStore(":memory:")
+CAT_DRIFT_NOW = NOW + 200000
+
+
+def _promote_category_directly(store, device_type, parameter, new_value, promoted_at):
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, reason) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, 'test')",
+        (f"catdrift_{device_type}_{promoted_at}", device_type, parameter, new_value - 0.5, new_value,
+         promoted_at, promoted_at, promoted_at),
+    )
+    store._maybe_commit()
+
+
+for i, val in enumerate((2.0, 2.5, 3.0)):
+    _promote_category_directly(store5, "smart_tv", "reputation_tier_suspicious_floor", val, CAT_DRIFT_NOW + i * 3600)
+
+drift5 = compute_drift_result(store5, now=CAT_DRIFT_NOW + 7200)
+cat_findings = [f for f in drift5["findings"] if f.get("device_type") == "smart_tv"]
+check("compute_drift_result: a category-scoped (device_type set, device_id "
+      "NULL) monotonic trend is flagged too, not just device-scoped ones",
+      len(cat_findings) == 1, f"got {drift5['findings']}")
+check("compute_drift_result: the category finding's own device_id is None "
+      "(never confused with a device-scoped finding)",
+      len(cat_findings) == 1 and cat_findings[0]["device_id"] is None)
 
 
 print()

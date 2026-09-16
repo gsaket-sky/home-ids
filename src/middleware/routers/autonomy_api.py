@@ -79,6 +79,9 @@ def _serialize_threshold_history(rows: List[Dict[str, Any]]) -> List[Dict[str, A
         out.append({
             "change_id": row.get("change_id"),
             "device_id": row.get("device_id"),
+            # 2026-09-16, per-device/category autotuning plan: a row now has AT
+            # MOST ONE of device_id/device_type set -- both None means global.
+            "device_type": row.get("device_type"),
             "parameter": parameter,
             "old_value": old_value,
             "new_value": new_value,
@@ -172,27 +175,36 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
     done for/about THIS device" is directly answerable per device, not something
     the operator has to eyeball out of a mixed-device event log.
 
-    Deliberately does NOT try to group the autotuner timeline by device -- checked
-    directly against the live graph (threshold_history.device_id is NULL for
-    every real row): autotuner changes are global parameters applied to every
-    device equally, not a per-device effect at all. `autotuner_is_global` says so
-    explicitly rather than the console having to infer it from an empty grouping.
+    UPDATED same day (per-device/category autotuning plan, Documentation/
+    PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md): autotuner threshold changes were
+    global-only when this endpoint was first written (threshold_history.device_id
+    was NULL for every real row) -- that plan implemented real device- and
+    category-scoped tuning on top of the existing global tier, so each device's
+    entry now also carries its own `autotuner` array (device-scoped changes
+    only), and a sibling `by_category` list covers category-scoped changes the
+    same way. Global-scope changes stay in the existing Autotuner Timeline panel
+    (/api/autonomy) -- they apply to every device equally, so they don't belong
+    in a per-device OR per-category breakdown.
 
-    limit here bounds the RAW trust_grants/building_trust rows pulled from the
-    graph before grouping (default 200, wider than /api/autonomy's own 50) --
-    grouping by device means a handful of very active devices could otherwise
-    starve a real but quieter device's own history out of a small global cap."""
+    limit here bounds the RAW trust_grants/building_trust/threshold_history rows
+    pulled from the graph before grouping (default 200, wider than
+    /api/autonomy's own 50) -- grouping by device means a handful of very active
+    devices could otherwise starve a real but quieter device's own history out
+    of a small global cap."""
     with open_store() as store:
         if store is None:
-            return {"devices": [], "autotuner_is_global": True, "autotuner_is_global_note": ""}
+            return {"devices": [], "by_category": []}
         trust_edges = store.get_edges(relation="trusts", limit_most_recent=limit)
         building_trust_rows = store.get_recent_composite_trust(limit)
+        threshold_rows = store.get_recent_threshold_history(limit)
 
     sm = _load_state_manager()
     grants = _serialize_trust_grants(trust_edges)
     building = _serialize_building_trust(building_trust_rows)
+    autotuner = _serialize_threshold_history(threshold_rows)
 
     by_device: Dict[str, Dict[str, Any]] = {}
+    by_category: Dict[str, Dict[str, Any]] = {}
 
     def _bucket(device_id: str) -> Dict[str, Any]:
         if device_id not in by_device:
@@ -201,9 +213,15 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
                 "hostname": _resolve_hostname(sm, device_id),
                 "trust_grants": [],
                 "building_trust": [],
+                "autotuner": [],
                 "last_activity_at": None,
             }
         return by_device[device_id]
+
+    def _category_bucket(category: str) -> Dict[str, Any]:
+        if category not in by_category:
+            by_category[category] = {"device_type": category, "autotuner": [], "last_activity_at": None}
+        return by_category[category]
 
     for g in grants:
         bucket = _bucket(g.get("device_id") or "unattributed")
@@ -219,19 +237,34 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
         if ts is not None and (bucket["last_activity_at"] is None or ts > bucket["last_activity_at"]):
             bucket["last_activity_at"] = ts
 
+    for a in autotuner:
+        ts = a.get("proposed_at")
+        if a.get("device_id"):
+            bucket = _bucket(a["device_id"])
+            bucket["autotuner"].append(a)
+            if ts is not None and (bucket["last_activity_at"] is None or ts > bucket["last_activity_at"]):
+                bucket["last_activity_at"] = ts
+        elif a.get("device_type"):
+            bucket = _category_bucket(a["device_type"])
+            bucket["autotuner"].append(a)
+            if ts is not None and (bucket["last_activity_at"] is None or ts > bucket["last_activity_at"]):
+                bucket["last_activity_at"] = ts
+        # else: global scope -- already covered by /api/autonomy's own
+        # Autotuner Timeline panel, deliberately not duplicated into either
+        # grouping here.
+
     devices_out = []
     for entry in by_device.values():
         entry["trust_grants_count"] = len(entry["trust_grants"])
         entry["building_trust_count"] = len(entry["building_trust"])
+        entry["autotuner_count"] = len(entry["autotuner"])
         devices_out.append(entry)
     devices_out.sort(key=lambda e: e["last_activity_at"] or 0, reverse=True)
 
-    return {
-        "devices": devices_out,
-        "autotuner_is_global": True,
-        "autotuner_is_global_note": (
-            "Autotuner threshold changes (see the Autotuner Timeline) apply globally, to "
-            "every device's decisions equally -- there is no per-device autotuner effect "
-            "to show here, confirmed against the real threshold_history data."
-        ),
-    }
+    categories_out = []
+    for entry in by_category.values():
+        entry["autotuner_count"] = len(entry["autotuner"])
+        categories_out.append(entry)
+    categories_out.sort(key=lambda e: e["last_activity_at"] or 0, reverse=True)
+
+    return {"devices": devices_out, "by_category": categories_out}

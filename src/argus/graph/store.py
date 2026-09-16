@@ -226,6 +226,7 @@ class GraphStore:
             CREATE TABLE IF NOT EXISTS threshold_history (
                 change_id       TEXT PRIMARY KEY,
                 device_id       TEXT REFERENCES devices(device_id),
+                device_type      TEXT,
                 parameter        TEXT NOT NULL,
                 old_value        REAL,
                 new_value        REAL,
@@ -238,6 +239,7 @@ class GraphStore:
                 snapshot_id      TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_threshold_history_device ON threshold_history(device_id, proposed_at);
+            CREATE INDEX IF NOT EXISTS idx_threshold_history_device_type ON threshold_history(device_type, proposed_at);
 
             CREATE TABLE IF NOT EXISTS baseline_snapshots (
                 snapshot_id            TEXT PRIMARY KEY,
@@ -265,6 +267,17 @@ class GraphStore:
             CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
             """
         )
+        # 2026-09-16, per-device/category autotuning plan: threshold_history predates
+        # this column -- CREATE TABLE IF NOT EXISTS above is a no-op on a db that
+        # already has the table (regardless of which columns it has), so an existing
+        # deployment's threshold_history needs an explicit ADD COLUMN. SQLite has no
+        # `ADD COLUMN IF NOT EXISTS`; the try/except is the idiom for that, same
+        # "no-op on a db that already has it, real migration on one that doesn't"
+        # framing as every CREATE TABLE/INDEX above.
+        try:
+            self._conn.execute("ALTER TABLE threshold_history ADD COLUMN device_type TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         self._conn.commit()
 
     def close(self) -> None:
