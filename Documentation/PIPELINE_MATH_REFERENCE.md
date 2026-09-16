@@ -239,7 +239,7 @@ check §13 references — a real regime shift (firmware update, new device behav
 pattern) is the one legitimate explanation the autotuner's drift-flag logic checks for
 before treating a trending series of promotions as suspicious.
 
-### 1d. `population_priors`: cold-start fallback — read path only, no writer exists
+### 1d. `population_priors`: cold-start fallback — writer built 2026-09-16
 
 **File:** `src/argus/graph/schema.sql` (`population_priors` table, keyed by
 `device_type` not `device_id`). Intent, per the schema's own comment: a device with
@@ -260,23 +260,50 @@ prior seeded with `kappa=5` (5 pseudo-observations) is outweighed by real data q
 one seeded with `kappa=200` would take much longer to override. The pseudo-count the
 pool was built with *is* the blending mechanism — not a separate weight parameter.
 
-**Real, currently-inert gap, found while researching this document**: the read/fallback
-side above is fully implemented and tested, but **no code anywhere in this repository
-writes to `population_priors` outside of a test fixture**
-(`tests/test_argus_baseline_engine.py`). The "clean backtest history" contributor-
-selection/aggregation job the schema comment describes does not exist yet — the table
-is real, queryable, and would work correctly the moment something populates it, but as
-of this writing nothing does. **UPDATE (2026-09-16): this gap is now live-relevant,
-not just theoretical** — `BaselineEngine` runs on `.94` as of this same day (§1b), so
-every device's `_seeded_model()` call on `.94` now genuinely falls through to each
-model's own weak default prior (`_load_population_prior()` returns `None` for every
-`device_type`, since the table is still empty everywhere, `.94` included) rather than
-a real hierarchical cold-start. The hierarchical-shrinkage cold-start design is
-sound and the read path is correct; it's simply feeding from an empty table right now,
-on both `.94` and `.19`. Not addressed as part of the `.94` wiring work — the user's
-request was to wire the existing scoring subsystem into the live path, not to also
-build the separate priors-aggregation job this gap has needed since Sheet 00 first
-shipped. A natural, still-unclaimed follow-up.
+**UPDATE (2026-09-16, same day, user request: "implement it"): the writer now
+exists.** `src/argus/ops/population_prior_builder.py` — a new scheduled job (daily,
+03:45, `config.yaml`'s `scheduled_jobs.scheduler.population_prior_builder`) — pools
+real per-device `device_baselines` posteriors into `population_priors` rows. Eligible
+contributors: a device's own (metric, hour, model_kind) posterior must have
+`n >= 20` real observations (same "is this enough real data" bar as the autotune
+Wilson gate's `_MIN_TRIALS_FOR_LOOSENING`), and the device must be **currently
+clean** — its most recent real decision must not be SUSPICIOUS/HIGH/CRITICAL, the
+exact same check `BaselineEngine.is_learning_paused()` already used for a different
+purpose, reused rather than re-invented. At least 2 eligible contributors are
+required per group (matching `live_engine.py`'s own `_PEER_DEVIATION_MIN_PEERS`
+precedent) — a lone device isn't a "population."
+
+**Pooling math, per model kind** (honest first-pass, not yet empirically tuned):
+Gaussian pools contributors' own `mu` (arithmetic mean) and implied variance
+(`beta/alpha`, mean of implied variances — a documented simplification that
+understates true between-device variance), rebuilt at a **fixed, modest**
+pseudo-count (`kappa=5.0, alpha=10.0`, matching this codebase's own one existing
+reference data point) so the pool stays a genuinely weak prior a new device's real
+data quickly outweighs. Beta pools the mean ratio, rebuilt at a fixed total
+pseudo-count of 10. Poisson pools the mean rate, rebuilt at a fixed pseudo-exposure
+of 5. Markov (the one case where summing is the mathematically natural operation,
+since the prior IS a Dirichlet count table) sums contributors' real transition
+counts directly, then uniformly scales down if the total exceeds a cap (50), so a
+device-type with many long-lived contributors doesn't end up with an oversized,
+hard-to-override prior.
+
+**A group that drops below the contributor minimum on rebuild has its stale row
+DELETED, not left behind** — this module's own test suite caught the naive version
+(silently skip, leave the old row) as a real bug before it ever shipped: the schema's
+own "rebuilt without them" promise means removed, not just excluded from future
+updates.
+
+**Not built** (documented, not silently omitted): the two-tier "rare/attack-shaped
+states pool GLOBALLY instead of per-device-type" design `baseline/engine.py`'s own
+unused `_GLOBAL_POOL_STATES`/`_GLOBAL_POOL_DEVICE_TYPE` constants sketch — re-reading
+that comment while building this writer, the actual per-state blending mechanics were
+never fully specified, and inventing that design silently would be a real,
+undocumented judgment call rather than an implementation of an existing spec.
+Single-tier (per-device-type only, matching what `_load_population_prior()` already
+reads) is what's actually built. See `tests/test_argus_population_prior_builder.py`
+for the full test coverage (27 checks, including a closed-loop test confirming a
+brand-new device actually inherits a freshly-built pool through the pre-existing
+`_seeded_model()` read path, not just independently-correct writer/reader halves).
 
 ---
 
@@ -1125,7 +1152,11 @@ every still-ongoing incident after a `soc.service` restart.
 | BOCPD hazard rate (expected regime length) | 1/500 cycles | `argus/baseline/engine.py` |
 | BOCPD changepoint: candidate mass / confirm samples / confirm avg surprise | >=0.5 / 3 / >=3.0 | `argus/baseline/engine.py` |
 | `baseline_scoring_enabled` rollback switch | default `true` | `config.yaml`'s `detection_engine:` section |
-| `population_priors` cold-start table | real, queryable — **no writer exists anywhere in this repo** outside a test fixture | `argus/graph/schema.sql`, `argus/baseline/engine.py` |
+| `population_priors` writer: min n / min contributors | 20 / 2 | `argus/ops/population_prior_builder.py` |
+| `population_priors` writer: Gaussian pseudo-count (kappa/alpha) | 5.0 / 10.0 | `argus/ops/population_prior_builder.py` |
+| `population_priors` writer: Beta/Poisson pseudo-count | 10.0 total / 5.0 exposure | `argus/ops/population_prior_builder.py` |
+| `population_priors` writer: Markov pooled-count cap | 50.0 | `argus/ops/population_prior_builder.py` |
+| `population_priors` writer schedule | daily, 03:45 | `config.yaml`'s `scheduled_jobs.scheduler.population_prior_builder` |
 | Default evidence TTL | 600s | `hypotheses/engine.py` |
 | Reputation-family evidence TTL | 86400s | `hypotheses/engine.py` |
 | Hard-stop freshness window | 120s | `decision/engine.py` |

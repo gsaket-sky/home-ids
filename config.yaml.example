@@ -962,6 +962,17 @@ scheduled_jobs:
       cron: "30 3 * * *"
       script: "../argus/ops/backtest_job.py"
 
+    # Release 15 Sheet 00 follow-up (2026-09-16) -- builds population_priors pools
+    # from real per-device baseline history, closing the "read-only, no writer"
+    # gap. Daily, not more often: population-level behavior patterns are
+    # slow-moving, unlike the nightly backtest's own correctness-gate reason to
+    # run every night. 3:45am -- clear of autotune (3am), live_prune (3:15am), and
+    # backtest_job (3:30am).
+    population_prior_builder:
+      enabled: true
+      cron: "45 3 * * *"
+      script: "../argus/ops/population_prior_builder.py"
+
 
 # =============================================================================
 # engine — v13 fast-cutover rollback switch (Documentation/
