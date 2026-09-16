@@ -261,14 +261,27 @@ row. `backtest_job.py`'s own device-scope proposal call was passing `device_id`
 without this hint until the same fix — a genuine, real bug this session's own
 test coverage caught before it shipped, not a hypothetical.
 
-**Deliberately deferred, not shipped**: the retroactive miss circuit-breaker
-(§4, item 4 — a nightly check that a real confirmed threat in a scope would
-have been suppressed under that scope's looser override, rolling it back
-immediately). The other three failsafe layers (canary+confirming-backtest,
-drift detection, trust-radius cap) are live; this fourth one needs its own
-design pass (how to reliably reconstruct "would this override have suppressed
-this specific real alert" after the fact) and is real, scoped follow-up work,
-not silently dropped.
+**UPDATE (same day, follow-on request): the retroactive circuit-breaker is now
+also shipped.** `check_retroactive_misses_and_rollback()` (`backtest_job.py`):
+for every currently-active loosened device/category override, finds real
+`suricata_signature_match` evidence whose confidence falls in the band
+`[parent_value, scope_value)` — would have cleared the PARENT tier's stricter
+hard-stop bar, doesn't clear this scope's own looser one — for a device in
+that scope. Cross-references against `decisions.raw_payload_json`'s
+`fp_verdict.verdict == "CONFIRMED_THREAT"` (the SAME ground truth
+`overview_api.py`'s `fp_confirmed_threats` tile already uses, not a new
+definition invented here) within `_HARD_STOP_FRESHNESS_SECONDS` of the
+evidence. Any hit rolls back that exact scoped override immediately, in the
+same pass — no canary, no confirming backtest, no operator gate, per the
+user's own explicit choice ("a hit should trigger an immediate autonomous
+rollback"), since this is undoing an override real evidence already proved
+wrong, not introducing a new guess. Wired into `run_backtest()` independently
+of `overall_pass` (a real confirmed miss is worth rolling back even on a night
+the synthetic backtest itself failed for an unrelated reason), runs before any
+new proposal/promotion that same cycle. 7 new tests, all against real graph
+fixtures (real evidence rows, real decision rows with real `raw_payload_json`)
+— happy path, no-evidence, wrong-verdict, outside-freshness-window, tightened-
+scope-never-checked, device-scoped-too, and `run_backtest()`'s own wiring.
 
 **Testing**: 60+ new/updated checks across `test_argus_autotune_engine.py`,
 `test_argus_backtest_job.py`, `test_argus_graph_store.py` (migration

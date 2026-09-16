@@ -30,6 +30,8 @@ def check(name, cond, detail=""):
 
 from argus.ops import backtest_job  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
+from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
+from argus.autotune.engine import AutotuneEngine  # noqa: E402
 
 NOW = 1_800_000_000.0
 
@@ -274,6 +276,134 @@ for p in scoped_proposals:
            f"to EXACTLY one of device_id/device_type -- never both, never neither "
            f"(never a stray global proposal from this function)",
           has_device != has_category, f"got device_id={p.get('device_id')} device_type={p.get('device_type')}")
+
+
+# =============================================================================
+# check_retroactive_misses_and_rollback -- the retroactive circuit-breaker
+# (Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md §4, item 4;
+# user-requested: "implement it and a hit should trigger an immediate
+# autonomous rollback"). Real graph fixtures throughout (real evidence rows,
+# real decisions rows with real raw_payload_json) -- no mocking, matching
+# this file's own established convention.
+# =============================================================================
+CB_NOW = NOW + 500_000
+
+
+def _promote_scoped_directly(store, device_id, device_type, parameter, old_value, new_value, promoted_at,
+                                change_id):
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'test setup')",
+        (change_id, device_id, device_type, parameter, old_value, new_value, promoted_at, promoted_at, promoted_at),
+    )
+    store._maybe_commit()
+
+
+def _add_suricata_evidence(store, device_id, confidence, timestamp):
+    store.insert_evidence(Evidence(
+        device_id=device_id, destination_id=NO_DESTINATION, evidence_type="suricata_signature_match",
+        independence_family="suricata", timestamp=timestamp, source="suricata", confidence=confidence, value=1.0,
+    ))
+
+
+def _add_confirmed_threat_decision(store, device_id, timestamp, confirmed=True):
+    store.insert_decision(
+        device_id=device_id, timestamp=timestamp, state="HIGH", decision_path="hypothesis_high",
+        confidence=0.85, risk_score=6.0,
+        raw_payload={"fp_verdict": {"verdict": "CONFIRMED_THREAT" if confirmed else "FALSE_POSITIVE"}},
+    )
+
+
+# --- happy path: category-scoped loosened override, real near-miss evidence,
+# real confirmed threat nearby -> rolled back ---
+store_cb1 = GraphStore(":memory:")
+store_cb1.upsert_device("cb_dev_a", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb1, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb1_global")
+_promote_scoped_directly(store_cb1, None, "iot", "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb1_cat")
+# confidence 0.75 sits in [0.70, 0.80) -- clears the PARENT's bar, doesn't clear this category's own
+_add_suricata_evidence(store_cb1, "cb_dev_a", confidence=0.75, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_cb1, "cb_dev_a", timestamp=CB_NOW - 90)  # well within freshness window
+
+rollbacks1 = backtest_job.check_retroactive_misses_and_rollback(store_cb1, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: rolls back a loosened category "
+      "override when real near-miss evidence + a real CONFIRMED_THREAT decision "
+      "line up", len(rollbacks1) == 1 and rollbacks1[0]["change_id"] == "cb1_cat", f"got {rollbacks1}")
+check("check_retroactive_misses_and_rollback: the rollback takes effect "
+      "IMMEDIATELY -- get_active_value() falls back to the parent tier right away",
+      abs(AutotuneEngine(store_cb1).get_active_value("hard_stop_candidate_sensitivity",
+                                                         device_type="iot", default=0.9) - 0.70) < 1e-9)
+
+# --- no near-miss evidence at all -> nothing to roll back ---
+store_cb2 = GraphStore(":memory:")
+store_cb2.upsert_device("cb_dev_b", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb2, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb2_global")
+_promote_scoped_directly(store_cb2, None, "iot", "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb2_cat")
+rollbacks2 = backtest_job.check_retroactive_misses_and_rollback(store_cb2, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: no evidence in the missed band "
+      "at all -- nothing rolled back", rollbacks2 == [], f"got {rollbacks2}")
+
+# --- near-miss evidence exists, but NO confirmed-threat decision nearby ---
+store_cb3 = GraphStore(":memory:")
+store_cb3.upsert_device("cb_dev_c", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb3, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb3_global")
+_promote_scoped_directly(store_cb3, None, "iot", "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb3_cat")
+_add_suricata_evidence(store_cb3, "cb_dev_c", confidence=0.75, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_cb3, "cb_dev_c", timestamp=CB_NOW - 90, confirmed=False)  # FALSE_POSITIVE, not confirmed
+rollbacks3 = backtest_job.check_retroactive_misses_and_rollback(store_cb3, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: near-miss evidence exists but "
+      "the nearby decision was FALSE_POSITIVE, not CONFIRMED_THREAT -- nothing "
+      "rolled back", rollbacks3 == [], f"got {rollbacks3}")
+
+# --- near-miss evidence + confirmed decision, but OUTSIDE the freshness window ---
+store_cb4 = GraphStore(":memory:")
+store_cb4.upsert_device("cb_dev_d", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb4, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb4_global")
+_promote_scoped_directly(store_cb4, None, "iot", "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb4_cat")
+_add_suricata_evidence(store_cb4, "cb_dev_d", confidence=0.75, timestamp=CB_NOW - 100)
+far_away = CB_NOW - 100 + backtest_job._HARD_STOP_FRESHNESS_SECONDS + 3600  # well past the freshness window
+_add_confirmed_threat_decision(store_cb4, "cb_dev_d", timestamp=far_away)
+rollbacks4 = backtest_job.check_retroactive_misses_and_rollback(store_cb4, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: a confirmed decision exists but "
+      "well outside the hard-stop freshness window of the near-miss evidence "
+      "-- not treated as related, nothing rolled back",
+      rollbacks4 == [], f"got {rollbacks4}")
+
+# --- a TIGHTENED scope is never even checked, regardless of nearby evidence ---
+store_cb5 = GraphStore(":memory:")
+store_cb5.upsert_device("cb_dev_e", device_type="router", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb5, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb5_global")
+_promote_scoped_directly(store_cb5, None, "router", "hard_stop_candidate_sensitivity", 0.70, 0.60, CB_NOW - 5000, "cb5_cat")  # TIGHTENED, not loosened
+_add_suricata_evidence(store_cb5, "cb_dev_e", confidence=0.65, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_cb5, "cb_dev_e", timestamp=CB_NOW - 90)
+rollbacks5 = backtest_job.check_retroactive_misses_and_rollback(store_cb5, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: a TIGHTENED scope (stricter than "
+      "its parent) is never rolled back regardless of nearby evidence -- it "
+      "can't have caused a miss, only the risky (looser) direction is checked",
+      rollbacks5 == [], f"got {rollbacks5}")
+
+# --- device-scoped (not just category-scoped) rollback also works ---
+store_cb6 = GraphStore(":memory:")
+store_cb6.upsert_device("cb_dev_f", device_type="phone", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb6, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb6_global")
+_promote_scoped_directly(store_cb6, "cb_dev_f", None, "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb6_dev")
+_add_suricata_evidence(store_cb6, "cb_dev_f", confidence=0.75, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_cb6, "cb_dev_f", timestamp=CB_NOW - 90)
+rollbacks6 = backtest_job.check_retroactive_misses_and_rollback(store_cb6, now=CB_NOW)
+check("check_retroactive_misses_and_rollback: a DEVICE-scoped (not just "
+      "category-scoped) loosened override is also correctly rolled back",
+      len(rollbacks6) == 1 and rollbacks6[0]["change_id"] == "cb6_dev", f"got {rollbacks6}")
+
+# --- run_backtest() wiring: the circuit breaker runs and its result is surfaced ---
+store_cb7 = GraphStore(":memory:")
+store_cb7.upsert_device("cb_dev_g", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_cb7, None, None, "hard_stop_candidate_sensitivity", 0.9, 0.70, CB_NOW - 10000, "cb7_global")
+_promote_scoped_directly(store_cb7, None, "iot", "hard_stop_candidate_sensitivity", 0.70, 0.80, CB_NOW - 5000, "cb7_cat")
+_add_suricata_evidence(store_cb7, "cb_dev_g", confidence=0.75, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_cb7, "cb_dev_g", timestamp=CB_NOW - 90)
+result_cb7 = backtest_job.run_backtest(store_cb7, device_ids=["cb_dev_g"], now=CB_NOW)
+check("run_backtest: surfaces circuit_breaker_rollbacks in its own return dict",
+      "circuit_breaker_rollbacks" in result_cb7 and len(result_cb7["circuit_breaker_rollbacks"]) == 1,
+      f"got {result_cb7.get('circuit_breaker_rollbacks')}")
 
 
 print()

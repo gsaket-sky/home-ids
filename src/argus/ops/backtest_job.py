@@ -53,6 +53,7 @@ from argus.autotune.engine import (  # noqa: E402
     AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION, compute_drift_result,
     wilson_lower_bound, _MIN_TRIALS_FOR_LOOSENING,
 )
+from argus.decision.engine import _HARD_STOP_FRESHNESS_SECONDS  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
@@ -399,6 +400,142 @@ def _promote_eligible_tuning_changes(store: GraphStore, run_id: str, now: float)
     return promoted
 
 
+# 2026-09-16, per-device/category autotuning plan §4, item 4 (user-requested:
+# "implement it and a hit should trigger an immediate autonomous rollback"):
+# the retroactive circuit-breaker. Every OTHER failsafe (canary+confirming-
+# backtest, drift detection, trust-radius cap) validates a scoped change
+# against SYNTHETIC attack data or STATISTICAL trends -- none of them can see
+# a real attack slipping through specifically BECAUSE a scope was loosened,
+# since that never happened in the synthetic world. This closes that blind
+# spot using real, already-recorded ground truth: decisions.raw_payload_json's
+# own fp_verdict field (the SAME CONFIRMED_THREAT signal overview_api.py's
+# fp_confirmed_threats tile and ai_soc.py's DeterministicValidator already
+# treat as ground truth elsewhere in this codebase -- not a new definition of
+# "confirmed" invented here).
+# Same 7-day window compute_drift_result()'s own _DEFAULT_DRIFT_LOOKBACK_SECONDS
+# uses (argus/autotune/engine.py) -- not imported directly since that name is
+# module-private there too; kept as its own constant here rather than reaching
+# across the module boundary for a private name a second time in this file.
+_RETROACTIVE_MISS_LOOKBACK_SECONDS = 7 * 86400.0
+
+
+def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float] = None,
+                                             lookback_seconds: float = _RETROACTIVE_MISS_LOOKBACK_SECONDS
+                                             ) -> List[Dict[str, Any]]:
+    """For every currently-active (promoted, not yet rolled back) device- or
+    category-scoped _TUNE_PARAMETER override that's LOOSENED relative to its
+    parent tier: finds real suricata_signature_match evidence, for a device in
+    that scope, whose confidence falls in the band [parent_value, scope_value)
+    -- i.e. would have cleared the PARENT tier's stricter hard-stop bar but
+    does not clear this scope's own looser one. For each such near-miss, checks
+    whether a decision for that same device within _HARD_STOP_FRESHNESS_SECONDS
+    of it was later recorded as fp_verdict.verdict == "CONFIRMED_THREAT" (the
+    established ground truth). Any hit rolls back that EXACT scoped override
+    immediately, in this same pass -- no canary, no confirming backtest, no
+    operator approval gate, matching the user's own explicit choice ("a hit
+    should trigger an immediate autonomous rollback"): unlike a NEW proposal,
+    which is inherently a guess being cautiously introduced, this is undoing
+    an override that real evidence has already shown was wrong.
+
+    Deliberately scoped to _TUNE_PARAMETER only (same scoping every other
+    proposal function in this file already uses) -- the evidence-confidence-
+    vs-threshold band comparison is only meaningful for a hard-stop
+    min-confidence bar; the other three TUNABLE_PARAMETERS have no comparable
+    per-evidence signal to retroactively re-score against.
+
+    Runs independently of overall_pass -- a real confirmed miss from an
+    already-promoted override is worth rolling back even on a night the
+    synthetic backtest itself failed for an unrelated reason. Best-effort at
+    the call site (run_backtest() wraps this in its own try/except, same
+    "never take down the run" framing as every other autotune trigger there).
+
+    Returns the list of {change_id, device_id, device_type, reason} dicts for
+    everything actually rolled back this pass."""
+    now = now if now is not None else time.time()
+    since = now - lookback_seconds
+    engine = AutotuneEngine(store)
+    direction = _LESS_SENSITIVE_DIRECTION[_TUNE_PARAMETER]
+    rolled_back: List[Dict[str, Any]] = []
+
+    active_scoped_rows = store._conn.execute(
+        "SELECT change_id, device_id, device_type, new_value FROM threshold_history WHERE parameter=? "
+        "AND promoted_at IS NOT NULL AND rolled_back_at IS NULL "
+        "AND (device_id IS NOT NULL OR device_type IS NOT NULL)",
+        (_TUNE_PARAMETER,),
+    ).fetchall()
+
+    for row in active_scoped_rows:
+        change_id = row["change_id"]
+        scope_device_id = row["device_id"]
+        scope_device_type = row["device_type"]
+        scope_value = float(row["new_value"])
+
+        parent_device_type = scope_device_type if scope_device_id else None
+        parent_value = engine.get_active_value(_TUNE_PARAMETER, device_id=None, device_type=parent_device_type,
+                                                  default=_TUNE_DEFAULT_SENSITIVITY)
+
+        # Only a LOOSENED scope can have missed something its parent would
+        # have caught -- a tightened scope is strictly MORE cautious than its
+        # parent, so it can never be the cause of a real miss.
+        if not ((scope_value - parent_value) * direction > 0):
+            continue
+        band_lo, band_hi = (parent_value, scope_value) if direction > 0 else (scope_value, parent_value)
+
+        if scope_device_id:
+            device_ids = [scope_device_id]
+        else:
+            device_ids = [r["device_id"] for r in store._conn.execute(
+                "SELECT device_id FROM devices WHERE device_type=? AND merged_into_device_id IS NULL",
+                (scope_device_type,),
+            ).fetchall()]
+        if not device_ids:
+            continue
+        placeholders = ",".join("?" * len(device_ids))
+
+        near_misses = store._conn.execute(
+            f"SELECT device_id, timestamp FROM evidence WHERE evidence_type='suricata_signature_match' "
+            f"AND device_id IN ({placeholders}) AND timestamp >= ? AND confidence >= ? AND confidence < ?",
+            (*device_ids, since, band_lo, band_hi),
+        ).fetchall()
+        if not near_misses:
+            continue
+
+        confirming_reason = None
+        for ev in near_misses:
+            decision_rows = store._conn.execute(
+                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
+                "AND timestamp >= ? AND timestamp <= ?",
+                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
+                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+            ).fetchall()
+            for drow in decision_rows:
+                try:
+                    payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                    confirming_reason = (
+                        f"retroactive circuit-breaker: decision {drow['decision_id']} for device "
+                        f"{ev['device_id']} was CONFIRMED_THREAT, near a suricata_signature_match "
+                        f"evidence item (confidence in [{band_lo:.3f}, {band_hi:.3f})) that this scope's "
+                        f"value {scope_value:.3f} would not hard-stop but the parent tier's "
+                        f"{parent_value:.3f} would have"
+                    )
+                    break
+            if confirming_reason:
+                break
+
+        if confirming_reason is None:
+            continue
+
+        if engine.rollback_change(change_id, confirming_reason, now=now):
+            LOGGER.critical("[AUTOTUNE_CIRCUIT_BREAKER] %s", confirming_reason)
+            rolled_back.append({"change_id": change_id, "device_id": scope_device_id,
+                                  "device_type": scope_device_type, "reason": confirming_reason})
+
+    return rolled_back
+
+
 def run_golden_set() -> Dict[str, Any]:
     """Runs the existing real-incident regression suite as a subprocess.
     Zero tolerance: any real-incident regression (non-zero exit) fails this
@@ -503,6 +640,21 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     )
     store._maybe_commit()
 
+    # 2026-09-16, per-device/category autotuning plan §4 (user-requested: "a hit
+    # should trigger an immediate autonomous rollback"): runs BEFORE any new
+    # proposal/promotion this cycle, and deliberately OUTSIDE the `if
+    # overall_pass:` gate below -- a real confirmed miss from an
+    # ALREADY-PROMOTED override is worth rolling back even on a night tonight's
+    # OWN synthetic backtest failed for some unrelated reason; the two checks
+    # are about different things (tonight's synthetic pass/fail vs. a
+    # previously-promoted override's real-world track record). Best-effort,
+    # same "never take down the run" framing as every other trigger here.
+    circuit_breaker_rollbacks: List[Dict[str, Any]] = []
+    try:
+        circuit_breaker_rollbacks = check_retroactive_misses_and_rollback(store, now=now)
+    except Exception:
+        LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] retroactive-miss check failed, non-fatal")
+
     # Release 15 Sheet 03a (2026-09-15): the triggering logic that was the autotuner's
     # one genuine remaining gap -- see _propose_tuning_change()'s own docstring for
     # exactly what's scoped in/out and why. Gated on overall_pass: a failing backtest
@@ -551,7 +703,8 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     return {"run_id": run_id, "golden_set": golden, "synthetic": synthetic, "drift": drift,
             "overall_pass": overall_pass, "tuning_proposal": tuning_proposal,
             "scoped_tuning_proposals": scoped_tuning_proposals,
-            "tuning_promoted": tuning_promoted}
+            "tuning_promoted": tuning_promoted,
+            "circuit_breaker_rollbacks": circuit_breaker_rollbacks}
 
 
 def main() -> None:
@@ -574,6 +727,14 @@ def main() -> None:
         # logged at WARNING so it's visible to an operator without being a
         # scheduled-job failure.
         LOGGER.warning("Posterior-trajectory drift detected: %s", result["drift"]["findings"])
+    if result["circuit_breaker_rollbacks"]:
+        # Each individual rollback is already logged at CRITICAL as it happens
+        # (check_retroactive_misses_and_rollback's own [AUTOTUNE_CIRCUIT_BREAKER]
+        # line) -- this is the run-level summary, same CRITICAL level since a
+        # real confirmed miss is a genuine, already-acted-on safety event, not
+        # routine tuning activity.
+        LOGGER.critical("[AUTOTUNE_CIRCUIT_BREAKER] %d scoped override(s) rolled back this run: %s",
+                          len(result["circuit_breaker_rollbacks"]), result["circuit_breaker_rollbacks"])
     if result["tuning_proposal"]:
         LOGGER.info("[AUTOTUNE_TRIGGER] %s", result["tuning_proposal"])
     if result["scoped_tuning_proposals"]:
