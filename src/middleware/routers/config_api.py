@@ -34,10 +34,7 @@ from pydantic import BaseModel
 from middleware.auth import verify_token, CONFIG, LOGGER
 from middleware.config_schema import CONFIG_SCHEMA, is_restart_required
 
-try:
-    from config import CONFIG_FILE
-except ImportError:
-    from core.config import CONFIG_FILE
+from config import CONFIG_FILE
 
 router = APIRouter()
 

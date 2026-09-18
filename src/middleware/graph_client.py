@@ -16,10 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-try:
-    from config import CONFIG_FILE
-except ImportError:
-    from core.config import CONFIG_FILE
+from config import CONFIG_FILE
 
 from argus.graph.store import GraphStore
 

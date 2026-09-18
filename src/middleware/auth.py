@@ -13,10 +13,7 @@ SRC_DIR = CURRENT_DIR.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-try:
-    from config import CONFIG
-except ImportError:
-    from core.config import CONFIG
+from config import CONFIG
 
 LOGGER = logging.getLogger("fritz_middleware")
 security = HTTPBearer(auto_error=False)

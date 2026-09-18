@@ -30,10 +30,7 @@ scalar/list/enum, and gets its own dedicated merge-aware endpoints
 (PATCH/DELETE /api/config/device_type_overrides/{pattern}) in routers/config_api.py
 instead of the generic per-key PATCH/DELETE.
 """
-try:
-    from config import _STATIC_KEYS
-except ImportError:
-    from core.config import _STATIC_KEYS
+from config import _STATIC_KEYS
 
 RUNTIME_RESTART_KEYS = frozenset({
     "lateral_movement_ports",
