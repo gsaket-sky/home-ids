@@ -51,11 +51,58 @@ class _Swap:
         self.percent = percent
 
 
+class _FakeSystemProcess:
+    """Simulates one entry from psutil.process_iter(['name']) -- .info is how
+    real psutil exposes attrs requested at iteration time, without a second
+    round-trip syscall per process."""
+    def __init__(self, name, rss_mb, raises=None):
+        self.info = {"name": name}
+        self._rss_mb = rss_mb
+        self._raises = raises  # an Exception class/instance to raise from memory_info(), simulating AccessDenied/ZombieProcess/etc.
+
+    def memory_info(self):
+        if self._raises:
+            raise self._raises
+        return _MemInfo(self._rss_mb)
+
+
+class _FakeChildProcess:
+    def __init__(self, pid, cmdline, rss_mb, raises=None):
+        self.pid = pid
+        self._cmdline = cmdline
+        self._rss_mb = rss_mb
+        self._raises = raises
+
+    def cmdline(self):
+        return self._cmdline
+
+    def name(self):
+        return self._cmdline[-1] if self._cmdline else "?"
+
+    def memory_info(self):
+        if self._raises:
+            raise self._raises
+        return _MemInfo(self._rss_mb)
+
+
+class _FakeSchedulerParentProcess:
+    def __init__(self, children):
+        self._children = children
+
+    def children(self, recursive=False):
+        return self._children
+
+
 class FakePsutil:
     def __init__(self):
         self.state = {"rss_mb": 100.0, "sysmem_pct": 10.0, "swap_pct": 0.0, "available_mb": 8000.0}
+        self.system_processes = []  # list of _FakeSystemProcess, for process_iter()
+        self.scheduler_pid = None
+        self.scheduler_children = []  # list of _FakeChildProcess
 
     def Process(self, pid=None):
+        if pid is not None and pid == self.scheduler_pid:
+            return _FakeSchedulerParentProcess(self.scheduler_children)
         return _FakeProcess(self.state)
 
     def virtual_memory(self):
@@ -63,6 +110,9 @@ class FakePsutil:
 
     def swap_memory(self):
         return _Swap(self.state["swap_pct"])
+
+    def process_iter(self, attrs=None):
+        return iter(self.system_processes)
 
 
 @pytest.fixture
@@ -245,3 +295,138 @@ def test_diagnostics_file_is_bounded_not_unbounded(hm, fake_psutil, tmp_path, mo
         hm._evaluate_resource_pressure()
     entries = _read_diagnostics(tmp_path)
     assert len(entries) == 3  # 6 escalations happened, but the file never grows past the cap
+
+
+# --- external component RSS attribution (2026-09-20, explicit user request) ------
+
+def test_external_components_are_matched_and_summed(hm, fake_psutil):
+    fake_psutil.system_processes = [
+        _FakeSystemProcess("zeek", 150.0),
+        _FakeSystemProcess("bash", 5.0),  # the zeekctl wrapper -- must NOT be counted as zeek
+        _FakeSystemProcess("prometheus", 80.0),
+        _FakeSystemProcess("prometheus-node-e", 20.0),  # truncated comm, still prometheus-node-exporter
+        _FakeSystemProcess("promtail", 30.0),
+        _FakeSystemProcess("loki", 60.0),
+    ]
+    totals = hm._external_component_rss_mb()
+    assert totals["zeek"] == 150.0
+    assert "bash" not in totals
+    assert totals["prometheus"] == 80.0
+    assert totals["prometheus_node_exporter"] == 20.0
+    assert totals["promtail"] == 30.0
+    assert totals["loki"] == 60.0
+
+
+def test_grafana_plugin_subprocesses_are_summed_into_one_total(hm, fake_psutil):
+    # Real shape found live on .94: 14 separate gpx_*-named plugin processes,
+    # none of which contain "grafana" in their own process name at all.
+    fake_psutil.system_processes = [
+        _FakeSystemProcess("grafana", 100.0),
+        _FakeSystemProcess("gpx_grafana-pro", 15.0),
+        _FakeSystemProcess("gpx_sqlite-data", 10.0),
+        _FakeSystemProcess("gpx_grafana-lok", 12.0),
+    ]
+    totals = hm._external_component_rss_mb()
+    assert totals["grafana"] == 137.0  # 100 + 15 + 10 + 12, all four bucketed together
+
+
+def test_grafanas_loki_plugin_does_not_get_double_counted_as_loki(hm, fake_psutil):
+    # gpx_grafana-lok's own comm is truncated and contains "lok", but this
+    # must land ONLY in "grafana" (via the gpx_ prefix), never also in "loki"
+    # (which matches on EXACT name -- this is exactly the false-positive risk
+    # a naive substring match would have hit).
+    fake_psutil.system_processes = [_FakeSystemProcess("gpx_grafana-lok", 12.0)]
+    totals = hm._external_component_rss_mb()
+    assert totals.get("loki") is None
+    assert totals["grafana"] == 12.0
+
+
+def test_ollama_absent_today_reports_nothing_not_zero(hm, fake_psutil):
+    fake_psutil.system_processes = [_FakeSystemProcess("zeek", 150.0)]
+    totals = hm._external_component_rss_mb()
+    assert "ollama" not in totals  # confirmed not installed on .94 -- absent, not a fabricated 0.0
+
+
+def test_a_zombie_or_access_denied_process_is_skipped_not_fatal(hm, fake_psutil):
+    fake_psutil.system_processes = [
+        _FakeSystemProcess("suricata", 0.0, raises=ProcessLookupError("zombie")),
+        _FakeSystemProcess("zeek", 150.0),
+    ]
+    totals = hm._external_component_rss_mb()
+    assert "suricata" not in totals
+    assert totals["zeek"] == 150.0
+
+
+def test_external_component_scan_failure_is_a_safe_empty_result(hm, monkeypatch):
+    def _boom(*a, **kw):
+        raise RuntimeError("simulated psutil failure")
+    monkeypatch.setattr(hm_module.psutil, "process_iter", _boom)
+    assert hm._external_component_rss_mb() == {}
+
+
+def test_captured_entry_includes_external_components(hm, fake_psutil, tmp_path):
+    fake_psutil.system_processes = [_FakeSystemProcess("zeek", 150.0)]
+    fake_psutil.state.update(rss_mb=2000)
+    hm._evaluate_resource_pressure()
+    entry = _read_diagnostics(tmp_path)[0]
+    assert entry["process_rss_mb"]["zeek"] == 150.0
+    assert entry["process_rss_mb"]["main"] == 2000.0  # the existing "main" key still present
+
+
+# --- active scheduled job attribution ---------------------------------------------
+
+class _FakeSchedulerProc:
+    def __init__(self, pid):
+        self.pid = pid
+
+
+def test_no_scheduler_proc_returns_empty_list(hm):
+    assert hm._active_scheduled_job_processes() == []
+
+
+def test_active_scheduled_job_is_reported_by_script_name(fake_psutil, tmp_path):
+    fake_psutil.scheduler_pid = 999
+    fake_psutil.scheduler_children = [
+        _FakeChildProcess(1001, ["python3", "src/argus/ops/live_llm_review.py"], 45.0),
+    ]
+    h = HealthManager(config=FakeConfig(tmp_path), alert_manager=FakeAlertManager(),
+                        state_dir=str(tmp_path), scheduler_proc=_FakeSchedulerProc(999))
+    jobs = h._active_scheduled_job_processes()
+    assert len(jobs) == 1
+    assert jobs[0]["script"] == "src/argus/ops/live_llm_review.py"
+    assert jobs[0]["rss_mb"] == 45.0
+    assert jobs[0]["pid"] == 1001
+
+
+def test_no_active_scheduled_jobs_is_an_empty_list_not_an_error(fake_psutil, tmp_path):
+    fake_psutil.scheduler_pid = 999
+    fake_psutil.scheduler_children = []
+    h = HealthManager(config=FakeConfig(tmp_path), alert_manager=FakeAlertManager(),
+                        state_dir=str(tmp_path), scheduler_proc=_FakeSchedulerProc(999))
+    assert h._active_scheduled_job_processes() == []
+
+
+def test_a_failing_child_process_lookup_is_skipped_not_fatal(fake_psutil, tmp_path):
+    fake_psutil.scheduler_pid = 999
+    fake_psutil.scheduler_children = [
+        _FakeChildProcess(1001, ["python3", "src/argus/ops/backtest_job.py"], 0.0, raises=ProcessLookupError("gone")),
+        _FakeChildProcess(1002, ["python3", "src/argus/ops/live_prune.py"], 30.0),
+    ]
+    h = HealthManager(config=FakeConfig(tmp_path), alert_manager=FakeAlertManager(),
+                        state_dir=str(tmp_path), scheduler_proc=_FakeSchedulerProc(999))
+    jobs = h._active_scheduled_job_processes()
+    assert len(jobs) == 1
+    assert jobs[0]["script"] == "src/argus/ops/live_prune.py"
+
+
+def test_captured_entry_includes_active_scheduled_jobs(fake_psutil, tmp_path):
+    fake_psutil.scheduler_pid = 999
+    fake_psutil.scheduler_children = [
+        _FakeChildProcess(1001, ["python3", "src/argus/ops/live_llm_review.py"], 45.0),
+    ]
+    h = HealthManager(config=FakeConfig(tmp_path), alert_manager=FakeAlertManager(),
+                        state_dir=str(tmp_path), scheduler_proc=_FakeSchedulerProc(999))
+    fake_psutil.state.update(rss_mb=2000)
+    h._evaluate_resource_pressure()
+    entry = _read_diagnostics(tmp_path)[0]
+    assert entry["active_scheduled_jobs"] == [{"script": "src/argus/ops/live_llm_review.py", "pid": 1001, "rss_mb": 45.0}]

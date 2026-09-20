@@ -70,6 +70,55 @@ try:
 except ImportError:  # pragma: no cover -- exercised only if the dependency is missing
     psutil = None
 
+# Memory-restart root-cause investigation, resource-attribution follow-up
+# (2026-09-20, explicit user request): every OTHER process sharing the box's
+# resources, so a future resource-constraint decision ("what do we cut back
+# first on a Pi") is based on real per-component numbers, not a guess. These
+# are NOT children of this Python process -- zeek/suricata share soc.service's
+# own cgroup but aren't its subprocesses; prometheus/promtail/loki/ollama are
+# entirely separate systemd services co-located on the same box for other
+# reasons (Grafana/observability, unrelated to this project) -- so they're
+# found by a single system-wide psutil.process_iter() scan matched by process
+# name, not by any parent/child relationship. Verified against .94's own real
+# process names directly (2026-09-20), not assumed:
+#   - "zeek" (the real packet-capture binary; its zeekctl bash wrapper is a
+#     separate "bash" process, correctly excluded by an exact name match)
+#   - "suricata" (matched loosely -- real name is "Suricata-Main", and it's
+#     genuinely ephemeral: only exists during a reactive-capture burst
+#     analysis, not a persistent daemon, so 0/absent is the expected common
+#     case, not a bug)
+#   - "prometheus" (exact -- must not also match prometheus-node-exporter)
+#   - "prometheus-node" (prometheus-node-exporter truncates to this at the
+#     kernel's 15-char TASK_COMM_LEN, same as `ps -o comm` shows)
+#   - "promtail", "loki" (exact -- "loki" as a bare substring would also
+#     wrongly match Grafana's "gpx_grafana-lok..." plugin process, which is
+#     why this is an exact match, not `in`)
+#   - "ollama" (loose match -- confirmed NOT installed on .94 at all today,
+#     no service/binary/container; kept in the registry so this diagnostic
+#     picks it up automatically the moment it ever IS deployed, rather than
+#     needing a code change then)
+#   - "grafana" -- the main server process (comm exactly "grafana") PLUS
+#     every one of its plugin-executor subprocesses, which is most of its
+#     real footprint (14 separate "gpx_*"-named processes seen live on .94 --
+#     gpx_grafana-prometheus-datasource, gpx_sqlite-datasource, etc.). None
+#     of those contain "grafana" in their own process name at all -- a naive
+#     substring match on "grafana" alone would silently miss almost the
+#     entire thing, so this specifically also matches the "gpx_" prefix.
+# CL-AFPE is deliberately absent from this registry: it runs IN-PROCESS
+# (argus/cl_afpe/engine.py, instantiated inside the same pipeline this
+# module's own "main" RSS already measures), not a separate PID -- there is
+# nothing more to attribute here without double-counting "main".
+_EXTERNAL_COMPONENT_MATCHERS = {
+    "zeek": lambda name: name == "zeek",
+    "suricata": lambda name: "suricata" in name,
+    "prometheus": lambda name: name == "prometheus",
+    "prometheus_node_exporter": lambda name: name.startswith("prometheus-node"),
+    "promtail": lambda name: name == "promtail",
+    "loki": lambda name: name == "loki",
+    "ollama": lambda name: "ollama" in name,
+    "grafana": lambda name: name == "grafana" or name.startswith("gpx_"),
+}
+
 
 def _estimate_cron_interval_seconds(cron_expr: Optional[str]) -> Optional[float]:
     """Estimates a standard 5-field cron expression's typical interval in
@@ -566,6 +615,7 @@ class HealthManager:
                 process_rss_mb[name] = round(psutil.Process(proc.pid).memory_info().rss / (1024 * 1024), 1)
             except Exception:
                 pass
+        process_rss_mb.update(self._external_component_rss_mb())
 
         graph_db = self._graph_db_diagnostic_stats()
 
@@ -573,11 +623,69 @@ class HealthManager:
             "timestamp": time.time(),
             "pressure_level": level,
             "process_rss_mb": process_rss_mb,
+            "active_scheduled_jobs": self._active_scheduled_job_processes(),
             "top_allocations": top_allocations,
             "top_object_types": top_object_types,
             "graph_db": graph_db,
         }
         self._append_diagnostic_entry(entry)
+
+    def _external_component_rss_mb(self) -> Dict[str, float]:
+        """One system-wide process scan, matched against
+        _EXTERNAL_COMPONENT_MATCHERS -- summed per component (not just the
+        first match) since a component can legitimately have more than one
+        live process. AccessDenied/NoSuchProcess/ZombieProcess are all
+        expected, ordinary outcomes here (a defunct/zombie Suricata-Main was
+        seen live on .94 during this investigation -- its own memory_info()
+        call correctly raises rather than returning garbage), not failures."""
+        totals: Dict[str, float] = {}
+        try:
+            for proc in psutil.process_iter(["name"]):
+                try:
+                    name = (proc.info.get("name") or "").strip()
+                except Exception:
+                    continue
+                if not name:
+                    continue
+                for component, matches in _EXTERNAL_COMPONENT_MATCHERS.items():
+                    if not matches(name):
+                        continue
+                    try:
+                        rss_mb = proc.memory_info().rss / (1024 * 1024)
+                    except Exception:
+                        continue
+                    totals[component] = round(totals.get(component, 0.0) + rss_mb, 1)
+        except Exception:
+            pass
+        return totals
+
+    def _active_scheduled_job_processes(self) -> list:
+        """Whichever scheduled job(s) (live_prune, backtest_job, live_llm_review,
+        etc. -- config.yaml's scheduled_jobs.scheduler entries, every one of
+        which scheduler_proc spawns as its own child) happen to be running AT
+        THE MOMENT this diagnostic fires. Usually empty -- jobs are short-lived
+        and idle most of the time -- which is the expected common case, not a
+        gap; the value is specifically catching the coincidence of a real
+        pressure escalation with a specific job actively running."""
+        if self.scheduler_proc is None or self.scheduler_proc.pid is None:
+            return []
+        out = []
+        try:
+            parent = psutil.Process(self.scheduler_proc.pid)
+            for child in parent.children(recursive=True):
+                try:
+                    cmdline = child.cmdline()
+                    label = next((part for part in reversed(cmdline) if part.endswith(".py")), child.name())
+                    out.append({
+                        "script": label,
+                        "pid": child.pid,
+                        "rss_mb": round(child.memory_info().rss / (1024 * 1024), 1),
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return out
 
     def _graph_db_diagnostic_stats(self) -> Dict[str, Any]:
         """A short-lived, read-only connection -- deliberately separate from

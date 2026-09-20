@@ -217,22 +217,49 @@ long-held writer). Bounded at `_MAX_DIAGNOSTIC_ENTRIES` (500) -- a rewrite-
 last-N pattern, not an unbounded append, matching every other retention
 decision in this document.
 
-Deliberately NOT built (scope-trimmed during implementation, not forgotten):
-per-child RSS for `zeek`/`suricata` specifically (they're separate
-systemd-cgroup siblings, not subprocesses of this Python process -- already
-visible in aggregate via `systemctl status soc.service`'s own cgroup
-`Memory:` line, and enumerating them robustly added complexity for a class
-of bug -- Root Causes #1/#2 -- that was Python-heap-side, not a zeek/suricata
-leak) and the console-API surface (12 targeted tests pass locally --
-`tests/test_health_manager_memory_diagnostics.py` -- covering capture
-triggers/shape/bounding/failure-isolation, plus all 65 pre-existing
-health_manager tests still pass; found and fixed two real bugs during this
-work: `_graph_db_diagnostic_stats()` used `sqlite3` without its own import
--- silently swallowed by its own `except Exception: return {}` -- and its
-read-only URI used an f-string instead of `Path.as_uri()`, invalid on
-Windows even though it happens to work on every real Linux deployment
-target; moved `sqlite3`/`tracemalloc`/`collections` to module-level imports
-to fix the former).
+**Resource-attribution follow-up, same day (explicit user request):** the
+"deliberately not built" per-external-process scope-trim above was
+un-deferred the same session. `_external_component_rss_mb()` does one
+system-wide `psutil.process_iter()` scan per capture, matched against a
+registry of real process names verified directly on `.94` (not assumed):
+`zeek`, `suricata` (genuinely ephemeral -- only exists during a
+reactive-capture burst, so absent is the expected common case), `prometheus`,
+`prometheus-node-exporter`, `promtail`, `loki`, `ollama` (confirmed NOT
+installed on `.94` at all today -- no service/binary/container; kept in the
+registry so it's picked up automatically whenever it IS deployed), and
+`grafana` -- which turned out to matter more than expected: its real
+footprint is the main server PLUS 14 separate plugin-executor subprocesses
+(`gpx_grafana-prometheus-datasource`, `gpx_sqlite-datasource`, etc.), *none*
+of which contain "grafana" in their own process name -- a naive substring
+match would have silently missed almost the entire thing. `gpx_grafana-lok`
+(the Loki plugin) is also the exact false-positive risk that's why `loki`
+itself matches on exact name, not substring -- confirmed via a dedicated
+regression test that it lands only in the `grafana` bucket. CL-AFPE is
+deliberately absent from this registry (it's in-process, part of the
+already-measured "main" RSS, not a separate PID -- adding it would
+double-count, not add coverage). Also added `_active_scheduled_job_processes()`
+-- whichever of `scheduler_proc`'s children (any `scheduled_jobs.scheduler`
+entry, including `live_llm_review.py`) happen to be actively running AT THE
+MOMENT a capture fires, by script name + RSS -- usually empty (jobs are
+short-lived), which is the value: catching the coincidence of a real
+pressure spike with a specific job actively running. Stated purpose (user,
+2026-09-20): a real per-component resource map to inform a future
+resource-constraint decision on the Pi -- "what gets cut back first" --
+rather than a guess.
+
+Console-API surface still not built (genuinely deferred, not scope-trimmed
+away this time -- the capture-and-log mechanism above is complete and is
+this phase's actual deliverable). 24 targeted tests pass locally
+(`tests/test_health_manager_memory_diagnostics.py` -- covering capture
+triggers/shape/bounding/failure-isolation plus the new external-component
+and scheduled-job attribution), plus all 65 pre-existing health_manager
+tests still pass; found and fixed two real bugs during the original
+implementation: `_graph_db_diagnostic_stats()` used `sqlite3` without its
+own import -- silently swallowed by its own `except Exception: return {}`
+-- and its read-only URI used an f-string instead of `Path.as_uri()`,
+invalid on Windows even though it happens to work on every real Linux
+deployment target; moved `sqlite3`/`tracemalloc`/`collections` to
+module-level imports to fix the former.
 
 ### Phase 4 -- Device-count-vs-memory benchmark harness -- BUILT (2026-09-20), sweep not yet run
 
