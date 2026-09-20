@@ -1088,6 +1088,47 @@ check("evidence_for_destination_exists respects the `since` floor -- a.com's hit
           exists_dev, "a.com", since=now_exists - 900, before=now_exists))
 exists_store.close()
 
+# --- BUGFIX (2026-09-20, restart-cadence investigation): batched deletes --------
+# prune_evidence()/prune_weak_zeek_notices()/get_evidence_by_ids() used to bind
+# the FULL id list as SQL parameters in one shot -- never a problem until the
+# one-time cleanup of 215,543 legacy zeek_notice rows found live on .94 hit
+# SQLite's own bound-parameter ceiling ("too many SQL variables"). This proves
+# a volume WELL PAST the single-chunk size (_SQLITE_DELETE_BATCH_SIZE=400)
+# works correctly across multiple chunks, not just that it doesn't crash.
+batch_dir = tempfile.mkdtemp(prefix="v13_graph_batch_test_")
+batch_db_path = str(_PathForSysPath(batch_dir) / "test_graph.db")
+batch_store = GraphStore(batch_db_path)
+batch_dev = "dev_batch_test"
+batch_store.upsert_device(batch_dev)
+now_batch = time.time() - 200 * 86400  # old enough that prune_evidence's default 90-day cutoff catches all of it
+batch_ids = []
+for i in range(1250):  # > 3x the 400-item batch size, forces multiple chunks
+    ev = Evidence(device_id=batch_dev, destination_id=NO_DESTINATION, evidence_type="zeek_notice_weak",
+                   independence_family="network_behavior", timestamp=now_batch + i, source="s")
+    batch_store.insert_evidence(ev)
+    batch_ids.append(ev.evidence_id)
+batch_store._maybe_commit()
+
+fetched = batch_store.get_evidence_by_ids(batch_ids)
+check("get_evidence_by_ids correctly fetches all 1250 ids across multiple batches, "
+      "not just the first chunk", len(fetched) == 1250, f"got {len(fetched)}")
+check("get_evidence_by_ids returns no duplicates across chunk boundaries",
+      len({e.evidence_id for e in fetched}) == 1250)
+
+batch_deleted = batch_store.prune_weak_zeek_notices(older_than_hours=1.0, now=time.time())
+check("prune_weak_zeek_notices deletes all 1250 old rows across multiple batches "
+      "without raising 'too many SQL variables'", batch_deleted == 1250, f"got {batch_deleted}")
+remaining_after_batch = batch_store._conn.execute(
+    "SELECT COUNT(*) c FROM evidence WHERE device_id = ?", (batch_dev,)).fetchone()["c"]
+check("REGRESSION GUARD: every one of the 1250 rows is actually gone, not just reported deleted",
+      remaining_after_batch == 0, f"got {remaining_after_batch}")
+remaining_edges = batch_store._conn.execute(
+    "SELECT COUNT(*) c FROM edges WHERE src_id IN (SELECT evidence_id FROM evidence WHERE device_id = ?) "
+    "OR dst_id IN (SELECT evidence_id FROM evidence WHERE device_id = ?)", (batch_dev, batch_dev)).fetchone()["c"]
+check("REGRESSION GUARD: no dangling edges left behind across the batched delete either",
+      remaining_edges == 0, f"got {remaining_edges}")
+batch_store.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

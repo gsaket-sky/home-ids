@@ -154,6 +154,23 @@ _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE: Dict[str, int] = {
 }
 _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW = 100
 
+# BUGFIX (2026-09-20, restart-cadence investigation): prune_evidence()/
+# prune_weak_zeek_notices() used to bind the FULL evidence_ids list as SQL
+# parameters in one shot (twice, for the edges delete's two IN clauses) --
+# never actually a problem at the volumes this project had seen until a
+# one-time cleanup of the newly-folded-in legacy zeek_notice backlog
+# (215,543 rows found live on .94) hit SQLite's own bound-parameter ceiling
+# ("too many SQL variables"). 400 is conservative even against the OLD,
+# widely-deployed SQLite default limit (999) -- the edges delete binds each
+# id TWICE (src_id and dst_id clauses), so 400 ids -> 800 params, safely
+# under it regardless of which SQLite build a given deployment ships.
+_SQLITE_DELETE_BATCH_SIZE = 400
+
+
+def _chunked(seq: List[Any], size: int):
+    for i in range(0, len(seq), size):
+        yield seq[i:i + size]
+
 
 class GraphStore:
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
@@ -889,14 +906,23 @@ class GraphStore:
     def get_evidence_by_ids(self, evidence_ids: List[str]) -> List[Evidence]:
         """Batch fetch by evidence_id -- added for the console API's graph-view
         endpoint, which resolves the evidence linked to several decisions at once via
-        get_edges() and would otherwise pay one query per evidence_id (N+1)."""
+        get_edges() and would otherwise pay one query per evidence_id (N+1).
+
+        BUGFIX (2026-09-20, restart-cadence investigation): batched, same
+        reason as prune_evidence()/prune_weak_zeek_notices() -- autotune/
+        reset.py's blast-radius check can call this with up to
+        _MAX_ALL_EVIDENCE_IDS_STORED (1000) ids, right at/over SQLite's own
+        older, widely-deployed bound-parameter ceiling (999)."""
         if not evidence_ids:
             return []
-        placeholders = ",".join("?" * len(evidence_ids))
-        rows = self._conn.execute(
-            f"SELECT * FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
-        ).fetchall()
-        return [Evidence.from_row(dict(r)) for r in rows]
+        out: List[Evidence] = []
+        for chunk in _chunked(evidence_ids, _SQLITE_DELETE_BATCH_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"SELECT * FROM evidence WHERE evidence_id IN ({placeholders})", chunk,
+            ).fetchall()
+            out.extend(Evidence.from_row(dict(r)) for r in rows)
+        return out
 
     def evidence_for_destination_exists(self, device_id: str, destination_id: str,
                                           since: float, before: float,
@@ -1589,17 +1615,20 @@ class GraphStore:
             evidence_ids = [r["evidence_id"] for r in rows]
             if archive_path is not None:
                 _append_archive_jsonl_gz(archive_path, [dict(r) for r in rows])
-            placeholders = ",".join("?" * len(evidence_ids))
-            self._conn.execute(
-                f"DELETE FROM edges WHERE "
-                f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
-                f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
-                evidence_ids + evidence_ids,
-            )
-            cur = self._conn.execute(
-                f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
-            )
-            return cur.rowcount
+            total_deleted = 0
+            for chunk in _chunked(evidence_ids, _SQLITE_DELETE_BATCH_SIZE):
+                placeholders = ",".join("?" * len(chunk))
+                self._conn.execute(
+                    f"DELETE FROM edges WHERE "
+                    f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
+                    f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
+                    chunk + chunk,
+                )
+                cur = self._conn.execute(
+                    f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", chunk,
+                )
+                total_deleted += cur.rowcount
+            return total_deleted
 
     def prune_weak_zeek_notices(self, older_than_hours: float = DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS,
                                   now: Optional[float] = None) -> int:
@@ -1642,17 +1671,20 @@ class GraphStore:
             evidence_ids = [r["evidence_id"] for r in rows]
             if not evidence_ids:
                 return 0
-            placeholders = ",".join("?" * len(evidence_ids))
-            self._conn.execute(
-                f"DELETE FROM edges WHERE "
-                f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
-                f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
-                evidence_ids + evidence_ids,
-            )
-            cur = self._conn.execute(
-                f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
-            )
-            return cur.rowcount
+            total_deleted = 0
+            for chunk in _chunked(evidence_ids, _SQLITE_DELETE_BATCH_SIZE):
+                placeholders = ",".join("?" * len(chunk))
+                self._conn.execute(
+                    f"DELETE FROM edges WHERE "
+                    f"(src_kind = 'evidence' AND src_id IN ({placeholders})) OR "
+                    f"(dst_kind = 'evidence' AND dst_id IN ({placeholders}))",
+                    chunk + chunk,
+                )
+                cur = self._conn.execute(
+                    f"DELETE FROM evidence WHERE evidence_id IN ({placeholders})", chunk,
+                )
+                total_deleted += cur.rowcount
+            return total_deleted
 
     def prune_device_destinations(self, older_than_days: float = DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
                                     now: Optional[float] = None) -> int:
