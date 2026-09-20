@@ -756,6 +756,139 @@ drift), and the `device_baselines` 89-vs-13-device_id anomaly noted earlier
 if it runs the same graph-store code, it likely has the identical bloat,
 unconfirmed either way.
 
+## HANDOVER for another session: identity-merge races + device_baselines 89-vs-13 (2026-09-20)
+
+**Not fixed this session -- investigated just enough to hand off with real
+evidence, not speculation.** User explicitly asked for this to be written up
+for a fresh session to pick up. Everything below is either a direct log
+quote/traceback from `.94` or a file:line read directly, not inferred.
+
+### The original anomaly: device_baselines has 89 distinct device_ids for ~13 real devices
+
+Flagged earlier in this same investigation (see the data-lifecycle retuning
+section above) and never dug into until now. Root cause turns out to be the
+SAME identity-merge machinery as the two bugs below -- ephemeral MACs each
+cold-start as their own `device_id` before (if ever) being merged into a
+canonical one, and `device_baselines` is keyed by `device_id` with no
+cleanup path when a device_id is later merged away. Not urgent on its own
+(the table is naturally bounded -- `PRIMARY KEY (device_id, metric, hour,
+regime_id)` is an upsert, not an append log -- so this doesn't bloat over
+time), but it's a visible symptom of the two real bugs below, not its own
+separate root cause.
+
+### Bug A: `merge_into_canonical()` can abort, leaving BOTH sides stuck
+
+Real log lines from `.94`, `state_guard.py` (the v1/legacy identity code,
+`core/state_guard.py`), 4 occurrences in the last 14 days:
+
+```
+Sep 19 10:34:50 WARNING home_ids.state_guard merge_into_canonical() aborted: canonical_id 9989de06dc0f is not a currently tracked device (orphan_id=ad5456a8b6b0 left untouched).
+Sep 19 10:34:50 WARNING home_ids.state_guard merge_into_canonical() aborted: canonical_id 513f41778e73 is not a currently tracked device (orphan_id=ad5456a8b6b0 left untouched).
+Sep 19 10:34:50 WARNING home_ids.state_guard merge_into_canonical() aborted: canonical_id 08bdb9a778c2 is not a currently tracked device (orphan_id=e354d31fd1b1 left untouched).
+Sep 19 10:36:02 WARNING home_ids.state_guard merge_into_canonical() aborted: canonical_id ad35ae47e5b6 is not a currently tracked device (orphan_id=10e395c31555 left untouched).
+```
+
+Pattern: the SAME device_id shows up as an "orphan redirected to canonical X"
+in one merge log line, then minutes later as the "canonical_id" target of a
+DIFFERENT pending merge that then aborts because it's no longer tracked (it
+was itself merged away in between). This is a **merge-ordering/staleness
+race**, not the same bug as the already-fixed 09-16 `merged_into_device_id`
+cycle in `argus/graph/store.py`'s `merge_device()` -- this is
+`state_guard.py`'s own, separate v1 merge function
+(`merge_into_canonical()`), which doesn't appear to follow a
+since-superseded canonical_id's own redirect chain before attempting to use
+it as a merge target. **Not yet read**: `state_guard.py`'s
+`merge_into_canonical()` source itself, to confirm exactly why it aborts
+instead of re-resolving the canonical_id through whatever redirected it.
+That's the concrete next step.
+
+### Bug B: a `KeyError` here skips the ENTIRE decision cycle, not just one device
+
+Real traceback, `.94`, twice on 2026-09-20 alone (07:02:29 and 14:49:32):
+
+```
+ERROR home_ids.state_guard Lock error: State for 'f3aaf1d0bca9' does not exist.
+ERROR home_ids.pipeline Unhandled error during pipeline step execution: "Device state for 'f3aaf1d0bca9' does not exist in StateManager store."
+Traceback (most recent call last):
+  File "core/pipeline.py", line 1012, in run
+    self._step(...)
+  File "core/pipeline.py", line 1170, in _step
+    with self.state_manager.lock_device(dev_id) as state:
+  File "core/state_guard.py", line 170, in lock_device
+    raise KeyError(f"Device state for '{device_id}' does not exist in StateManager store.")
+```
+
+`lock_device()` (`state_guard.py:165-172`) raises `KeyError` if `device_id`
+isn't in `self._states` at call time. Confirmed directly (`pipeline.py:1167`):
+
+```python
+for dev_id in self.state_manager.get_all_device_ids():
+    with self.state_manager.lock_device(dev_id) as state:
+```
+
+`get_all_device_ids()` returns a snapshot; `lock_device()` is called per
+device INSIDE the loop. If a device is removed from `_states` (merged/
+discarded) in the window between the snapshot and that device's turn in the
+loop -- exactly the kind of concurrent identity-reconcile activity Bug A's
+own log lines show happening -- `lock_device()` raises. That exception is
+only caught at the OUTER `run()` loop (`pipeline.py:1009-1014`), one level
+above `_step()`, not per-device inside the loop. **Real, confirmed blast
+radius: every device later in that same cycle's iteration order gets
+silently skipped, not just the one that was actually merged away** -- a
+single mid-cycle merge can cost an entire decision cycle's coverage across
+the whole fleet, not one device's.
+
+Confirmed for this specific device: `f3aaf1d0bca9` was merged away hours
+LATER the same day (18:55:01, "orphan f3aaf1d0bca9 discarded... redirected
+to canonical 162a1335b869 (AppleWatch-User)") -- so either this device
+churns in and out of tracking multiple times (plausible for MAC-rotating
+devices), or there's an earlier merge/discard for the same id outside the
+window checked. **Not yet confirmed**: whether this specific KeyError
+always correlates with a concurrent merge (would confirm the race theory
+outright) or can also happen some other way (e.g. a device genuinely never
+added to `_states` reached via a stale reference from elsewhere) -- that's
+the other concrete next step, alongside Bug A's source read.
+
+### Bonus finding (lower priority, this session's own doing, not pre-existing): lost writes under lock contention
+
+Found live tonight while running this session's own manual cleanup scripts
+against the SAME live `state/v13_graph.db` the running service holds a
+long-lived connection to:
+
+```
+ERROR home_ids.v13_live_engine Failed to write evidence/decision to GraphStore for device '2d313502b7d0' -- the live decision itself is already made and unaffected by this: database is locked
+sqlite3.OperationalError: database is locked
+```
+
+`_write_graph()`'s best-effort try/except (`live_engine.py`) catches
+`sqlite3.OperationalError: database is locked` and logs it, but does NOT
+retry -- that cycle's evidence/decision write is silently lost (the live
+DECISION itself was already made and returned before this runs, so nothing
+about detection accuracy is affected, only the durable audit trail for that
+one cycle). This specific occurrence was self-inflicted (this session's own
+`live_prune_weak_notices.py`/`zeek_log_prune.py`/`decision_bloat_cleanup.py`
+invocations competing with the live writer), not a standing bug -- but the
+underlying gap (no retry-with-backoff on transient lock contention) is real
+and would also fire under any OTHER source of write contention. Worth a
+short `busy_timeout`-based retry if this recurs outside of manual
+intervention.
+
+### Suggested next steps for the session that picks this up
+
+1. Read `state_guard.py`'s `merge_into_canonical()` in full -- confirm
+   whether it follows a stale canonical_id's OWN `merged_into` redirect (if
+   `state_guard.py` even tracks that concept the way `graph/store.py` does)
+   before aborting, and why it doesn't retry against the resolved target.
+2. Decide whether `pipeline.py:1167`'s device loop should catch `KeyError`
+   PER-DEVICE (skip just that one device, log, continue the loop) rather
+   than letting it propagate and abort the whole `_step()` call -- this
+   alone would contain Bug B's blast radius regardless of whether Bug A's
+   root cause gets fixed too.
+3. Once Bug A/B are understood, revisit whether `device_baselines`' 89-vs-13
+   device_id count drops back toward the real device count, or whether a
+   separate one-time consolidation of pre-merge baseline rows into their
+   canonical device_id is still needed on top.
+
 ## Open questions for later phases, not blocking Phase 1
 
 - Where exactly should the payload-stripping live -- `store.py` (centralizes
