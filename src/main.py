@@ -25,6 +25,7 @@ import logging
 import signal
 import sys
 import subprocess
+import tracemalloc
 import warnings
 from pathlib import Path
 import os
@@ -87,6 +88,19 @@ def main():
     scheduler_proc = None
     setup_logging()
     LOGGER.info("🚀 Booting Home IDS Network Detection & Response Platform...")
+
+    # Memory-restart root-cause investigation (2026-09-20): must start before ANY
+    # other allocation happens, or a snapshot taken later has no history to diff
+    # against. health_manager.py's own _maybe_capture_memory_diagnostics() is the
+    # only consumer -- it only takes a snapshot on a CONSERVATION/CRITICAL pressure
+    # transition, so this needs to already be running by then, not started
+    # reactively at the moment pressure is first detected. nframe=1 (the default)
+    # is enough for statistics('lineno') grouping; tracemalloc's own overhead at
+    # that depth is modest and worth it specifically because this is a resource-
+    # constrained target where the next memory-growth bug needs to be diagnosable
+    # from a live box, not reproduced separately.
+    if bool(CONFIG.get("health_manager_memory_diagnostics_enabled", True)):
+        tracemalloc.start()
 
     # BUGFIX (health manager): component_heartbeat.json persists across restarts
     # -- reset it before either subprocess is spawned below, so a fresh boot's

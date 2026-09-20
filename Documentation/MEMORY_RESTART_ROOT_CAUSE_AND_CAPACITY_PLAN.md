@@ -197,23 +197,42 @@ A one-time maintenance script, same family as `prune_evidence()`/
 confirmation before running, per standing rule, and should run once as a
 one-off with a full DB file backup taken immediately before.**
 
-### Phase 3 -- Runtime memory/process profiling instrumentation
+### Phase 3 -- Runtime memory/process profiling instrumentation -- IMPLEMENTED (2026-09-20), not yet deployed to `.94`
 
-Add a lightweight capability, gated so it costs ~nothing in the common case:
-- Extend `health_manager.py`'s existing periodic check: on every transition
-  INTO `CONSERVATION` or `CRITICAL` (i.e., exactly when it matters, and right
-  before a restart would otherwise erase the evidence), take a `tracemalloc`
-  snapshot (top ~15 allocations by file:line) and a `gc.get_objects()` type
-  histogram (top ~20 types by count -- no new dependency needed, stdlib
-  `gc`+`collections.Counter` only, keeping this Pi-appropriate). Log both to a
-  rotating `state/memory_diagnostics.jsonl`.
-- Also log, on the same trigger: DB file + WAL size, `edges`/`decisions` row
-  counts, and per-process RSS for every child (`zeek`, `suricata`, the
-  scheduler, the LLM review process) so a future spike can be attributed to a
-  specific subprocess, not just the cgroup total.
-- Surface the last N diagnostic snapshots via a small console API endpoint
-  (matching the existing `middleware/routers/` pattern) so this is
-  inspectable without SSH.
+`main.py` now calls `tracemalloc.start()` at the very top of boot (gated by
+`health_manager_memory_diagnostics_enabled`, default `true`) -- has to start
+before any real allocation happens, or a later snapshot has no history to
+diff against. `health_manager.py`'s `_evaluate_resource_pressure()` now calls
+`_maybe_capture_memory_diagnostics()` on every ESCALATING transition into
+`CONSERVATION`/`CRITICAL` (not every transition -- recovering back to NORMAL
+isn't informative here, and firing on every flap risked noise/overhead
+exactly when the process is already under pressure). Each capture writes one
+JSON line to `state/memory_diagnostics.jsonl`: top 15 allocations by
+file:line (`tracemalloc`), a `gc.get_objects()` type histogram (top 20,
+stdlib `collections.Counter` only -- no new dependency for the Pi target),
+`fastapi`/`scheduler` subprocess RSS (`main`'s own RSS was already tracked),
+and the graph db's size/WAL-size/decisions-and-edges row counts via a
+short-lived read-only connection (never competes with `live_engine.py`'s own
+long-held writer). Bounded at `_MAX_DIAGNOSTIC_ENTRIES` (500) -- a rewrite-
+last-N pattern, not an unbounded append, matching every other retention
+decision in this document.
+
+Deliberately NOT built (scope-trimmed during implementation, not forgotten):
+per-child RSS for `zeek`/`suricata` specifically (they're separate
+systemd-cgroup siblings, not subprocesses of this Python process -- already
+visible in aggregate via `systemctl status soc.service`'s own cgroup
+`Memory:` line, and enumerating them robustly added complexity for a class
+of bug -- Root Causes #1/#2 -- that was Python-heap-side, not a zeek/suricata
+leak) and the console-API surface (12 targeted tests pass locally --
+`tests/test_health_manager_memory_diagnostics.py` -- covering capture
+triggers/shape/bounding/failure-isolation, plus all 65 pre-existing
+health_manager tests still pass; found and fixed two real bugs during this
+work: `_graph_db_diagnostic_stats()` used `sqlite3` without its own import
+-- silently swallowed by its own `except Exception: return {}` -- and its
+read-only URI used an f-string instead of `Path.as_uri()`, invalid on
+Windows even though it happens to work on every real Linux deployment
+target; moved `sqlite3`/`tracemalloc`/`collections` to module-level imports
+to fix the former).
 
 ### Phase 4 -- Device-count-vs-memory benchmark harness
 
@@ -536,13 +555,45 @@ passing, run individually, not the full suite). Not yet deployed to `.94`.
   files on `.94` identified and approved for deletion (not yet executed --
   bundled into the same deploy pass as everything else here).
 
-Not yet done, still needs `.94` live-host action (each needs its own
-confirmation per the standing rule, even though the overall sequence is
-already approved): commit+push, `git pull` + `soc.service` restart on `.94`,
-adding the two new `scheduled_jobs` entries + `archive_network_activity_
-backup`/`zeek_log_retention_days` keys to `.94`'s real (deployment-local,
-gitignored) `config.yaml`, deleting the stale backup files, and running
-`decision_bloat_cleanup.py` (dry-run first for real numbers, then `--apply`).
+**Deployed to `.94` (2026-09-20, same session)**: commit+push, `git pull` +
+`soc.service` restart, the two new `scheduled_jobs` entries + config keys
+added to `.94`'s real `config.yaml`, ~362MB of stale backups deleted, and
+`decision_bloat_cleanup.py --apply` run against the live database (service
+briefly stopped for a clean VACUUM) -- **13,734,175 excess edges removed,
+~4.56GB of JSON bloat stripped, db 9.13GB -> 957MB**, integrity verified,
+`soc.service` restarted cleanly.
+
+**Additional finding while first-running `zeek_log_prune.py`**: every dated
+Zeek log directory was `drwxr-sr-x root:zeek` (group has read+execute but NOT
+write -- `zeek.service`'s unit file set no `UMask`, so `zeek-archiver`
+inherited systemd's default `0022`). `user` (the account `soc.service`,
+and this job, run as) genuinely could not delete these regardless of group
+membership -- deleting a file needs write on its CONTAINING directory, not
+just the parent. User explicitly chose fixing this at the source over
+baking `sudo` into the scheduled job itself (user already has unrestricted
+passwordless sudo on this box, pre-existing, not something this session
+introduced -- but using it from inside a recurring app job was judged riskier
+than necessary here). Fix, live on `.94`: added `UMask=0002` to
+`/etc/systemd/system/zeek.service` (backed up as `zeek.service.bak-
+pre-umask-fix-20260920` first), `daemon-reload` + restart so all FUTURE
+rotated directories are created group-writable; one-time `sudo chmod -R g+w
+/opt/zeek/logs` to fix the 83 directories that already existed. Re-ran
+`zeek_log_prune.py` immediately after: 68 directories deleted, 7.5GB -> 2.4GB
+(15 days remaining), zero errors. **This unit-file change lives only on
+`.94`'s live system, not in this git repo** -- a fresh Zeek install/reinstall
+on any other box (including `.19`, or a future Pi deployment) would need the
+same `UMask=0002` addition re-applied by hand; there is no installer script
+in this repo yet that would carry it automatically.
+
+Still not done: verifying the restart-cadence fix actually holds (needs
+several hours of observation), deleting the migration's own 9.1GB safety
+backup once that's confirmed, Phase 3 (runtime profiling instrumentation),
+Phase 4 (the device-count-vs-memory benchmark harness), Phase 5 (an actual
+Pi capacity number + the still-unresolved CPUQuota 200%-live-vs-40%-tracked
+drift), and the `device_baselines` 89-vs-13-device_id anomaly noted earlier
+(flagged, not investigated). `.19` was not touched at all this session --
+if it runs the same graph-store code, it likely has the identical bloat,
+unconfirmed either way.
 
 ## Open questions for later phases, not blocking Phase 1
 

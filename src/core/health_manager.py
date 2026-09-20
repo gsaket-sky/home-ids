@@ -19,11 +19,14 @@ Fails safe throughout: every check/action is wrapped in try/except inside
 _check_cycle()/_run_loop(), so a bug in ANY single check can never crash or
 block the main pipeline this thread shares a process with.
 """
+import collections
 import gc
 import json
 import logging
+import sqlite3
 import threading
 import time
+import tracemalloc
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -478,6 +481,17 @@ class HealthManager:
             self._apply_pressure_level(new_level)
             if new_level in (CONSERVATION, CRITICAL) or (new_level == RESOURCE_PRESSURE and self._alerted_pressure_level != RESOURCE_PRESSURE):
                 self._send_pressure_alert(new_level, escalating=(_PRESSURE_ORDER.index(new_level) > _PRESSURE_ORDER.index(old_level)))
+            # Memory-restart root-cause investigation (2026-09-20): capture a
+            # diagnostic snapshot right at the moment pressure gets WORSE -- the
+            # single most valuable time to do it, since a CRITICAL transition can
+            # lead to a self-restart within a few cycles (_trigger_critical_self_
+            # restart() below) that would otherwise erase every clue about what
+            # was actually holding the memory. Only on escalation, not every
+            # transition (recovering back to NORMAL isn't informative here, and
+            # firing on every flap would risk noise/overhead exactly when the
+            # process is already under pressure).
+            if _PRESSURE_ORDER.index(new_level) > _PRESSURE_ORDER.index(old_level) and new_level in (CONSERVATION, CRITICAL):
+                self._maybe_capture_memory_diagnostics(new_level)
         elif new_level == NORMAL and self._alerted_pressure_level not in (None, NORMAL):
             # Fully recovered -- one confirmation alert, then stop repeating.
             self._send_pressure_alert(NORMAL, escalating=False)
@@ -498,6 +512,114 @@ class HealthManager:
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------- diagnostics
+
+    _MAX_DIAGNOSTIC_ENTRIES = 500  # bounded, matches this project's own "no
+    # unchecked disk growth" standing rule -- at a few KB/entry this caps the
+    # file around a few MB even in a pathological flapping scenario, and this
+    # only fires on an ESCALATING CONSERVATION/CRITICAL transition (rare by
+    # construction, not a per-cycle write).
+
+    def _maybe_capture_memory_diagnostics(self, level: str) -> None:
+        if not bool(self.config.get("health_manager_memory_diagnostics_enabled", True)):
+            return
+        try:
+            self._capture_memory_diagnostics(level)
+        except Exception as e:
+            LOGGER.error("Failed to capture memory diagnostics: %s", e, exc_info=True)
+
+    def _capture_memory_diagnostics(self, level: str) -> None:
+        """Snapshots exactly what's holding memory RIGHT NOW, at the one moment
+        it matters most -- an escalating CONSERVATION/CRITICAL transition, which
+        can lead to a self-restart within a few cycles that would otherwise
+        erase every clue. Uses only tracemalloc + gc (stdlib) rather than a
+        third-party profiler (objgraph/pympler) -- this is a resource-
+        constrained Pi target, and stdlib-only keeps the diagnostic capability
+        itself from being one more dependency to carry onto that hardware.
+        Best-effort by design (see _maybe_capture_memory_diagnostics()): a
+        failure here must never affect the real pressure-response logic that
+        already ran above it in _evaluate_resource_pressure()."""
+        if not tracemalloc.is_tracing():
+            # health_manager_memory_diagnostics_enabled was false at process
+            # startup (main.py's own tracemalloc.start() gate) but flipped true
+            # live since -- tracemalloc can't retroactively trace allocations
+            # that already happened, so there's nothing meaningful to snapshot
+            # until the next restart picks up the new config at startup.
+            return
+
+        top_stats = tracemalloc.take_snapshot().statistics("lineno")[:15]
+        top_allocations = [
+            {"location": str(stat.traceback), "size_mb": round(stat.size / (1024 * 1024), 3),
+             "count": stat.count}
+            for stat in top_stats
+        ]
+
+        type_counts = collections.Counter(type(o).__name__ for o in gc.get_objects())
+        top_object_types = [{"type": t, "count": c} for t, c in type_counts.most_common(20)]
+
+        process_rss_mb = {"main": round(self._rss_mb(), 1)}
+        for name, proc in (("fastapi", self.fastapi_proc), ("scheduler", self.scheduler_proc)):
+            if proc is None or proc.pid is None:
+                continue
+            try:
+                process_rss_mb[name] = round(psutil.Process(proc.pid).memory_info().rss / (1024 * 1024), 1)
+            except Exception:
+                pass
+
+        graph_db = self._graph_db_diagnostic_stats()
+
+        entry = {
+            "timestamp": time.time(),
+            "pressure_level": level,
+            "process_rss_mb": process_rss_mb,
+            "top_allocations": top_allocations,
+            "top_object_types": top_object_types,
+            "graph_db": graph_db,
+        }
+        self._append_diagnostic_entry(entry)
+
+    def _graph_db_diagnostic_stats(self) -> Dict[str, Any]:
+        """A short-lived, read-only connection -- deliberately separate from
+        live_engine.py's own long-held write connection, so this never
+        competes with or blocks the real decision-writing path (see
+        GraphStore.checkpoint_wal()'s own docstring for the same read-only-
+        short-lived-connection precedent from the console API)."""
+        db_path = self.state_dir / "v13_graph.db"
+        if not db_path.exists():
+            return {}
+        try:
+            size_mb = round(db_path.stat().st_size / (1024 * 1024), 1)
+            wal_path = db_path.with_name(db_path.name + "-wal")
+            wal_mb = round(wal_path.stat().st_size / (1024 * 1024), 1) if wal_path.exists() else 0.0
+            # Path.as_uri() (not an f-string) -- a raw Windows path isn't a valid
+            # sqlite URI (backslashes, no scheme separator), a bug this project's
+            # own dev environment (Windows) can hit even though every real
+            # deployment target (.94, a future Pi) is Linux, where the naive
+            # f-string version happens to work -- found via a failing local test,
+            # not live, but real cross-platform fragility worth fixing outright.
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=2.0)
+            try:
+                decisions_rows = conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0]
+                edges_rows = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            finally:
+                conn.close()
+            return {"size_mb": size_mb, "wal_mb": wal_mb, "decisions_rows": decisions_rows, "edges_rows": edges_rows}
+        except Exception:
+            return {}
+
+    def _append_diagnostic_entry(self, entry: Dict[str, Any]) -> None:
+        path = self.state_dir / "memory_diagnostics.jsonl"
+        lines = []
+        if path.exists():
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except Exception:
+                lines = []
+        lines.append(json.dumps(entry, default=str))
+        # Bounded, not a straight append -- see _MAX_DIAGNOSTIC_ENTRIES' own comment.
+        lines = lines[-self._MAX_DIAGNOSTIC_ENTRIES:]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _apply_pressure_level(self, level: str) -> None:
         """The concrete degradation levers for each pressure tier. Each tier
