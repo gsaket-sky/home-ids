@@ -226,7 +226,16 @@ class BaselineEngine:
         only_persist_if_changed_from) -- so the latest row's own timestamp
         already IS "when this device most recently left/avoided an incident
         state," and a plain elapsed-time check against it is the correct
-        cooldown, with no extra row-counting needed."""
+        cooldown, with no extra row-counting needed.
+
+        BUGFIX (2026-09-20, identity-merge handover follow-up): resolves
+        device_id to its live canonical id first -- get_latest_decision_for_device()
+        already does this internally too, but score_metric()/
+        score_activity_transition() below need the SAME resolution for their
+        OWN device_baselines reads/writes, so this is resolved once, up front,
+        for consistency rather than relying on it happening to also be safe
+        here specifically."""
+        device_id = self.store.resolve_canonical_device_id(device_id)
         latest = self.store.get_latest_decision_for_device(device_id)
         if latest is None:
             return False
@@ -398,6 +407,26 @@ class BaselineEngine:
         the schema's own explicit sentinel is used, not a guess.
         """
         now = now if now is not None else time.time()
+        # BUGFIX (2026-09-20, identity-merge handover follow-up): resolve BEFORE
+        # anything else touches device_id -- device_baselines was found to be
+        # the real root cause of the device_baselines 89-vs-13 device_id anomaly:
+        # every device_baselines row (and this engine's own in-memory
+        # _trackers/_markov/_last_state/_changepoint_pending caches) was keyed
+        # by device_id LITERALLY, with no merge resolution anywhere in this
+        # file. An orphan that merges away mid-lifetime (see
+        # core/state_guard.py's merge_into_canonical()) would silently strand
+        # its own brief baseline history under a dead id forever, while the
+        # canonical identity cold-starts a completely fresh one -- exactly the
+        # kind of stray row the 89-vs-13 anomaly investigation found. Resolving
+        # here means a NEW orphan (now typically merged away within a cycle or
+        # two, since the zombie-resurrection fix closed off the main source of
+        # long-lived orphans) never gets its own device_baselines row in the
+        # first place. Deliberately NOT also searching across every id that
+        # ever merged into this canonical (unlike get_evidence_for_device()'s
+        # own resolve_merges) -- per this session's explicit product decision,
+        # a pre-merge orphan's own brief statistical history stays discarded,
+        # not adopted, same reasoning as core/state_guard.py's baselines.
+        device_id = self.store.resolve_canonical_device_id(device_id)
         if self.is_learning_paused(device_id, now):
             return None
 
@@ -473,6 +502,10 @@ class BaselineEngine:
         real corroboration-counting code doesn't even read).
         """
         now = now if now is not None else time.time()
+        # BUGFIX (2026-09-20, identity-merge handover follow-up): same
+        # resolve-before-anything-else fix as score_metric() above -- see its
+        # own comment for the full rationale.
+        device_id = self.store.resolve_canonical_device_id(device_id)
         if self.is_learning_paused(device_id, now):
             return None
         self.store.upsert_device(device_id, timestamp=now)  # same FK fix as score_metric

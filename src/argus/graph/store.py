@@ -193,6 +193,23 @@ class GraphStore:
         # next checkpoint -- an acceptable tradeoff for this data, and a direct fix for
         # the fsync-per-commit write-amplification/wear pattern found live on .94.
         self._conn.execute("PRAGMA synchronous = NORMAL")
+        # BUGFIX (2026-09-20, identity-merge handover -- "bonus finding"): Python's
+        # sqlite3 module defaults connect()'s busy_timeout to 5000ms. Found live this
+        # same session: a one-time maintenance script (this project's own cleanup
+        # tooling -- live_prune_weak_notices.py/zeek_log_prune.py/
+        # decision_bloat_cleanup.py) holding a competing write lock (a bulk DELETE or
+        # VACUUM) for longer than that caused the live pipeline's own evidence/decision
+        # write to fail outright with "database is locked" -- a silently lost row in
+        # the durable audit trail (the live DECISION itself was already made and
+        # returned before this write runs, so detection accuracy was never affected,
+        # only this one cycle's record of it). Raised to a still-short but more
+        # forgiving 10s: long enough to ride out a typical administrative-script
+        # contention window without the live per-cycle write giving up immediately,
+        # short enough to stay a small fraction of the 60s pipeline_main_loop
+        # heartbeat deadline even in a genuinely stuck-writer worst case. Per-
+        # connection, same as synchronous/cache_size above -- must be set here, not
+        # schema.sql, for the identical reason (doesn't persist in the db file itself).
+        self._conn.execute("PRAGMA busy_timeout = 10000")
         # Phase 10b: optional -- omitting hardware_profile (every pre-existing
         # caller, including every test) leaves SQLite's own default cache_size
         # untouched, identical to this class's behavior before this param existed.
@@ -1071,18 +1088,53 @@ class GraphStore:
         canonical_ids = {self.resolve_canonical_device_id(r["device_id"]) for r in rows}
         return sorted(canonical_ids)
 
-    def get_evidence_by_type_since(self, evidence_type: str, since: float) -> List[Evidence]:
+    def get_evidence_by_type_since(self, evidence_type: str, since: float,
+                                     cap_per_device: Optional[int] = None) -> List[Evidence]:
         """All evidence of one type across EVERY device since `since` -- unlike
         get_evidence_for_device(), deliberately not scoped to one device. DGA-seed
         correlation (Release 14, N4) needs this raw cross-device fetch because it
         groups by a COMPUTED shape key (live_engine.py's own _dga_shape_key()),
         not a single stored value get_devices_sharing_provenance() could match on
-        directly -- the grouping happens in Python after this fetch."""
-        rows = self._conn.execute(
-            "SELECT * FROM evidence WHERE evidence_type = ? AND timestamp >= ?",
+        directly -- the grouping happens in Python after this fetch.
+
+        cap_per_device (2026-09-20, restart-cadence investigation follow-up --
+        flagged at the time as "the same bug class as Root Cause #3, lower
+        priority, worth the same cap treatment if it ever is [large]"): None
+        (the default) preserves this method's original, fully-unbounded
+        behavior. When set, this is capped PER DEVICE, not to a flat total --
+        unlike get_evidence_for_device()'s cap_per_type (safe to cap by total
+        recency there, since it only ever affects ONE device's own evaluation),
+        this query's whole POINT is counting how many DISTINCT devices share a
+        pattern (see live_engine.py's `len(others) >= _COORDINATED_TARGETING_
+        MIN_OTHER_DEVICES` check). A flat total-rows cap would let ONE flooding
+        device's own volume silently crowd every other genuinely-distinct
+        device's evidence out of the result, undercounting the very cardinality
+        this correlation exists to detect -- exactly the opposite of what a
+        defensive cap should do. Capping per-device instead bounds the worst
+        case to O(active_devices x cap_per_device) while guaranteeing every
+        device that has ANY evidence in the window still contributes at least
+        one row (so it's never silently dropped from the distinct-device
+        count), only that any single device's own row MULTIPLICITY is bounded."""
+        if cap_per_device is None:
+            rows = self._conn.execute(
+                "SELECT * FROM evidence WHERE evidence_type = ? AND timestamp >= ?",
+                (evidence_type, since),
+            ).fetchall()
+            return [Evidence.from_row(dict(r)) for r in rows]
+
+        device_rows = self._conn.execute(
+            "SELECT DISTINCT device_id FROM evidence WHERE evidence_type = ? AND timestamp >= ?",
             (evidence_type, since),
         ).fetchall()
-        return [Evidence.from_row(dict(r)) for r in rows]
+        out: List[Evidence] = []
+        for r in device_rows:
+            per_device_rows = self._conn.execute(
+                "SELECT * FROM evidence WHERE evidence_type = ? AND timestamp >= ? AND device_id = ? "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (evidence_type, since, r["device_id"], cap_per_device),
+            ).fetchall()
+            out.extend(Evidence.from_row(dict(row)) for row in per_device_rows)
+        return out
 
     def get_devices_with_metadata_value(self, key: str, value: Any) -> List[str]:
         """Release 14, N2 (peer-cohort behavioral baselining): all device_ids
@@ -1716,6 +1768,42 @@ class GraphStore:
         number of rows deleted."""
         cutoff = (now if now is not None else time.time()) - older_than_days * 86400
         cur = self._conn.execute("DELETE FROM device_destinations WHERE last_seen < ?", (cutoff,))
+        self._maybe_commit()
+        return cur.rowcount
+
+    def prune_orphaned_device_baselines(self) -> int:
+        """Deletes device_baselines rows whose device_id has since been merged
+        away (devices.merged_into_device_id IS NOT NULL) -- the concrete
+        cleanup half of the 2026-09-20 identity-merge handover's
+        device_baselines 89-vs-13-device_id anomaly. Root cause (see
+        argus/baseline/engine.py's own resolve-at-entry fix, landed the same
+        day): every device_baselines row used to be written under whatever
+        device_id happened to be live AT THE TIME, with no merge awareness --
+        an orphan that existed even briefly before merging into a richer
+        canonical identity got its own permanent, invisible-to-canonical row.
+        That fix stops NEW stray rows from accumulating; this method cleans up
+        rows that already exist from before it shipped.
+
+        Deliberately does NOT touch threshold_history (argus/autotune/engine.py's
+        table) -- unlike baselines, a merged device's threshold_history rows
+        are DELIBERATELY still treated as live (get_active_value() now
+        resolves across every id that ever merged into a canonical, per this
+        session's own explicit "a tuned threshold, unlike a statistical
+        estimator, should carry forward" decision) -- deleting them here would
+        silently regress that fix, reverting a genuinely-still-active
+        promoted threshold back to its parent tier's default.
+
+        Safe to call repeatedly (an already-clean state_baselines table has
+        nothing matching the join and is a fast no-op). Runs a single indexed
+        DELETE, not a full table scan -- device_baselines has no dedicated
+        index on merged-device lookups, but the number of ever-merged
+        device_ids is small (device count, not evidence-row count) relative
+        to device_baselines' own likely row count, so the subquery itself is
+        cheap regardless."""
+        cur = self._conn.execute(
+            "DELETE FROM device_baselines WHERE device_id IN "
+            "(SELECT device_id FROM devices WHERE merged_into_device_id IS NOT NULL)"
+        )
         self._maybe_commit()
         return cur.rowcount
 

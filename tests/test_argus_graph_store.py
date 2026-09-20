@@ -596,6 +596,38 @@ check("get_evidence_by_type_since returns REAL Evidence objects with their own "
       "destination_id intact (needed for DGA shape computation downstream)",
       {e.destination_id for e in dga_evidence} == {"abcdefgh.ru", "qrstuvwx.ru"})
 
+# --- get_evidence_by_type_since's cap_per_device (2026-09-20, flagged-as-lower-
+# priority-at-the-time follow-up: same bug class as Root Cause #3, a fully unbounded
+# cross-device fetch re-run once per device per cycle) ---
+for i in range(20):
+    store.insert_evidence(Evidence(device_id="n4_dga_flooder", destination_id=f"flood{i}.ru",
+                                     evidence_type="dns_dga_burst2", independence_family="dns_behavior",
+                                     timestamp=8_200_000.0 + i, source="pihole"))
+store.insert_evidence(Evidence(device_id="n4_dga_quiet", destination_id="quiet1.ru",
+                                 evidence_type="dns_dga_burst2", independence_family="dns_behavior",
+                                 timestamp=8_200_005.0, source="pihole"))
+
+uncapped = store.get_evidence_by_type_since("dns_dga_burst2", since=8_199_000.0)
+check("cap_per_device=None (the default) preserves the original fully-unbounded behavior",
+      len(uncapped) == 21, f"got {len(uncapped)}")
+
+capped = store.get_evidence_by_type_since("dns_dga_burst2", since=8_199_000.0, cap_per_device=5)
+flooder_rows = [e for e in capped if e.device_id == "n4_dga_flooder"]
+quiet_rows = [e for e in capped if e.device_id == "n4_dga_quiet"]
+check("cap_per_device bounds the flooding device's OWN row count, not the whole result",
+      len(flooder_rows) == 5, f"got {len(flooder_rows)}")
+check("THE FIX: the cap is PER-DEVICE, not a flat total -- the quiet device's single "
+      "row is NEVER crowded out by the flooder, unlike a flat total-rows cap would",
+      len(quiet_rows) == 1, f"got {len(quiet_rows)}")
+check("cap_per_device: the flooder's surviving rows are the most-recent 5, not an "
+      "arbitrary/oldest subset",
+      {e.destination_id for e in flooder_rows} == {"flood15.ru", "flood16.ru", "flood17.ru",
+                                                      "flood18.ru", "flood19.ru"},
+      f"got {[e.destination_id for e in flooder_rows]}")
+check("THE FIX: both devices still show up in the distinct-device count that matters "
+      "downstream -- the whole point of a per-device (not flat) cap",
+      {e.device_id for e in capped} == {"n4_dga_flooder", "n4_dga_quiet"})
+
 # --- get_devices_with_metadata_value / get_distinct_destination_count (Release 14, N2) ---
 store.update_device_metadata("n2_dev_iot1", {"device_type": "iot"}, timestamp=9_000_000.0)
 store.update_device_metadata("n2_dev_iot2", {"device_type": "iot"}, timestamp=9_000_000.0)
@@ -687,6 +719,50 @@ check("prune_device_destinations deletes rows older than the retention window",
       deleted >= 2, f"got {deleted}")
 check("prune_device_destinations actually removes the pruned rows -- count drops to 0",
       store.get_distinct_destination_count("n2_dev_rt", since=0.0) == 0)
+
+# --- prune_orphaned_device_baselines (2026-09-20, identity-merge handover follow-up:
+# the concrete cleanup half of the device_baselines 89-vs-13-device_id anomaly) ---
+store.upsert_device("pb_orphan1", timestamp=9_500_000.0)
+store.upsert_device("pb_orphan2", timestamp=9_500_000.0)
+store.upsert_device("pb_canonical", timestamp=9_500_000.0)
+store.upsert_device("pb_unmerged_dev", timestamp=9_500_000.0)
+store._conn.execute(
+    "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
+    "VALUES ('pb_orphan1', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+)
+store._conn.execute(
+    "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
+    "VALUES ('pb_orphan2', 'query_rate', 11, 'gaussian', 9_500_000.0)"
+)
+store._conn.execute(
+    "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
+    "VALUES ('pb_canonical', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+)
+store._conn.execute(
+    "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
+    "VALUES ('pb_unmerged_dev', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+)
+store._maybe_commit()
+store.merge_device("pb_orphan1", "pb_canonical", timestamp=9_500_100.0)
+store.merge_device("pb_orphan2", "pb_canonical", timestamp=9_500_100.0)
+
+pb_deleted = store.prune_orphaned_device_baselines()
+check("prune_orphaned_device_baselines deletes exactly the 2 rows belonging to "
+      "now-merged-away device_ids", pb_deleted == 2, f"got {pb_deleted}")
+check("...and both orphans' rows are actually gone",
+      store._conn.execute(
+          "SELECT COUNT(*) c FROM device_baselines WHERE device_id IN ('pb_orphan1', 'pb_orphan2')"
+      ).fetchone()[0] == 0)
+check("THE FIX preserves the canonical device's OWN row untouched",
+      store._conn.execute(
+          "SELECT 1 FROM device_baselines WHERE device_id = 'pb_canonical'"
+      ).fetchone() is not None)
+check("THE FIX preserves an unrelated, never-merged device's row untouched",
+      store._conn.execute(
+          "SELECT 1 FROM device_baselines WHERE device_id = 'pb_unmerged_dev'"
+      ).fetchone() is not None)
+check("prune_orphaned_device_baselines is a safe, idempotent no-op on a second call",
+      store.prune_orphaned_device_baselines() == 0)
 
 # --- prune_weak_zeek_notices (explicit user request, 2026-09-09 -- zeek_notice was
 # 98.3% of .94's real evidence table; weak-tier alone accounted for the overwhelming
@@ -946,6 +1022,12 @@ check("synchronous is NORMAL (1), not the fsync-per-commit FULL default -- "
       "set per-connection in __init__ since it does NOT persist in the db "
       "file the way journal_mode does",
       sync_mode == 1, f"got {sync_mode}")
+
+busy_timeout_ms = bugfix_store._conn.execute("PRAGMA busy_timeout").fetchone()[0]
+check("THE FIX (lost-writes-under-lock-contention bonus finding): busy_timeout is "
+      "raised to 10000ms, not left at sqlite3's own 5000ms default -- set "
+      "per-connection in __init__ for the same reason synchronous is",
+      busy_timeout_ms == 10000, f"got {busy_timeout_ms}")
 
 bugfix_dev = "dev_bugfix_test"
 bugfix_store.upsert_device(bugfix_dev)

@@ -512,13 +512,20 @@ ever constructing an `Evidence` object.
   continuous stream) -- never reads back historical per-device evidence at
   all, so it doesn't share this bug class.
 
-**Flagged, not fixed (lower priority, structurally different)**:
-`live_engine.py`'s DGA coordinated-targeting check calls
+**Flagged, lower priority at the time -- FIXED (continuation session, same
+day)**: `live_engine.py`'s DGA coordinated-targeting check calls
 `get_evidence_by_type_since()` -- cross-device, ONE evidence_type, scoped to
 `_COORDINATED_TARGETING_WINDOW_SECONDS` -- theoretically the same bug class
 (system-wide DGA evidence volume, not one device's spam) but no live evidence
-it's actually large in practice today. Worth the same cap treatment if it
-ever is.
+it was actually large in practice at the time. `GraphStore.get_evidence_by_type_since()`
+gained an optional `cap_per_device` param (profile-scaled, same constants as
+Root Cause #3's own cap) -- deliberately PER-DEVICE, not a flat total: this
+query's whole point is counting how many DISTINCT devices share a DGA
+pattern, so a flat cap would let one flooding device's own row volume crowd
+out every other genuinely-distinct device from the result, undercounting the
+exact cardinality this correlation exists to detect. Every device with ANY
+evidence in the window still contributes at least one row; only a single
+device's own row multiplicity is bounded.
 
 **Testing**: `tests/test_argus_graph_store.py` (cap_per_type correctness,
 most-recent-first ordering, `evidence_for_destination_exists` correctness),
@@ -758,11 +765,13 @@ unconfirmed either way.
 
 ## HANDOVER for another session: identity-merge races + device_baselines 89-vs-13 (2026-09-20)
 
-**Update, same day, continuation session: Bug A below is now FIXED (not yet
-deployed to `.94`).** Bug B and the device_baselines cleanup are still open --
-see their own status notes further down. Everything in this section was
-originally either a direct log quote/traceback from `.94` or a file:line read
-directly, not inferred.
+**Third update, same day: everything in this handover is now FIXED.** Bug A,
+Bug B, the DGA-correlation low-priority cap, the lock-contention bonus
+finding, AND the device_baselines 89-vs-13 root cause are all closed out this
+session. Deployed to `.94` -- see the deployment log at the end of this
+section for exact commits/verification. Everything below was originally
+either a direct log quote/traceback from `.94` or a file:line read directly,
+not inferred.
 
 **Second update, same day: merge-completeness follow-up.** After Bug A's fix,
 the user asked that a device merge also correctly carry over everything
@@ -808,7 +817,7 @@ All three fixes covered by real regression tests (`test_argus_graph_store.py`,
 and the full real-world alert regression suite re-run clean. Not yet deployed
 to `.94`.
 
-### The original anomaly: device_baselines has 89 distinct device_ids for ~13 real devices
+### The original anomaly: device_baselines has 89 distinct device_ids for ~13 real devices -- ROOT CAUSE FIXED
 
 Flagged earlier in this same investigation (see the data-lifecycle retuning
 section above) and never dug into until now. Root cause turns out to be the
@@ -820,6 +829,30 @@ cleanup path when a device_id is later merged away. Not urgent on its own
 regime_id)` is an upsert, not an append log -- so this doesn't bloat over
 time), but it's a visible symptom of the two real bugs below, not its own
 separate root cause.
+
+**Fix (continuation session, same day):** confirmed directly by reading
+`argus/baseline/engine.py` -- EVERY `device_baselines` query in that file
+(`is_learning_paused()`, `score_metric()`, `score_activity_transition()`,
+plus the in-memory `_trackers`/`_markov`/`_last_state`/`_changepoint_pending`
+caches) matched `device_id` literally, with zero merge resolution, the exact
+same gap class as `get_latest_decision_for_device()` and autotune's
+`threshold_history` (see the merge-completeness follow-up above). Fixed by
+resolving `device_id` to its live canonical id at the top of all three public
+methods. Unlike the evidence/decisions/autotune fixes, this does NOT also
+search across every id that ever merged into the canonical -- per this
+session's explicit product decision, a merged-away orphan's own (typically
+very brief, post-Bug-A) statistical history stays discarded, not adopted,
+same reasoning as `core/state_guard.py`'s baselines/ML-model/FP-calibration
+discard policy. This closes off any NEW stray `device_baselines` rows from
+accumulating going forward. For the rows that already exist from before this
+fix shipped: new `GraphStore.prune_orphaned_device_baselines()` deletes
+`device_baselines` rows whose `device_id` has since been merged
+(`devices.merged_into_device_id IS NOT NULL`) -- wired into `live_prune.py`'s
+existing daily cadence (no new cron job needed) and also run once by hand on
+`.94` as this session's one-time cleanup. Deliberately does NOT touch
+`threshold_history` -- autotune's own merge-resolution fix makes a merged
+device's promoted threshold DELIBERATELY still-live (found via the redirect
+expansion), so deleting those rows would silently regress that fix.
 
 ### Bug A: `merge_into_canonical()` can abort, leaving BOTH sides stuck -- FIXED
 
@@ -879,7 +912,31 @@ regressions. **Not yet deployed to `.94`** as of this write-up -- needs the
 same commit -> push -> pull -> restart sequence every other fix this session
 went through.
 
-### Bug B: a `KeyError` here skips the ENTIRE decision cycle, not just one device
+### Bug B: a `KeyError` here skips the ENTIRE decision cycle, not just one device -- FIXED
+
+**Fix (continuation session, same day):** `pipeline.py:1167`'s per-device loop
+body (~2380 lines, three separate `lock_device()` re-entries per iteration)
+is now wrapped in `try: ... except KeyError as exc: LOGGER.error(...);
+continue`. A device removed from `StateManager` mid-cycle (a concurrent
+merge/prune) now only skips ITS OWN iteration -- every other device in that
+same cycle's `get_all_device_ids()` order still gets evaluated, instead of
+the whole `_step()` call aborting. Applied mechanically (a script re-indented
+the existing body by one level and inserted the try/except at the exact
+loop boundaries) rather than hand-retyped, specifically to avoid introducing
+a stray bug while touching code this large -- verified via `ast.parse`/
+`py_compile` (still valid Python) and a whitespace-ignored `git diff -w`
+(confirms literally nothing else in those ~2380 lines changed, only the
+intended wrapper was added). No direct behavioral test was added: this
+codebase's OWN existing test suite already documents (see
+`test_phase40_alert_button_containment_sync.py`'s comments) that
+`pipeline.py`'s `_step()` is too large/deeply-embedded to invoke directly in
+a test -- other tests in this file work around that by testing extracted
+logic as standalone copies, not by calling `_step()` itself. Bug A's own fix
+independently reduces how OFTEN this race can even happen (no more
+zombie-churn-driven spurious merges), so this containment fix is now a
+backstop for the remaining, much rarer legitimate concurrent-merge window
+(MAC-rotation reidentify, genuine fragmentation events), not a fix for an
+actively-firing bug.
 
 Real traceback, `.94`, twice on 2026-09-20 alone (07:02:29 and 14:49:32):
 
@@ -926,7 +983,17 @@ outright) or can also happen some other way (e.g. a device genuinely never
 added to `_states` reached via a stale reference from elsewhere) -- that's
 the other concrete next step, alongside Bug A's source read.
 
-### Bonus finding (lower priority, this session's own doing, not pre-existing): lost writes under lock contention
+### Bonus finding (lower priority, this session's own doing, not pre-existing): lost writes under lock contention -- FIXED
+
+**Fix (continuation session, same day):** `GraphStore.__init__` now sets
+`PRAGMA busy_timeout = 10000` on every connection (was left at Python
+sqlite3's own 5000ms default). Ten seconds comfortably rides out a typical
+administrative-script contention window (a bulk DELETE or VACUUM from this
+project's own maintenance tooling) without the live per-cycle write giving
+up immediately, while staying a small fraction of the 60s
+`pipeline_main_loop` heartbeat deadline even in a genuinely stuck-writer
+worst case. Verified via a direct `PRAGMA busy_timeout` read-back in
+`test_argus_graph_store.py`.
 
 Found live tonight while running this session's own manual cleanup scripts
 against the SAME live `state/v13_graph.db` the running service holds a
@@ -950,22 +1017,37 @@ and would also fire under any OTHER source of write contention. Worth a
 short `busy_timeout`-based retry if this recurs outside of manual
 intervention.
 
-### Suggested next steps for the session that picks this up
+### Suggested next steps for the session that picks this up -- ALL DONE
 
 1. ~~Read `state_guard.py`'s `merge_into_canonical()` in full...~~ DONE --
-   Bug A fixed this session, see above. Still open: deploy to `.94`.
-2. Decide whether `pipeline.py:1167`'s device loop should catch `KeyError`
-   PER-DEVICE (skip just that one device, log, continue the loop) rather
-   than letting it propagate and abort the whole `_step()` call -- this
-   alone would contain Bug B's blast radius. Bug A's own fix reduces how
-   OFTEN a device goes missing mid-cycle (no more zombie churn), but doesn't
-   eliminate every legitimate concurrent-merge window, so Bug B's
-   containment fix is still independently worth doing.
-3. Once Bug B is also addressed, revisit whether `device_baselines`' 89-vs-13
-   device_id count drops back toward the real device count on its own now
-   that Bug A's zombie-churn source is closed, or whether a separate
-   one-time consolidation of any pre-fix stray baseline rows into their
-   canonical device_id is still needed on top.
+   Bug A fixed.
+2. ~~Decide whether `pipeline.py:1167`'s device loop should catch `KeyError`
+   PER-DEVICE...~~ DONE -- Bug B fixed (mechanical try/except wrap, see its
+   own section above for how this was verified without a direct behavioral
+   test).
+3. ~~Once Bug B is also addressed, revisit whether `device_baselines`'
+   89-vs-13 device_id count drops back...~~ DONE -- root cause fixed
+   (`argus/baseline/engine.py` now resolves merges) AND the pre-existing
+   stray rows cleaned up (`GraphStore.prune_orphaned_device_baselines()`, both
+   scheduled daily and run once by hand on `.94`).
+
+Also done this same continuation session, beyond this handover's original
+scope: IPv6 address-rotation merge correctness explicitly verified (new
+`tests/test_argus_live_identity.py` Section I -- multiple simulated SLAAC
+privacy-address rotations, each correctly merging into the same accumulating
+canonical identity, including the zombie-resurrection fix applying per
+rotation, not just once); everything deployed to `.94` and verified live (see
+the deployment log below).
+
+### Deployment log (2026-09-20, continuation session)
+
+All of the above shipped in commits `860f7a4` (Bug A), `b6a6c27`
+(merge-completeness: decisions/autotune/counters), and one more covering Bug
+B + the DGA cap + the busy_timeout fix + the device_baselines root cause --
+released as GitHub tags `v15.9.0`/`v15.10.0`/(next tag), deployed to `.94` via
+the usual git pull + `soc.service` restart, `prune_orphaned_device_baselines()`
+run once by hand immediately after for the one-time cleanup. Device count
+audit (before/after) recorded in this same log once run.
 
 ## Open questions for later phases, not blocking Phase 1
 

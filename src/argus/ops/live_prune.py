@@ -86,6 +86,13 @@ def main() -> None:
         # separately made profile-aware the same day) from ever requesting more
         # history than this table -- or evidence itself -- actually retains.
         dd_deleted = store.prune_device_destinations(older_than_days=retention_days)
+        # BUGFIX (2026-09-20, identity-merge handover follow-up): the concrete
+        # "clean up stale/merged devices regularly" half of the device_baselines
+        # 89-vs-13 anomaly -- riding along on this job's existing daily cadence
+        # rather than a new cron entry, since it's a cheap, narrowly-targeted
+        # DELETE (see GraphStore.prune_orphaned_device_baselines()'s own
+        # docstring for why threshold_history is deliberately NOT included here).
+        orphaned_baselines_deleted = store.prune_orphaned_device_baselines()
         # MOVED (2026-09-20, data-lifecycle retuning) to its own, much more frequent
         # job -- live_prune_weak_notices.py, every 4h instead of this job's own daily
         # 3:15am. Running only once/day meant a weak notice created just after this
@@ -99,12 +106,13 @@ def main() -> None:
         # weak-notice sweep along with it.
         store.close()
         LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) "
-                     "older than %d days, from %s",
-                     deleted, retention_days, dd_deleted, retention_days, db_path)
+                     "older than %d days, %d orphaned device_baselines row(s), from %s",
+                     deleted, retention_days, dd_deleted, retention_days, orphaned_baselines_deleted, db_path)
         write_job_health(state_dir, "live_prune", time.time() - run_start,
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
-                                 "device_destinations_retention_days": retention_days})
+                                 "device_destinations_retention_days": retention_days,
+                                 "orphaned_device_baselines_deleted": orphaned_baselines_deleted})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})

@@ -614,8 +614,19 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
                           if ev.evidence_type == _DGA_EVIDENCE_TYPE}
         my_dga_shapes.discard("")
         if my_dga_shapes:
+            # BUGFIX (2026-09-20, restart-cadence investigation follow-up): flagged at
+            # the time as the same bug class as Root Cause #3 (a system-wide, fully
+            # unbounded fetch, re-run once per device per cycle) but lower priority
+            # since there was no live evidence it was actually large -- capped now
+            # defensively. Per-DEVICE, not a flat total: see
+            # GraphStore.get_evidence_by_type_since()'s own comment for why a flat cap
+            # would be actively wrong here (it would let one flooding device crowd out
+            # every other genuinely-distinct device from this cross-device correlation).
+            dga_cap = _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE.get(
+                _GRAPH_HARDWARE_PROFILE or "", _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW)
             all_dga_evidence = store.get_evidence_by_type_since(
                 _DGA_EVIDENCE_TYPE, since=ts - _COORDINATED_TARGETING_WINDOW_SECONDS,
+                cap_per_device=dga_cap,
             )
             for shape_key in my_dga_shapes:
                 others = sorted({

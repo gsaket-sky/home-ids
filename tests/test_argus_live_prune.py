@@ -54,6 +54,17 @@ recent_ev = Evidence(device_id="dev1", destination_id=NO_DESTINATION, evidence_t
                        independence_family="f", timestamp=now - 1 * 86400, source="s")
 store.insert_evidence(old_ev)
 store.insert_evidence(recent_ev)
+# 2026-09-20, identity-merge handover follow-up: a merged-away device's stray
+# device_baselines row, to confirm main() actually wires up
+# prune_orphaned_device_baselines() end-to-end, not just that the GraphStore
+# method exists in isolation.
+store.upsert_device("lp_orphan", timestamp=now)
+store.upsert_device("lp_canonical", timestamp=now)
+store._conn.execute(
+    "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
+    "VALUES ('lp_orphan', 'query_rate', 10, 'gaussian', ?)", (now,)
+)
+store.merge_device("lp_orphan", "lp_canonical", timestamp=now)
 store.close()
 
 live_prune.CONFIG = {"state_path": str(_real_dir / "ids_state.json")}
@@ -64,10 +75,18 @@ check("main() actually pruned the old (>90 day) evidence row",
       verify_store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?", (old_ev.evidence_id,)).fetchone() is None)
 check("main() kept the recent evidence row",
       verify_store._conn.execute("SELECT 1 FROM evidence WHERE evidence_id=?", (recent_ev.evidence_id,)).fetchone() is not None)
+check("main() ALSO wired up prune_orphaned_device_baselines() -- the merged "
+      "device's stray row is gone, not just evidence/device_destinations",
+      verify_store._conn.execute(
+          "SELECT 1 FROM device_baselines WHERE device_id='lp_orphan'"
+      ).fetchone() is None)
 
 health = json.loads((_real_dir / "job_health.json").read_text())
 check("job_health.json records a real deleted count (>=1)",
       health["live_prune"]["deleted"] >= 1)
+check("job_health.json records the orphaned_device_baselines_deleted count too",
+      health["live_prune"].get("orphaned_device_baselines_deleted") == 1,
+      f"got {health['live_prune']}")
 check("job_health.json has no 'error' key on a successful run",
       "error" not in health["live_prune"])
 

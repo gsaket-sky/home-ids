@@ -311,6 +311,76 @@ check("Sheet 03a live wiring: a device with NO promoted hazard_rate still gets "
       abs(default_tracker.hazard_rate - custom_hazard) > 1e-9)
 
 
+# =============================================================================
+# HANDOVER FOLLOW-UP (2026-09-20): device_baselines reads/writes must resolve
+# an identity merge -- the real root cause of the device_baselines 89-vs-13
+# device_id anomaly. Every query in this file used to match device_id
+# literally, with zero merge resolution, so an orphan's brief pre-merge
+# baseline history stranded a permanent stray row under a dead id.
+# =============================================================================
+store7 = GraphStore(":memory:")
+engine7 = BaselineEngine(store7)
+MERGE_NOW7 = NOW + 500000
+store7.upsert_device("orphan_dev7", device_type="laptop", timestamp=MERGE_NOW7)
+
+# The orphan gets ONE real observation before merging away (a brief real
+# pre-merge lifetime -- exactly what Bug A's own fix now typically limits an
+# orphan to, a cycle or two before it merges into its canonical identity).
+engine7.score_metric("orphan_dev7", "query_rate", "gaussian", (50.0,), hour=10, now=MERGE_NOW7)
+check("setup: the orphan's own device_baselines row exists before any merge",
+      store7._conn.execute(
+          "SELECT 1 FROM device_baselines WHERE device_id='orphan_dev7' AND metric='query_rate' AND hour=10"
+      ).fetchone() is not None)
+
+store7.merge_device("orphan_dev7", "canonical_dev7", timestamp=MERGE_NOW7 + 10)
+
+# A FRESH engine (empty in-memory tracker cache) is used for the post-merge
+# calls below -- otherwise a cache hit under the OLD key could mask whether
+# the fix is really resolving at the DB level or just coincidentally reusing
+# an in-memory object from before the merge.
+#
+# NOTE on expected behavior: resolve_canonical_device_id("canonical_dev7") is a
+# no-op (canonical_dev7 was never itself merged away) -- so scoring via the
+# canonical id cold-starts canonical_dev7's OWN row, it does NOT retroactively
+# adopt the orphan's pre-merge history. That's deliberate (this session's
+# explicit "discard, not blend, an orphan's brief statistical history"
+# decision) -- see this fix's own comment in argus/baseline/engine.py. What
+# THIS fix actually guarantees: once resolved, calling via the STALE orphan id
+# afterward lands on the SAME canonical row too, instead of continuing to grow
+# a second, permanently-invisible-to-canonical row under the dead id.
+fresh_engine7 = BaselineEngine(store7)
+fresh_engine7.score_metric("canonical_dev7", "query_rate", "gaussian", (50.5,), hour=10, now=MERGE_NOW7 + 20)
+check("setup: scoring via the (already-live) canonical id cold-starts ITS OWN "
+      "row -- the orphan's pre-merge history is not retroactively adopted, "
+      "per the discard-not-blend policy",
+      store7._conn.execute(
+          "SELECT 1 FROM device_baselines WHERE device_id='canonical_dev7' AND metric='query_rate' AND hour=10"
+      ).fetchone() is not None)
+orphan_row_before = store7._conn.execute(
+    "SELECT posterior_params_json FROM device_baselines WHERE device_id='orphan_dev7' AND metric='query_rate' AND hour=10"
+).fetchone()
+
+fresh_engine7.score_metric("orphan_dev7", "query_rate", "gaussian", (51.0,), hour=10, now=MERGE_NOW7 + 30)
+orphan_row_after = store7._conn.execute(
+    "SELECT posterior_params_json FROM device_baselines WHERE device_id='orphan_dev7' AND metric='query_rate' AND hour=10"
+).fetchone()
+check("THE FIX: calling via the now-stale ORPHAN id does NOT touch the orphan's "
+      "own frozen pre-merge row -- without the fix, this call would have kept "
+      "growing a permanently-invisible-to-canonical row under the dead id forever",
+      orphan_row_before == orphan_row_after, f"before={orphan_row_before} after={orphan_row_after}")
+check("THE FIX: the observation made via the stale orphan id landed on the "
+      "CANONICAL row instead -- exactly one tracker object, keyed by the "
+      "canonical id, not a second one for the orphan",
+      list(fresh_engine7._trackers.keys()) == [("canonical_dev7", "query_rate", 10)],
+      f"got keys={list(fresh_engine7._trackers.keys())}")
+
+check("is_learning_paused: resolves the stale orphan id too -- a decision made "
+      "under the canonical id after the merge is correctly seen when queried via "
+      "the orphan's own (dead) id",
+      fresh_engine7.is_learning_paused("orphan_dev7", now=MERGE_NOW7 + 40)
+      == fresh_engine7.is_learning_paused("canonical_dev7", now=MERGE_NOW7 + 40))
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

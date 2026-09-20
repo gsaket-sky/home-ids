@@ -404,6 +404,77 @@ check("H: THE FIX -- re-resolving the orphan's OWN address after it's been merge
 check("H: THE FIX -- no zombie DeviceState was created under the dead orphan id",
       not state_h.has_device(orphan_id_h))
 
+# --- I. IPv6 address-rotation merge correctness (2026-09-20 follow-up request):
+# SLAAC privacy addresses rotate periodically (commonly ~daily) -- each rotation's
+# first few packets can arrive before Zeek's mac-logging catches up for the NEW
+# address, cold-starting a fresh IP-anchored orphan exactly like the IPv4 case
+# already covered above, just repeated multiple times over a device's lifetime.
+# Confirms every rotation's orphan correctly merges into the SAME accumulating
+# canonical identity -- both in v1's own state (state_i) and mirrored into the
+# v13 graph (graph_i) -- with zero zombies left behind for ANY of them, not just
+# the first. ---
+state_i = _fresh_state_manager("i")
+graph_i = _fresh_graph_store("i")
+live_mgr_i = LiveIdentityManager(state_i, {}, graph_i, {})
+MAC_I = "aa:bb:cc:dd:ee:66"
+CANON_IP_I = "192.168.77.220"
+canonical_id_i = v_current_stable_device_id(CANON_IP_I)
+state_i.get_or_create(device_id=canonical_id_i, client_ip=CANON_IP_I, hostname="dual-stack-host")
+state_i.bind_mac(MAC_I, canonical_id_i)
+
+IPV6_ROTATIONS = [
+    "2001:db8:1::aaaa:bbbb:cccc:0001",
+    "2001:db8:1::aaaa:bbbb:cccc:0002",
+    "2001:db8:1::aaaa:bbbb:cccc:0003",
+]
+orphan_ids_i = []
+for rotation_ip in IPV6_ROTATIONS:
+    # Cold start: this rotation's address hasn't been seen before, and (matching
+    # the real gap) its MAC isn't resolvable on this specific flow yet.
+    orphan_id = live_mgr_i.resolve_device_id(rotation_ip, mac_addr=None, hostname="unknown")
+    state_i.get_or_create(device_id=orphan_id, client_ip=rotation_ip, hostname="unknown")
+    orphan_ids_i.append(orphan_id)
+    # A moment later, the MAC becomes known for this SAME address (mac-logging
+    # catches up) -- process_zeek_identities() would compute dev_id=canonical_id_i
+    # via the MAC-first branch and call this exact method before get_or_create().
+    merged_id = live_mgr_i._merge_orphan_if_fragmented(
+        rotation_ip, canonical_id_i, ml_registry=None, fp_engine=None,
+        ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+    )
+    check(f"I: rotation {rotation_ip} -- the orphan created for THIS address is the "
+          "one actually merged", merged_id == orphan_id, f"got={merged_id}")
+
+check("I: after 3 separate IPv6 rotations, ALL 3 orphans are gone -- not just the "
+      "first one, every single rotation merges cleanly",
+      all(not state_i.has_device(oid) for oid in orphan_ids_i),
+      f"still tracked: {[oid for oid in orphan_ids_i if state_i.has_device(oid)]}")
+check("I: exactly ONE DeviceState survives for this physical device, regardless of "
+      "how many times its IPv6 address rotated",
+      state_i.get_all_device_ids() == [canonical_id_i], f"got={state_i.get_all_device_ids()}")
+
+canonical_known_ips_i = set(state_i.get_or_create(canonical_id_i, CANON_IP_I, "unknown").known_ips.to_list())
+check("I: the canonical identity's known_ips covers every rotation's address",
+      set(IPV6_ROTATIONS).issubset(canonical_known_ips_i), f"known_ips={canonical_known_ips_i}")
+
+for rotation_ip, orphan_id in zip(IPV6_ROTATIONS, orphan_ids_i):
+    check(f"I: the v13 graph also resolves rotation {rotation_ip}'s orphan id to "
+          "the SAME canonical id -- the graph-side mirror kept pace with every "
+          "single rotation, not just the first",
+          graph_i.resolve_canonical_device_id(orphan_id) == canonical_id_i,
+          f"got={graph_i.resolve_canonical_device_id(orphan_id)}")
+
+# THE ACTUAL BUG-A SCENARIO, now for IPv6: the FIRST rotation's address is seen
+# again after its own merge (e.g. a brief return to an old privacy address is not
+# how SLAAC works, but a delayed/retransmitted packet using it IS realistic),
+# again with a MAC-capture miss -- must resolve to canonical, never resurrect.
+resolved_old_rotation = live_mgr_i.resolve_device_id(IPV6_ROTATIONS[0], mac_addr=None, hostname="unknown")
+check("I: THE FIX applies across IPv6 rotations too -- re-resolving the FIRST "
+      "rotation's address after ITS merge (with a MAC-capture miss) returns the "
+      "live canonical id, not a resurrected zombie",
+      resolved_old_rotation == canonical_id_i, f"got={resolved_old_rotation}")
+check("I: still no zombie under the first rotation's orphan id",
+      not state_i.has_device(orphan_ids_i[0]))
+
 
 print(f"\n{'='*60}")
 if FAILURES:
