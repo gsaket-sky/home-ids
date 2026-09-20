@@ -251,6 +251,14 @@ class ZeekFeatureExtractor:
         self._http_reqs = defaultdict(dict)
         self._outbound_bytes = defaultdict(lambda: deque(maxlen=5000))
         self._doh_bypass_uids = defaultdict(dict)
+        # SNI-verified DoH hits only (real DOH_SNIS hostname match, e.g. "dns.google"),
+        # separate from _doh_bypass_uids above which also counts the port+IP heuristic
+        # in _process_conn (dst_ip in DOH_IPS and dst_port == 443) -- that heuristic
+        # can't distinguish genuine DoH from ordinary HTTPS to the same provider IP
+        # (see dns_evasion.py's own REVERTED note), so it's fine for the observability
+        # metric it already feeds but not trustworthy enough to become Evidence. This
+        # dict is {device_ip: {dest_ip: ts}}, exposed via get_doh_bypass_ips().
+        self._doh_sni_hits = defaultdict(dict)
         self._lateral_moves = defaultdict(lambda: deque(maxlen=500))
         self._conn_states = defaultdict(lambda: deque(maxlen=5000))
         self._conn_durations = defaultdict(lambda: deque(maxlen=5000))
@@ -430,6 +438,7 @@ class ZeekFeatureExtractor:
         
         prune_ts_dict(self._new_ips)
         prune_ts_dict(self._doh_bypass_uids)
+        prune_ts_dict(self._doh_sni_hits)
         prune_ts_dict(self._http_uas)
         prune_ts_dict(self._http_reqs)
 
@@ -709,6 +718,16 @@ class ZeekFeatureExtractor:
             out.update(self._dest_ports.get(ip, {}))
         return out
 
+    def get_doh_bypass_ips(self, device_ip) -> set:
+        """Destination IPs this device made a TLS connection to with an SNI matching a
+        known DoH provider hostname (DOH_SNIS) -- real, SNI-verified DoH, not the
+        broader/noisier port+IP heuristic _doh_bypass_uids also counts. See
+        _doh_sni_hits's own comment for why the two are kept separate."""
+        out = set()
+        for ip in self._as_ip_list(device_ip):
+            out.update(self._doh_sni_hits.get(ip, {}).keys())
+        return out
+
     def pop_new_wired_probe_sources(self) -> list:
         """Consume-once accessor for PHASE 21D's wired-device-probe trigger. Returns
         [(wired_ip, new_source_ip), ...] for any first-time-seen source since the last
@@ -761,6 +780,9 @@ class ZeekFeatureExtractor:
             if sni and any(sni == doh or sni.endswith(f".{doh}") for doh in DOH_SNIS):
                 if len(self._doh_bypass_uids[src]) < 100:
                     self._doh_bypass_uids[src][ev.get("uid", "")] = ts
+                dest_ip = ev.get("id.resp_h", "")
+                if dest_ip and len(self._doh_sni_hits[src]) < 100:
+                    self._doh_sni_hits[src][dest_ip] = ts
 
     def _process_http(self, src: str, ev: dict) -> None:
         ua, host, uri, ts = ev.get("user_agent", ""), ev.get("host", ""), ev.get("uri", ""), ev.get("ts", time.time())
@@ -951,7 +973,7 @@ class ZeekFeatureExtractor:
         return alerts
 
     def reset_all(self) -> None:
-        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
+        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
     def reset_client(self, client_ip) -> None:
@@ -961,6 +983,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
                 if ip in d:
                     del d[ip]

@@ -443,6 +443,39 @@ check("REGRESSION GUARD: a genuinely unexplained IP alongside a known resolver s
       "produces evidence -- the fix excludes only the resolver, not the whole device",
       bool(mixed_evidence) and mixed_evidence[0].domain == "66.66.66.66", f"got {mixed_evidence}")
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# FIXED (2026-09-18): a DoH analogue of the port-53/853 policy-bypass check above was
+# tried and reverted (see dns_evasion.py's own note on the KNOWN_PUBLIC_DNS_RESOLVERS
+# :443 heuristic) because it would have flagged ordinary HTTPS to Cloudflare/Google as
+# "DNS policy bypass." The real fix: DeviceBurstAudit.doh_bypass_ips, populated from
+# zeek_features.py's real TLS ClientHello SNI match against DOH_SNIS -- proof of an
+# actual DoH handshake, not an IP+port inference.
+# ═══════════════════════════════════════════════════════════════════════════════════
+doh_audit = DeviceBurstAudit(dest_ips={"1.1.1.1"}, queried_domains=set(), doh_bypass_ips={"1.1.1.1"})
+doh_evidence = audit_device("dev_doh", doh_audit, geoip_engine=None, ti_engine=None)
+check("THE FIX: a device's ONLY connection is a DoH bypass (SNI-verified) to a "
+      "known-resolver IP -- this must NOT be silently dropped by the "
+      "_is_known_dns_resolver() exclusion the way the reverted port+IP heuristic was",
+      bool(doh_evidence) and doh_evidence[0].domain == "1.1.1.1", f"got {doh_evidence}")
+check("the DoH evidence note mentions DNS-over-HTTPS, not the port-53/853 wording",
+      bool(doh_evidence) and "DNS-over-HTTPS" in doh_evidence[0].provenance,
+      f"got {doh_evidence[0].provenance if doh_evidence else None}")
+
+clean_https_audit = DeviceBurstAudit(dest_ips={"1.1.1.1"}, queried_domains={"example.com"})
+geoip_clean = _FakeGeoIP(reverse_dns_map={"1.1.1.1": "server.example.com"})
+clean_https_evidence = audit_device("dev_clean_https", clean_https_audit, geoip_engine=geoip_clean)
+check("REGRESSION GUARD (the exact fixture that caused the original revert): ordinary "
+      "HTTPS to 1.1.1.1 that reverse-DNS explains, with NO SNI match, still produces "
+      "NO evidence -- the fix must not resurrect the false-positive the revert avoided",
+      clean_https_evidence == [], f"got {clean_https_evidence}")
+
+doh_mixed_audit = DeviceBurstAudit(dest_ips={"1.1.1.1", "66.66.66.66"}, queried_domains=set(),
+                                    doh_bypass_ips={"1.1.1.1"})
+doh_mixed_evidence = audit_device("dev_doh_mixed", doh_mixed_audit, geoip_engine=None, ti_engine=None)
+check("a DoH bypass IP alongside a separate genuinely-unexplained IP still produces "
+      "exactly one evidence covering both (value == 2)",
+      bool(doh_mixed_evidence) and doh_mixed_evidence[0].value == 2.0, f"got {doh_mixed_evidence}")
+
 # BUGFIX (found in the SAME live audit, a level deeper than the earlier target_display
 # fix): alert_target_domain ITSELF (not just the Telegram display text) never got a
 # DNS_EVASION branch, so network_context["queried_domain"] -- used by

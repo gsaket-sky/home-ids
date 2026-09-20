@@ -420,9 +420,14 @@ def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_i
                 # can distinguish a direct port-53/853 resolver bypass
                 # (DNS_POLICY_BYPASS) from a generic unexplained connection.
                 dest_ports = zeek_fx.get_dest_ports(client_ip)
+                # 2026-09-18: feeds DeviceBurstAudit.doh_bypass_ips so audit_device()
+                # can flag SNI-verified DoH bypass (real TLS ClientHello SNI match
+                # against a known DoH provider hostname), not just the port-53/853
+                # resolver-bypass case dest_ports already covers.
+                doh_bypass_ips = zeek_fx.get_doh_bypass_ips(client_ip)
         except KeyError:
             continue  # device pruned between get_all_device_ids() and lock_device()
-        devices[dev_id] = DeviceBurstAudit(dest_ips=dest_ips, queried_domains=queried_domains, dest_ports=dest_ports)
+        devices[dev_id] = DeviceBurstAudit(dest_ips=dest_ips, queried_domains=queried_domains, dest_ports=dest_ports, doh_bypass_ips=doh_bypass_ips)
         device_ips[dev_id] = client_ip
 
     if not devices:

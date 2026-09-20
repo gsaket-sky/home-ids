@@ -48,6 +48,25 @@ check("10 distinct REQUEST targets are counted", feats["zeek_arp_sweep_count"] =
       f"got {feats['zeek_arp_sweep_count']}")
 check("case-insensitive 'operation' matching (request/REQUEST both counted)", True)  # exercised above, no crash
 
+# REGRESSION GUARD (2026-09-18, third-party audit's "domain-less-evidence-bleeding"
+# finding, investigated and confirmed already closed): zeek_arp_sweep_count and
+# zeek_arp_swept_ip_examples are both derived from the IDENTICAL
+# `{tpa for ip in ips for _ts, tpa in self._arp_targets.get(ip, [])}` set comprehension
+# in zeek_features.py -- structurally, examples can only ever be real swept target IPs
+# from that same set, never an unrelated/domain-less placeholder bleeding in. Locking
+# this in as a test, not just a one-off trace, so a future change to either field can't
+# silently reintroduce the divergence this was checked against.
+swept_examples = feats["zeek_arp_swept_ip_examples"]
+all_swept_targets = {f"192.168.1.{100 + i}" for i in range(10)}
+check("zeek_arp_swept_ip_examples is capped at 5, not the full 10-target count",
+      len(swept_examples) == 5, f"got {len(swept_examples)}")
+check("every example IP is a genuine swept target from the same set zeek_arp_sweep_count "
+      "counts -- never a domain-less/unrelated placeholder",
+      set(swept_examples).issubset(all_swept_targets), f"got {swept_examples}")
+check("examples are sorted, so the same underlying set always yields the same reported "
+      "examples (not an arbitrary/unstable dict-order sample)",
+      swept_examples == sorted(swept_examples))
+
 
 # A device that only ever replies (never probes) must show zero.
 zfx2 = ZeekFeatureExtractor(home_subnets=["192.168.1.0/24"])

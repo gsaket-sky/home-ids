@@ -55,10 +55,17 @@ class DeviceBurstAudit:
         error; audit_device() only uses this to distinguish a direct UDP/53 (or
         DoT/853) bypass from a generic unexplained connection, never as a required
         input.
+    doh_bypass_ips: destination IPs whose TLS SNI matched a known DoH provider
+        hostname (DOH_SNIS in zeek_features.py), from
+        ZeekFeatureExtractor.get_doh_bypass_ips() -- real SNI-verified DoH, not a
+        port+IP heuristic (that approach was tried and reverted, see
+        audit_device()'s own note on the KNOWN_PUBLIC_DNS_RESOLVERS:443 attempt).
+        Optional (defaults empty).
     """
     dest_ips: Set[str] = field(default_factory=set)
     queried_domains: Set[str] = field(default_factory=set)
     dest_ports: Dict[str, int] = field(default_factory=dict)
+    doh_bypass_ips: Set[str] = field(default_factory=set)
 
 
 def _is_private_lan_ip(ip: str) -> bool:
@@ -186,45 +193,65 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     # entirely by _is_private_lan_ip() above, before ever reaching this loop -- so
     # by construction, anything landing here on port 53/853 is an external resolver.
     policy_bypass_ips: List[str] = []
+    doh_bypass_hits: List[str] = []
 
     inconclusive_timeouts = 0
     for ip in audit.dest_ips:
         if _is_private_lan_ip(ip):
             continue
-        if _is_known_dns_resolver(ip):
-            continue
-        # BUGFIX (live audit): _asn_explains() (fast, local, no timeout risk) now runs
-        # BEFORE _reverse_dns_explains() (slow, network, timeout-prone under load) --
-        # any IP the ASN check already explains never pays the reverse-DNS round-trip
-        # at all, directly shrinking exposure to the exact load-driven timeout cascade
-        # geoip.py's own comment describes.
-        if _asn_explains(ip, geoip_engine):
-            continue
-        explained = _reverse_dns_explains(ip, audit.queried_domains, geoip_engine, ti_engine)
-        if explained is None:
-            # Inconclusive (reverse-DNS timed out under load) -- not evidence of
-            # anything, must not be counted as "unexplained." Skip this IP entirely
-            # rather than silently treating "couldn't check" as "checked, suspicious."
-            inconclusive_timeouts += 1
-            continue
-        if explained:
-            continue
-        unexplained.append(ip)
         # TRIED (P1, third-party audit, 2026-09-16) and REVERTED: a DoH analogue of
         # the port-53/853 policy-bypass check below, treating a port-443 connection
         # to a KNOWN_PUBLIC_DNS_RESOLVERS IP as evasion. Reverted after
         # test_phase23_fritzbox_capture.py's own "clean device" fixture (a
         # connection to 1.1.1.1:443 that reverse-DNS genuinely explains, via
-        # _reverse_dns_explains() above) failed against it -- Cloudflare/Google
+        # _reverse_dns_explains() below) failed against it -- Cloudflare/Google
         # etc. are NOT single-purpose DNS infrastructure on port 443 the way they
         # are on 53/853; 1.1.1.1 alone fronts unrelated CDN/proxy traffic, so this
         # would have flagged ordinary HTTPS to those providers as "DNS policy
-        # bypass" alongside genuine DoH. A real fix needs TLS SNI/ALPN telemetry
-        # (which DeviceBurstAudit doesn't carry today) to actually distinguish a
-        # DoH handshake from ordinary HTTPS to the same IP -- not a port+IP
-        # heuristic alone. Left as a real, still-open gap; do not re-attempt this
-        # exact approach without that telemetry.
-        if audit.dest_ports.get(ip) in (53, 853):
+        # bypass" alongside genuine DoH.
+        #
+        # FIXED (2026-09-18): the port+IP heuristic above was the wrong signal, but
+        # TLS SNI telemetry to actually distinguish a DoH handshake from ordinary
+        # HTTPS to the same IP already existed -- just uncollected here.
+        # zeek_features.py's _process_ssl() already reads the real TLS ClientHello
+        # SNI and matches it against DOH_SNIS (genuine DoH-provider hostnames like
+        # "dns.google"), exposed via get_doh_bypass_ips() -> DeviceBurstAudit.
+        # doh_bypass_ips. An SNI match is proof of an actual DoH handshake, so it's
+        # checked BEFORE (not after) _is_known_dns_resolver()/_asn_explains()/
+        # _reverse_dns_explains() below and bypasses all three deliberately: those
+        # exist to explain away an IP that MIGHT be innocuous (a device's own DNS
+        # history covers it, or it belongs to a CDN/cloud ASN it legitimately talks
+        # to for other reasons) -- irrelevant once SNI has already proven this
+        # SPECIFIC connection was a DoH handshake. 1.1.1.1/8.8.8.8 etc. are both
+        # "known resolvers" (would otherwise short-circuit below) AND the exact IPs
+        # real DoH providers answer on, so gating this after those checks would
+        # have silently exempted the primary real-world case.
+        is_doh = ip in audit.doh_bypass_ips
+        if not is_doh:
+            if _is_known_dns_resolver(ip):
+                continue
+            # BUGFIX (live audit): _asn_explains() (fast, local, no timeout risk) now
+            # runs BEFORE _reverse_dns_explains() (slow, network, timeout-prone under
+            # load) -- any IP the ASN check already explains never pays the
+            # reverse-DNS round-trip at all, directly shrinking exposure to the exact
+            # load-driven timeout cascade geoip.py's own comment describes.
+            if _asn_explains(ip, geoip_engine):
+                continue
+            explained = _reverse_dns_explains(ip, audit.queried_domains, geoip_engine, ti_engine)
+            if explained is None:
+                # Inconclusive (reverse-DNS timed out under load) -- not evidence of
+                # anything, must not be counted as "unexplained." Skip this IP
+                # entirely rather than silently treating "couldn't check" as
+                # "checked, suspicious."
+                inconclusive_timeouts += 1
+                continue
+            if explained:
+                continue
+        unexplained.append(ip)
+        if is_doh:
+            policy_bypass_ips.append(ip)
+            doh_bypass_hits.append(ip)
+        elif audit.dest_ports.get(ip) in (53, 853):
             policy_bypass_ips.append(ip)
         if ti_engine is not None:
             try:
@@ -279,8 +306,11 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
         note += f"; {len(reputation_hits)} already carry threat-intel reputation data"
     if no_dns_at_all:
         note += " (device has NO DNS history at all in this window)"
-    if policy_bypass_ips:
-        note += f"; {len(policy_bypass_ips)} connection(s) are direct port-53/853 queries to a non-Pi-hole resolver"
+    non_doh_policy_bypass = len(policy_bypass_ips) - len(doh_bypass_hits)
+    if non_doh_policy_bypass:
+        note += f"; {non_doh_policy_bypass} connection(s) are direct port-53/853 queries to a non-Pi-hole resolver"
+    if doh_bypass_hits:
+        note += f"; {len(doh_bypass_hits)} connection(s) are DNS-over-HTTPS to a known DoH provider (SNI-verified)"
     if inconclusive_timeouts:
         note += (f"; {inconclusive_timeouts} additional connection(s) skipped -- reverse-DNS "
                  f"timed out under load, inconclusive rather than counted as unexplained")
