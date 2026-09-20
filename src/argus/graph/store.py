@@ -126,6 +126,34 @@ _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE: Dict[str, int] = {
 # bounding the worst case to ~33KB instead of multiple MB.
 _MAX_ALL_EVIDENCE_IDS_STORED = 1000
 
+# BUGFIX (2026-09-20, restart-cadence investigation): a real device found live on
+# .94 generated 39,551 zeek_notice_weak items in 24 hours alone (~1 every 2.2s,
+# non-stop) -- get_evidence_for_device()'s per-cycle window query correctly used
+# its index (0.225s), but constructing and iterating 41,509 Evidence objects for
+# ONE device, EVERY 2s decision cycle, was blowing the pipeline_main_loop's 60s
+# heartbeat deadline and triggering self-restarts every ~12-14 minutes -- far
+# worse than Root Causes #1/#2 ever were. Deliberately NOT scoped to zeek_notice_
+# weak specifically (explicit user decision): any evidence_type could in
+# principle flood this way for a genuinely infected/misbehaving device, not just
+# a chatty smart-TV's routine protocol noise -- this caps EVERY type, uniformly,
+# network-agnostic (no zeek-specific or household-specific assumption baked in).
+# Most-recent-first (same ordering precedent as the supporting-evidence-edge cap
+# above) preserves genuine severity signal for a real, sustained attack (up to
+# the cap, every relevant item survives) while bounding the pathological-volume
+# case. Verified this doesn't silently change scoring correctness for the
+# uniform-confidence case that motivated it (ZEEK_NOTICE_TIER_CONFIDENCE is a
+# FIXED per-tier constant, not computed per-observation -- averaging any subset
+# of identical values gives the identical result) and independence_families is
+# already a set (family-deduplicated for corroboration-counting purposes, only
+# ever affected by DISTINCT families present, never by within-family volume) --
+# this cap only removes redundant, informationally-empty duplicates, not signal.
+_MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE: Dict[str, int] = {
+    "pi_8gb": 50,
+    "x86_16gb": 100,
+    "custom": 100,
+}
+_DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW = 100
+
 
 class GraphStore:
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
@@ -791,10 +819,22 @@ class GraphStore:
         return out
 
     def get_evidence_for_device(self, device_id: str, since: Optional[float] = None,
-                                  resolve_merges: bool = True) -> List[Evidence]:
+                                  resolve_merges: bool = True,
+                                  cap_per_type: Optional[int] = None) -> List[Evidence]:
         """Fresh, per-call snapshot -- never a cached/mutated object, matching the
         pure-per-cycle evaluation model every v13 Hypothesis.evaluate() (Phase 3)
-        relies on."""
+        relies on.
+
+        cap_per_type (2026-09-20, restart-cadence investigation): None (the
+        default) preserves this method's original, fully-unbounded behavior --
+        every caller that needs the complete audit trail (decision_replay.py,
+        console-API reads, etc.) is unaffected. Live callers pass a real cap
+        (see _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE's own comment for the
+        full incident this closes) to bound how many rows of any ONE
+        evidence_type get constructed into Evidence objects, most-recent-first
+        -- a device generating tens of thousands of duplicate observations of
+        the same type in one window must never cost proportionally more to
+        process than a handful of genuinely distinct ones."""
         canonical = self.resolve_canonical_device_id(device_id) if resolve_merges else device_id
         if resolve_merges:
             # Every device_id that ever resolved (directly or transitively) to this
@@ -804,14 +844,47 @@ class GraphStore:
         else:
             device_ids = [device_id]
         placeholders = ",".join("?" * len(device_ids))
-        query = f"SELECT * FROM evidence WHERE device_id IN ({placeholders})"
-        params: List[Any] = list(device_ids)
+
+        if cap_per_type is None:
+            query = f"SELECT * FROM evidence WHERE device_id IN ({placeholders})"
+            params: List[Any] = list(device_ids)
+            if since is not None:
+                query += " AND timestamp >= ?"
+                params.append(since)
+            query += " ORDER BY timestamp ASC"
+            rows = self._conn.execute(query, params).fetchall()
+            return [Evidence.from_row(dict(r)) for r in rows]
+
+        # Capped path: find which evidence_types are actually present first (a
+        # cheap, indexed query -- typically single-digit distinct types even
+        # for a device with tens of thousands of rows), then one most-recent-
+        # first, LIMIT-bounded query per type, unioned together. Two round
+        # trips at most (regardless of how many total rows exist), never one
+        # unbounded fetch -- this is what actually stops the pathological
+        # volume case from ever reaching Python object construction at all,
+        # not just from affecting anything downstream of it.
+        type_query = f"SELECT DISTINCT evidence_type FROM evidence WHERE device_id IN ({placeholders})"
+        type_params: List[Any] = list(device_ids)
         if since is not None:
-            query += " AND timestamp >= ?"
-            params.append(since)
-        query += " ORDER BY timestamp ASC"
-        rows = self._conn.execute(query, params).fetchall()
-        return [Evidence.from_row(dict(r)) for r in rows]
+            type_query += " AND timestamp >= ?"
+            type_params.append(since)
+        types = [r["evidence_type"] for r in self._conn.execute(type_query, type_params).fetchall()]
+
+        out: List[Evidence] = []
+        for evidence_type in types:
+            per_type_query = (
+                f"SELECT * FROM evidence WHERE device_id IN ({placeholders}) AND evidence_type = ?"
+            )
+            per_type_params: List[Any] = list(device_ids) + [evidence_type]
+            if since is not None:
+                per_type_query += " AND timestamp >= ?"
+                per_type_params.append(since)
+            per_type_query += " ORDER BY timestamp DESC LIMIT ?"
+            per_type_params.append(cap_per_type)
+            rows = self._conn.execute(per_type_query, per_type_params).fetchall()
+            out.extend(Evidence.from_row(dict(r)) for r in rows)
+        out.sort(key=lambda ev: ev.timestamp)
+        return out
 
     def get_evidence_by_ids(self, evidence_ids: List[str]) -> List[Evidence]:
         """Batch fetch by evidence_id -- added for the console API's graph-view
@@ -824,6 +897,30 @@ class GraphStore:
             f"SELECT * FROM evidence WHERE evidence_id IN ({placeholders})", evidence_ids,
         ).fetchall()
         return [Evidence.from_row(dict(r)) for r in rows]
+
+    def evidence_for_destination_exists(self, device_id: str, destination_id: str,
+                                          since: float, before: float,
+                                          resolve_merges: bool = True) -> bool:
+        """BUGFIX (2026-09-20, restart-cadence investigation): window.py's
+        domain_seen_before() used to answer this exact yes/no question by
+        calling get_evidence_for_device() -- fetching and constructing EVERY
+        evidence row for the device across the whole lookback window (up to
+        90 days) just to check whether ANY of them matched one destination
+        before one cutoff. For a device with a large evidence history this is
+        a pure existence check paying the full cost of a bulk fetch -- `SELECT
+        1 ... LIMIT 1` (SQLite short-circuits on the first match, using the
+        SAME idx_evidence_device_ts index the bulk query already used) answers
+        the identical question without ever constructing an Evidence object,
+        let alone all of them."""
+        canonical = self.resolve_canonical_device_id(device_id) if resolve_merges else device_id
+        device_ids = self._all_ids_resolving_to(canonical) if resolve_merges else [device_id]
+        placeholders = ",".join("?" * len(device_ids))
+        query = (
+            f"SELECT 1 FROM evidence WHERE device_id IN ({placeholders}) "
+            f"AND destination_id = ? AND timestamp >= ? AND timestamp < ? LIMIT 1"
+        )
+        params: List[Any] = list(device_ids) + [destination_id, since, before]
+        return self._conn.execute(query, params).fetchone() is not None
 
     def _all_ids_resolving_to(self, canonical_id: str) -> List[str]:
         ids = [canonical_id]

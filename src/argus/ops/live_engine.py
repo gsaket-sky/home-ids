@@ -59,7 +59,10 @@ from argus.evidence.ingest import convert_list
 from argus.evidence.model import Evidence, NO_DESTINATION
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
 from argus.decision.engine import DecisionEngine as V13DecisionEngine
-from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS
+from argus.graph.store import (
+    GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS,
+    _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE, _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW,
+)
 from argus.graph.window import RollingWindowView
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import MLScorer
@@ -345,11 +348,26 @@ def _convert_active_evidence(v1_evidence_list, features: dict):
 def _query_graph_window(device_id: str, now: float) -> List:
     """Best-effort: returns [] on any failure rather than raising, so a graph
     problem degrades to "decide on this cycle's fresh evidence only" (exactly
-    today's pre-Phase-1 behavior), never blocks a real decision."""
+    today's pre-Phase-1 behavior), never blocks a real decision.
+
+    BUGFIX (2026-09-20, restart-cadence investigation): cap_per_type is now
+    passed here, hardware-profile-driven -- a real device found live on .94
+    generated 41,509 evidence rows in this SAME 24h window (39,551 of them
+    zeek_notice_weak, ~1 every 2.2s non-stop), and constructing+iterating that
+    many Evidence objects every 2s cycle for one device was blowing the
+    pipeline_main_loop's 60s heartbeat deadline, self-restarting every
+    ~12-14 minutes -- worse than Root Causes #1/#2 ever were. See
+    GraphStore._MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE's own comment for
+    why this bounds the pathological-volume case without losing genuine
+    signal (most-recent-first, and confirmed the specific case that motivated
+    this -- zeek_notice_weak's fixed per-tier confidence -- is mathematically
+    unaffected by which subset survives the cap)."""
     try:
         store = _get_graph_store()
         window = RollingWindowView(store)
-        return window.evidence_in_window(device_id, _GRAPH_QUERY_WINDOW_SECONDS, now=now)
+        cap = _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE.get(
+            _GRAPH_HARDWARE_PROFILE or "", _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW)
+        return window.evidence_in_window(device_id, _GRAPH_QUERY_WINDOW_SECONDS, now=now, cap_per_type=cap)
     except Exception as e:
         LOGGER.warning(
             "Failed to query GraphStore window for device %r, deciding on this "

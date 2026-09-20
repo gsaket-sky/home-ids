@@ -992,6 +992,82 @@ if real_archive_path.exists():
           any(line.get("evidence_id") == archived_ev2.evidence_id for line in archived_lines))
 archive_store.close()
 
+# --- BUGFIX (2026-09-20, restart-cadence investigation) ----------------------
+# get_evidence_for_device()'s cap_per_type: a real device found live on .94
+# generated 41,509 evidence rows (39,551 zeek_notice_weak) in ONE 24h window,
+# blowing the pipeline's 60s heartbeat deadline every ~2s decision cycle and
+# self-restarting every ~12-14 minutes. cap_per_type bounds how many rows of
+# any ONE evidence_type get constructed, most-recent-first, per device.
+cap_dir = tempfile.mkdtemp(prefix="v13_graph_cap_test_")
+cap_db_path = str(_PathForSysPath(cap_dir) / "test_graph.db")
+cap_store = GraphStore(cap_db_path)
+cap_dev = "dev_cap_test"
+cap_store.upsert_device(cap_dev)
+now_cap = time.time()
+
+# 500 zeek_notice_weak items (simulates the pathological volume) + 3 genuinely
+# distinct dns_behavior items -- the exact mixed shape a real chatty device has.
+weak_ids_oldest_to_newest = []
+for i in range(500):
+    ev = Evidence(device_id=cap_dev, destination_id=NO_DESTINATION, evidence_type="zeek_notice_weak",
+                   independence_family="network_behavior", timestamp=now_cap + i, source="s", confidence=0.4)
+    cap_store.insert_evidence(ev)
+    weak_ids_oldest_to_newest.append(ev.evidence_id)
+dns_ids = []
+for i in range(3):
+    ev = Evidence(device_id=cap_dev, destination_id=NO_DESTINATION, evidence_type="dns_behavior",
+                   independence_family="dns_behavior", timestamp=now_cap + 1000 + i, source="s", confidence=0.8)
+    cap_store.insert_evidence(ev)
+    dns_ids.append(ev.evidence_id)
+
+uncapped = cap_store.get_evidence_for_device(cap_dev)
+check("cap_per_type=None (the default) preserves the original fully-unbounded behavior",
+      len(uncapped) == 503, f"got {len(uncapped)}")
+
+capped = cap_store.get_evidence_for_device(cap_dev, cap_per_type=50)
+weak_in_capped = [e for e in capped if e.evidence_type == "zeek_notice_weak"]
+dns_in_capped = [e for e in capped if e.evidence_type == "dns_behavior"]
+check("cap_per_type=50 bounds the 500 zeek_notice_weak items down to 50",
+      len(weak_in_capped) == 50, f"got {len(weak_in_capped)}")
+check("cap_per_type=50 does NOT truncate a type with fewer items than the cap (all 3 dns_behavior survive)",
+      len(dns_in_capped) == 3, f"got {len(dns_in_capped)}")
+check("the capped result is still sorted ascending by timestamp (this method's own documented contract)",
+      all(capped[i].timestamp <= capped[i + 1].timestamp for i in range(len(capped) - 1)))
+kept_weak_ids = {e.evidence_id for e in weak_in_capped}
+most_recent_50_ids = set(weak_ids_oldest_to_newest[-50:])
+check("the 50 zeek_notice_weak items KEPT are the most-recent 50, not an arbitrary/oldest subset",
+      kept_weak_ids == most_recent_50_ids)
+
+cap_store.close()
+
+# --- evidence_for_destination_exists() (replaces domain_seen_before()'s own
+# previous full-fetch-then-scan implementation with a targeted EXISTS query) --
+exists_dir = tempfile.mkdtemp(prefix="v13_graph_exists_test_")
+exists_db_path = str(_PathForSysPath(exists_dir) / "test_graph.db")
+exists_store = GraphStore(exists_db_path)
+exists_dev = "dev_exists_test"
+exists_store.upsert_device(exists_dev)
+now_exists = time.time()
+old_hit = Evidence(device_id=exists_dev, destination_id="a.com", evidence_type="x",
+                     independence_family="f", timestamp=now_exists - 1800, source="s")
+exists_store.insert_evidence(old_hit)
+
+check("evidence_for_destination_exists finds a.com's older hit within a wide window",
+      exists_store.evidence_for_destination_exists(
+          exists_dev, "a.com", since=now_exists - 100_000, before=now_exists))
+check("evidence_for_destination_exists correctly returns False for a domain never contacted",
+      not exists_store.evidence_for_destination_exists(
+          exists_dev, "z.com", since=now_exists - 100_000, before=now_exists))
+check("evidence_for_destination_exists respects the `before` cutoff -- a.com's hit at "
+      "-1800s is excluded when `before` exclude everything after -3600s",
+      not exists_store.evidence_for_destination_exists(
+          exists_dev, "a.com", since=now_exists - 100_000, before=now_exists - 3600))
+check("evidence_for_destination_exists respects the `since` floor -- a.com's hit at "
+      "-1800s is excluded when `since` starts at -900s",
+      not exists_store.evidence_for_destination_exists(
+          exists_dev, "a.com", since=now_exists - 900, before=now_exists))
+exists_store.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

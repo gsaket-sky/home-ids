@@ -1,12 +1,12 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
-**Status (2026-09-20, updated): Phase 1 + the data-lifecycle retuning + the
-Zeek log retention gap are all implemented and tested locally, not yet
-deployed to `.94`.** Phase 2 (the retroactive cleanup migration) is written,
-tested against a synthetic reproduction of the exact live pathology, and
-ready to dry-run against `.94`'s real database -- pending the deploy. See
-"Implementation status" near the end of this document for the concrete
-file-by-file list.
+**Status (2026-09-20, latest): Phases 1-4 all implemented, deployed to `.94`,
+and verified.** Cadence verification AFTER deploying Phases 1-3 found the
+restarts were still happening -- every ~12-14 minutes, WORSE than before --
+from a completely different, previously-undiscovered cause (evidence-volume
+flooding, not DB bloat). See "Root Cause #3" below for the full incident;
+that fix is also now implemented, tested, and deployed. See "Implementation
+status" near the end of this document for the concrete file-by-file list.
 
 Written 2026-09-20 after a
 live investigation on `.94` (read-only: `systemctl status`, `journalctl`,
@@ -424,6 +424,110 @@ for symmetry) export before deleting.
    dangling-edge issue. Not urgent (this table doesn't bloat from it either
    way, since it's upsert-keyed), but worth a look once higher-priority
    Phase 1/2 work is done.
+
+## Root Cause #3: evidence-volume flooding (found 2026-09-20, AFTER deploying Phases 1-3)
+
+Cadence verification -- the actual point of this section, done right after
+deploying Phases 1-3 -- found the restarts had NOT stopped. They'd gotten
+**worse**: every ~12-14 minutes, versus the original 1.5-3.5 hours. This is a
+different bug from Root Causes #1/#2, not a regression from today's fix (the
+fix is confirmed working: newest decisions checked live were ~41KB, not 22MB,
+and `attack_evidence`/`winning_evidence` are correctly absent from stored
+payloads).
+
+**Diagnosis** (all read-only against `.94`'s live system): the restarts were
+`pipeline_main_loop -> UNHEALTHY (heartbeat stale for 312s, expected ~60s)` --
+the PER-COMPONENT heartbeat state machine, not the RSS-based resource-pressure
+tier this whole document was otherwise about. The dying process had consumed
+6m14s of CPU over an 11m12s stall -- busy the whole time, not blocked/idle.
+Found the cause: one real device (a smart TV, `2d313502b7d0`) generated
+**41,509 evidence rows in 24 hours** (39,551 `zeek_notice_weak`, ~1 every
+2.2s non-stop). The SQL query itself was fast (0.225s, correctly used
+`idx_evidence_device_ts`) -- the cost was constructing and iterating 41,509
+`Evidence` objects through the full HypothesisEngine (~20-30 separate O(N)
+hypothesis checks, no single one quadratic, but K checks x N items adds up
+fast) EVERY 2-second decision cycle, for one device, blowing the 60s
+heartbeat deadline. Also found, same device: 180,274 rows of the OLD,
+unfragmented `zeek_notice` type (not `_weak`/`_medium`), dated 10.8-13.9 days
+ago -- pure historical debt from before the tier-classification fix landed
+weeks ago, never cleaned up because it doesn't match the exact string
+`prune_weak_zeek_notices()` filters on, sitting under the general 90-day
+retention. Not the active cause (new writes are correctly classified), but
+real, unaddressed debt.
+
+**Why the obvious fix (exclude weak-tier from the live window) would have
+been WRONG** -- checked before implementing, not assumed: `zeek_notice_weak`'s
+confidence is a FIXED per-tier constant (0.4, `ZEEK_NOTICE_TIER_CONFIDENCE`),
+and its family (`network_behavior`) IS in `_PARTIAL_SUPPORT_FAMILIES`,
+feeding `evidence_verification_required` via an averaged `hypothesis_weight`
+across all partial-support evidence. A blanket exclusion would have silently
+broken that signal. But this is ALSO a latent scoring bug in its own right:
+averaging thousands of identical 0.4 values together with a handful of
+genuinely distinct signals can swamp real evidence down toward 0.4,
+regardless of what the real signal actually shows -- duplicated observations
+of the same tier carry zero additional information.
+
+**The actual fix, network-agnostic per explicit user request** (not scoped
+to zeek or to weak-tier specifically -- ANY evidence_type could flood this
+way for a genuinely infected/misbehaving device, not just routine smart-TV
+noise): `GraphStore.get_evidence_for_device()` gained an optional
+`cap_per_type` parameter (`None` preserves the original, fully-unbounded
+behavior for every audit/replay consumer) -- when set, at most N most-recent
+rows of any ONE `evidence_type` get constructed into `Evidence` objects per
+device, via a cheap distinct-types query plus one `LIMIT`-bounded,
+most-recent-first query per type (2 round trips total, never one unbounded
+fetch). `_MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE` (50 `pi_8gb` / 100
+`x86_16gb`/`custom`) matches the existing profile-scaled-cap convention
+already used for supporting-evidence edges. `live_engine.py`'s
+`_query_graph_window()` (the actual live per-cycle call site) now passes this
+cap. Confirmed mathematically lossless for the case that motivated it (a
+fixed-confidence tier): averaging any subset of identical values gives the
+identical result, and `independence_families` is already a Python `set` (only
+ever affected by which DISTINCT families are present, never by within-family
+volume) -- this cap only removes redundant, informationally-empty duplicates,
+never genuine signal, and a real sustained attack still keeps every relevant
+item up to the cap.
+
+**A second, worse instance found by systematically checking siblings** (user
+asked: is this hiding elsewhere -- evidence graph, HEE, Suricata?):
+`window.py`'s `domain_seen_before()` -- "has this device ever contacted this
+destination" -- called `get_evidence_for_device()` across up to a 90-day
+lookback just to answer a yes/no question, meaning a device with a large
+history could pay the FULL unbounded-fetch cost for a pure existence check.
+Replaced with `GraphStore.evidence_for_destination_exists()`, a targeted
+`SELECT 1 ... LIMIT 1` that short-circuits on the first match using the same
+index -- identical result (verified against the pre-existing
+`test_argus_graph_window.py` suite, unchanged, all still passing), without
+ever constructing an `Evidence` object.
+
+**Checked and confirmed CLEAN, not just assumed:**
+- **HEE** (`hypotheses/engine.py`): ~20-30 hypothesis checks, each a plain
+  `any()`/list-comprehension linear scan over the evidence list -- O(K x N),
+  no quadratic pattern found. Fixing the INPUT size (both fixes above)
+  proportionally fixes HEE's own exposure too; no separate HEE-side change
+  needed.
+- **Suricata** (`intelligence/detectors/suricata_scan.py`): write-only,
+  batch/reactive-invocation based (confirmed earlier in this same
+  investigation -- it only runs against a specific burst pcap file, not a
+  continuous stream) -- never reads back historical per-device evidence at
+  all, so it doesn't share this bug class.
+
+**Flagged, not fixed (lower priority, structurally different)**:
+`live_engine.py`'s DGA coordinated-targeting check calls
+`get_evidence_by_type_since()` -- cross-device, ONE evidence_type, scoped to
+`_COORDINATED_TARGETING_WINDOW_SECONDS` -- theoretically the same bug class
+(system-wide DGA evidence volume, not one device's spam) but no live evidence
+it's actually large in practice today. Worth the same cap treatment if it
+ever is.
+
+**Testing**: `tests/test_argus_graph_store.py` (cap_per_type correctness,
+most-recent-first ordering, `evidence_for_destination_exists` correctness),
+`tests/test_argus_graph_window.py` (pre-existing `domain_seen_before` suite,
+unchanged, confirms the rewrite is behavior-identical), `tests/
+test_argus_live_engine.py` (new section K: confirms `_query_graph_window()`
+actually applies the cap end-to-end, not just that the primitive exists in
+isolation), plus the FULL `test_real_world_alert_regression.py` suite (every
+real historical incident's verdict unchanged) -- all passing.
 
 ## Storage capacity projection (added 2026-09-20)
 

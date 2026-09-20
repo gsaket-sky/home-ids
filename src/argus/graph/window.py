@@ -32,9 +32,16 @@ class RollingWindowView:
         self.store = store
 
     def evidence_in_window(self, device_id: str, window_seconds: float,
-                             now: Optional[float] = None) -> List[Evidence]:
+                             now: Optional[float] = None,
+                             cap_per_type: Optional[int] = None) -> List[Evidence]:
+        """cap_per_type (2026-09-20, restart-cadence investigation): passed
+        straight through to GraphStore.get_evidence_for_device() -- see that
+        method's own docstring. None (the default) is this method's original,
+        fully-unbounded behavior; live_engine.py's own live per-cycle call is
+        the one caller that passes a real, hardware-profile-driven cap."""
         now = now if now is not None else time.time()
-        return self.store.get_evidence_for_device(device_id, since=now - window_seconds)
+        return self.store.get_evidence_for_device(
+            device_id, since=now - window_seconds, cap_per_type=cap_per_type)
 
     def domain_counts(self, device_id: str, window_seconds: float = LONG_WINDOW_SECONDS,
                         now: Optional[float] = None) -> Counter:
@@ -58,14 +65,17 @@ class RollingWindowView:
         exclude_window_seconds lets a caller ask "seen before the CURRENT alert's
         own window" by excluding the most recent slice -- e.g. lookback_seconds=90days,
         exclude_window_seconds=SHORT_WINDOW_SECONDS asks "was this destination
-        familiar before this specific incident started," not just "ever.\""""
+        familiar before this specific incident started," not just "ever."
+
+        BUGFIX (2026-09-20, restart-cadence investigation): used to fetch and
+        construct EVERY evidence row for the device across the whole
+        lookback_seconds window (up to 90 days) just to answer this yes/no
+        question -- see GraphStore.evidence_for_destination_exists()'s own
+        docstring for the full incident. Now a targeted existence query,
+        identical result, without ever paying for a bulk fetch."""
         now = now if now is not None else time.time()
-        evidence = self.store.get_evidence_for_device(device_id, since=now - lookback_seconds)
-        cutoff = now - exclude_window_seconds
-        return any(
-            ev.destination_id == destination_id and ev.timestamp < cutoff
-            for ev in evidence
-        )
+        return self.store.evidence_for_destination_exists(
+            device_id, destination_id, since=now - lookback_seconds, before=now - exclude_window_seconds)
 
     def evidence_type_counts(self, device_id: str, window_seconds: float = LONG_WINDOW_SECONDS,
                                now: Optional[float] = None) -> Dict[str, int]:

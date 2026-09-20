@@ -990,6 +990,43 @@ check("J6: the cached value matches this cycle's real attack hypothesis score, n
 _j_store = live_engine._get_graph_store()
 _j_store.close()
 
+# --- K: cap_per_type is actually wired end-to-end into the live per-cycle path
+# (2026-09-20, restart-cadence investigation) -- a real device found live on
+# .94 generated 41,509 evidence rows (39,551 zeek_notice_weak) in ONE 24h
+# window, blowing the pipeline's 60s heartbeat deadline every cycle. This
+# confirms _query_graph_window() actually applies GraphStore's own cap, not
+# just that the cap mechanism exists in isolation (test_argus_graph_store.py's
+# own job) -- the real regression is in the WIRING, not the primitive.
+_k_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_cap_test_")
+_k_graph_db_path = str(_PathForSysPath(_k_tmpdir) / "k_graph.db")
+live_engine.configure(_k_graph_db_path, hardware_profile="x86_16gb")
+_k_store = live_engine._get_graph_store()
+_k_now = 5_000_000.0
+_k_store.upsert_device("devK")
+for i in range(300):  # far more than x86_16gb's 100-per-type cap
+    _k_store.insert_evidence(Evidence(
+        device_id="devK", destination_id=NO_DESTINATION, evidence_type="zeek_notice_weak",
+        independence_family="network_behavior", timestamp=_k_now - 100 + i, source="s", confidence=0.4))
+_k_store._maybe_commit()
+
+_k_windowed = live_engine._query_graph_window("devK", _k_now)
+check("K: _query_graph_window() actually caps a real device's oversized single-type "
+      "evidence volume down to the hardware profile's own limit (x86_16gb: 100), not "
+      "the full 300 rows genuinely present in the graph",
+      len(_k_windowed) == 100, f"got {len(_k_windowed)}")
+
+# devK's evaluate() call must not hang/degrade even with this volume present --
+# the actual live symptom this fix closes (a 2s cycle taking long enough to blow
+# a 60s heartbeat deadline). Not a timing assertion (too flaky cross-machine),
+# just confirms the call completes and returns a normal, sane verdict.
+_k_result = live_engine.evaluate(
+    [], ReputationVector(domain="", tier=0), features={}, device_id="devK", now=_k_now)
+check("K: evaluate() for a device with a huge single-type evidence backlog still "
+      "returns a normal verdict shape, not a crash or hang",
+      _k_result.get("state") in ("BENIGN", "ANOMALOUS", "SUSPICIOUS", "HIGH", "CRITICAL"))
+
+_k_store.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")
