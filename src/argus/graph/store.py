@@ -1306,16 +1306,35 @@ class GraphStore:
             out.append(d)
         return out
 
-    def get_latest_decision_for_device(self, device_id: str) -> Optional[Dict[str, Any]]:
+    def get_latest_decision_for_device(self, device_id: str, resolve_merges: bool = True) -> Optional[Dict[str, Any]]:
         """Release 15, closed-loop autotuning architecture: the no-learning-
         during-an-incident gate (Design Invariant 06) needs a device's
         CURRENT state, not a windowed query -- one row, newest first, backed
         by idx_decisions_device_ts so this is an index-order scan, not a
         table sort. Returns None for a device with no decision history yet
-        (treated as BENIGN/no gate by callers, never as an error)."""
+        (treated as BENIGN/no gate by callers, never as an error).
+
+        BUGFIX (2026-09-20, identity-merge handover follow-up): used to query
+        `device_id` literally, with no canonical resolution -- unlike
+        get_evidence_for_device()'s already-established resolve_merges
+        behavior. A stale reference to a since-merged orphan id would miss
+        the canonical device's actual latest decision (or, worse, keep
+        seeing whatever the orphan's own last decision was, frozen forever).
+        Also considers decisions recorded under any OTHER id that ever
+        resolved (directly or transitively) into this canonical id -- the
+        orphan may well have its own real decision history from before it
+        was merged away, and this device's incident-cooldown gate should see
+        the whole physical device's history, not just its current identity's
+        slice of it."""
+        if resolve_merges:
+            canonical = self.resolve_canonical_device_id(device_id)
+            device_ids = self._all_ids_resolving_to(canonical)
+        else:
+            device_ids = [device_id]
+        placeholders = ",".join("?" * len(device_ids))
         row = self._conn.execute(
-            "SELECT * FROM decisions WHERE device_id = ? ORDER BY timestamp DESC LIMIT 1",
-            (device_id,),
+            f"SELECT * FROM decisions WHERE device_id IN ({placeholders}) ORDER BY timestamp DESC LIMIT 1",
+            device_ids,
         ).fetchone()
         if row is None:
             return None

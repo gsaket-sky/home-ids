@@ -464,13 +464,18 @@ class StateManager:
         src/merge_fragmented_devices.py for the offline one-time cleanup script that
         also calls this directly against the on-disk state file.
 
-        Per explicit product decision: the orphan's OWN accumulated state (baselines,
-        evidence, learned thresholds) is DISCARDED, not blended into the canonical
-        identity's — the orphan is typically far sparser (cold-started with
-        hostname/mac unresolved) than the canonical identity it's being folded into.
-        Only its identifying pointers (known_ips, MAC bindings, blocked-domain
+        Per explicit product decision: the orphan's OWN accumulated STATISTICAL state
+        (baselines, evidence, learned thresholds) is DISCARDED, not blended into the
+        canonical identity's — the orphan is typically far sparser (cold-started with
+        hostname/mac unresolved) than the canonical identity it's being folded into,
+        and blending a near-empty estimator into a mature one would corrupt it, not
+        improve it. Its identifying pointers (known_ips, MAC bindings, blocked-domain
         attribution) are redirected so future traffic and existing operator-facing
-        records correctly resolve to the canonical id.
+        records correctly resolve to the canonical id. EXCEPTION (2026-09-20, identity-
+        merge handover follow-up): confirmed_threat_count/fp_count/has_validated_threat
+        ARE carried forward (summed/OR'd into the canonical) -- these are simple counts
+        of real, discrete operator actions against this physical device, not statistical
+        estimators, so summing them is lossless and correct rather than corrupting.
 
         Idempotent / safe: a no-op returning False if canonical_id isn't a currently
         tracked device, if orphan_id == canonical_id, or if orphan_id isn't currently
@@ -510,6 +515,31 @@ class StateManager:
             for ip in orphan_ips:
                 self._ip_to_device_id[ip] = canonical_id
                 canonical_state.known_ips.add(ip)
+
+            # BUGFIX (2026-09-20, identity-merge handover follow-up): carry forward the
+            # orphan's operator-confirmed incident counters instead of silently dropping
+            # them. Per the discard-not-blend policy documented above, STATISTICAL state
+            # (baselines, learned thresholds, ML models, FP calibration) stays discarded
+            # -- blending a near-empty orphan's estimator into the canonical's mature one
+            # would corrupt it, not improve it. These three fields are different in kind:
+            # they're simple, monotonically-incrementing counts of real operator actions
+            # (a human confirmed a threat / marked a false positive against THIS physical
+            # device, e.g. fritzbox_api.py's isolate action or pihole_api.py's mark-FP/
+            # mark-threat actions), not a statistical estimate that degrades when summed.
+            # Losing them on merge would silently erase a device's real incident history
+            # and could make an already-flagged device look falsely clean right after a
+            # routine identity-merge event that has nothing to do with its actual risk.
+            canonical_state.confirmed_threat_count = (
+                getattr(canonical_state, "confirmed_threat_count", 0)
+                + getattr(orphan_state, "confirmed_threat_count", 0)
+            )
+            canonical_state.fp_count = (
+                getattr(canonical_state, "fp_count", 0) + getattr(orphan_state, "fp_count", 0)
+            )
+            canonical_state.has_validated_threat = (
+                getattr(canonical_state, "has_validated_threat", False)
+                or getattr(orphan_state, "has_validated_threat", False)
+            )
 
             # Redirect the MAC-correlation index the same way migrate_device_id() does.
             self._repoint_mac_index(orphan_id, canonical_id)

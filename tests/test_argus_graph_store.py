@@ -157,6 +157,37 @@ except RuntimeError as e:
     check("resolve_canonical_device_id still detects a cycle written by some other means, "
           "rather than infinite-looping", "cycle" in str(e))
 
+# --- get_latest_decision_for_device() merge resolution (2026-09-20 handover follow-up) ---
+# BUGFIX: used to query `device_id` literally with no canonical resolution -- unlike
+# get_evidence_for_device()'s already-established resolve_merges behavior. A stale
+# reference to a since-merged orphan id would miss the canonical device's actual
+# latest decision.
+store.insert_decision("decOrphan", timestamp=800.0, state="SUSPICIOUS",
+                        decision_path="orphan_path", confidence=0.5, risk_score=3.0)
+store.merge_device("decOrphan", "decCanonical", timestamp=810.0)
+store.insert_decision("decCanonical", timestamp=820.0, state="HIGH",
+                        decision_path="canonical_path", confidence=0.8, risk_score=6.0)
+
+latest_via_canonical = store.get_latest_decision_for_device("decCanonical")
+check("get_latest_decision_for_device: querying the canonical id returns its own latest decision",
+      latest_via_canonical is not None and latest_via_canonical["decision_path"] == "canonical_path")
+
+latest_via_orphan = store.get_latest_decision_for_device("decOrphan")
+check("THE FIX: querying a since-merged ORPHAN id resolves through to the canonical "
+      "device's actual latest decision, not the orphan's own frozen last decision",
+      latest_via_orphan is not None and latest_via_orphan["decision_path"] == "canonical_path",
+      f"got={latest_via_orphan}")
+
+latest_via_orphan_unresolved = store.get_latest_decision_for_device("decOrphan", resolve_merges=False)
+check("resolve_merges=False preserves the original literal, unresolved behavior",
+      latest_via_orphan_unresolved is not None
+      and latest_via_orphan_unresolved["decision_path"] == "orphan_path",
+      f"got={latest_via_orphan_unresolved}")
+
+check("get_latest_decision_for_device returns None for a device with no decision history "
+      "(unaffected by the merge-resolution change)",
+      store.get_latest_decision_for_device("never_decided_device") is None)
+
 # --- retention pruning ---
 now = 10_000_000.0
 old_ev = Evidence(device_id="devold", destination_id=NO_DESTINATION, evidence_type="x",

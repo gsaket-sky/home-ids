@@ -434,6 +434,67 @@ check("compute_drift_result: the category finding's own device_id is None "
       len(cat_findings) == 1 and cat_findings[0]["device_id"] is None)
 
 
+# =============================================================================
+# HANDOVER FOLLOW-UP (2026-09-20): device-scoped reads/writes must resolve an
+# identity merge (core/state_guard.py's merge_into_canonical(), mirrored into
+# the graph via GraphStore.merge_device()) -- otherwise a device's own tuned
+# threshold history, and its cooldown clock, would silently go blind the
+# moment that device gets folded into a richer canonical identity.
+# =============================================================================
+store6 = GraphStore(":memory:")
+engine6 = AutotuneEngine(store6)
+MERGE_NOW = NOW + 300000
+_insert_backtest(store6, "bt6", True, at=MERGE_NOW)
+store6.upsert_device("orphan_dev6", device_type="iot", timestamp=MERGE_NOW)
+
+# The device's OWN threshold was promoted BEFORE it existed under its richer
+# canonical identity (e.g. tuned while still IP-anchored, before its MAC
+# became known and it got folded into a MAC-anchored canonical id).
+_promote_directly(store6, "orphan_dev6", "hard_stop_candidate_sensitivity", 0.80, MERGE_NOW)
+check("setup: the orphan's own device-scoped value is visible before any merge",
+      engine6.get_active_value("hard_stop_candidate_sensitivity", device_id="orphan_dev6") == 0.80)
+
+store6.merge_device("orphan_dev6", "canonical_dev6", timestamp=MERGE_NOW + 10)
+
+check("THE FIX: querying the CANONICAL id after the merge still finds the "
+      "orphan's promoted value -- it's the same physical device's tuning "
+      "history, not a fresh one that should start at global/category defaults",
+      engine6.get_active_value("hard_stop_candidate_sensitivity", device_id="canonical_dev6") == 0.80)
+check("THE FIX: querying the now-stale ORPHAN id also still resolves through "
+      "to the same value (consistent with get_evidence_for_device()'s own "
+      "resolve_merges convention)",
+      engine6.get_active_value("hard_stop_candidate_sensitivity", device_id="orphan_dev6") == 0.80)
+
+# A NEW proposal made against the (stale) orphan id must land on the
+# canonical id's row, not re-create a dead scope that would go invisible
+# again the next time anyone reads by the canonical id.
+r_merge_propose = engine6.propose_change(
+    "hard_stop_candidate_sensitivity", 0.75, "tuning after the merge",
+    device_id="orphan_dev6", backtest_run_id="bt6", now=MERGE_NOW + 20000,
+)
+check("propose_change: a proposal made against the stale orphan id is accepted",
+      r_merge_propose.accepted, r_merge_propose.reason)
+written_row = store6._conn.execute(
+    "SELECT device_id FROM threshold_history WHERE change_id=?", (r_merge_propose.change_id,),
+).fetchone()
+check("THE FIX: the new proposal's row is written under the CANONICAL id, "
+      "never the stale orphan id it was called with",
+      written_row["device_id"] == "canonical_dev6", f"got={dict(written_row)}")
+
+# The cooldown clock must also be shared across the merge -- an immediate
+# second proposal against EITHER id is still the same physical device's
+# cooldown, not a fresh one.
+r_merge_propose_2 = engine6.propose_change(
+    "hard_stop_candidate_sensitivity", 0.72, "immediate second attempt",
+    device_id="canonical_dev6", backtest_run_id="bt6", now=MERGE_NOW + 20001,
+)
+check("THE FIX: the cooldown clock is shared across the merge -- an "
+      "immediate second proposal (via the canonical id this time) is "
+      "rejected on cooldown, not treated as a fresh scope",
+      r_merge_propose_2.accepted is False and "cooldown" in r_merge_propose_2.reason,
+      r_merge_propose_2.reason)
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

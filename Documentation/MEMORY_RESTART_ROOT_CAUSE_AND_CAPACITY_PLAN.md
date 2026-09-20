@@ -764,6 +764,50 @@ see their own status notes further down. Everything in this section was
 originally either a direct log quote/traceback from `.94` or a file:line read
 directly, not inferred.
 
+**Second update, same day: merge-completeness follow-up.** After Bug A's fix,
+the user asked that a device merge also correctly carry over everything
+associated with the orphan -- the evidence graph, metrics, and per-device
+files in state/model directories. Audited all three before changing anything
+(per this project's own network-agnostic/verify-first standing rule):
+
+- **Evidence graph**: already correct. `GraphStore.merge_device()` tombstones
+  the orphan (`merged_into_device_id`, never deleted) and `get_evidence_for_device()`
+  already walks that chain. One real gap found and fixed:
+  `get_latest_decision_for_device()` queried `device_id` literally with no
+  canonical resolution -- fixed to resolve through the merge chain the same
+  way, with a `resolve_merges=True` default matching the evidence method's
+  own convention.
+- **Autotune per-device thresholds** (`argus/autotune/engine.py`): a real,
+  previously-unaudited gap -- `get_active_value()`/`propose_change()`/the
+  cooldown clock all matched `device_id` literally against `threshold_history`.
+  A device's own tuned threshold, and its cooldown, would have gone silently
+  invisible the moment it merged into a richer canonical identity. Fixed:
+  reads now resolve across every id that ever merged into the current
+  canonical; writes always resolve `device_id` to canonical BEFORE the row is
+  written, so a new proposal can never land under a soon-to-be-orphaned id.
+- **ML models / FP calibration / statistical baselines**: confirmed these are
+  discarded, not blended, by DELIBERATE prior design (not a bug) -- orphan
+  state is typically near-empty, and blending it into a mature canonical
+  model/baseline would corrupt it, not improve it. Explicitly asked the user
+  whether to keep or reverse this; user chose to keep it.
+- **Metrics / per-device files**: `ml_engine.py`'s per-device `.pkl` file and
+  `fp_engine.py`'s JSON-keyed calibration profile are correctly discarded
+  alongside the same statistical state above (no orphaned files left behind
+  either way). The one real gap: `confirmed_threat_count`/`fp_count`/
+  `has_validated_threat` on `DeviceState` are simple counts of real,
+  discrete operator actions (an operator confirmed a threat or marked a false
+  positive), not statistical estimators -- these are DIFFERENT in kind and
+  were being silently dropped on merge. Fixed: `merge_into_canonical()` now
+  sums the counts and ORs the flag into the canonical device. This also
+  automatically fixes the metrics/graph mirror for these three fields, since
+  `DeviceState.to_graph_metadata()` already mirrors them into the graph on
+  every `flush_to_disk()` -- no separate metrics-side change was needed.
+
+All three fixes covered by real regression tests (`test_argus_graph_store.py`,
+`test_argus_autotune_engine.py`, `test_phase39_retroactive_identity_merge.py`)
+and the full real-world alert regression suite re-run clean. Not yet deployed
+to `.94`.
+
 ### The original anomaly: device_baselines has 89 distinct device_ids for ~13 real devices
 
 Flagged earlier in this same investigation (see the data-lifecycle retuning

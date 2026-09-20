@@ -135,14 +135,38 @@ class AutotuneEngine:
         """One exact-scope lookup -- device-specific (device_id set, device_type
         NULL), category-specific (device_type set, device_id NULL), or global
         (both NULL). Never falls back on its own; get_active_value() below is
-        what walks the tiers."""
+        what walks the tiers.
+
+        BUGFIX (2026-09-20, identity-merge handover follow-up): the device
+        tier used to match `device_id` literally -- a device-scoped
+        threshold tuned BEFORE this device was merged into a richer
+        canonical identity (see core/state_guard.py's merge_into_canonical())
+        would silently become invisible after the merge, since the row is
+        still stored under the orphan's old id and nothing ever re-pointed
+        it. Mirrors get_evidence_for_device()/get_latest_decision_for_device()'s
+        own resolve_merges convention: considers every id that ever resolved
+        (directly or transitively) into this device's current canonical id,
+        not just its literal current value."""
+        if device_id is not None:
+            candidate_ids = self.store._all_ids_resolving_to(
+                self.store.resolve_canonical_device_id(device_id)
+            )
+            placeholders = ",".join("?" * len(candidate_ids))
+            row = self.store._conn.execute(
+                f"SELECT new_value FROM threshold_history WHERE parameter=? AND "
+                f"device_id IN ({placeholders}) AND device_type IS NULL AND "
+                f"promoted_at IS NOT NULL AND rolled_back_at IS NULL "
+                f"ORDER BY promoted_at DESC LIMIT 1",
+                [parameter, *candidate_ids],
+            ).fetchone()
+            return float(row["new_value"]) if row is not None else None
         row = self.store._conn.execute(
             "SELECT new_value FROM threshold_history WHERE parameter=? AND "
-            "(device_id=? OR (device_id IS NULL AND ? IS NULL)) AND "
+            "device_id IS NULL AND "
             "(device_type=? OR (device_type IS NULL AND ? IS NULL)) AND "
             "promoted_at IS NOT NULL AND rolled_back_at IS NULL "
             "ORDER BY promoted_at DESC LIMIT 1",
-            (parameter, device_id, device_id, device_type, device_type),
+            (parameter, device_type, device_type),
         ).fetchone()
         return float(row["new_value"]) if row is not None else None
 
@@ -176,13 +200,36 @@ class AutotuneEngine:
                               device_type: Optional[str] = None) -> Optional[float]:
         """Cooldown lookup is an EXACT scope match, deliberately not a fallback --
         a pending device-scoped proposal's cooldown must never be confused with
-        its category's own, separate cooldown clock."""
+        its category's own, separate cooldown clock.
+
+        BUGFIX (2026-09-20, identity-merge handover follow-up): same
+        merge-blindness gap as _promoted_value_at_scope() above -- a device's
+        cooldown clock must keep ticking across an identity merge (it's the
+        same physical device), not silently reset because its proposal
+        history is still filed under an id that's since been merged away.
+        `propose_change()` always passes the ALREADY-RESOLVED canonical
+        device_id here (see its own resolve-at-entry fix), so this call
+        itself always uses row_device_id == the canonical id -- the IN-clause
+        expansion is what makes an EARLIER proposal, written under the
+        orphan's own pre-merge id, still count against that same cooldown."""
+        if device_id is not None:
+            candidate_ids = self.store._all_ids_resolving_to(
+                self.store.resolve_canonical_device_id(device_id)
+            )
+            placeholders = ",".join("?" * len(candidate_ids))
+            row = self.store._conn.execute(
+                f"SELECT proposed_at FROM threshold_history WHERE parameter=? AND "
+                f"device_id IN ({placeholders}) AND device_type IS NULL "
+                f"ORDER BY proposed_at DESC LIMIT 1",
+                [parameter, *candidate_ids],
+            ).fetchone()
+            return float(row["proposed_at"]) if row is not None else None
         row = self.store._conn.execute(
             "SELECT proposed_at FROM threshold_history WHERE parameter=? AND "
-            "(device_id=? OR (device_id IS NULL AND ? IS NULL)) AND "
+            "device_id IS NULL AND "
             "(device_type=? OR (device_type IS NULL AND ? IS NULL)) "
             "ORDER BY proposed_at DESC LIMIT 1",
-            (parameter, device_id, device_id, device_type, device_type),
+            (parameter, device_type, device_type),
         ).fetchone()
         return float(row["proposed_at"]) if row is not None else None
 
@@ -227,6 +274,16 @@ class AutotuneEngine:
         now = now if now is not None else time.time()
         if parameter not in TUNABLE_PARAMETERS:
             return ProposalResult(False, reason=f"'{parameter}' is not on the tunable allowlist")
+
+        # BUGFIX (2026-09-20, identity-merge handover follow-up): resolve device_id
+        # to its live canonical id BEFORE it's used for anything below -- a NEW
+        # proposal must never be written under an id that's already been (or is
+        # about to be) merged away, or it would join the same class of
+        # merge-blindness bug _promoted_value_at_scope()/_last_proposal_time()
+        # were just fixed for. A no-op for the ordinary case (device_id was
+        # never merged, or was already canonical).
+        if device_id is not None:
+            device_id = self.store.resolve_canonical_device_id(device_id)
 
         # The row's OWN scope -- device_id wins if given (device_type, if also
         # given, is a parent-resolution hint only, never written).

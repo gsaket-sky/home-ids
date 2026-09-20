@@ -84,6 +84,14 @@ sm = StateManager(state_path="/tmp/_phase39_test_state_a.json")
 canonical = sm.get_or_create("canon_id", IPV4, "smart-tv")
 canonical.mac_address = MAC
 orphan = sm.get_or_create("orphan_id", IPV6_LL, "unknown")
+# HANDOVER FOLLOW-UP (2026-09-20): real operator-confirmed incident counters on both
+# sides -- these must be CARRIED FORWARD (summed/OR'd), unlike statistical state.
+canonical.confirmed_threat_count = 2
+canonical.fp_count = 1
+canonical.has_validated_threat = True
+orphan.confirmed_threat_count = 3
+orphan.fp_count = 5
+orphan.has_validated_threat = False
 
 check("safety: merge_into_canonical() with a canonical_id that isn't tracked is a no-op",
       sm.merge_into_canonical("orphan_id", "nonexistent_id") is False)
@@ -111,6 +119,15 @@ check("ml_registry.discard_device() was called for the orphan with reason=\"merg
 check("fp_engine.discard_device_profile() was called for the orphan with reason=\"merge\"",
       fake_fp.discarded == [("orphan_id", "merge")])
 
+canon_after_merge = sm.get_or_create("canon_id", IPV4, "smart-tv")
+check("THE FIX: confirmed_threat_count is CARRIED FORWARD (summed), not discarded -- a "
+      "real operator-confirmed incident count, not statistical state",
+      canon_after_merge.confirmed_threat_count == 5, f"got={canon_after_merge.confirmed_threat_count}")
+check("THE FIX: fp_count is CARRIED FORWARD (summed) too",
+      canon_after_merge.fp_count == 6, f"got={canon_after_merge.fp_count}")
+check("THE FIX: has_validated_threat is OR'd -- the canonical was already True, stays True",
+      canon_after_merge.has_validated_threat is True)
+
 check("idempotent: merging the same (now-gone) orphan a second time is a safe no-op",
       sm.merge_into_canonical("orphan_id", "canon_id") is False)
 
@@ -135,10 +152,14 @@ check("the isolation side channel is consume-once (drained by the pop above)",
       sm_b.pop_last_migrated_isolation_target() is None)
 
 sm_c = StateManager(state_path="/tmp/_phase39_test_state_c.json")
-sm_c.get_or_create("canon_c", IPV4, "smart-tv")
+canon_c = sm_c.get_or_create("canon_c", IPV4, "smart-tv")
 orphan_c = sm_c.get_or_create("orphan_c", IPV6_LL, "orphan-host")
 orphan_c.device_type = "laptop"
+orphan_c.has_validated_threat = True  # canon_c stays at its False default
 sm_c.merge_into_canonical("orphan_c", "canon_c")
+check("THE FIX: has_validated_threat is OR'd the OTHER direction too -- the orphan "
+      "was the one flagged True, and that fact survives onto the canonical",
+      canon_c.has_validated_threat is True)
 cleanup_info = sm_c.pop_last_orphan_merge_cleanup()
 check("the new orphan-merge-cleanup side channel carries the orphan's id/hostname/type "
       "and the canonical id it was folded into",
