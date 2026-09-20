@@ -102,31 +102,60 @@ def inject_benign_drift_and_evaluate(source_store: GraphStore, device_id: str,
     BENIGN, weird-but-harmless drift and confirms it does NOT fire -- a
     false-positive-resistance test, not a detection-recall one. A tuner that
     passes every inject_and_evaluate() floor by becoming maximally
-    aggressive should fail this check instead."""
+    aggressive should fail this check instead.
+
+    BUGFIX (2026-09-20, found while investigating why Sheet 03a's nightly
+    backtest gate had never once passed): `false_positive` used to be just
+    `decision["state"] in _DETECTED_STATES` -- flagging a device as a false
+    positive whenever it was non-BENIGN AFTER adding the synthetic evidence,
+    with no check for whether it was ALREADY non-BENIGN BEFORE adding it.
+    Confirmed live on `.94`: 3 of the 6 devices failing this check every
+    single night for 5 nights straight were already SUSPICIOUS from their
+    own real, ongoing evidence (zeek_notice_medium/dns_tunnel_v2) -- exactly
+    matching this project's own documented, already-tested behavior
+    (test_real_world_alert_regression.py's own DNS_COVERT_TUNNELING case:
+    "a single dns_behavior-family finding stays SUSPICIOUS"). The synthetic
+    first_contact item had ZERO effect on those 3 devices' outcome (verified
+    directly: identical state with and without it) -- this test was
+    penalizing the nightly backtest gate for a device's own correct,
+    pre-existing classification, not for anything the synthetic injection
+    actually caused. Now compares against a BASELINE evaluation (the same
+    cloned real evidence, WITHOUT the synthetic addition) and only counts it
+    as a false positive if the synthetic evidence caused a NEW escalation
+    the device wasn't already at -- the actual thing this test exists to
+    catch."""
     now = now if now is not None else time.time()
     clone = clone_device_state(source_store, device_id, now=now)
     try:
+        window = RollingWindowView(clone)
+        window_seconds = window_seconds if window_seconds is not None else RollingWindowView.LONG_WINDOW_SECONDS
+        rep_classifier = reputation_classifier or ReputationClassifier()
+        engine = decision_engine or DecisionEngine()
+
+        def _evaluate_current_clone_state() -> Dict[str, Any]:
+            evidence_list = window.evidence_in_window(device_id, window_seconds, now=now)
+            target_domain = ""
+            for ev in reversed(evidence_list):
+                if ev.destination_id != NO_DESTINATION:
+                    target_domain = ev.destination_id
+                    break
+            rep = rep_classifier.classify(target_domain)
+            return engine.evaluate(evidence_list, rep, now=now)
+
+        baseline_decision = _evaluate_current_clone_state()
+
         synthetic_items = benign_drift(device_id, now=now)
         for ev in synthetic_items:
             clone.insert_evidence(ev)
-
-        window = RollingWindowView(clone)
-        window_seconds = window_seconds if window_seconds is not None else RollingWindowView.LONG_WINDOW_SECONDS
-        evidence_list = window.evidence_in_window(device_id, window_seconds, now=now)
-
-        target_domain = ""
-        for ev in reversed(evidence_list):
-            if ev.destination_id != NO_DESTINATION:
-                target_domain = ev.destination_id
-                break
-        rep = (reputation_classifier or ReputationClassifier()).classify(target_domain)
-        decision = (decision_engine or DecisionEngine()).evaluate(evidence_list, rep, now=now)
+        decision = _evaluate_current_clone_state()
     finally:
         clone.close()
 
+    baseline_was_benign = baseline_decision["state"] not in _DETECTED_STATES
     return {
         "device_id": device_id, "state": decision["state"], "decision_path": decision["decision_path"],
-        "false_positive": decision["state"] in _DETECTED_STATES,
+        "baseline_state": baseline_decision["state"],
+        "false_positive": decision["state"] in _DETECTED_STATES and baseline_was_benign,
         "synthetic_evidence_types": [e.evidence_type for e in synthetic_items],
     }
 

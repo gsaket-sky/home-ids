@@ -93,6 +93,66 @@ check("inject_benign_drift_and_evaluate: purely benign synthetic drift does "
       drift_result["false_positive"] is False, f"got state={drift_result['state']}")
 
 # =============================================================================
+# BUGFIX (2026-09-20, found on .94: this check had never once passed in 5
+# nights, blocking Sheet 03a's autotuner gate entirely): a device that's
+# ALREADY non-BENIGN from its own real evidence must NOT be counted as a
+# false positive just because it's still non-BENIGN after ALSO adding the
+# synthetic benign evidence -- only a NEW escalation the synthetic evidence
+# itself caused counts.
+# =============================================================================
+already_suspicious_source = GraphStore(":memory:")
+already_suspicious_device = "dev_already_suspicious"
+already_suspicious_source.upsert_device(already_suspicious_device, device_type="laptop", timestamp=NOW)
+# A real dns_tunnel_v2 hit, exactly like a live device with a single
+# dns_behavior-family finding (matches test_real_world_alert_regression.py's
+# own DNS_COVERT_TUNNELING case: stays SUSPICIOUS on ONE such finding).
+already_suspicious_source.insert_evidence(Evidence(
+    device_id=already_suspicious_device, destination_id="evil-tunnel.example.com",
+    evidence_type="dns_tunnel_v2", independence_family="dns_behavior",
+    timestamp=NOW, source="dns_features", confidence=0.9,
+))
+already_suspicious_drift = injector.inject_benign_drift_and_evaluate(
+    already_suspicious_source, already_suspicious_device, now=NOW + 200)
+check("THE FIX: a device already SUSPICIOUS from its own real evidence is "
+      "NOT flagged as a false positive just because adding benign synthetic "
+      "drift doesn't magically clear that pre-existing state",
+      already_suspicious_drift["false_positive"] is False,
+      f"got {already_suspicious_drift}")
+check("THE FIX: the result still honestly reports the device's real "
+      "(non-BENIGN) state, it just doesn't count that against the "
+      "false-positive-resistance check",
+      already_suspicious_drift["state"] != "BENIGN")
+check("THE FIX: baseline_state is reported and matches the pre-synthetic "
+      "real state",
+      already_suspicious_drift.get("baseline_state") == already_suspicious_drift["state"])
+
+
+class _FlipOnFirstContactDecisionEngine:
+    """Stub proving the fix still catches a REAL false positive -- a
+    synthetic addition that genuinely FLIPS a device from BENIGN to
+    non-BENIGN must still be caught, not silently waved through by the
+    baseline comparison."""
+    def evaluate(self, evidence_list, rep, now=None):
+        has_first_contact = any(e.evidence_type == "first_contact" for e in evidence_list)
+        state = "SUSPICIOUS" if has_first_contact else "BENIGN"
+        return {"state": state, "decision_path": "test_stub"}
+
+
+flip_source = GraphStore(":memory:")
+flip_device = "dev_genuinely_flipped"
+flip_source.upsert_device(flip_device, device_type="laptop", timestamp=NOW)
+flip_result = injector.inject_benign_drift_and_evaluate(
+    flip_source, flip_device, now=NOW + 200, decision_engine=_FlipOnFirstContactDecisionEngine())
+check("REGRESSION GUARD: a synthetic addition that GENUINELY flips a device "
+      "from BENIGN to non-BENIGN is still correctly caught as a false "
+      "positive -- the fix narrows the check, it doesn't disable it",
+      flip_result["false_positive"] is True, f"got {flip_result}")
+check("REGRESSION GUARD: the baseline state for the genuinely-flipped case "
+      "is BENIGN (confirming the flip really was caused by the synthetic "
+      "evidence, not already present)",
+      flip_result.get("baseline_state") == "BENIGN")
+
+# =============================================================================
 # Signature diversity: repeated calls to the same generator vary
 # =============================================================================
 samples = [tuple(ev.value for ev in ATTACK_GENERATORS["exfiltration"](device, now=NOW)) for _ in range(15)]
