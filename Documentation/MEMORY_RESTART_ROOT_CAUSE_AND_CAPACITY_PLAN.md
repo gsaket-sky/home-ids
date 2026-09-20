@@ -1041,13 +1041,58 @@ the deployment log below).
 
 ### Deployment log (2026-09-20, continuation session)
 
-All of the above shipped in commits `860f7a4` (Bug A), `b6a6c27`
-(merge-completeness: decisions/autotune/counters), and one more covering Bug
-B + the DGA cap + the busy_timeout fix + the device_baselines root cause --
-released as GitHub tags `v15.9.0`/`v15.10.0`/(next tag), deployed to `.94` via
-the usual git pull + `soc.service` restart, `prune_orphaned_device_baselines()`
-run once by hand immediately after for the one-time cleanup. Device count
-audit (before/after) recorded in this same log once run.
+Shipped in three commits: `860f7a4` (Bug A), `b6a6c27` (merge-completeness:
+decisions/autotune/counters), `8d093ae` (Bug B + the DGA cap + the
+busy_timeout fix + the device_baselines root cause) -- released as GitHub
+tags `v15.9.0`/`v15.10.0`/v15.11.0 (this doc update included in a follow-up
+commit under the same tag's spirit). Deployed to `.94`: `git pull --ff-only`
+(70abccd -> 8d093ae, clean fast-forward, working tree was already clean),
+`sudo systemctl restart soc.service` (came up clean, `NRestarts=0` throughout,
+no tracebacks besides the pre-existing/benign FritzBox-webhook-not-up-yet
+retry warning), then `GraphStore.prune_orphaned_device_baselines()` run once
+by hand for the one-time cleanup.
+
+**Device-count audit, directly queried from `.94`'s live `state/v13_graph.db`
+and `state/ids_state.json` (not estimated):**
+
+| | before cleanup | after cleanup |
+|---|---|---|
+| `devices` table, total ever seen | 114 | 114 (unchanged -- audit-preserving by design, never deleted) |
+| `devices` table, live/unmerged (canonical) | 56 | 56 (unchanged -- cleanup only touched `device_baselines`) |
+| `devices` table, merged away (tombstoned) | 58 | 58 |
+| `device_baselines`, distinct device_ids | 92 | **48** |
+| `device_baselines`, distinct ORPHANED device_ids (the actual bloat) | 44 | **0** |
+| `device_baselines`, total rows | 21,315 | 19,724 (1,603 orphaned rows deleted; the ~12-row gap vs. a naive 21315-1603 subtraction is the live service's own normal scoring activity in the few minutes between the two snapshots) |
+| `state/ids_state.json`, actively tracked right now | 43 | 43 (unaffected -- this file only reflects StateManager's own in-memory device set) |
+
+**How many of the 56 "live" graph devices are "actually correct" (real,
+distinct physical devices, not lingering fragments):** 46 of the 56 were
+seen within the last 24h, with a plausible, diverse `device_type` spread
+(smart_tv/laptop/iot/router/phone/tablet/printer/nas/dns_server/
+gaming_console/server -- not a pile of near-identical types that would
+suggest still-unmerged fragmentation). The remaining 10 range from 3.3 to
+16.9 days idle -- these are candidates for the EXISTING `prune_stale_devices()`
+hourly sweep to eventually age out of `state/ids_state.json` (several already
+have -- that's exactly why `state/ids_state.json`'s 43 is lower than the
+graph's 56), but their GRAPH `devices` row persists forever by the same
+deliberate audit-preserving design `merge_device()` already uses, not a new
+gap -- the row itself is negligible in size, and every retention-sensitive
+table that hangs off it (evidence/decisions/device_baselines) already has its
+own real pruning. This is a meaningfully HIGHER real count than the
+originally-flagged "~13 real devices" estimate (from weeks earlier in this
+same investigation) -- consistent with genuine network growth over that time,
+not remaining fragmentation: `device_baselines`' distinct-device count (the
+number that mattered for the 89-vs-13 anomaly) dropped from 92 to a real,
+now-orphan-free 48, matching the live device population, not 13.
+
+**Not separately re-verified over a multi-hour window this session** (time
+constraints) -- the cadence-verification `Monitor` watch from earlier in this
+continuation session already confirmed 14+ clean minutes / zero restarts
+before this deploy; this deploy's own post-restart check (a few minutes,
+`NRestarts=0`, no error/traceback lines, no lock-contention errors even
+while the one-time cleanup query ran concurrently against the live db) is
+consistent with that holding, but a longer unattended observation window
+is still the strongest confirmation and wasn't run to completion here.
 
 ## Open questions for later phases, not blocking Phase 1
 
