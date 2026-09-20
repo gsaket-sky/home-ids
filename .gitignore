@@ -13,10 +13,14 @@ fp_trust_cache.json
 fp_sigma_shifts.json
 models/*.pkl
 models/*.onnx
+models/*.json
 models/fastembed_cache/
 models/devices/
 models/*.mmdb
 reports/
+# Deploy-script-generated marker + pre-deploy config snapshots on live hosts (.94/.19)
+.deployed_commit
+*.bak
 !config.json
 # BUGFIX (2026-08-29, live incident): config.yaml holds real deployment values
 # (home subnet, gateway IP, safe_ips, etc.) that must stay real for the service to
