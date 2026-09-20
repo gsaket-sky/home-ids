@@ -197,7 +197,7 @@ A one-time maintenance script, same family as `prune_evidence()`/
 confirmation before running, per standing rule, and should run once as a
 one-off with a full DB file backup taken immediately before.**
 
-### Phase 3 -- Runtime memory/process profiling instrumentation -- IMPLEMENTED (2026-09-20), not yet deployed to `.94`
+### Phase 3 -- Runtime memory/process profiling instrumentation -- IMPLEMENTED + DEPLOYED (2026-09-20), live on `.94`
 
 `main.py` now calls `tracemalloc.start()` at the very top of boot (gated by
 `health_manager_memory_diagnostics_enabled`, default `true`) -- has to start
