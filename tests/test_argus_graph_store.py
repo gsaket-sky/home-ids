@@ -687,6 +687,26 @@ check("REGRESSION GUARD: a medium-tier row of the SAME age is untouched -- this 
 check("prune_weak_zeek_notices with nothing to prune is a safe no-op (0, not an error)",
       store.prune_weak_zeek_notices(older_than_hours=12.0, now=_wnow) == 0)
 
+# --- BUGFIX (2026-09-20, restart-cadence investigation): the legacy, unfragmented
+# 'zeek_notice' type (pre-2026-09-09 fragmentation fix, 215,543 rows found live on
+# .94 across 21 devices) is now folded into the SAME fast sweep -- it scores nothing
+# and cannot be newly created by any code path today, so it's pure dead weight. ---
+store.insert_evidence(Evidence(device_id="wn_dev2", destination_id=NO_DESTINATION,
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=_wnow - 13 * 3600, source="s"))  # legacy bare type, old -- prunable
+store.insert_evidence(Evidence(device_id="wn_dev2", destination_id=NO_DESTINATION,
+                                 evidence_type="zeek_notice", independence_family="network_behavior",
+                                 timestamp=_wnow - 1 * 3600, source="s"))  # legacy bare type, recent -- kept
+legacy_deleted = store.prune_weak_zeek_notices(older_than_hours=12.0, now=_wnow)
+check("prune_weak_zeek_notices ALSO deletes the old legacy bare 'zeek_notice' row",
+      legacy_deleted == 1, f"got {legacy_deleted}")
+remaining_legacy = store._conn.execute(
+    "SELECT COUNT(*) AS c FROM evidence WHERE device_id = 'wn_dev2' AND evidence_type = 'zeek_notice'"
+).fetchone()["c"]
+check("REGRESSION GUARD: the recent legacy-type row survives (within the 12h window, "
+      "same age-cutoff logic as every other type this sweep handles)",
+      remaining_legacy == 1, f"got {remaining_legacy}")
+
 # --- set/get_destination_reputation (Phase 1a: network-wide reputation propagation) ---
 check("get_destination_reputation returns None for a destination never cached",
       store.get_destination_reputation("never-cached.example.com") is None)

@@ -1614,11 +1614,25 @@ class GraphStore:
         a decision that legitimately cited a weak notice (rare, since it contributes
         zero scoring weight, but not impossible if it showed up in a display-only
         context) shouldn't have its own audit trail invalidated by this faster
-        sweep. Returns the number of rows deleted."""
+        sweep. Returns the number of rows deleted.
+
+        BUGFIX (2026-09-20, restart-cadence investigation): also targets the
+        legacy, unfragmented 'zeek_notice' type (not 'zeek_notice_weak') --
+        confirmed live on .94: 215,543 rows across 21 devices, all dated to a
+        narrow 10.8-13.9-day-old window matching exactly when the 2026-09-09
+        tier-fragmentation fix landed (zeek_network.py now always writes
+        zeek_notice_evidence_type(tier), never the bare type -- confirmed by
+        reading that code directly, not assumed). This type scores nothing
+        (not a member of any HYPOTHESIS_RELEVANT_EVIDENCE_TYPES set -- those
+        all check for 'zeek_notice_{tier}' strings specifically) and cannot be
+        newly created by any code path today, so it's pure historical debt,
+        equally worthless as zeek_notice_weak and folded into the same fast
+        sweep rather than waiting out prune_evidence()'s full 90-day window or
+        needing a separate one-time migration script."""
         cutoff = (now if now is not None else time.time()) - older_than_hours * 3600
         with self.transaction():
             rows = self._conn.execute(
-                "SELECT evidence_id FROM evidence WHERE evidence_type = 'zeek_notice_weak' "
+                "SELECT evidence_id FROM evidence WHERE evidence_type IN ('zeek_notice_weak', 'zeek_notice') "
                 "AND timestamp < ? AND evidence_id NOT IN ("
                 "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
                 "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
