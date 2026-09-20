@@ -299,6 +299,79 @@ check("REGRESSION GUARD: a device with no pre-existing fragmentation resolves to
       f"pass1={ids_fresh_1} pass2={ids_fresh_2} all_ids={sm_h.get_all_device_ids()}")
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section G: HANDOVER FIX (2026-09-20) -- the zombie-resurrection identity-merge race
+#
+# Background: real .94 logs showed merge_into_canonical() aborting with "canonical_id
+# X is not a currently tracked device" -- X being a device_id that had ALREADY been
+# discarded by an earlier, successful merge. Root cause: resolve_device_id()'s
+# IP/hostname/MAC hash branches (stable_device_id()) are pure functions with no memory
+# of what they've hashed before. A later per-flow signal miss (Zeek didn't capture the
+# MAC on THIS specific flow, even though it's known elsewhere for the same device)
+# regenerates the exact same hash as a device_id that's since been merged away and
+# deleted -- get_or_create() would then silently resurrect a zombie DeviceState under
+# the dead id, stealing that address's future traffic from its real canonical identity
+# and leaving a stray row behind in anything keyed by device_id (e.g. device_baselines).
+# Fixed via a flat, persisted _merge_redirects map (dead id -> live successor),
+# consulted by resolve_device_id() and re-checked defensively inside
+# merge_into_canonical() itself.
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+# G1: continues DIRECTLY from Section F's already-merged state (sm_g/idm_g/orphan_id_live/
+# canonical_id_live) -- the exact real scenario, using real stable_device_id() hashes, not
+# hand-picked literal ids, so there's no risk of testing a mismatched/synthetic id.
+resolved_after_merge = idm_g.resolve_device_id(IPV6_LL, mac_addr=None, hostname="unknown")
+check("THE FIX: re-resolving the orphan's OWN address AFTER its merge, this time with a "
+      "per-flow MAC miss (mac_addr=None) -- exactly the live .94 failure mode -- returns "
+      "the LIVE canonical id instead of resurrecting the dead orphan hash",
+      resolved_after_merge == canonical_id_live,
+      f"got={resolved_after_merge} want={canonical_id_live}")
+check("...and no zombie DeviceState was created under the dead orphan id",
+      not sm_g.has_device(orphan_id_live))
+check("resolve_merge_redirect() maps the dead orphan id straight to its live successor",
+      sm_g.resolve_merge_redirect(orphan_id_live) == canonical_id_live,
+      f"got={sm_g.resolve_merge_redirect(orphan_id_live)}")
+check("resolve_merge_redirect() is a no-op for an id that was never merged away",
+      sm_g.resolve_merge_redirect(canonical_id_live) == canonical_id_live)
+check("resolve_merge_redirect() is a no-op for a completely unknown id",
+      sm_g.resolve_merge_redirect("never_seen_id") == "never_seen_id")
+
+# G2: chain flattening + merge_into_canonical()'s own defensive re-resolution, and
+# persistence -- exercised at the StateManager level directly with hand-picked ids (no
+# resolve_device_id() involved here, so literal ids are fine: only the redirect-map
+# mechanics are under test, not hash derivation).
+sm_i = StateManager(state_path="/tmp/_phase39_test_state_j.json")
+canon_i = sm_i.get_or_create("canon_i", IPV4, "smart-tv")
+orphan_i = sm_i.get_or_create("orphan_i", IPV6_LL, "unknown")
+sm_i.merge_into_canonical("orphan_i", "canon_i")
+
+super_canon = sm_i.get_or_create("super_canon_i", "10.0.0.99", "smart-tv")
+merged_chain = sm_i.merge_into_canonical("canon_i", "super_canon_i")
+check("setup: a formerly-canonical id can itself be merged away later", merged_chain)
+check("CHAIN FLATTENING: resolving the ORIGINAL orphan now returns the NEWEST canonical "
+      "directly, in one hop, not the intermediate dead id",
+      sm_i.resolve_merge_redirect("orphan_i") == "super_canon_i",
+      f"got={sm_i.resolve_merge_redirect('orphan_i')}")
+check("merge_into_canonical() resolves a stale canonical_id argument instead of "
+      "blindly aborting against it -- calling it again with the now-superseded "
+      "'canon_i' as the target correctly finds nothing left to merge",
+      sm_i.merge_into_canonical("orphan_i", "canon_i") is False,
+      "expected False: orphan_i and canon_i both now resolve to super_canon_i, so "
+      "orphan_id == canonical_id after resolution")
+
+# Persistence: the redirect map must survive a restart, or the fix only lasts until the
+# next soc.service bounce -- exactly the kind of restart this whole investigation is about.
+sm_i.flush_to_disk()
+sm_i_reloaded = StateManager(state_path="/tmp/_phase39_test_state_j.json")
+sm_i_reloaded.load_from_disk()
+check("PERSISTENCE: the merge redirect map survives a flush/reload cycle",
+      sm_i_reloaded.resolve_merge_redirect("orphan_i") == "super_canon_i",
+      f"got={sm_i_reloaded.resolve_merge_redirect('orphan_i')}")
+check("PERSISTENCE: the intermediate redirect also survives",
+      sm_i_reloaded.resolve_merge_redirect("canon_i") == "super_canon_i",
+      f"got={sm_i_reloaded.resolve_merge_redirect('canon_i')}")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED: {FAILURES}")

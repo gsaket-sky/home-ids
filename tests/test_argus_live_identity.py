@@ -39,6 +39,14 @@ Sections:
      read on the hot resolve_device_id() path), only on a genuinely NEW value
      (no write amplification for an already-known MAC/IP), bounded eviction, and
      the same fail-safe/None-graph-store guarantees as every other override here.
+  H. HANDOVER FIX (2026-09-20): resolve_device_id()'s pure hash branches have no
+     memory of a device_id they minted before that's since been discarded via
+     merge_into_canonical() -- a later per-flow signal miss (e.g. a MAC not
+     captured on this specific flow) can regenerate the exact same dead hash and
+     silently resurrect a zombie DeviceState under it. Fixed via
+     StateManager.resolve_merge_redirect(), applied at every return point in THIS
+     class's own resolve_device_id() override (core/identity.py's version got the
+     same fix independently -- this class doesn't delegate to it).
 """
 import sys
 import tempfile
@@ -358,6 +366,43 @@ live_mgr_g4._refresh_identity_signals(dev_g4, "aa:bb:cc:dd:ee:88", "10.0.0.3", "
 check("G: FAIL-SAFE -- a graph read/write failure never raises out to the caller, "
       "and the real v1 update is completely unaffected",
       dev_g4.mac_address == "aa:bb:cc:dd:ee:88" and "10.0.0.3" in dev_g4.known_ips)
+
+# --- H. HANDOVER FIX (2026-09-20): the zombie-resurrection identity-merge race, this
+# time for the ACTUAL live/production resolve_device_id() override (this class fully
+# overrides that method rather than delegating to core.identity.DeviceIdentityManager's
+# version -- see this module's own docstring -- so core/identity.py's own fix, already
+# covered by tests/test_phase39_retroactive_identity_merge.py's Section G, does NOT
+# automatically cover this class; it needed its own, separate fix, applied at every
+# return point in live_manager.py's resolve_device_id() override). ---
+state_h = _fresh_state_manager("h")
+live_mgr_h = LiveIdentityManager(state_h, {}, None, {})
+ORPHAN_IP_H = "192.168.77.210"
+CANON_IP_H = "192.168.77.211"
+MAC_H = "aa:bb:cc:dd:ee:77"
+
+orphan_id_h = live_mgr_h.resolve_device_id(ORPHAN_IP_H, mac_addr=None, hostname="unknown")
+state_h.get_or_create(device_id=orphan_id_h, client_ip=ORPHAN_IP_H, hostname="unknown")
+canonical_id_h = v_current_stable_device_id(CANON_IP_H)
+canon_state_h = state_h.get_or_create(device_id=canonical_id_h, client_ip=CANON_IP_H, hostname="realhost")
+state_h.bind_mac(MAC_H, canonical_id_h)
+
+merged_h = state_h.merge_into_canonical(orphan_id_h, canonical_id_h)
+check("H: setup -- the orphan merges into the canonical normally", merged_h)
+check("H: setup -- the orphan no longer exists as a separate tracked device",
+      not state_h.has_device(orphan_id_h))
+
+# The orphan's own address is resolved again with NO mac_addr this time (a per-flow
+# capture miss) -- v13_resolve_device_id()'s pure IP-anchor branch would, on its own,
+# regenerate the exact same dead orphan_id_h hash.
+resolved_after_merge_h = live_mgr_h.resolve_device_id(ORPHAN_IP_H, mac_addr=None, hostname="unknown")
+check("H: THE FIX -- re-resolving the orphan's OWN address after it's been merged "
+      "away (with no MAC this time) returns the LIVE canonical id, not a resurrected "
+      "zombie -- this is the code path actually running on .94, not just the "
+      "core/identity.py fallback",
+      resolved_after_merge_h == canonical_id_h,
+      f"got={resolved_after_merge_h} want={canonical_id_h}")
+check("H: THE FIX -- no zombie DeviceState was created under the dead orphan id",
+      not state_h.has_device(orphan_id_h))
 
 
 print(f"\n{'='*60}")

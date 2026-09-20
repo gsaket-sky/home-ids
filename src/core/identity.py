@@ -255,7 +255,7 @@ class DeviceIdentityManager:
             if mac_addr and mac_addr != "unknown":
                 with self._lock:
                     self._gateway_mac = mac_addr
-            return stable_device_id(gateway_ip)
+            return self.state_manager.resolve_merge_redirect(stable_device_id(gateway_ip))
 
         # GENERAL FIX (2026-08-27): the router's OTHER addresses (most commonly its IPv6
         # link-local/ULA, which never equals gateway_ip literally) still deserve the same
@@ -266,7 +266,7 @@ class DeviceIdentityManager:
             with self._lock:
                 learned_gateway_mac = self._gateway_mac
             if learned_gateway_mac and mac_addr == learned_gateway_mac:
-                return stable_device_id(gateway_ip)
+                return self.state_manager.resolve_merge_redirect(stable_device_id(gateway_ip))
 
         # PHASE 6 FIX (cross-address-family correlation): if this MAC address is already
         # bound to a known device_id — most commonly because we've already seen this same
@@ -281,20 +281,34 @@ class DeviceIdentityManager:
         if mac_addr and mac_addr != "unknown":
             existing_dev_id = self.state_manager.get_device_id_for_mac(mac_addr)
             if existing_dev_id:
+                # Already MAC-anchored to a live device_id -- nothing to redirect, this
+                # IS the canonical id (resolve_merge_redirect() would be a no-op here by
+                # construction, since a dead id is never left bound in _mac_to_device_id).
                 return existing_dev_id
 
         # ARCHITECTURAL FIX: Anchor local private IPs to guarantee unified correlation
         # between Pi-hole DNS logs and Zeek flow logs for the exact same physical device.
         if _is_trackable_local_ip(client_ip):
-            return stable_device_id(client_ip)
-            
-        if hostname and not _is_generic_hostname(hostname):
-            return stable_device_id(f"host:{hostname.lower()}")
-            
-        if mac_addr and mac_addr != "unknown":
-            return stable_device_id(mac_addr)
-            
-        return stable_device_id(client_ip)
+            result = stable_device_id(client_ip)
+        elif hostname and not _is_generic_hostname(hostname):
+            result = stable_device_id(f"host:{hostname.lower()}")
+        elif mac_addr and mac_addr != "unknown":
+            result = stable_device_id(mac_addr)
+        else:
+            result = stable_device_id(client_ip)
+
+        # BUGFIX (identity-merge race, handover 2026-09-20): every branch above is a pure,
+        # state-unaware hash -- stable_device_id() has no memory of what it's hashed
+        # before. If this same ip/hostname/mac was already used to mint a device_id that
+        # has since been discarded via merge_into_canonical() (e.g. a per-flow
+        # MAC-resolution miss on a device that's otherwise already MAC-anchored
+        # elsewhere), this would otherwise resurrect a zombie DeviceState under the dead
+        # id and silently steal this address's future traffic from its real canonical
+        # identity -- confirmed live via merge_into_canonical()'s own abort-warning
+        # firing because the resurrected id is, by definition, "not a currently tracked
+        # device". Resolving through the redirect map transparently upgrades any dead id
+        # straight to its live successor, so the resurrection never happens.
+        return self.state_manager.resolve_merge_redirect(result)
 
     def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
                                 ips_mitigator: Any = None, fp_engine: Any = None,

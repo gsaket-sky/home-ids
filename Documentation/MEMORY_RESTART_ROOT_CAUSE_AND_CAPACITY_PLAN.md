@@ -758,10 +758,11 @@ unconfirmed either way.
 
 ## HANDOVER for another session: identity-merge races + device_baselines 89-vs-13 (2026-09-20)
 
-**Not fixed this session -- investigated just enough to hand off with real
-evidence, not speculation.** User explicitly asked for this to be written up
-for a fresh session to pick up. Everything below is either a direct log
-quote/traceback from `.94` or a file:line read directly, not inferred.
+**Update, same day, continuation session: Bug A below is now FIXED (not yet
+deployed to `.94`).** Bug B and the device_baselines cleanup are still open --
+see their own status notes further down. Everything in this section was
+originally either a direct log quote/traceback from `.94` or a file:line read
+directly, not inferred.
 
 ### The original anomaly: device_baselines has 89 distinct device_ids for ~13 real devices
 
@@ -776,7 +777,7 @@ regime_id)` is an upsert, not an append log -- so this doesn't bloat over
 time), but it's a visible symptom of the two real bugs below, not its own
 separate root cause.
 
-### Bug A: `merge_into_canonical()` can abort, leaving BOTH sides stuck
+### Bug A: `merge_into_canonical()` can abort, leaving BOTH sides stuck -- FIXED
 
 Real log lines from `.94`, `state_guard.py` (the v1/legacy identity code,
 `core/state_guard.py`), 4 occurrences in the last 14 days:
@@ -788,19 +789,51 @@ Sep 19 10:34:50 WARNING home_ids.state_guard merge_into_canonical() aborted: can
 Sep 19 10:36:02 WARNING home_ids.state_guard merge_into_canonical() aborted: canonical_id ad35ae47e5b6 is not a currently tracked device (orphan_id=10e395c31555 left untouched).
 ```
 
-Pattern: the SAME device_id shows up as an "orphan redirected to canonical X"
-in one merge log line, then minutes later as the "canonical_id" target of a
-DIFFERENT pending merge that then aborts because it's no longer tracked (it
-was itself merged away in between). This is a **merge-ordering/staleness
-race**, not the same bug as the already-fixed 09-16 `merged_into_device_id`
-cycle in `argus/graph/store.py`'s `merge_device()` -- this is
-`state_guard.py`'s own, separate v1 merge function
-(`merge_into_canonical()`), which doesn't appear to follow a
-since-superseded canonical_id's own redirect chain before attempting to use
-it as a merge target. **Not yet read**: `state_guard.py`'s
-`merge_into_canonical()` source itself, to confirm exactly why it aborts
-instead of re-resolving the canonical_id through whatever redirected it.
-That's the concrete next step.
+**Root cause, confirmed by reading `merge_into_canonical()` and
+`resolve_device_id()` in full (the concrete next step this handover called
+for):** `resolve_device_id()`'s IP/hostname/MAC-fallback branches
+(`stable_device_id()`) are pure, state-unaware hashes of the input string --
+they have zero memory of a device_id they minted before that's since been
+discarded via a successful `merge_into_canonical()` call. A device that's
+already MAC-anchored to a canonical identity can still hit a **per-flow MAC
+capture miss** (Zeek didn't log `orig_l2_addr` on that one specific flow, even
+though the MAC IS known elsewhere for the same device) -- when that happens,
+`resolve_device_id()` falls through to the plain IP-hash branch and
+regenerates the EXACT SAME hash as the device_id that was already merged away
+and deleted. `get_or_create()` then silently resurrects a zombie DeviceState
+under that dead id and rebinds `_ip_to_device_id` to it, stealing that
+address's future traffic from its real canonical identity -- and, separately,
+if some OTHER address for the same physical device attempts a merge against
+that resurrected id as a "canonical" target before it exists, that's the
+"aborted: canonical_id X is not a currently tracked device" log line. This is
+also the real root cause of the `device_baselines` 89-vs-13 anomaly noted
+above: each such transient zombie writes at least one baseline row under a
+device_id that's gone again within a cycle or two.
+
+**Fix (this session):** a new flat, persisted `StateManager._merge_redirects`
+map (dead orphan_id -> live canonical_id, kept flat/single-hop by
+`merge_into_canonical()` itself, capped at `_MAX_MERGE_REDIRECTS = 5000`,
+survives a restart via `flush_to_disk()`/`load_from_disk()` the same way
+`_ips_state`/`_action_ledger` already do). `resolve_merge_redirect()` is
+consulted at every return point of BOTH `resolve_device_id()` overrides in
+this codebase -- `core/identity.py`'s (the v1/legacy path) AND
+`argus/identity/live_manager.py`'s `LiveIdentityManager.resolve_device_id()`
+(the actual class running on `.94` -- it fully overrides the method rather
+than delegating to the v1 version, confirmed by reading `live_manager.py`'s
+own docstring, so the v1 fix alone would NOT have covered production). Also
+re-checked defensively inside `merge_into_canonical()` itself (resolves both
+`orphan_id` and `canonical_id` through the same map before doing anything),
+so the method self-heals even against a stale id from a caller that isn't
+`resolve_device_id()`. Verified via a real repro of the exact live failure
+mode (merge, then re-resolve the orphan's own address with a simulated
+MAC-capture miss) in both `tests/test_phase39_retroactive_identity_merge.py`
+(v1 path, Section G) and `tests/test_argus_live_identity.py` (the live
+`LiveIdentityManager` path, Section H) -- plus chain-flattening and
+flush/reload persistence checks. Full existing identity/state-guard test
+suite and the real-world alert regression suite both re-run clean, no
+regressions. **Not yet deployed to `.94`** as of this write-up -- needs the
+same commit -> push -> pull -> restart sequence every other fix this session
+went through.
 
 ### Bug B: a `KeyError` here skips the ENTIRE decision cycle, not just one device
 
@@ -875,18 +908,19 @@ intervention.
 
 ### Suggested next steps for the session that picks this up
 
-1. Read `state_guard.py`'s `merge_into_canonical()` in full -- confirm
-   whether it follows a stale canonical_id's OWN `merged_into` redirect (if
-   `state_guard.py` even tracks that concept the way `graph/store.py` does)
-   before aborting, and why it doesn't retry against the resolved target.
+1. ~~Read `state_guard.py`'s `merge_into_canonical()` in full...~~ DONE --
+   Bug A fixed this session, see above. Still open: deploy to `.94`.
 2. Decide whether `pipeline.py:1167`'s device loop should catch `KeyError`
    PER-DEVICE (skip just that one device, log, continue the loop) rather
    than letting it propagate and abort the whole `_step()` call -- this
-   alone would contain Bug B's blast radius regardless of whether Bug A's
-   root cause gets fixed too.
-3. Once Bug A/B are understood, revisit whether `device_baselines`' 89-vs-13
-   device_id count drops back toward the real device count, or whether a
-   separate one-time consolidation of pre-merge baseline rows into their
+   alone would contain Bug B's blast radius. Bug A's own fix reduces how
+   OFTEN a device goes missing mid-cycle (no more zombie churn), but doesn't
+   eliminate every legitimate concurrent-merge window, so Bug B's
+   containment fix is still independently worth doing.
+3. Once Bug B is also addressed, revisit whether `device_baselines`' 89-vs-13
+   device_id count drops back toward the real device count on its own now
+   that Bug A's zombie-churn source is closed, or whether a separate
+   one-time consolidation of any pre-fix stray baseline rows into their
    canonical device_id is still needed on top.
 
 ## Open questions for later phases, not blocking Phase 1

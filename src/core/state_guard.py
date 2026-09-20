@@ -38,6 +38,11 @@ LOGGER = logging.getLogger("home_ids.state_guard")
 
 
 class StateManager:
+    # Cap for _merge_redirects (see __init__'s comment) -- LRU-evicted like _states'
+    # own max_devices capacity guard, just a separate, much smaller bound since merge
+    # events track device churn, not per-packet/per-evidence volume.
+    _MAX_MERGE_REDIRECTS = 5000
+
     def __init__(self, state_path: str = "state/ids_state.json", max_devices: int = 5000,
                   graph_store: Optional[Any] = None):
         self.state_path = Path(state_path)
@@ -109,6 +114,25 @@ class StateManager:
         # _last_migrated_isolation_target (which only carries mac/ip) rather than widening
         # that struct for a caller its original mechanism doesn't need.
         self._last_orphan_merge_cleanup: Optional[Dict[str, str]] = None
+        # BUGFIX (identity-merge race, handover 2026-09-20): flat redirect map from a
+        # discarded orphan_id -> the canonical_id it was folded into by
+        # merge_into_canonical(). Without this, resolve_device_id()'s pure IP/hostname/MAC
+        # hash branches (stable_device_id()) have no memory of a device_id they minted
+        # before that's since been merged away -- a later per-flow signal miss (e.g. the
+        # MAC isn't captured on this specific flow, even though it IS known elsewhere for
+        # this device) regenerates the exact same dead hash and get_or_create() silently
+        # resurrects a zombie DeviceState under it, stealing that address's future traffic
+        # from its real canonical identity. Kept FLAT (never chained) by
+        # merge_into_canonical() itself -- every existing entry pointing at an orphan_id
+        # that's itself about to be discarded gets repointed to the new canonical_id in the
+        # same step, so resolve_merge_redirect() is always a single O(1) hop. Persisted the
+        # same way as _ips_state/_action_ledger (flush_to_disk/load_from_disk) so a
+        # soc.service restart can't bring a dead id back to life either. Capped at
+        # _MAX_MERGE_REDIRECTS, LRU-evicted, matching this session's "everything capped, no
+        # unrestricted growth in production" retention philosophy -- merges track device
+        # churn, not traffic volume, so this grows far slower than the evidence tables, but
+        # it's still unbounded in principle over a long enough uptime.
+        self._merge_redirects: "OrderedDict[str, str]" = OrderedDict()
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -452,6 +476,16 @@ class StateManager:
         tracked device, if orphan_id == canonical_id, or if orphan_id isn't currently
         tracked (e.g. this exact merge already ran once)."""
         with self._global_lock:
+            # BUGFIX (identity-merge race, handover 2026-09-20): resolve BOTH ids through
+            # the redirect map before doing anything else. This is a second line of
+            # defense on top of resolve_device_id()'s own resolve_merge_redirect() call --
+            # it means this method is self-healing even if some OTHER caller (an offline
+            # cleanup script, a future call site) passes a stale/dead id directly, and
+            # it's also what actually prevents the "both sides stuck" failure mode: if
+            # canonical_id itself was already merged away since the caller looked it up,
+            # this follows it to its live successor instead of aborting against a dead id.
+            canonical_id = self._merge_redirects.get(canonical_id, canonical_id)
+            orphan_id = self._merge_redirects.get(orphan_id, orphan_id)
             if canonical_id not in self._states:
                 LOGGER.warning(
                     "merge_into_canonical() aborted: canonical_id %s is not a currently "
@@ -482,6 +516,19 @@ class StateManager:
             orphan_mac = getattr(orphan_state, "mac_address", "unknown")
             if orphan_mac and orphan_mac != "unknown":
                 self._mac_to_device_id[orphan_mac] = canonical_id
+
+            # BUGFIX (identity-merge race, handover 2026-09-20): flatten any existing
+            # redirect chain (A already pointed at orphan_id from an EARLIER merge) onto
+            # the new canonical_id before recording orphan_id's own redirect, so
+            # resolve_merge_redirect() is always a single hop no matter how many times a
+            # device_id has been re-merged over its lifetime.
+            for old_orphan, redirected_to in list(self._merge_redirects.items()):
+                if redirected_to == orphan_id:
+                    self._merge_redirects[old_orphan] = canonical_id
+            self._merge_redirects[orphan_id] = canonical_id
+            self._merge_redirects.move_to_end(orphan_id)
+            while len(self._merge_redirects) > self._MAX_MERGE_REDIRECTS:
+                self._merge_redirects.popitem(last=False)
 
             # Reattribute any Pi-hole domain-block records that were tagged with the
             # orphan's device_id/hostname so their "which device caused this" display
@@ -529,6 +576,24 @@ class StateManager:
     def get_all_device_ids(self) -> List[str]:
         with self._global_lock:
             return list(self._states.keys())
+
+    def resolve_merge_redirect(self, device_id: str) -> str:
+        """Returns the live device_id `device_id` currently resolves to if it was ever
+        discarded via merge_into_canonical() (including across a restart -- persisted
+        the same way as everything else via flush_to_disk()/load_from_disk()), or
+        device_id unchanged if it was never merged away. Always O(1): merge_into_canonical()
+        keeps the redirect map flat (never chained), so at most one lookup is ever needed.
+
+        Closes a real live bug (see identity.py's resolve_device_id(), the primary
+        caller): resolve_device_id()'s pure IP/hostname/MAC hash branches have no memory
+        of a device_id they minted before that's since been merged away. Without this,
+        a later per-flow signal miss (e.g. a MAC isn't captured on this specific flow,
+        even though it IS known elsewhere for this device) regenerates the exact same
+        dead hash, and get_or_create() silently resurrects a zombie DeviceState under it
+        -- confirmed live via merge_into_canonical()'s own abort-warning log lines
+        pointing at the same device_id from both directions minutes apart."""
+        with self._global_lock:
+            return self._merge_redirects.get(device_id, device_id)
 
     def get_ips_state(self) -> Dict[str, Any]:
         """Returns a shallow copy of the IPS state for inspection.
@@ -726,9 +791,15 @@ class StateManager:
                     self._ips_state = data["ips_state"]
                 if isinstance(data, dict) and "action_ledger" in data:
                     self._action_ledger = data["action_ledger"] or {}
+                if isinstance(data, dict) and "merge_redirects" in data:
+                    # BUGFIX (identity-merge race, handover 2026-09-20): must survive a
+                    # restart -- otherwise a soc.service bounce would forget every
+                    # discarded id and re-open the exact resurrection window this map
+                    # exists to close.
+                    self._merge_redirects = OrderedDict(data["merge_redirects"] or {})
 
                 for dev_id, d in devices_data.items():
-                    if dev_id in ("ips_state", "action_ledger"):
+                    if dev_id in ("ips_state", "action_ledger", "merge_redirects"):
                         continue
                     st = DeviceState.from_dict(d, alpha=alpha)
                     self._states[dev_id] = st
@@ -778,6 +849,7 @@ class StateManager:
                     "ips_state": self._ips_state,
                     "devices": devices_snapshot,
                     "action_ledger": dict(self._action_ledger),
+                    "merge_redirects": dict(self._merge_redirects),
                 }
 
             self.state_path.parent.mkdir(parents=True, exist_ok=True)

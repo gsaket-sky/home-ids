@@ -246,14 +246,15 @@ class LiveIdentityManager(DeviceIdentityManager):
             if anchor.ip and anchor.ip == client_ip:
                 if mac_addr != "unknown" and not randomized:
                     self._learn_anchor_mac(role, mac_addr)
-                return v13_stable_device_id(anchor.ip)
+                return self.state_manager.resolve_merge_redirect(v13_stable_device_id(anchor.ip))
 
         if mac_addr != "unknown" and not randomized:
             learned_anchor_macs = self._get_learned_anchor_macs()
             for role, anchor in self._trust_anchors.items():
                 learned = learned_anchor_macs.get(role) or anchor.mac
                 if learned and learned == mac_addr:
-                    return v13_stable_device_id(anchor.ip) if anchor.ip else _anchor_device_id(role)
+                    anchor_id = v13_stable_device_id(anchor.ip) if anchor.ip else _anchor_device_id(role)
+                    return self.state_manager.resolve_merge_redirect(anchor_id)
 
         # Branch 3 (mac_bindings): reuses state_manager's own real, already-persisted
         # MAC->device_id index directly -- not reinvented. Checked regardless of
@@ -279,9 +280,21 @@ class LiveIdentityManager(DeviceIdentityManager):
         # since 1/2 are already fully handled above with the v-current-compatible
         # formula; letting the pure function re-match them with its own role-based
         # formula would silently undo that.
-        return v13_resolve_device_id(
+        #
+        # BUGFIX (identity-merge race, 2026-09-20 handover): every branch reached from
+        # here on (and the two anchor branches above) is a pure, state-unaware hash --
+        # it has no memory of a device_id it minted before that's since been discarded
+        # via merge_into_canonical() (core/state_guard.py). A later per-flow signal miss
+        # (e.g. this MAC isn't captured on this specific flow, even though it's known
+        # elsewhere for the same device) would otherwise regenerate the exact same dead
+        # hash and get_or_create() would silently resurrect a zombie DeviceState under
+        # it, stealing this address's future traffic from its real canonical identity.
+        # core/identity.py's own resolve_device_id() got the same fix -- this class
+        # fully overrides that method rather than delegating to it (see this module's
+        # docstring), so the fix has to be applied here too, not inherited.
+        return self.state_manager.resolve_merge_redirect(v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
-        )
+        ))
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
                                       ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
