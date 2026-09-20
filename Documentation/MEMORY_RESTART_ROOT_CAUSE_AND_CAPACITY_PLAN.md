@@ -234,20 +234,50 @@ Windows even though it happens to work on every real Linux deployment
 target; moved `sqlite3`/`tracemalloc`/`collections` to module-level imports
 to fix the former).
 
-### Phase 4 -- Device-count-vs-memory benchmark harness
+### Phase 4 -- Device-count-vs-memory benchmark harness -- BUILT (2026-09-20), sweep not yet run
 
-Only meaningful after Phase 1+2 land. Build a synthetic load generator that
-drives the real pipeline path (ingest -> HEE -> decision -> graph write)
-with N synthetic devices' worth of realistic `Evidence` objects, against an
-isolated state dir/DB, for a fixed simulated duration. Sweep N (e.g. 13, 25,
-50, 100, 200) and measure steady-state RSS, DB growth rate (MB/day as f(N)),
-and CPU time per cycle as f(N).
+**No real Pi 8GB unit is available (explicit user answer, 2026-09-20)** --
+simulating Pi constraints via cgroups on `.94` instead of real hardware.
 
-Run this under a `systemd-run --scope` (or equivalent) resource cap matching
-real Pi specs (8GB RAM, cgroup CPU quota reflecting a Pi's weaker
-single-thread performance relative to `.94`'s Ryzen 5) rather than trusting
-raw x86 numbers -- `.94` is not the target hardware and is meaningfully
-faster per-core, so an uncorrected x86 benchmark would be optimistic.
+**CPU calibration, researched not guessed**: looked up actual Geekbench 6
+single-core scores rather than assume a ratio -- AMD Ryzen 5 3550H (`.94`'s
+real CPU) scores ~1012, Raspberry Pi 5 scores ~770-774. That's a **1.31x**
+gap -- much smaller than this document's own earlier "meaningfully faster
+per-core" framing assumed before actually checking. `CPUQuota=76%`
+(1/1.31) is the derived correction for a `systemd-run --scope` cgroup. This
+corrects single-thread throughput only, not core-count/topology differences
+(Pi 5: 4x Cortex-A76; `.94`: Ryzen 5 3550H, 4C/8T) -- a real Pi would still
+give a more trustworthy number, per this doc's own open question below.
+
+**`tools/benchmark_device_capacity.py`** drives the SAME real per-device
+entry point `pipeline.py` itself calls -- `argus.ops.live_engine.evaluate()`
+-- with synthetic evidence for N virtual devices, against an isolated state
+dir (never the real `state/v13_graph.db`). Simulated time (an explicit,
+advancing `now` passed to `evaluate()`, not real sleeps) so a multi-day
+curve doesn't need multi-day wall-clock runtime. Traffic model calibrated
+against `.94`'s own real measured rates from this same investigation (~530
+evidence items/device/day, ~28 decision-state-changes/device/day), not
+guessed.
+
+Smoke-tested locally (3 devices, 1 simulated day, ~9.5s wall-clock): DB grew
+to 4.11MB, ~1.37MB/device/day -- the same order of magnitude as Phase 5's
+own analytical estimate (~1.67MB/device/day combining evidence+edges+
+decisions), a reasonable cross-check that the synthetic traffic model isn't
+wildly unrealistic.
+
+**Important scope caveat, not yet resolved**: this harness measures ONLY
+the `live_engine.evaluate()` code path's own RSS -- `GraphStore` +
+`HypothesisEngine` + `DecisionEngine` + `BaselineEngine`. It does NOT run
+Zeek/Suricata, the FastAPI/uvicorn process, the scheduler, LLM review,
+CL-AFPE, or `health_manager.py` itself, all of which contribute to the REAL
+`soc.service` process's RSS. The smoke test's own numbers (58.7MB baseline
+-> 72.5MB after 1 day, 3 devices) are therefore NOT directly comparable to
+the real 1843MB CRITICAL threshold -- concluding "a Pi could handle
+thousands of devices" from this alone would be a real, live mistake. The
+full N-sweep (13/25/50/100/200 devices x 7 simulated days each, run on `.94`
+under the `CPUQuota=76%`/`MemoryMax=8G` cgroup) still needs to actually run
+-- estimated wall-clock cost from the smoke test's own timing, roughly
+linear in devices x days: ~2.5 hours for the full sweep sequentially.
 
 ### Phase 5 -- Capacity report + CPU quota reconciliation
 
