@@ -50,6 +50,7 @@ from utils import write_job_health  # noqa: E402
 from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 from intelligence.geoip import GeoIPEngine  # noqa: E402
 from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
+from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
 from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from argus.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
 from argus.ops.telegram import send_telegram  # noqa: E402
@@ -194,7 +195,23 @@ def _notify_local_intel_matches(matches: list, geoip_engine: GeoIPEngine, days_b
 # actually being enforced on `.94` -- deliberately widened here, now that it is,
 # rather than leaving an artificially narrow lookback that ignores 76 days of
 # history the graph is already paying to retain.
-DEFAULT_DAYS_BACK = DEFAULT_EVIDENCE_RETENTION_DAYS
+#
+# BUGFIX (2026-09-20, data-lifecycle retuning): this was a flat 90 regardless of
+# hardware_profile, but evidence/device_destinations retention is only 30 days on
+# pi_8gb -- meaning a pi_8gb deployment was requesting 60 days of history that its
+# OWN retention policy had already deleted, silently getting a shorter effective
+# scan than intended with no indication anything was truncated. Now scaled the
+# same way live_prune.py's own retention_days is, so this job's lookback can never
+# exceed what the graph actually still retains, on any profile.
+_DAYS_BACK_BY_PROFILE = {
+    "pi_8gb": 30.0,
+    "x86_16gb": DEFAULT_EVIDENCE_RETENTION_DAYS,
+    "custom": DEFAULT_EVIDENCE_RETENTION_DAYS,
+}
+
+
+def _default_days_back() -> float:
+    return _DAYS_BACK_BY_PROFILE.get(load_hardware_profile(CONFIG), DEFAULT_EVIDENCE_RETENTION_DAYS)
 
 
 def main() -> None:
@@ -211,25 +228,26 @@ def main() -> None:
         return
 
     try:
+        days_back = _default_days_back()
         store = GraphStore(str(db_path))
         lookup = real_threat_intel_lookup_factory(CONFIG, str(state_dir), refresh=True)
         hunter = RetroHunter(store, lookup)
-        findings = hunter.hunt(days_back=DEFAULT_DAYS_BACK)
+        findings = hunter.hunt(days_back=days_back)
         LOGGER.info(
             "Retro-hunt complete: %d finding(s) against the last %d days of graph history.",
-            len(findings), DEFAULT_DAYS_BACK,
+            len(findings), days_back,
         )
-        _notify_external_ti_findings(findings, DEFAULT_DAYS_BACK)
+        _notify_external_ti_findings(findings, days_back)
 
         # Phase 7: cross-device local-intel correlation, against the SAME v13-only
         # LocalConfirmedIntel store CL-AFPE's own shadow mode writes into (Phase 6e)
         # -- see retro_hunter.py's own module docstring item #4 for why this is
         # deliberately never v1's real local_confirmed_intel.json.
         local_intel = LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
-        local_matches = hunter.check_local_intel_history(local_intel, days_back=DEFAULT_DAYS_BACK)
+        local_matches = hunter.check_local_intel_history(local_intel, days_back=days_back)
         LOGGER.info(
             "Local-intel cross-reference complete: %d match(es) against the last %d days.",
-            len(local_matches), DEFAULT_DAYS_BACK,
+            len(local_matches), days_back,
         )
 
         # Release 14, Workstream 5 (item 2): close the loop for each newly-implicated
@@ -255,7 +273,7 @@ def main() -> None:
                 db_path=CONFIG.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")),
                 asn_db_path=CONFIG.get("geoip_asn_db", ""),
             )
-            _notify_local_intel_matches(local_matches, geoip_engine, DEFAULT_DAYS_BACK)
+            _notify_local_intel_matches(local_matches, geoip_engine, days_back)
 
         write_job_health(state_dir, "live_retro_hunter", time.time() - run_start,
                           extra={

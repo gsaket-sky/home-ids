@@ -879,6 +879,119 @@ with tempfile.TemporaryDirectory() as tmpdir:
         old_store.close()
         second_open.close()
 
+# --- BUGFIX (2026-09-20, memory-restart root-cause investigation) -----------
+# insert_decision() used to persist attack_evidence/winning_evidence (full
+# serialized Evidence objects, built only for pipeline.py's same-cycle Telegram
+# WHY-block) wholesale into raw_payload_json forever -- found live on .94 as a
+# 22MB single row, 13.3MB of that from attack_evidence alone. Also used to store
+# _all_evidence_ids fully uncapped when the edge cap was exceeded -- one legacy
+# row had 68,915 ids there (~2.2MB) despite the edge cap being only 50.
+_bugfix_dir = tempfile.mkdtemp(prefix="v13_graph_bugfix_test_")
+bugfix_db_path = str(_PathForSysPath(_bugfix_dir) / "test_graph.db")
+bugfix_store = GraphStore(bugfix_db_path, hardware_profile="x86_16gb")
+
+sync_mode = bugfix_store._conn.execute("PRAGMA synchronous").fetchone()[0]
+check("synchronous is NORMAL (1), not the fsync-per-commit FULL default -- "
+      "set per-connection in __init__ since it does NOT persist in the db "
+      "file the way journal_mode does",
+      sync_mode == 1, f"got {sync_mode}")
+
+bugfix_dev = "dev_bugfix_test"
+bugfix_store.upsert_device(bugfix_dev)
+bugfix_evidence_ids = []
+for i in range(5):
+    ev = Evidence(device_id=bugfix_dev, destination_id=NO_DESTINATION, evidence_type="x",
+                   independence_family="f", timestamp=time.time(), source="s")
+    bugfix_store.insert_evidence(ev)
+    bugfix_evidence_ids.append(ev.evidence_id)
+
+small_payload = {
+    "state": "BENIGN", "decision_path": "test",
+    "attack_evidence": [{"evidence_id": e, "big": "x" * 1000} for e in bugfix_evidence_ids],
+    "winning_evidence": [{"evidence_id": e} for e in bugfix_evidence_ids],
+}
+small_decision_id = bugfix_store.insert_decision(
+    device_id=bugfix_dev, timestamp=time.time(), state="BENIGN", decision_path="test",
+    confidence=0.0, risk_score=0.0, raw_payload=small_payload, evidence_ids=bugfix_evidence_ids,
+)
+stored_row = bugfix_store._conn.execute(
+    "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (small_decision_id,)).fetchone()
+stored_payload = json.loads(stored_row["raw_payload_json"])
+check("attack_evidence is stripped from the PERSISTED payload (still fine to "
+      "exist transiently in the in-memory dict pipeline.py's WHY-block uses "
+      "same-cycle -- this only checks what actually lands in the db)",
+      "attack_evidence" not in stored_payload)
+check("winning_evidence is stripped from the PERSISTED payload",
+      "winning_evidence" not in stored_payload)
+check("the rest of the payload (state/decision_path) survives the strip",
+      stored_payload.get("state") == "BENIGN" and stored_payload.get("decision_path") == "test")
+
+# Regression test against the exact real-world shape found live: a decision
+# whose evidence list is far larger than any hardware-profile edge cap.
+huge_dev = "dev_huge_evidence_test"
+bugfix_store.upsert_device(huge_dev)
+huge_evidence_ids = []
+for i in range(120):
+    ev = Evidence(device_id=huge_dev, destination_id=NO_DESTINATION, evidence_type="x",
+                   independence_family="f", timestamp=time.time() + i, source="s")
+    bugfix_store.insert_evidence(ev)
+    huge_evidence_ids.append(ev.evidence_id)
+# Simulates the real 68,915-id shape without actually inserting that many rows --
+# _all_evidence_ids only needs the ids themselves, not real backing evidence rows,
+# to exercise the cap logic (the real evidence rows above establish timestamps for
+# the 120 that ARE real, the synthetic ones exercise the "no matching row yet"
+# fallback path the same way fresh-this-cycle evidence does).
+synthetic_huge_ids = huge_evidence_ids + [f"synthetic-{i}" for i in range(2000)]
+huge_decision_id = bugfix_store.insert_decision(
+    device_id=huge_dev, timestamp=time.time(), state="BENIGN", decision_path="test",
+    confidence=0.0, risk_score=0.0, raw_payload={}, evidence_ids=synthetic_huge_ids,
+)
+huge_row = bugfix_store._conn.execute(
+    "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (huge_decision_id,)).fetchone()
+huge_payload = json.loads(huge_row["raw_payload_json"])
+check("_all_evidence_ids is capped at _MAX_ALL_EVIDENCE_IDS_STORED (1000), not "
+      "left fully uncapped -- found live: 68,915 ids (~2.2MB) on one legacy row",
+      len(huge_payload.get("_all_evidence_ids", [])) == 1000,
+      f"got {len(huge_payload.get('_all_evidence_ids', []))}")
+supports_edge_count = bugfix_store._conn.execute(
+    "SELECT COUNT(*) c FROM edges WHERE dst_id=? AND relation='supports'", (huge_decision_id,)
+).fetchone()["c"]
+check("the edge cap itself (x86_16gb: 50) is unaffected by this change",
+      supports_edge_count == 50, f"got {supports_edge_count}")
+
+bugfix_store.close()
+
+# --- prune_evidence() archive_network_activity_backup path -------------------
+archive_dir = tempfile.mkdtemp(prefix="v13_graph_archive_test_")
+archive_db_path = str(_PathForSysPath(archive_dir) / "test_graph.db")
+archive_store = GraphStore(archive_db_path)
+old_ts = time.time() - 200 * 86400
+archived_ev = Evidence(device_id="dev_archive_test", destination_id=NO_DESTINATION,
+                         evidence_type="x", independence_family="f", timestamp=old_ts, source="s")
+archive_store.insert_evidence(archived_ev)
+
+no_archive_path = _PathForSysPath(archive_dir) / "no_archive.jsonl.gz"
+deleted_no_archive = archive_store.prune_evidence(older_than_days=90, archive_path=None)
+check("prune_evidence() with archive_path=None (the production default) deletes "
+      "the row without writing any archive file -- zero unbounded-growth risk",
+      deleted_no_archive == 1 and not no_archive_path.exists())
+
+archived_ev2 = Evidence(device_id="dev_archive_test2", destination_id=NO_DESTINATION,
+                          evidence_type="x", independence_family="f", timestamp=old_ts, source="s")
+archive_store.insert_evidence(archived_ev2)
+real_archive_path = _PathForSysPath(archive_dir) / "evidence_archive.jsonl.gz"
+deleted_with_archive = archive_store.prune_evidence(older_than_days=90, archive_path=real_archive_path)
+check("prune_evidence() with an archive_path (dev/test opt-in only) deletes AND "
+      "writes the row to the archive file first",
+      deleted_with_archive == 1 and real_archive_path.exists())
+if real_archive_path.exists():
+    import gzip as _gzip
+    with _gzip.open(real_archive_path, "rt", encoding="utf-8") as f:
+        archived_lines = [json.loads(line) for line in f if line.strip()]
+    check("the archived line actually contains the deleted evidence row's data",
+          any(line.get("evidence_id") == archived_ev2.evidence_id for line in archived_lines))
+archive_store.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

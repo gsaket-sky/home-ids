@@ -25,6 +25,7 @@ uses for a similar not-yet-validated number).
 """
 import logging
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import sys
@@ -33,10 +34,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
-from argus.graph.store import (  # noqa: E402
-    GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
-    DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS,
-)
+from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 
 LOGGER = logging.getLogger("live_prune")
 
@@ -62,34 +60,51 @@ def main() -> None:
     retention_days = _RETENTION_DAYS_BY_PROFILE.get(
         load_hardware_profile(CONFIG), DEFAULT_EVIDENCE_RETENTION_DAYS)
 
+    # Explicit user decision (2026-09-20, data-lifecycle retuning): production runs
+    # forever with zero unrestricted growth, no exceptions -- so archiving is OFF by
+    # default and reserved for testing/dev sessions that explicitly opt in via
+    # config.yaml. See GraphStore.prune_evidence()'s own docstring for what the
+    # archive actually contains and why it's best-effort.
+    archive_path = None
+    if CONFIG.get("archive_network_activity_backup", False):
+        archive_path = state_dir / "evidence_archive" / f"evidence_{datetime.now(timezone.utc):%Y-%m}.jsonl.gz"
+
     try:
         store = GraphStore(str(db_path))
-        deleted = store.prune_evidence(older_than_days=retention_days)
-        # BUGFIX (external architecture review, 2026-09-09): device_destinations
-        # (GraphStore.record_device_destinations(), the peer-cohort baseline's real
-        # traffic input) gets its OWN fixed retention, not hardware-profile-scaled
-        # like evidence's -- see schema.sql's own retention-policy comment and
-        # DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS's docstring for why 30 days is
-        # already the right number regardless of hardware profile (its only
-        # consumer only ever looks back 7 days).
-        dd_deleted = store.prune_device_destinations(older_than_days=DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS)
-        # BUGFIX (explicit user request, 2026-09-09): zeek_notice_weak rows get their
-        # own much-shorter, tier-specific retention -- see DEFAULT_WEAK_ZEEK_NOTICE_
-        # RETENTION_HOURS's own docstring (graph/store.py) for the full incident
-        # (confirmed live: 98.3% of the evidence table on .94 was zeek_notice,
-        # contributing zero scoring weight at the weak tier).
-        weak_notice_deleted = store.prune_weak_zeek_notices(older_than_hours=DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS)
+        deleted = store.prune_evidence(older_than_days=retention_days, archive_path=archive_path)
+        # BUGFIX (2026-09-20, data-lifecycle retuning): device_destinations used to
+        # get its OWN fixed 30-day retention regardless of profile, reasoned only
+        # against peer-cohort baselining's 7-day lookback. That missed a SECOND real
+        # consumer -- live_retro_hunter.py's retroactive threat-intel re-scan reads
+        # up to DEFAULT_EVIDENCE_RETENTION_DAYS (90) back by default -- so on
+        # x86_16gb/custom, a destination touched 31-90 days ago was silently
+        # invisible to retroactive cross-checking, a real coverage gap for exactly
+        # the audit capability this table exists to support. Now reuses the SAME
+        # profile-scaled `retention_days` evidence itself uses (this table is
+        # currently ~0.6MB, so widening it costs nothing) -- also keeps
+        # live_retro_hunter's OWN lookback (see that file's DEFAULT_DAYS_BACK,
+        # separately made profile-aware the same day) from ever requesting more
+        # history than this table -- or evidence itself -- actually retains.
+        dd_deleted = store.prune_device_destinations(older_than_days=retention_days)
+        # MOVED (2026-09-20, data-lifecycle retuning) to its own, much more frequent
+        # job -- live_prune_weak_notices.py, every 4h instead of this job's own daily
+        # 3:15am. Running only once/day meant a weak notice created just after this
+        # run effectively lived ~23-24h, roughly double its OWN documented 12h
+        # retention SLA at the peak (this method's cutoff-at-prune-TIME semantics
+        # only enforce "no older than 12h AT THE MOMENT THIS RUNS", not a
+        # continuously-enforced TTL). Deliberately NOT folded into a shorter cadence
+        # for THIS whole job instead -- evidence/device_destinations pruning does a
+        # real full-table scan (measured ~120s against .94's live graph) that doesn't
+        # need to run 6x more often just to carry the cheap, narrowly-indexed
+        # weak-notice sweep along with it.
         store.close()
         LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) "
-                     "older than %d days, %d zeek_notice_weak row(s) older than %.0fh, from %s",
-                     deleted, retention_days, dd_deleted, DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
-                     weak_notice_deleted, DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS, db_path)
+                     "older than %d days, from %s",
+                     deleted, retention_days, dd_deleted, retention_days, db_path)
         write_job_health(state_dir, "live_prune", time.time() - run_start,
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
-                                 "device_destinations_retention_days": DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS,
-                                 "weak_notice_deleted": weak_notice_deleted,
-                                 "weak_notice_retention_hours": DEFAULT_WEAK_ZEEK_NOTICE_RETENTION_HOURS})
+                                 "device_destinations_retention_days": retention_days})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})

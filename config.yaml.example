@@ -457,6 +457,25 @@ network:
 # 25 per decision (vs 50) -- see each consuming module's own docstring for why.
 hardware_profile: pi_8gb
 
+# archive_network_activity_backup -- explicit user decision (2026-09-20,
+# data-lifecycle retuning): OFF by default. A production deployment must run
+# forever with zero unrestricted disk growth, no exceptions -- so evidence pruned
+# past its retention window is simply deleted, matching every other capped table
+# in this system. Set to true ONLY for a testing/dev session that wants a full
+# historical record (state/evidence_archive/*.jsonl.gz, one file per month) for
+# incident investigation or decision-replay validation -- that path has no
+# rotation cap of its own and will grow indefinitely by design, an accepted
+# tradeoff for a controlled, temporary diagnostic session, not something to leave
+# on in a real deployment. See live_prune.py / GraphStore.prune_evidence()'s own
+# docstrings for exactly what gets written.
+archive_network_activity_backup: false
+
+# zeek_log_retention_days -- explicit user decision (2026-09-20): 14 days of raw
+# Zeek logs kept on disk for manual forensic review after an incident, then
+# deleted by the zeek_log_prune scheduled job. See that job's own docstring
+# (src/argus/ops/zeek_log_prune.py) for the full incident this closes.
+zeek_log_retention_days: 14
+
 
 # -----------------------------------------------------------------------------
 # geofencing — block traffic to specific countries by GeoIP
@@ -905,6 +924,16 @@ scheduled_jobs:
       cron: "15 3 * * *"
       script: "../argus/ops/live_prune.py"
 
+    # Data-lifecycle retuning (2026-09-20) -- split out of live_prune above onto
+    # its own tight cadence: zeek_notice_weak's documented 12h retention was only
+    # actually enforced once a day, letting rows effectively live up to ~23-24h
+    # in practice. Cheap, narrowly-indexed delete (idx_evidence_type_ts) -- every
+    # 4h costs almost nothing extra, unlike live_prune's own full-table scan.
+    live_prune_weak_notices:
+      enabled: true
+      cron: "0 */4 * * *"
+      script: "../argus/ops/live_prune_weak_notices.py"
+
     # v13 full-architecture plan, Phase 4 -- retroactive threat-intel re-scan of
     # v13's OWN graph-backed destination history (state/v13_graph.db), NOT a
     # replacement for the "retro_hunter" job above (that one keeps doing its own
@@ -944,6 +973,18 @@ scheduled_jobs:
       enabled: true
       cron: "*/15 * * * *"
       script: "../argus/ops/cl_afpe_flip_monitor.py"
+
+    # SSD/disk-capacity audit (2026-09-20) -- found /opt/zeek/logs holding 83 daily
+    # dated directories (7.5GB, back to 2026-06-14) with zero retention ever
+    # applied; Zeek's own hourly rotation+compression is already fine, nothing ever
+    # deleted an old day. HEE never reads these archives back (the live pipeline
+    # only ever consumes the `current` live-spool symlink), so this is pure
+    # byproduct with no ongoing value -- see zeek_log_retention_days below for the
+    # window. 4:15am -- clear of every job above.
+    zeek_log_prune:
+      enabled: true
+      cron: "15 4 * * *"
+      script: "../argus/ops/zeek_log_prune.py"
 
     # Release 15, closed-loop autotuning architecture, Sheet 02 -- nightly
     # backtest (tests/test_real_world_alert_regression.py's real-incident

@@ -32,10 +32,13 @@ _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 # for any caller that doesn't go through that wiring, e.g. direct GraphStore use in
 # tests).
 DEFAULT_EVIDENCE_RETENTION_DAYS = 90
-# device_destinations' own retention (schema.sql's own documented policy, external
-# architecture review, 2026-09-09) -- shorter than evidence's 90 days since its only
-# consumer (peer-cohort baselining) only ever looks back 7 days
-# (_PEER_DEVIATION_WINDOW_SECONDS, v13/ops/live_engine.py).
+# device_destinations' fallback retention -- used as this method's own default
+# parameter (direct/test callers only). BUGFIX (2026-09-20): live_prune.py's real
+# scheduled job no longer uses this fixed 30 -- it reuses evidence's OWN
+# profile-scaled retention_days instead, since a SECOND consumer beyond peer-cohort
+# baselining's 7-day lookback (live_retro_hunter.py's retroactive threat-intel
+# re-scan, up to 90 days back) was found silently losing coverage past 30 days.
+# See live_prune.py's own comment at the call site for the full incident.
 DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS = 30
 # zeek_notice_weak's own MUCH shorter retention (explicit user request, 2026-09-09 --
 # "check the current evidence table's per-type row counts ... collapsing repeated
@@ -109,6 +112,20 @@ _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE: Dict[str, int] = {
     "custom": 50,
 }
 
+# BUGFIX (2026-09-20, memory-restart root-cause investigation): insert_decision()
+# below also stashes payload["_all_evidence_ids"] uncapped whenever the edge cap is
+# exceeded (autotune/reset.py's _full_evidence_ids_for_decision() genuinely needs
+# the COMPLETE set for blast-radius correctness, so this key can't just be
+# dropped). Found live on .94: a handful of legacy decisions (written before the
+# edge cap above existed) had accumulated up to 68,915 evidence ids here, ~2.2MB
+# of raw_payload_json for that key alone. 1000 is a generous, first-pass ceiling
+# relative to the 25/50 edge cap -- large enough that no realistic post-fix
+# decision should ever hit it (evidence keeps aging out via its own 30/90-day
+# retention, so a decision accumulating 1000+ contributing items implies the
+# SAME kind of long-lived-stuck-state pathology this fix is closing off), while
+# bounding the worst case to ~33KB instead of multiple MB.
+_MAX_ALL_EVIDENCE_IDS_STORED = 1000
+
 
 class GraphStore:
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
@@ -118,6 +135,19 @@ class GraphStore:
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
+        # BUGFIX (2026-09-20, SSD/SD-card wear audit): synchronous is a PER-CONNECTION
+        # setting, unlike journal_mode (which persists in the db file itself once set) --
+        # it does NOT survive into schema.sql's _apply_schema(), which only ever runs
+        # for a brand-new file (is_new below), so setting it there would silently never
+        # apply to any real, already-existing deployment (exactly .94's case). Must be
+        # set here, on every connection open, same as foreign_keys/cache_size above.
+        # NORMAL is SQLite's own documented recommended pairing with WAL mode (unlike
+        # the default FULL, which fsyncs on every single commit): the db file itself
+        # can never be corrupted by a power loss under WAL regardless of this setting,
+        # the only risk is losing the most-recent commit(s) if power is lost before the
+        # next checkpoint -- an acceptable tradeoff for this data, and a direct fix for
+        # the fsync-per-commit write-amplification/wear pattern found live on .94.
+        self._conn.execute("PRAGMA synchronous = NORMAL")
         # Phase 10b: optional -- omitting hardware_profile (every pre-existing
         # caller, including every test) leaves SQLite's own default cache_size
         # untouched, identical to this class's behavior before this param existed.
@@ -560,6 +590,21 @@ class GraphStore:
         all_evidence_ids = list(evidence_ids or [])
         capped_evidence_ids = all_evidence_ids
         payload = dict(raw_payload or {})
+        # BUGFIX (2026-09-20, memory-restart root-cause investigation): attack_evidence/
+        # winning_evidence (decision/engine.py) are FULL serialized Evidence objects --
+        # not ids -- built solely so pipeline.py's Telegram WHY-block can render
+        # corroborating evidence that may have already aged out of its own short-TTL
+        # in-memory store, a same-cycle, in-memory-only need. This method previously
+        # persisted the SAME dict wholesale, so those fields ended up duplicated
+        # forever in raw_payload_json with no cap -- found live on .94: individual
+        # rows up to 22MB, one field alone (attack_evidence) accounting for 13.3MB of
+        # that. Both are fully reconstructable after the fact via this decision's own
+        # 'supports' edges + the evidence table (exactly what decision_replay.py's
+        # get_decision_evidence() already does), so persisting them a second time here
+        # is pure redundant bloat with no audit-completeness upside -- confirmed no
+        # caller anywhere reads either key back OUT of a persisted raw_payload_json.
+        payload.pop("attack_evidence", None)
+        payload.pop("winning_evidence", None)
         if all_evidence_ids:
             cap = _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE.get(
                 self._hardware_profile or "", _MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE["x86_16gb"])
@@ -577,7 +622,15 @@ class GraphStore:
                 capped_evidence_ids = sorted(
                     all_evidence_ids, key=lambda eid: ts_by_id.get(eid, 0.0), reverse=True
                 )[:cap]
-                payload["_all_evidence_ids"] = all_evidence_ids
+                # BUGFIX (2026-09-20): this list itself used to be stored fully
+                # uncapped -- see _MAX_ALL_EVIDENCE_IDS_STORED's own comment for why
+                # it can't just be dropped (autotune/reset.py needs it) but must still
+                # be bounded (found live: 68,915 ids, ~2.2MB, for one legacy row).
+                # Most-recent-first, same ordering as capped_evidence_ids, so anything
+                # trimmed here is also the oldest/least-relevant for a blast-radius check.
+                payload["_all_evidence_ids"] = sorted(
+                    all_evidence_ids, key=lambda eid: ts_by_id.get(eid, 0.0), reverse=True
+                )[:_MAX_ALL_EVIDENCE_IDS_STORED]
 
         self._conn.execute(
             "INSERT INTO decisions (decision_id, device_id, timestamp, winning_hypothesis_id, "
@@ -1390,7 +1443,7 @@ class GraphStore:
     # --- retention (schema.sql's own documented policy) -------------------------
 
     def prune_evidence(self, older_than_days: float = DEFAULT_EVIDENCE_RETENTION_DAYS,
-                         now: Optional[float] = None) -> int:
+                         now: Optional[float] = None, archive_path: Optional[Path] = None) -> int:
         """Deletes evidence older than the cutoff UNLESS referenced by a decision
         newer than the cutoff (decisions are the audit trail; keep what they point
         to) -- matches schema.sql's documented policy exactly, not a simplified
@@ -1410,19 +1463,35 @@ class GraphStore:
         incident). Now selects the evidence_ids being deleted FIRST, deletes
         every edge referencing any of them (either direction), then deletes the
         evidence rows themselves -- all inside one transaction, so a mid-failure
-        can never leave edges half-cleaned relative to what evidence survived."""
+        can never leave edges half-cleaned relative to what evidence survived.
+
+        archive_path (2026-09-20, data-lifecycle retuning, explicit user decision):
+        None by default -- a straight delete, zero disk-growth risk, the right
+        production behavior ("run forever, everything capped, no exceptions").
+        Callers pass a real path ONLY under the config-gated
+        archive_network_activity_backup toggle (see live_prune.py's call site),
+        intended for testing/dev sessions that want a full historical record for
+        incident investigation or decision-replay validation -- when given, every
+        row being deleted is appended (one compact JSON object per line) to a
+        gzip-compressed, size-rotated file at this path before the delete runs,
+        mirroring live_decision_archive.py's existing export-then-delete shape.
+        Best-effort: an archive write failure is logged and does NOT block the
+        prune (losing the write-only backup copy is recoverable; leaving evidence
+        unpruned indefinitely is the failure mode this method exists to prevent)."""
         cutoff = (now if now is not None else time.time()) - older_than_days * 86400
         with self.transaction():
             rows = self._conn.execute(
-                "SELECT evidence_id FROM evidence WHERE timestamp < ? AND evidence_id NOT IN ("
+                "SELECT * FROM evidence WHERE timestamp < ? AND evidence_id NOT IN ("
                 "  SELECT src_id FROM edges WHERE src_kind = 'evidence' AND dst_kind = 'decision' "
                 "  AND EXISTS (SELECT 1 FROM decisions d WHERE d.decision_id = edges.dst_id AND d.timestamp >= ?)"
                 ")",
                 (cutoff, cutoff),
             ).fetchall()
-            evidence_ids = [r["evidence_id"] for r in rows]
-            if not evidence_ids:
+            if not rows:
                 return 0
+            evidence_ids = [r["evidence_id"] for r in rows]
+            if archive_path is not None:
+                _append_archive_jsonl_gz(archive_path, [dict(r) for r in rows])
             placeholders = ",".join("?" * len(evidence_ids))
             self._conn.execute(
                 f"DELETE FROM edges WHERE "
@@ -1534,3 +1603,23 @@ class GraphStore:
 def _looks_like_ip(value: str) -> bool:
     parts = value.split(".")
     return len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+
+def _append_archive_jsonl_gz(archive_path: Path, rows: List[Dict[str, Any]]) -> None:
+    """Appends `rows` (already plain dicts, one JSON object per line) to a
+    gzip-compressed file at archive_path, creating its parent directory and the
+    file itself if either doesn't exist yet. Used only by prune_evidence()'s
+    optional archive_network_activity_backup path (2026-09-20) -- deliberately
+    NOT a general-purpose archive utility, just enough to mirror
+    live_decision_archive.py's export-then-delete shape for evidence too. Opens
+    in append (binary) mode each call rather than holding a handle open across
+    the caller's own transaction() -- this runs once per scheduled prune, not
+    per-row, so the extra open/close cost is irrelevant. Best-effort by design
+    (see prune_evidence()'s own docstring for why a failure here must not block
+    the actual prune): callers are expected to wrap this in try/except."""
+    import gzip
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(archive_path, "at", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, default=str))
+            f.write("\n")
