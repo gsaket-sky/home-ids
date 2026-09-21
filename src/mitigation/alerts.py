@@ -156,6 +156,18 @@ class AlertManager:
             self._worker_thread = None
             self._updates_thread = None
 
+    def _safe_exc(self, exc: BaseException) -> str:
+        """Stringifies an exception with the bot token scrubbed out.
+        requests/urllib3 exceptions (e.g. SSLError, ConnectionError) embed the full
+        request URL -- which includes self.token, since Telegram's API puts the bot
+        token in the URL path itself rather than a header -- in their own str().
+        Logging str(exc) directly leaks the live token in plaintext into log files.
+        """
+        text = str(exc)
+        if self.token and self.token in text:
+            text = text.replace(self.token, "***REDACTED***")
+        return text
+
     def send(self, message: str, raw_payload: Optional[Dict[str, Any]] = None, reply_markup: Optional[Dict[str, Any]] = None) -> None:
         """Enqueues an alert message for asynchronous Telegram delivery with optional inline buttons.
         Non-blocking: returns immediately. Ollama summarization happens inside the dispatch worker.
@@ -218,7 +230,7 @@ class AlertManager:
                     
                 self.q.task_done()
             except Exception as exc:
-                LOGGER.error("Exception in Telegram dispatch worker: %s[cite: 29]", exc)
+                LOGGER.error("Exception in Telegram dispatch worker: %s", self._safe_exc(exc))
                 if 'item' in locals() and item:
                     try:
                         # Prevent infinite re-queuing of malformed payloads by checking structure
@@ -269,7 +281,7 @@ class AlertManager:
                         self._handle_telegram_command(text, update["message"])
 
             except Exception as exc:
-                LOGGER.debug("Telegram bot updates worker exception: %s", exc)
+                LOGGER.debug("Telegram bot updates worker exception: %s", self._safe_exc(exc))
                 self._stop_event.wait(timeout=5.0)
 
     def _handle_telegram_callback(self, cb_data: str, cb_id: str, cb_update: dict = None):
@@ -393,7 +405,7 @@ class AlertManager:
 
             self.session.post(answer_url, json={"callback_query_id": cb_id, "text": msg_text}, timeout=5.0)
         except Exception as e:
-            LOGGER.error("Failed to process Telegram callback query: %s", e)
+            LOGGER.error("Failed to process Telegram callback query: %s", self._safe_exc(e))
 
     def _is_sender_allowed(self, chat_id: str) -> bool:
         """AUDIT FIX #10: Returns True if the sender is on the allowed chat_id list.
