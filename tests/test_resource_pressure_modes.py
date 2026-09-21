@@ -380,5 +380,65 @@ def test_entering_resource_pressure_alerts_exactly_once(hm, fake_psutil):
     assert len(pressure_alerts) == 1
 
 
+# --- bounded pressure probe (2026-09-21 live incident) ----------------------------
+# Confirmed live on .94 via py-spy: psutil.Process.memory_info() -- a plain
+# open() on /proc/<pid>/stat -- blocked for many minutes once the cgroup was deep
+# enough into memory pressure that even a trivial file-open stalled on kernel
+# reclaim. That froze health_manager's ONLY thread forever (it never returned to
+# _run_loop()'s while loop), silently disabling job-health monitoring AND the
+# CRITICAL self-restart this subsystem exists to perform. _bounded_call() bounds
+# any single probe attempt so a stall can no longer take the whole watchdog down.
+
+def test_bounded_call_returns_result_when_fn_completes_quickly():
+    value, timed_out = HealthManager._bounded_call(lambda: 42, timeout=1.0)
+    assert value == 42
+    assert timed_out is False
+
+
+def test_bounded_call_propagates_a_real_exception():
+    def _boom():
+        raise ValueError("real failure")
+    with pytest.raises(ValueError, match="real failure"):
+        HealthManager._bounded_call(_boom, timeout=1.0)
+
+
+def test_bounded_call_times_out_on_a_hung_fn():
+    import threading as _threading
+    released = _threading.Event()
+
+    def _hang():
+        released.wait(timeout=5.0)  # simulates the stuck open() syscall
+        return "too late"
+
+    value, timed_out = HealthManager._bounded_call(_hang, timeout=0.2)
+    assert timed_out is True
+    assert value is None
+    released.set()  # let the daemon thread exit cleanly instead of leaking past the test
+
+
+def test_classify_pressure_keeps_previous_level_when_probe_hangs(hm, monkeypatch):
+    # Escalate to CONSERVATION first via a normal, fast probe.
+    monkeypatch.setattr(
+        hm, "_bounded_call",
+        staticmethod(lambda fn, timeout: ((1600.0, None, 10.0, 0.0, 8000.0), False)),
+    )
+    assert hm._classify_pressure() == hm_module.CONSERVATION
+    hm._pressure_state = hm_module.CONSERVATION
+
+    # Now simulate the probe hanging -- must NOT crash, NOT silently return
+    # NORMAL (which would incorrectly clear conservation-mode overrides), and
+    # NOT block this call.
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, True)))
+    assert hm._classify_pressure() == hm_module.CONSERVATION
+
+
+def test_check_cycle_completes_even_when_pressure_probe_hangs(hm, monkeypatch):
+    """The real-world failure mode: _run_loop() must reach its next iteration
+    (job-health/heartbeat checks must still run) even if the resource-pressure
+    probe itself is the thing that's stuck."""
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, True)))
+    hm._check_cycle()  # must return promptly, not hang the test
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -489,20 +489,74 @@ class HealthManager:
         except Exception:
             return None
 
-    def _classify_pressure(self) -> str:
-        if psutil is None:
-            return NORMAL
+    def _gather_pressure_signals(self) -> Optional[Tuple[float, Optional[float], float, float, float]]:
         rss_mb = self._rss_mb()
         cgroup_pct = self._cgroup_memory_pct()
         try:
             vm = psutil.virtual_memory()
             swap = psutil.swap_memory()
         except Exception:
-            return NORMAL
+            return None
+        return rss_mb, cgroup_pct, vm.percent, swap.percent, vm.available / (1024 * 1024)
 
-        sysmem_pct = vm.percent
-        swap_pct = swap.percent
-        available_mb = vm.available / (1024 * 1024)
+    @staticmethod
+    def _bounded_call(fn, timeout: float) -> Tuple[Any, bool]:
+        """Runs fn() on a throwaway daemon thread with a hard wall-clock bound.
+
+        Used only for the resource-pressure probe below -- psutil/sysfs reads are
+        ordinarily instant, but a live incident (2026-09-21, .94) confirmed via
+        py-spy that psutil.Process.memory_info() -- a plain open() on
+        /proc/<pid>/stat -- can itself block for many minutes once the kernel is
+        stalling file-opens under severe cgroup memory pressure (the file-open's
+        own small allocation competing with reclaim). That stall permanently froze
+        THIS watchdog's one and only thread (it never returns to _run_loop()'s
+        while loop), silently killing job-health monitoring AND the CRITICAL
+        self-restart this whole subsystem exists to perform, for the rest of the
+        process's life, at exactly the moment it mattered most -- with no error
+        logged, since nothing raised, it just never returned.
+
+        A bounded probe can't fix the underlying kernel stall, but it stops that
+        stall from taking the watchdog down with it. A stuck probe leaks one
+        daemon thread (bounded by process lifetime, since it dies with the
+        process) rather than freezing the watchdog forever -- an acceptable,
+        self-limiting trade given how rare this condition is and how much worse
+        the alternative (total watchdog loss) is.
+        """
+        result: Dict[str, Any] = {}
+
+        def _target():
+            try:
+                result["value"] = fn()
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(target=_target, daemon=True, name="health_manager_pressure_probe")
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None, True
+        if "error" in result:
+            raise result["error"]
+        return result.get("value"), False
+
+    def _classify_pressure(self) -> str:
+        if psutil is None:
+            return NORMAL
+        signals, timed_out = self._bounded_call(
+            self._gather_pressure_signals,
+            timeout=float(self.config.get("health_manager_pressure_probe_timeout_seconds", 5.0)),
+        )
+        if timed_out:
+            LOGGER.warning(
+                "Health manager: resource-pressure probe did not return in time "
+                "(likely a kernel-level stall under memory pressure) -- skipping "
+                "this cycle's classification, keeping the previous level (%s).",
+                self._pressure_state,
+            )
+            return self._pressure_state
+        if signals is None:
+            return NORMAL
+        rss_mb, cgroup_pct, sysmem_pct, swap_pct, available_mb = signals
         rss_pressure_floor = float(self.config.get("health_manager_rss_pressure_mb", 1024))
 
         # BUGFIX #1 (found live, 2026-09-14, minutes after first deploy): swap_pct/
