@@ -353,6 +353,28 @@ def test_write_snapshot_file_round_trips_through_disk(hm, tmp_path):
     assert on_disk["components"]["comp_a"]["state"] == HEALTHY
 
 
+def test_snapshot_bounds_a_hung_rss_read_and_falls_back_to_last_known(hm, monkeypatch):
+    """2026-09-21 (live incident, third occurrence): snapshot() used to call
+    self._rss_mb() directly and unbounded -- the exact psutil call already
+    proven live (via py-spy, twice) to hang under this cgroup's memory
+    pressure. A live 30+ minute stale snapshot file with zero timeout/failure
+    log lines showed the outer _check_cycle() bound wasn't reliably catching
+    this specific call in practice -- snapshot() now bounds it directly."""
+    monkeypatch.setattr(hm, "_rss_mb", lambda: 777.0)
+    snap = hm.snapshot()
+    assert snap["rss_mb"] == 777.0  # first successful read is cached
+
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, True)))
+    snap2 = hm.snapshot()
+    assert snap2["rss_mb"] == 777.0  # falls back to the last known value on a hang, not 0/None
+
+
+def test_send_pressure_alert_bounds_a_hung_rss_or_cgroup_read(hm, monkeypatch):
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, True)))
+    hm._send_pressure_alert(hm_module.CRITICAL, escalating=True)  # must not hang or raise
+    assert hm.alert_manager.sent  # still sends an alert, just without a real rss/cgroup reading
+
+
 def test_check_cycle_writes_snapshot_file(hm, tmp_path, monkeypatch):
     """Full _check_cycle() (as the real check loop calls it) must always end
     with a fresh snapshot on disk, even though most of its own sub-checks

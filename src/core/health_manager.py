@@ -218,6 +218,7 @@ class HealthManager:
         self._alerted_pressure_level: Optional[str] = None
         self._process = psutil.Process() if psutil is not None else None
         self._dns_evasion_audit_disabled: bool = False
+        self._last_known_rss_mb: float = 0.0
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -684,8 +685,18 @@ class HealthManager:
         self._alerted_pressure_level = level
         if self.alert_manager is None or not bool(self.config.get("telegram_enabled", False)):
             return
-        rss = self._rss_mb()
-        cgroup_pct = self._cgroup_memory_pct()
+        # Same reasoning as snapshot()'s own fix just above: an unbounded direct
+        # call here is the identical risky pattern already proven to hang under
+        # this cgroup's memory pressure -- bound it directly rather than relying
+        # solely on the outer _check_cycle() bound.
+        rss, timed_out = self._bounded_call(self._rss_mb, timeout=3.0)
+        if timed_out:
+            rss = self._last_known_rss_mb
+        else:
+            self._last_known_rss_mb = rss
+        cgroup_pct, cgroup_timed_out = self._bounded_call(self._cgroup_memory_pct, timeout=3.0)
+        if cgroup_timed_out:
+            cgroup_pct = None
         cgroup_note = f", cgroup={cgroup_pct:.0f}%" if cgroup_pct is not None else ""
         icon = {"normal": "✅", "resource_pressure": "⚠️", "conservation": "🟠", "critical": "🔴"}.get(level, "⚠️")
         try:
@@ -1164,11 +1175,26 @@ class HealthManager:
         SAFE_MODE) -- including the in-process components (pipeline_main_loop/
         identity_reconcile_worker/ti_refresh), whose heartbeats live only in
         the HEARTBEATS in-memory singleton, never written to a file the way
-        the cross-process ones are."""
+        the cross-process ones are.
+
+        2026-09-21 (live incident, third occurrence): this used to call
+        self._rss_mb() directly, unbounded -- the exact same psutil call already
+        proven (twice, live, via py-spy) to block for many minutes under this
+        cgroup's memory pressure. _check_cycle() as a whole is bounded by
+        _run_one_iteration() now, but a live 30+ minute stale snapshot with zero
+        "did not complete" log lines showed that bound wasn't reliably catching
+        THIS specific call in practice under this host's severity of pressure --
+        bounding it here too, directly, with its own short timeout, closes the
+        gap rather than relying on the outer bound alone."""
+        rss_mb, timed_out = self._bounded_call(self._rss_mb, timeout=3.0)
+        if timed_out:
+            rss_mb = self._last_known_rss_mb
+        else:
+            self._last_known_rss_mb = rss_mb
         return {
             "written_at": time.time(),
             "pressure_level": self._pressure_state,
-            "rss_mb": self._rss_mb(),
+            "rss_mb": rss_mb,
             "auto_recovery_enabled": bool(self.config.get("health_manager_auto_recovery_enabled", True)),
             "components": {
                 name: {
