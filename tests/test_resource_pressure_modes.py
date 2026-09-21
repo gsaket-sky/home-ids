@@ -440,5 +440,50 @@ def test_check_cycle_completes_even_when_pressure_probe_hangs(hm, monkeypatch):
     hm._check_cycle()  # must return promptly, not hang the test
 
 
+# --- outer-loop protection (2026-09-21 live incident, second occurrence) ----------
+# The narrower _classify_pressure() fix above was NOT enough on its own: a second
+# live py-spy dump caught a DIFFERENT call, _capture_memory_diagnostics()'s
+# tracemalloc.take_snapshot(), hang the exact same way under the same memory
+# pressure. _run_one_iteration() now bounds the WHOLE _check_cycle() call, not
+# just one probe inside it, so no single hang -- found or not-yet-found -- can
+# freeze the watchdog thread past one missed interval.
+
+def test_run_one_iteration_completes_even_when_check_cycle_hangs(hm, monkeypatch):
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, True)))
+    interval = hm._run_one_iteration()  # must return promptly, not hang the test
+    assert interval == 15.0
+
+
+def test_run_one_iteration_returns_configured_interval_on_success(hm, monkeypatch):
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: (None, False)))
+    hm.config._data["health_manager_check_interval_seconds"] = 7.0
+    assert hm._run_one_iteration() == 7.0
+
+
+def test_run_one_iteration_skips_check_cycle_entirely_when_disabled(hm, monkeypatch):
+    calls = []
+    monkeypatch.setattr(hm, "_bounded_call", staticmethod(lambda fn, timeout: calls.append(1) or (None, False)))
+    hm.config._data["health_manager_enabled"] = False
+    hm._run_one_iteration()
+    assert calls == []
+
+
+def test_a_real_hang_inside_check_cycle_is_bounded_end_to_end(hm, monkeypatch):
+    """No mocking of _bounded_call itself here -- a genuinely blocked _check_cycle()
+    (simulating the real tracemalloc.take_snapshot() stall) must still let
+    _run_one_iteration() return within the configured timeout, not hang forever."""
+    import threading as _threading
+    released = _threading.Event()
+
+    def _hung_check_cycle():
+        released.wait(timeout=5.0)
+
+    monkeypatch.setattr(hm, "_check_cycle", _hung_check_cycle)
+    hm.config._data["health_manager_check_cycle_timeout_seconds"] = 0.2
+    interval = hm._run_one_iteration()
+    assert interval == 15.0
+    released.set()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

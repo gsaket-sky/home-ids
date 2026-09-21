@@ -242,18 +242,49 @@ class HealthManager:
 
     def _run_loop(self) -> None:
         while self._running:
-            interval = float(self.config.get("health_manager_check_interval_seconds", 15.0))
-            if interval <= 0:
-                interval = 15.0
-            try:
-                if bool(self.config.get("health_manager_enabled", True)):
-                    self._check_cycle()
-            except Exception as exc:
-                # Must never crash the pipeline this thread shares a process with --
-                # same contract EnginePipeline._identity_reconcile_worker() already
-                # honors (pipeline.py:743-758).
-                LOGGER.error("Health manager check cycle failed (non-fatal, will retry next interval): %s", exc, exc_info=True)
+            interval = self._run_one_iteration()
             time.sleep(interval)
+
+    def _run_one_iteration(self) -> float:
+        """One pass of the watchdog loop -- factored out of _run_loop() so a test
+        can drive it directly instead of racing a real infinite while-loop thread.
+        Returns the sleep interval the caller should wait before the next call."""
+        interval = float(self.config.get("health_manager_check_interval_seconds", 15.0))
+        if interval <= 0:
+            interval = 15.0
+        try:
+            if bool(self.config.get("health_manager_enabled", True)):
+                # 2026-09-21 (live incident, second occurrence): the narrower fix
+                # in _classify_pressure() (bounding just the rss/cgroup probe) was
+                # NOT enough on its own -- a live py-spy dump caught a DIFFERENT
+                # call, _capture_memory_diagnostics()'s tracemalloc.take_snapshot(),
+                # hung the exact same way (a large snapshot walk stalling under the
+                # same kernel-level memory pressure). Chasing each individual
+                # blocking call one at a time is whack-a-mole -- anything in
+                # _check_cycle()'s call graph that touches the filesystem, the
+                # kernel, or a large in-memory structure is a candidate once this
+                # cgroup is deep enough into pressure. Bounding the WHOLE cycle
+                # here, not just one probe inside it, means no single hang -- known
+                # or still undiscovered -- can freeze this thread past one missed
+                # interval. The except below already covers exceptions; this
+                # covers hangs, which never raise anything to catch.
+                _, timed_out = self._bounded_call(
+                    self._check_cycle,
+                    timeout=float(self.config.get("health_manager_check_cycle_timeout_seconds", 30.0)),
+                )
+                if timed_out:
+                    LOGGER.error(
+                        "Health manager check cycle did not complete within %.0fs "
+                        "(likely a kernel-level stall under memory pressure) -- "
+                        "abandoning it and retrying next interval.",
+                        float(self.config.get("health_manager_check_cycle_timeout_seconds", 30.0)),
+                    )
+        except Exception as exc:
+            # Must never crash the pipeline this thread shares a process with --
+            # same contract EnginePipeline._identity_reconcile_worker() already
+            # honors (pipeline.py:743-758).
+            LOGGER.error("Health manager check cycle failed (non-fatal, will retry next interval): %s", exc, exc_info=True)
+        return interval
 
     def _check_cycle(self) -> None:
         self._evaluate_resource_pressure()
