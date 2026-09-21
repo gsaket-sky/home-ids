@@ -51,6 +51,37 @@ from mitigation.ips import IPSMitigator
 LOGGER = logging.getLogger("home_ids.main")
 
 
+class _SecretRedactingFormatter(logging.Formatter):
+    """Wraps the normal formatted output (message + any exception traceback) and
+    scrubs every configured secret value out of it before it reaches a handler.
+
+    2026-09-21 (live incident): confirmed live that urllib3's OWN internal retry
+    logger ("Retrying ... after connection broken by ...") logs the full request
+    URL -- including the Telegram bot token, which lives in the URL path rather
+    than a header -- on every automatic connection retry. src/mitigation/alerts.py's
+    own _safe_exc() only scrubs exceptions THIS codebase catches and formats
+    itself; it has no way to reach into a third-party library's own logging calls.
+    Chasing each individual library/call site that might embed a secret in a log
+    line is the same whack-a-mole this session already learned not to play with
+    health_manager's blocking calls -- redacting the final rendered text of EVERY
+    log record, from every logger, in one place, closes the whole class of leak
+    instead of one instance of it. Operates on the fully rendered string (not just
+    record.msg/args) so it also catches a secret embedded inside an exception
+    traceback via exc_info=True, which a Filter running before formatting cannot.
+    """
+
+    def __init__(self, *args, secrets=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._secrets = sorted({s for s in (secrets or []) if s}, key=len, reverse=True)
+
+    def format(self, record: logging.LogRecord) -> str:
+        text = super().format(record)
+        for secret in self._secrets:
+            if secret in text:
+                text = text.replace(secret, "***REDACTED***")
+        return text
+
+
 def setup_logging():
     """Configures the root logger based on the dynamic configuration."""
     log_level_str = CONFIG.get("log_level", "INFO").upper()
@@ -59,6 +90,21 @@ def setup_logging():
         level=numeric_level, 
         format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
+    # Redact every known secret (restart-required per config.py's own _STATIC_KEYS,
+    # so reading them once here at boot is sufficient -- these can't change live)
+    # from every log line this process emits, regardless of which logger/library
+    # produced it. See _SecretRedactingFormatter's own docstring for why this is a
+    # blanket fix rather than another one-off patch at a single call site.
+    _secret_keys = (
+        "telegram_token", "otx_api_key", "abuseipdb_api_key", "virustotal_api_key",
+        "pihole_api_password", "fritz_password", "fritz_api_token",
+    )
+    _secrets = [str(CONFIG.get(k, "")).strip() for k in _secret_keys]
+    _redacting_formatter = _SecretRedactingFormatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s", secrets=_secrets,
+    )
+    for _handler in logging.getLogger().handlers:
+        _handler.setFormatter(_redacting_formatter)
     LOGGER.debug("Logging subsystem initialized at level: %s", log_level_str)
 
     # BUGFIX: log_level is documented [LIVE] in config.yaml, but logging.basicConfig()
