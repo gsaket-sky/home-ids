@@ -752,8 +752,14 @@ class HealthManager:
         type_counts = collections.Counter(type(o).__name__ for o in gc.get_objects())
         top_object_types = [{"type": t, "count": c} for t, c in type_counts.most_common(20)]
 
-        process_rss_mb = {"main": round(self._rss_mb(), 1)}
-        cgroup_pct = self._cgroup_memory_pct()
+        # Same reasoning as snapshot()'s and _send_pressure_alert()'s own fixes --
+        # bound this process's own direct psutil/sysfs reads rather than relying
+        # solely on the outer _check_cycle() bound.
+        main_rss, main_timed_out = self._bounded_call(self._rss_mb, timeout=3.0)
+        process_rss_mb = {"main": round(main_rss if not main_timed_out else self._last_known_rss_mb, 1)}
+        cgroup_pct, cgroup_timed_out = self._bounded_call(self._cgroup_memory_pct, timeout=3.0)
+        if cgroup_timed_out:
+            cgroup_pct = None
         for name, proc in (("fastapi", self.fastapi_proc), ("scheduler", self.scheduler_proc)):
             if proc is None or proc.pid is None:
                 continue
