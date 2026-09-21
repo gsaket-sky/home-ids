@@ -1,6 +1,14 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
-**Status (2026-09-20, latest): Phases 1-4 all implemented, deployed to `.94`,
+**Status (2026-09-21, latest): Phase 4's benchmark sweep actually RUN (real
+data below, not the earlier "not yet run" placeholder), Phase 5's capacity
+question ANSWERED, `soc.service`'s `MemoryMax` raised again (2G -> 3.5G, this
+was still too tight even after Phases 1-3's fixes), and a related real gap
+fixed: `ml_engine.py`'s per-device model dict had no cleanup on age-out
+eviction. See "Phase 4 -- REAL RESULTS" and "Phase 5 -- capacity answer"
+below for the full 2026-09-21 update.**
+
+**Status (2026-09-20): Phases 1-4 all implemented, deployed to `.94`,
 and verified.** Cadence verification AFTER deploying Phases 1-3 found the
 restarts were still happening -- every ~12-14 minutes, WORSE than before --
 from a completely different, previously-undiscovered cause (evidence-volume
@@ -292,19 +300,121 @@ own analytical estimate (~1.67MB/device/day combining evidence+edges+
 decisions), a reasonable cross-check that the synthetic traffic model isn't
 wildly unrealistic.
 
-**Important scope caveat, not yet resolved**: this harness measures ONLY
+**Important scope caveat**: this harness measures ONLY
 the `live_engine.evaluate()` code path's own RSS -- `GraphStore` +
 `HypothesisEngine` + `DecisionEngine` + `BaselineEngine`. It does NOT run
 Zeek/Suricata, the FastAPI/uvicorn process, the scheduler, LLM review,
-CL-AFPE, or `health_manager.py` itself, all of which contribute to the REAL
-`soc.service` process's RSS. The smoke test's own numbers (58.7MB baseline
--> 72.5MB after 1 day, 3 devices) are therefore NOT directly comparable to
-the real 1843MB CRITICAL threshold -- concluding "a Pi could handle
-thousands of devices" from this alone would be a real, live mistake. The
-full N-sweep (13/25/50/100/200 devices x 7 simulated days each, run on `.94`
-under the `CPUQuota=76%`/`MemoryMax=8G` cgroup) still needs to actually run
--- estimated wall-clock cost from the smoke test's own timing, roughly
-linear in devices x days: ~2.5 hours for the full sweep sequentially.
+CL-AFPE, the legacy v1 engine (`fp_engine.py`/`ml_engine.py`/`threat_intel.py`,
+which runs live in parallel with v13/argus by deliberate permanent design),
+or `health_manager.py` itself, all of which also contribute to the REAL
+`soc.service` process's RSS. Concluding "a Pi could handle thousands of
+devices" from this benchmark ALONE would be a real mistake -- see "Phase 5 --
+capacity answer" below for how this gets combined with the rest of the
+process's real, measured footprint.
+
+### Phase 4 -- REAL RESULTS (2026-09-21, this benchmark actually run)
+
+Run locally (not on `.94` -- avoids adding load to a box that was actively
+cycling every 10-45 minutes at the time; state-dir pointed at local disk, not
+the network share the repo checkout itself lives on, after an initial N=13
+run against the network share measured the SAME RSS numbers but ~3x slower
+wall-clock purely from SQLite fsync latency over SMB -- confirms the RSS
+figures below aren't an artifact of where the DB file lives, only the speed
+of getting there is). `--hardware-profile pi_8gb` for all three runs.
+
+| N devices | Simulated days run | Final RSS | Notable |
+|---|---|---|---|
+| 13 | 3.0 | 121.4MB | still climbing slightly at day 3 (not fully plateaued) |
+| 50 | 6.0 | 132.2MB | plateaued by day ~2 (125.4MB) -- day 2->6 only +6.8MB despite db growing 127MB->392MB |
+| 100 | 6.0 | 147.3MB | plateaued by day ~2-3 (133.4MB) -- day 3->6 only +9.3MB despite db growing 396MB->791MB |
+
+**This engine layer's RSS is a clean linear fit**: `RSS(N) ≈ 117.1MB +
+0.302MB × N`, confirmed against all three data points (N=13's predicted
+plateau of 117.1+13×0.302=121.0MB matches its measured 121.4MB almost
+exactly, even though N=13 hadn't fully finished climbing to plateau at day
+3). The 117MB floor is dominated by two FIXED costs, not per-device state:
+Python/library import overhead (~59MB, measured at simulated-day 0 before
+any device activity) and the `pi_8gb` profile's own `cache_size` PRAGMA cap
+(48,000KB = 48MB) filling up as the SQLite page cache warms -- both
+independent of N. **The actual per-device marginal cost in this layer is
+tiny: ~0.3MB/device.** Going from 50 to 100 devices costs this layer only
+~15MB total, not a meaningful driver of capacity limits.
+
+Separately measured, not from this benchmark (it doesn't exercise the legacy
+v1 engine at all): `ml_engine.py`'s per-device model files on `.94` measured
+at 15MB for 13 real devices (~1.15MB/device on disk, loaded fully into RAM
+via `joblib.load()` with no cap until 200 active devices, which no real
+household/small-business deployment reaches) -- and the threat-intel Tranco
+top-1M-domain rank index measured directly at **121MB RSS** for exactly
+1,000,000 entries (built the real dict locally, watched `psutil` RSS before/
+after; this is a FIXED cost, independent of device count, rebuilt every 24h).
+
+### Phase 5 -- capacity answer (2026-09-21)
+
+Combining the measured pieces: `soc.service`'s real total footprint (main +
+fastapi + scheduler processes) is dominated by a **fixed floor of roughly
+1.6-1.9GB** -- the Tranco index (121MB), the legacy-v1-engine-running-
+alongside-v13/argus overhead (the single largest unattributed chunk;
+existing `tracemalloc`-based diagnostics don't yet attribute this precisely,
+a real gap this investigation did not close), GeoIP DBs (~78MB, mmap'd),
+CL-AFPE's ONNX sessions, and general Python/library overhead -- **plus a
+genuinely small per-device marginal cost, roughly 0.3-1.5MB/device** (the
+v13/argus layer's measured 0.3MB/device plus the legacy engine's ~1.15MB/
+device ML models).
+
+**Answer: device count (50 vs. 100) is NOT the capacity constraint.** At 50
+devices, realistic total is ~1.7-2.0GB; at 100 devices, ~1.8-2.1GB -- a
+difference of only ~100-150MB. `soc.service` was restarting every 10-45
+minutes at TODAY's ~56 real devices because the 2G `MemoryMax` left
+near-zero headroom above that fixed floor, not because of device-count
+scaling. **Fix applied**: `MemoryMax` raised 2G -> 3.5G (see
+`Documentation/INSTALL.md` section 7.2 for the full rationale) -- this gives
+real headroom above the realistic 1.7-2.1GB ceiling at 50-100 devices, plus
+room for normal bursts (LLM review, Suricata reactive capture, FP-model
+retraining), instead of running flush against the wall as 2G did.
+
+**Full-box implication for the real Raspberry Pi target**: `soc.service`
+alone is not the whole picture -- this project's own `Documentation/
+INSTALL.md` puts Pi-hole, Zeek, Suricata, Prometheus, Loki, Promtail, and
+Grafana on the SAME box. Measured live on `.94`: Grafana 418MB + Prometheus
+102MB + Loki 78MB + Promtail 26MB + node-exporter 20MB ≈ 645MB, plus Zeek
+~265MB baseline. Rough full-box steady-state total: ~3.25GB (`soc.service`
+with its new 3.5G cap, real usage inside it) + ~0.9GB (observability stack)
++ ~0.5GB (Zeek/Suricata) + ~0.15GB (Pi-hole) + ~0.5GB (OS) ≈ **~5.3GB**,
+leaving ~2.7GB headroom on an 8GB Pi for zram-swap and burst absorption --
+workable, but confirms 8GB is the right target with real margin, not an
+over-provisioned choice; a 4GB Pi would not have adequate headroom under
+this same accounting.
+
+**Real gap fixed alongside this (2026-09-21)**: `pipeline.py`'s age-out
+device pruning (`prune_stale_devices()`, ~7-day idle default) already
+cleaned up `fp_engine.py`'s calibration profile and Prometheus metric labels
+for a pruned device, but NOT `ml_engine.py`'s per-device model -- only
+`merge_into_canonical()` ever called `MultiDeviceMLEngine.discard_device()`.
+A device that went stale WITHOUT ever merging kept its `DeviceMLEngine`
+resident in RAM (bounded only by a 200-active-device LRU cap that real
+household/small-business scale never reaches) and its `.pkl` file on disk
+forever, re-globbed and reloaded by `load_models()` on every future process
+restart regardless of that LRU cap. Fixed: `pipeline.py`'s pruning loop now
+also calls `self.ml_registry.discard_device(e_dev_id, reason="prune")`,
+mirroring the existing `fp_engine.discard_device_profile(..., reason="prune")`
+call right above it. Covered by a new standalone test,
+`tests/test_ml_engine_stale_device_discard.py` (8 checks, all passing) --
+exercises `MultiDeviceMLEngine.discard_device()` directly rather than
+`pipeline.py`'s own `_step()`, which (per `test_phase40_alert_button_
+containment_sync.py`'s own documented reasoning) is too large/deeply-embedded
+to invoke directly in a test.
+
+**Not yet done**: attributing the ~1.3GB "everything else" chunk of the
+fixed floor to specific subsystems (the legacy-v1-engine-in-parallel
+overhead is the largest suspect but wasn't isolated); the CPUQuota
+200%-live-vs-40%-tracked drift noted in section 4 above remains unresolved;
+zram-for-swap-on-the-real-Pi is a separate, machine-specific OS/systemd
+config decision, not something this repo's own code can deploy -- see the
+session notes for why `.94` (an x86 box with server-grade NVMe, not an SD
+card) needs a different justification than the real Pi target for adopting
+it, and why validating the setup on `.94` first (before real Pi hardware is
+available) is still worth doing.
 
 ### Phase 5 -- Capacity report + CPU quota reconciliation
 

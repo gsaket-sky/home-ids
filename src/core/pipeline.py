@@ -3589,6 +3589,14 @@ class EnginePipeline:
                 # the same gap the merge path's discard_device_profile() closes, here for
                 # the age-out eviction path instead of the retroactive-merge path.
                 if hasattr(self, 'fp_engine') and self.fp_engine: self.fp_engine.discard_device_profile(e_dev_id, reason="prune")
+                # BUGFIX (2026-09-21, memory-capacity investigation): ml_registry's
+                # per-device model dict had NO cleanup on age-out eviction -- only
+                # merge_into_canonical() ever called discard_device(). A device that
+                # goes stale (7-day idle default) without ever merging kept its
+                # sklearn model resident in RAM, and its .pkl file on disk, forever.
+                # Same gap class as fp_engine's calibration profile above, closed the
+                # same way for the age-out path.
+                if self.ml_registry: self.ml_registry.discard_device(e_dev_id, reason="prune")
             self.state_manager.prune_expired_actions(now)  # PHASE 3: drop expired revoke-ledger entries
             self._last_prune = now
 
