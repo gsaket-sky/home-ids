@@ -855,6 +855,44 @@ class StateManager:
             LOGGER.error("Failed to load state store from %s: %s", self.state_path, exc)
             return 0
 
+    # 2026-09-21 (live incident): confirmed live that a graceful shutdown (pipeline.py's
+    # stop(), itself triggered by health_manager's own pipeline_main_loop-heartbeat
+    # self-heal) got stuck for 5+ minutes inside this exact json.dump()/file-write --
+    # the same "even basic filesystem I/O can stall under this cgroup's memory
+    # pressure" pattern already found (twice, via py-spy) in core/health_manager.py's
+    # psutil/sysfs reads. This is also called every ~60s from the HOT pipeline loop
+    # (pipeline.py's _step()) -- a stall here is very plausibly the ROOT CAUSE of the
+    # pipeline_main_loop heartbeat going stale in the first place, not just a
+    # shutdown-time inconvenience. Bounding it protects both paths with one fix.
+    _FLUSH_IO_TIMEOUT_SECONDS = 20.0
+
+    @staticmethod
+    def _bounded_io(fn, timeout: float):
+        """Same shape as core/health_manager.py's own _bounded_call() -- kept as a
+        small local copy rather than importing across that module boundary (state_
+        guard.py has no other dependency on health_manager.py, and this codebase's
+        own established precedent, e.g. health_manager.py's _set_config_override(),
+        already prefers a small local copy over a cross-layer import for exactly
+        this kind of narrow, self-contained helper). Runs fn() on a throwaway daemon
+        thread with a hard wall-clock bound; a stuck fn() leaks one thread (bounded
+        by process lifetime) instead of freezing the caller forever."""
+        result: Dict[str, Any] = {}
+
+        def _target():
+            try:
+                result["value"] = fn()
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(target=_target, daemon=True, name="state_flush_io")
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None, True
+        if "error" in result:
+            raise result["error"]
+        return result.get("value"), False
+
     def flush_to_disk(self) -> bool:
         try:
             LOGGER.debug("Acquiring global lock to initiate state file persistence.")
@@ -884,11 +922,28 @@ class StateManager:
 
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self.state_path.with_suffix(".tmp")
-            
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(full_snapshot, f, separators=(",", ":"))
-                
-            tmp_path.replace(self.state_path)
+
+            def _write_and_replace():
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(full_snapshot, f, separators=(",", ":"))
+                tmp_path.replace(self.state_path)
+
+            _, timed_out = self._bounded_io(_write_and_replace, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)
+            if timed_out:
+                # tmp_path.replace() never ran (or hasn't yet, on the abandoned
+                # thread) -- self.state_path is untouched, so a concurrent reader
+                # never sees a partial/corrupt file. The abandoned write may still
+                # complete later on its own leaked thread and silently finish the
+                # replace after the fact; that's fine (same file, same content it
+                # would have written promptly).
+                LOGGER.error(
+                    "StateManager flush to %s did not complete within %.0fs (likely "
+                    "a kernel-level I/O stall under memory pressure) -- abandoning "
+                    "this flush attempt rather than blocking the caller.",
+                    self.state_path, self._FLUSH_IO_TIMEOUT_SECONDS,
+                )
+                return False
+
             LOGGER.info("StateManager flushed state snapshot (%d devices, IPS state) to %s", len(devices_snapshot), self.state_path)
 
             if self._graph_store is not None:
