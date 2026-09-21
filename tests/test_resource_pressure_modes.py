@@ -165,6 +165,58 @@ def test_classify_critical_beats_conservation_beats_pressure(hm, fake_psutil):
     assert hm._classify_pressure() == hm_module.CRITICAL
 
 
+# --- cgroup-wide memory pressure ---------------------------------------------------
+#
+# BUGFIX regression (found live, 2026-09-21 OOM incident): _rss_mb() only ever
+# measured THIS process's own RSS. Confirmed live on .94: a real kernel
+# OOM-kill hit soc.service's own systemd cgroup cap (2G + 256M swap) while the
+# main process's own RSS was 1.34GB -- comfortably under its own 1843MB
+# CRITICAL threshold -- because THREE OTHER processes sharing that same cgroup
+# (uvicorn, scheduler.py, and a nightly batch job scheduler.py had spawned)
+# added another ~740MB the RSS-only check has no way to see. _cgroup_memory_pct()
+# reads systemd's own memory.current/memory.max accounting directly, so
+# _classify_pressure() can escalate on the SAME signal the kernel will
+# eventually act on, even when this process's own RSS looks fine.
+
+def test_classify_critical_on_cgroup_pct_alone_even_with_healthy_rss(hm, fake_psutil, monkeypatch):
+    fake_psutil.state.update(rss_mb=500, sysmem_pct=10, swap_pct=0, available_mb=8000)  # all healthy
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: 95.0)  # the cgroup itself is nearly OOM
+    assert hm._classify_pressure() == hm_module.CRITICAL
+
+
+def test_classify_conservation_on_cgroup_pct_alone_even_with_healthy_rss(hm, fake_psutil, monkeypatch):
+    fake_psutil.state.update(rss_mb=500, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: 80.0)  # above 75% conservation floor, below 90% critical
+    assert hm._classify_pressure() == hm_module.CONSERVATION
+
+
+def test_classify_normal_when_cgroup_pct_low_even_if_unavailable_elsewhere(hm, fake_psutil, monkeypatch):
+    fake_psutil.state.update(rss_mb=500, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: 10.0)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_classify_falls_back_gracefully_when_cgroup_pct_unavailable(hm, fake_psutil, monkeypatch):
+    """None (Windows dev environment, cgroup v1, non-systemd deployment) must
+    be treated as 'no signal', not crash and not itself force an escalation --
+    the existing RSS/swap/available-memory checks still apply unchanged."""
+    fake_psutil.state.update(rss_mb=500, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: None)
+    assert hm._classify_pressure() == hm_module.NORMAL
+
+
+def test_cgroup_memory_pct_returns_none_on_this_dev_machine(hm):
+    """This dev environment is Windows (no /proc/self/cgroup at all) -- the
+    real, non-monkeypatched implementation must degrade to None, not raise.
+    On every real deployment target (.94, the eventual Pi -- both Linux under
+    systemd) this same code path returns a real percentage instead; that
+    parsing logic is exercised implicitly by every OTHER test in this file
+    that monkeypatches this method's RETURN VALUE rather than its internals,
+    matching this codebase's established pattern for OS-integration points
+    (see _external_component_rss_mb()'s own fake-psutil-based tests)."""
+    assert hm._cgroup_memory_pct() is None
+
+
 # --- BUGFIX regression: system-wide swap/sysmem/available must NOT escalate ----
 # a process that isn't itself contributing to the pressure. Found live,
 # 2026-09-14: .94 (a shared box also running Grafana/Loki/Immich/n8n/OpenWebUI)

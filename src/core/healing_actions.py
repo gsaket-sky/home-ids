@@ -34,6 +34,9 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger("home_ids.healing_actions")
 
 
+_SIGKILL_ESCALATION_ATTEMPT = 3  # see BUGFIX #2 below
+
+
 def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]:
     """The main pipeline process restarting itself.
 
@@ -56,19 +59,62 @@ def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]
     shutdown_handler (graceful subprocess cleanup, health_manager.stop(),
     pipeline.stop(), then a real sys.exit(0) called FROM the main thread,
     which does terminate the process) instead of a bare, thread-local, silently
-    no-op exit."""
+    no-op exit.
+
+    BUGFIX #2 (found live, 2026-09-21 OOM incident investigation): confirmed
+    this SIGTERM path can itself silently fail to work at all under severe
+    cgroup memory/swap pressure -- CPython only delivers a caught signal to
+    Python code at the next bytecode-eval-loop check, which never comes if
+    the main thread is stuck thrashing on swapped-out pages (page faults are
+    serviced entirely in the kernel, with no bytecode running in between).
+    Live evidence: this fired for `pipeline_main_loop` FIVE times over 31
+    minutes (RecoveryBackoff's own 0/30/120/600s schedule), each logged as
+    "succeeded... verifying", while the component's heartbeat staleness kept
+    climbing the entire time (302s -> 1139s) -- the process never actually
+    exited on its own. The engine sat with zero detection coverage,
+    believing it was healing itself, until the kernel's OOM-killer ended it
+    45 minutes after the first attempt. From the 3rd attempt onward (i.e.
+    once TWO prior SIGTERMs have demonstrably not worked -- this action is
+    only ever invoked again because the component is still unhealthy),
+    escalate to SIGKILL: unlike SIGTERM it cannot be caught, blocked, or
+    queued waiting for a bytecode boundary -- the kernel enforces it
+    unconditionally without any cooperation from this (possibly wedged)
+    process. This skips main.py's graceful shutdown_handler (state saves
+    etc.), the correct tradeoff at this point: systemd's Restart=always
+    relaunches it either way, and the alternative already demonstrated live
+    is an unbounded, silent coverage gap rather than a clean shutdown."""
+    backoff_attempt = 0
+    try:
+        backoff_attempt = hm._get_record(component)["backoff"].attempt_count
+    except Exception:
+        pass
+    escalate = backoff_attempt >= _SIGKILL_ESCALATION_ATTEMPT
+    # getattr fallback: SIGKILL doesn't exist on Windows (this project's own
+    # dev environment) -- every real deployment target (.94, the eventual Pi)
+    # is Linux, where it's always present, but this must not crash a dev-
+    # machine test run over a platform difference that never occurs in
+    # production.
+    sig = getattr(signal, "SIGKILL", signal.SIGTERM) if escalate else signal.SIGTERM
+    action_detail = (
+        "SIGKILL sent to self (graceful SIGTERM already failed to take effect)"
+        if escalate else "SIGTERM sent to self"
+    )
+
     try:
         if hm.alert_manager is not None:
             hm.alert_manager.send(
                 f"🔁 *Health Manager*: restarting the main engine process "
-                f"(triggered by `{component}`). Expect a ~10-45s detection gap "
-                f"while systemd relaunches it."
+                f"(triggered by `{component}`, attempt {backoff_attempt}). "
+                f"Expect a ~10-45s detection gap while systemd relaunches it."
             )
     except Exception:
         pass
-    LOGGER.critical("Health manager triggered a self-restart (component=%s). Sending SIGTERM to self for graceful shutdown.", component)
-    os.kill(os.getpid(), signal.SIGTERM)
-    return True, "SIGTERM sent to self"
+    LOGGER.critical(
+        "Health manager triggered a self-restart (component=%s, attempt=%d). %s.",
+        component, backoff_attempt, action_detail,
+    )
+    os.kill(os.getpid(), sig)
+    return True, action_detail
 
 
 def restart_fastapi_subprocess(hm: "HealthManager", component: str) -> Tuple[bool, str]:

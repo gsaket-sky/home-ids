@@ -72,6 +72,59 @@ def test_restart_own_process_survives_no_alert_manager(monkeypatch):
     healing_actions.restart_own_process(hm, "resource_pressure")  # must not raise
 
 
+# BUGFIX #2 regression (found live, 2026-09-21 OOM incident): a graceful
+# SIGTERM can silently never take effect if the main thread is too busy
+# thrashing on swapped-out pages to ever reach a bytecode boundary --
+# confirmed live, pipeline_main_loop sent itself SIGTERM 5 times over 31
+# minutes with zero actual effect, until the kernel's OOM-killer ended it.
+# From the 3rd attempt onward, escalate to SIGKILL, which the kernel enforces
+# unconditionally with no cooperation from this process required.
+
+def _fake_hm_with_backoff(attempt_count, **overrides):
+    return _fake_hm(
+        _get_record=lambda component: {"backoff": SimpleNamespace(attempt_count=attempt_count)},
+        **overrides,
+    )
+
+
+@pytest.mark.parametrize("attempt_count", [1, 2])
+def test_restart_own_process_still_uses_sigterm_below_escalation_threshold(monkeypatch, attempt_count):
+    kills = []
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    hm = _fake_hm_with_backoff(attempt_count)
+    success, detail = healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert kills == [(healing_actions.os.getpid(), healing_actions.signal.SIGTERM)]
+    assert success is True
+    assert "SIGTERM" in detail
+
+
+@pytest.mark.parametrize("attempt_count", [3, 4, 5])
+def test_restart_own_process_escalates_to_sigkill_after_repeated_failed_attempts(monkeypatch, attempt_count):
+    # getattr, not a bare signal.SIGKILL reference: this dev environment is
+    # Windows, which has no SIGKILL at all -- every real deployment target is
+    # Linux, where it's always present (see healing_actions.py's own comment).
+    expected_sig = getattr(healing_actions.signal, "SIGKILL", healing_actions.signal.SIGTERM)
+    kills = []
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    hm = _fake_hm_with_backoff(attempt_count)
+    success, detail = healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert kills == [(healing_actions.os.getpid(), expected_sig)]
+    assert success is True
+    if expected_sig != healing_actions.signal.SIGTERM:
+        assert "SIGKILL" in detail
+
+
+def test_restart_own_process_missing_get_record_defaults_to_sigterm(monkeypatch):
+    """_fake_hm() (no _get_record at all, like a minimal stand-in) must not
+    crash -- the attempt-count lookup is best-effort, defaulting to the safe
+    (non-escalated) SIGTERM behavior rather than raising."""
+    kills = []
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: kills.append((pid, sig)))
+    hm = _fake_hm()
+    success, detail = healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert kills == [(healing_actions.os.getpid(), healing_actions.signal.SIGTERM)]
+
+
 # --- restart_fastapi_subprocess ----------------------------------------------------
 
 def test_restart_fastapi_subprocess_terminates_old_and_launches_new(monkeypatch):

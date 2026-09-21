@@ -248,6 +248,28 @@ device_type_of = backtest_job._device_type_lookup(store_scoped, scoped_device_id
 check("_device_type_lookup: resolves the real device_type for every requested device",
       device_type_of == {"dev_scoped_0": "smart_tv", "dev_scoped_1": "smart_tv"}, f"got {device_type_of}")
 
+# BUGFIX regression (found live on .94, 2026-09-21): the live pipeline never
+# writes the devices.device_type COLUMN (score_metric()'s own upsert_device()
+# call never passes device_type) -- it only ever lands in metadata_json via
+# update_device_metadata(), the SAME landmine population_prior_builder.py's
+# own _device_type_map() already hit and fixed 2026-09-16. Confirmed live: on
+# .94, ALL 56 real devices had device_type=NULL in the column, which made
+# devices_by_category always come back empty in augment_small_category_sweeps()
+# -- the entire category/device-scoped tuning path had been silently inert.
+metadata_only_dev = "dev_metadata_only"
+store_scoped.upsert_device(metadata_only_dev, timestamp=NOW)  # no device_type -- column stays NULL
+store_scoped.update_device_metadata(metadata_only_dev, {"device_type": "iot"}, timestamp=NOW)
+column_value = store_scoped._conn.execute(
+    "SELECT device_type FROM devices WHERE device_id = ?", (metadata_only_dev,)
+).fetchone()["device_type"]
+check("_device_type_lookup regression setup: the raw column is genuinely NULL, "
+      "matching .94's real data, not just theoretically possible",
+      column_value is None, f"got {column_value!r}")
+metadata_only_lookup = backtest_job._device_type_lookup(store_scoped, [metadata_only_dev])
+check("_device_type_lookup: resolves device_type from metadata_json when the "
+      "column is NULL -- the real .94 bug this fixes",
+      metadata_only_lookup == {metadata_only_dev: "iot"}, f"got {metadata_only_lookup}")
+
 all_trials = backtest_job.augment_small_category_sweeps(store_scoped, scoped_synthetic, device_type_of, now=NOW)
 check("augment_small_category_sweeps: returns at least the base pass's own "
       "trial count (2 devices) -- augmentation only ever ADDS trials",

@@ -1007,11 +1007,28 @@ scheduled_jobs:
     # from real per-device baseline history, closing the "read-only, no writer"
     # gap. Daily, not more often: population-level behavior patterns are
     # slow-moving, unlike the nightly backtest's own correctness-gate reason to
-    # run every night. 3:45am -- clear of autotune (3am), live_prune (3:15am), and
-    # backtest_job (3:30am).
+    # run every night.
+    #
+    # BUGFIX (2026-09-21): was "45 3 * * *" (3:45am), a 15-minute gap after
+    # backtest_job's own 3:30am start, on the assumption backtest_job would
+    # already be done (it always had been -- 1-4 minutes every night since
+    # inception). That assumption broke live on .94: the night
+    # _device_type_lookup()'s own devices.device_type-column bug was fixed
+    # (see that function's docstring in argus/ops/backtest_job.py),
+    # augment_small_category_sweeps()'s per-device/category repeat-sweep
+    # passes actually ran for the first time ever (they'd been silently inert
+    # until then) and backtest_job was STILL RUNNING 48+ minutes later,
+    # overlapping this job's own start and contributing to a real kernel
+    # OOM-kill of the whole soc.service cgroup. Both jobs are memory-heavy and
+    # share soc.service's own memory cap as scheduler.py subprocesses -- moved
+    # to 4:45am, a full 75-minute gap, given backtest_job's real duration is
+    # no longer tightly bounded. A fixed-offset schedule is still inherently
+    # fragile against a job whose own duration isn't bounded -- true
+    # serialization (don't start this until backtest_job's own PID has
+    # exited) would be the robust fix, not yet done.
     population_prior_builder:
       enabled: true
-      cron: "45 3 * * *"
+      cron: "45 4 * * *"
       script: "../argus/ops/population_prior_builder.py"
 
 

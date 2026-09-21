@@ -450,10 +450,50 @@ class HealthManager:
         except Exception:
             return 0.0
 
+    def _cgroup_memory_pct(self) -> Optional[float]:
+        """How full THIS SERVICE's own systemd/cgroup v2 memory cap is right
+        now (memory.current / memory.max), or None if that can't be read
+        (Windows dev environment, cgroup v1, or a non-systemd deployment --
+        callers must treat that as "no signal", never as "healthy").
+
+        BUGFIX (2026-09-21 OOM incident investigation): _rss_mb() only ever
+        measured THIS process's own RSS against health_manager_rss_critical_mb
+        -- confirmed live that a real kernel OOM-kill hit soc.service's own
+        2G/256M-swap systemd cgroup cap while the main process was at 1.34GB,
+        comfortably under its own 1843MB CRITICAL threshold. The other three
+        processes sharing that SAME cgroup cap (uvicorn, scheduler.py, and
+        whatever scheduler.py had spawned at that moment -- that night, a
+        nightly batch job) added another ~740MB on top, which _rss_mb() has no
+        way to see: it is structurally scoped to one process, but the systemd
+        cap it's supposed to be a proxy for is scoped to the whole cgroup.
+        Reading memory.current/memory.max directly from sysfs is the
+        authoritative number for "how close is the thing systemd will
+        actually OOM-kill", not an approximation via summed process RSS
+        (which also double-counts shared pages another way). No new
+        dependency: cgroup v2 exposes this as a plain readable file, no
+        elevated privilege needed (confirmed live: the service's own
+        unprivileged user can read its own cgroup's accounting files)."""
+        try:
+            cgroup_line = Path("/proc/self/cgroup").read_text(encoding="utf-8").strip()
+            # cgroup v2 unified hierarchy is a single "0::<path>" line.
+            rel_path = cgroup_line.split("::", 1)[1].lstrip("/")
+            base = Path("/sys/fs/cgroup") / rel_path
+            current = int((base / "memory.current").read_text().strip())
+            max_raw = (base / "memory.max").read_text().strip()
+            if max_raw == "max":
+                return None  # no cap set -- nothing to be a percentage OF
+            max_bytes = int(max_raw)
+            if max_bytes <= 0:
+                return None
+            return 100.0 * current / max_bytes
+        except Exception:
+            return None
+
     def _classify_pressure(self) -> str:
         if psutil is None:
             return NORMAL
         rss_mb = self._rss_mb()
+        cgroup_pct = self._cgroup_memory_pct()
         try:
             vm = psutil.virtual_memory()
             swap = psutil.swap_memory()
@@ -497,12 +537,19 @@ class HealthManager:
         # fixed separately in the unit file, Restart=always). Restarting this
         # process does nothing to lower OTHER processes' swap usage, so swap was
         # never the right signal for this specific action.
+        cgroup_critical_pct = float(self.config.get("health_manager_cgroup_critical_pct", 90))
+        cgroup_conservation_pct = float(self.config.get("health_manager_cgroup_conservation_pct", 75))
+
         if (
             rss_mb >= float(self.config.get("health_manager_rss_critical_mb", 1843))
             or available_mb < float(self.config.get("health_manager_min_available_mb", 512))
+            or (cgroup_pct is not None and cgroup_pct >= cgroup_critical_pct)
         ):
             return CRITICAL
-        if rss_mb >= float(self.config.get("health_manager_rss_conservation_mb", 1536)):
+        if (
+            rss_mb >= float(self.config.get("health_manager_rss_conservation_mb", 1536))
+            or (cgroup_pct is not None and cgroup_pct >= cgroup_conservation_pct)
+        ):
             return CONSERVATION
         if system_signals_active and swap_pct >= float(self.config.get("health_manager_swap_conservation_pct", 60)):
             return CONSERVATION
@@ -553,11 +600,13 @@ class HealthManager:
         if self.alert_manager is None or not bool(self.config.get("telegram_enabled", False)):
             return
         rss = self._rss_mb()
+        cgroup_pct = self._cgroup_memory_pct()
+        cgroup_note = f", cgroup={cgroup_pct:.0f}%" if cgroup_pct is not None else ""
         icon = {"normal": "✅", "resource_pressure": "⚠️", "conservation": "🟠", "critical": "🔴"}.get(level, "⚠️")
         try:
             self.alert_manager.send(
                 f"{icon} *Health Manager: resource pressure -> {level.upper()}* "
-                f"(rss={rss:.0f}MB)"
+                f"(rss={rss:.0f}MB{cgroup_note})"
             )
         except Exception:
             pass
@@ -608,6 +657,7 @@ class HealthManager:
         top_object_types = [{"type": t, "count": c} for t, c in type_counts.most_common(20)]
 
         process_rss_mb = {"main": round(self._rss_mb(), 1)}
+        cgroup_pct = self._cgroup_memory_pct()
         for name, proc in (("fastapi", self.fastapi_proc), ("scheduler", self.scheduler_proc)):
             if proc is None or proc.pid is None:
                 continue
@@ -623,6 +673,7 @@ class HealthManager:
             "timestamp": time.time(),
             "pressure_level": level,
             "process_rss_mb": process_rss_mb,
+            "cgroup_memory_pct": cgroup_pct,
             "active_scheduled_jobs": self._active_scheduled_job_processes(),
             "top_allocations": top_allocations,
             "top_object_types": top_object_types,

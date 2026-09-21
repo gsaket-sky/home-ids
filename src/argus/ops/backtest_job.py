@@ -120,15 +120,38 @@ _MAX_SWEEP_REPETITIONS_PER_DEVICE = 5
 
 
 def _device_type_lookup(store: GraphStore, device_ids: List[str]) -> Dict[str, Optional[str]]:
-    """device_id -> device_type (or None) for the given devices, one query."""
+    """device_id -> effective device_type (or None) for the given devices, one query.
+
+    BUGFIX (found 2026-09-21 while investigating a real .94 OOM incident, NOT
+    by inspection): this used to read the devices.device_type COLUMN directly
+    (`SELECT device_id, device_type FROM devices ...`). Confirmed live: on
+    .94's real graph, ALL 56 devices have device_type=NULL in that column --
+    the live pipeline never writes it (score_metric()'s own upsert_device()
+    call never passes device_type; live_engine.py's peer-deviation injection
+    writes it into metadata_json via update_device_metadata(), never the
+    column). This is the SAME landmine population_prior_builder.py's own
+    _device_type_map() already hit and fixed on 2026-09-16 (see that
+    function's docstring) -- a second, independent instance of it here meant
+    every category/device-scoped tuning proposal in this module
+    (augment_small_category_sweeps(), _propose_scoped_tuning_changes())
+    silently produced zero proposals, ever: devices_by_category always came
+    back empty since every entry's device_type was None. Fixed the same way:
+    metadata_json's own "device_type" key first, the column as fallback."""
     if not device_ids:
         return {}
     placeholders = ",".join("?" * len(device_ids))
     rows = store._conn.execute(
-        f"SELECT device_id, device_type FROM devices WHERE device_id IN ({placeholders})",
+        f"SELECT device_id, device_type, metadata_json FROM devices WHERE device_id IN ({placeholders})",
         device_ids,
     ).fetchall()
-    return {r["device_id"]: r["device_type"] for r in rows}
+    out: Dict[str, Optional[str]] = {}
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except (TypeError, ValueError):
+            meta = {}
+        out[row["device_id"]] = meta.get("device_type") or row["device_type"]
+    return out
 
 
 def _flatten_trials(per_device: Dict[str, Any], device_type_of: Dict[str, Optional[str]]) -> List[Dict[str, Any]]:
