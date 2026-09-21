@@ -98,7 +98,7 @@ else:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: metrics_sync.py -- ARP-sweep autotune relay sync (real file, real object)
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     import json
     from pathlib import Path
     state_dir = Path(tmpdir)
@@ -159,7 +159,7 @@ d.try_dispatch(cfg_enabled, zeek_fx=object(), trigger_reason="metrics_test")  # 
 check("a deferred dispatch (shared budget exhausted) increments outcome=deferred",
       counter_value(reactive_capture_bursts_total, trigger_reason="metrics_test", outcome="deferred") == before_deferred + 1.0)
 
-with tempfile.TemporaryDirectory() as tmpdir2:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
     stale_dir = _PathForSysPath(tmpdir2)
     old_file = stale_dir / "orphan.pcap"
     old_file.write_bytes(b"x")
@@ -177,7 +177,7 @@ with tempfile.TemporaryDirectory() as tmpdir2:
 # ═══════════════════════════════════════════════════════════════════════════════════
 from intelligence.fp_engine import AutonomousFPEngine
 
-with tempfile.TemporaryDirectory() as tmpdir3:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir3:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir3)
     fp.record_confirmed_threat("dev_metrics_test", "malicious-metrics-test.example", "6.6.6.6",
                                 reason="unit_test")

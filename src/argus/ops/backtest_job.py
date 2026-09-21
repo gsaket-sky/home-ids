@@ -442,6 +442,62 @@ def _promote_eligible_tuning_changes(store: GraphStore, run_id: str, now: float)
 _RETROACTIVE_MISS_LOOKBACK_SECONDS = 7 * 86400.0
 
 
+def _iter_active_loosened_scopes(store: GraphStore, engine: AutotuneEngine, parameter: str,
+                                    default: float):
+    """Shared traversal used by every retroactive-circuit-breaker check in this
+    file: finds every currently-active (promoted, not yet rolled back) device- or
+    category-scoped override of `parameter` that's LOOSENED relative to its
+    parent tier, resolves that parent's own current value, and the concrete
+    device_id set the scope covers. Yields (change_id, scope_device_id,
+    scope_device_type, scope_value, parent_value, band_lo, band_hi, device_ids)
+    tuples -- callers do their own parameter-specific near-miss/confirmation
+    lookup against `device_ids`.
+
+    2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase F): extracted
+    from check_retroactive_misses_and_rollback() (originally hand-scoped to
+    _TUNE_PARAMETER only) so arp_sweep_unique_targets_threshold/
+    fp_combined_suppress_threshold's own checks below don't duplicate this
+    traversal -- their near-miss signal and ground-truth confirmation differ
+    from hard_stop_candidate_sensitivity's, but "which scopes are even
+    eligible" does not."""
+    direction = _LESS_SENSITIVE_DIRECTION[parameter]
+    active_scoped_rows = store._conn.execute(
+        "SELECT change_id, device_id, device_type, new_value FROM threshold_history WHERE parameter=? "
+        "AND promoted_at IS NOT NULL AND rolled_back_at IS NULL "
+        "AND (device_id IS NOT NULL OR device_type IS NOT NULL)",
+        (parameter,),
+    ).fetchall()
+
+    for row in active_scoped_rows:
+        scope_device_id = row["device_id"]
+        scope_device_type = row["device_type"]
+        scope_value = float(row["new_value"])
+
+        parent_device_type = scope_device_type if scope_device_id else None
+        parent_value = engine.get_active_value(parameter, device_id=None, device_type=parent_device_type,
+                                                  default=default)
+
+        # Only a LOOSENED scope can have missed something its parent would
+        # have caught -- a tightened scope is strictly MORE cautious than its
+        # parent, so it can never be the cause of a real miss.
+        if not ((scope_value - parent_value) * direction > 0):
+            continue
+        band_lo, band_hi = (parent_value, scope_value) if direction > 0 else (scope_value, parent_value)
+
+        if scope_device_id:
+            device_ids = [scope_device_id]
+        else:
+            device_ids = [r["device_id"] for r in store._conn.execute(
+                "SELECT device_id FROM devices WHERE device_type=? AND merged_into_device_id IS NULL",
+                (scope_device_type,),
+            ).fetchall()]
+        if not device_ids:
+            continue
+
+        yield (row["change_id"], scope_device_id, scope_device_type, scope_value,
+               parent_value, band_lo, band_hi, device_ids)
+
+
 def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float] = None,
                                              lookback_seconds: float = _RETROACTIVE_MISS_LOOKBACK_SECONDS
                                              ) -> List[Dict[str, Any]]:
@@ -460,11 +516,14 @@ def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float
     which is inherently a guess being cautiously introduced, this is undoing
     an override that real evidence has already shown was wrong.
 
-    Deliberately scoped to _TUNE_PARAMETER only (same scoping every other
-    proposal function in this file already uses) -- the evidence-confidence-
-    vs-threshold band comparison is only meaningful for a hard-stop
-    min-confidence bar; the other three TUNABLE_PARAMETERS have no comparable
-    per-evidence signal to retroactively re-score against.
+    Deliberately scoped to _TUNE_PARAMETER here -- the evidence-CONFIDENCE-
+    vs-threshold band comparison this function does is only meaningful for a
+    hard-stop min-confidence bar. arp_sweep_unique_targets_threshold and
+    fp_combined_suppress_threshold get their OWN checks below
+    (check_arp_sweep_retroactive_misses_and_rollback() /
+    check_fp_combined_retroactive_misses_and_rollback()), sharing this
+    function's scope-traversal (_iter_active_loosened_scopes()) but not its
+    near-miss/confirmation logic, which doesn't generalize cleanly to either.
 
     Runs independently of overall_pass -- a real confirmed miss from an
     already-promoted override is worth rolling back even on a night the
@@ -477,42 +536,11 @@ def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float
     now = now if now is not None else time.time()
     since = now - lookback_seconds
     engine = AutotuneEngine(store)
-    direction = _LESS_SENSITIVE_DIRECTION[_TUNE_PARAMETER]
     rolled_back: List[Dict[str, Any]] = []
 
-    active_scoped_rows = store._conn.execute(
-        "SELECT change_id, device_id, device_type, new_value FROM threshold_history WHERE parameter=? "
-        "AND promoted_at IS NOT NULL AND rolled_back_at IS NULL "
-        "AND (device_id IS NOT NULL OR device_type IS NOT NULL)",
-        (_TUNE_PARAMETER,),
-    ).fetchall()
-
-    for row in active_scoped_rows:
-        change_id = row["change_id"]
-        scope_device_id = row["device_id"]
-        scope_device_type = row["device_type"]
-        scope_value = float(row["new_value"])
-
-        parent_device_type = scope_device_type if scope_device_id else None
-        parent_value = engine.get_active_value(_TUNE_PARAMETER, device_id=None, device_type=parent_device_type,
-                                                  default=_TUNE_DEFAULT_SENSITIVITY)
-
-        # Only a LOOSENED scope can have missed something its parent would
-        # have caught -- a tightened scope is strictly MORE cautious than its
-        # parent, so it can never be the cause of a real miss.
-        if not ((scope_value - parent_value) * direction > 0):
-            continue
-        band_lo, band_hi = (parent_value, scope_value) if direction > 0 else (scope_value, parent_value)
-
-        if scope_device_id:
-            device_ids = [scope_device_id]
-        else:
-            device_ids = [r["device_id"] for r in store._conn.execute(
-                "SELECT device_id FROM devices WHERE device_type=? AND merged_into_device_id IS NULL",
-                (scope_device_type,),
-            ).fetchall()]
-        if not device_ids:
-            continue
+    for (change_id, scope_device_id, scope_device_type, scope_value, parent_value,
+         band_lo, band_hi, device_ids) in _iter_active_loosened_scopes(
+             store, engine, _TUNE_PARAMETER, _TUNE_DEFAULT_SENSITIVITY):
         placeholders = ",".join("?" * len(device_ids))
 
         near_misses = store._conn.execute(
@@ -543,6 +571,169 @@ def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float
                         f"evidence item (confidence in [{band_lo:.3f}, {band_hi:.3f})) that this scope's "
                         f"value {scope_value:.3f} would not hard-stop but the parent tier's "
                         f"{parent_value:.3f} would have"
+                    )
+                    break
+            if confirming_reason:
+                break
+
+        if confirming_reason is None:
+            continue
+
+        if engine.rollback_change(change_id, confirming_reason, now=now):
+            LOGGER.critical("[AUTOTUNE_CIRCUIT_BREAKER] %s", confirming_reason)
+            rolled_back.append({"change_id": change_id, "device_id": scope_device_id,
+                                  "device_type": scope_device_type, "reason": confirming_reason})
+
+    return rolled_back
+
+
+_ARP_SWEEP_PARAMETER = "arp_sweep_unique_targets_threshold"
+_ARP_SWEEP_DEFAULT_THRESHOLD = 8.0  # matches pipeline.py's own config.get(..., 8) default
+
+
+def check_arp_sweep_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float] = None,
+                                                        lookback_seconds: float = _RETROACTIVE_MISS_LOOKBACK_SECONDS
+                                                        ) -> List[Dict[str, Any]]:
+    """Same shape as check_retroactive_misses_and_rollback(), for
+    arp_sweep_unique_targets_threshold. The re-scorable signal here is
+    evidence.VALUE (the raw unique-target count), not confidence --
+    threat_signals.py computes arp_sweep evidence's confidence FROM the
+    threshold already in force at write time (0.5 + (count-threshold)*0.05,
+    confirmed via the evidence-bridge trace this phase's own investigation
+    did), so re-banding that confidence against a hypothetical parent
+    threshold would double-count the original threshold. The raw count is
+    threshold-independent and safe to re-band directly. Confirmation is the
+    SAME mechanism as the hard-stop check: a decision for that device, within
+    _HARD_STOP_FRESHNESS_SECONDS of the near-miss evidence, later recorded as
+    fp_verdict.verdict == "CONFIRMED_THREAT"."""
+    now = now if now is not None else time.time()
+    since = now - lookback_seconds
+    engine = AutotuneEngine(store)
+    rolled_back: List[Dict[str, Any]] = []
+
+    for (change_id, scope_device_id, scope_device_type, scope_value, parent_value,
+         band_lo, band_hi, device_ids) in _iter_active_loosened_scopes(
+             store, engine, _ARP_SWEEP_PARAMETER, _ARP_SWEEP_DEFAULT_THRESHOLD):
+        placeholders = ",".join("?" * len(device_ids))
+
+        near_misses = store._conn.execute(
+            f"SELECT device_id, timestamp FROM evidence WHERE evidence_type='arp_sweep' "
+            f"AND device_id IN ({placeholders}) AND timestamp >= ? AND value >= ? AND value < ?",
+            (*device_ids, since, band_lo, band_hi),
+        ).fetchall()
+        if not near_misses:
+            continue
+
+        confirming_reason = None
+        for ev in near_misses:
+            decision_rows = store._conn.execute(
+                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
+                "AND timestamp >= ? AND timestamp <= ?",
+                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
+                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+            ).fetchall()
+            for drow in decision_rows:
+                try:
+                    payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                    confirming_reason = (
+                        f"retroactive circuit-breaker: decision {drow['decision_id']} for device "
+                        f"{ev['device_id']} was CONFIRMED_THREAT, near an arp_sweep evidence item "
+                        f"(unique-target count in [{band_lo:.1f}, {band_hi:.1f})) that this scope's "
+                        f"threshold {scope_value:.1f} would not flag but the parent tier's "
+                        f"{parent_value:.1f} would have"
+                    )
+                    break
+            if confirming_reason:
+                break
+
+        if confirming_reason is None:
+            continue
+
+        if engine.rollback_change(change_id, confirming_reason, now=now):
+            LOGGER.critical("[AUTOTUNE_CIRCUIT_BREAKER] %s", confirming_reason)
+            rolled_back.append({"change_id": change_id, "device_id": scope_device_id,
+                                  "device_type": scope_device_type, "reason": confirming_reason})
+
+    return rolled_back
+
+
+_FP_COMBINED_PARAMETER = "fp_combined_suppress_threshold"
+_FP_COMBINED_DEFAULT_THRESHOLD = 0.80  # matches fp_engine.py's own _DEFAULT_COMBINED_SUPPRESS_THRESHOLD
+
+
+def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float] = None,
+                                                          lookback_seconds: float = _RETROACTIVE_MISS_LOOKBACK_SECONDS
+                                                          ) -> List[Dict[str, Any]]:
+    """Same protective intent as the other two checks, for
+    fp_combined_suppress_threshold -- structurally different from both,
+    because a LOOSENED (lowered) suppress threshold doesn't fail to catch a
+    piece of EVIDENCE, it SUPPRESSES an alert outright (no evidence row to
+    re-band; the decision itself carries fp_verdict.confidence, the value that
+    drove suppression).
+
+    Near-miss: a decision in scope whose fp_verdict.confidence falls in
+    [scope_value, parent_value) -- i.e. would NOT have been suppressed by the
+    parent tier's higher bar, but WAS suppressed by this scope's lower one
+    (fp_verdict.suppress True). Confirmation: a LATER decision for the SAME
+    device, any time up to `now`, reaching fp_verdict.verdict ==
+    "CONFIRMED_THREAT" -- since the near-miss decision itself was suppressed
+    (never published, never seen by an operator to correct), the ground truth
+    has to come from a DIFFERENT, later alert on that device establishing it's
+    genuinely malicious, the same "this device has since proven hostile"
+    reasoning the other two checks apply to a freshness-windowed decision,
+    just necessarily a coarser window here since there's no operator-visible
+    event at the moment of the near-miss to anchor a tight one to."""
+    now = now if now is not None else time.time()
+    since = now - lookback_seconds
+    engine = AutotuneEngine(store)
+    rolled_back: List[Dict[str, Any]] = []
+
+    for (change_id, scope_device_id, scope_device_type, scope_value, parent_value,
+         band_lo, band_hi, device_ids) in _iter_active_loosened_scopes(
+             store, engine, _FP_COMBINED_PARAMETER, _FP_COMBINED_DEFAULT_THRESHOLD):
+        placeholders = ",".join("?" * len(device_ids))
+
+        candidate_rows = store._conn.execute(
+            f"SELECT decision_id, device_id, timestamp, raw_payload_json FROM decisions "
+            f"WHERE device_id IN ({placeholders}) AND timestamp >= ?",
+            (*device_ids, since),
+        ).fetchall()
+
+        near_misses = []
+        for row in candidate_rows:
+            try:
+                payload = json.loads(row["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            fp_verdict = payload.get("fp_verdict") or {}
+            confidence = fp_verdict.get("confidence")
+            if fp_verdict.get("suppress") and isinstance(confidence, (int, float)) \
+                    and band_lo <= confidence < band_hi:
+                near_misses.append(row)
+        if not near_misses:
+            continue
+
+        confirming_reason = None
+        for miss_row in near_misses:
+            later_confirmed = store._conn.execute(
+                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? AND timestamp > ?",
+                (miss_row["device_id"], miss_row["timestamp"]),
+            ).fetchall()
+            for drow in later_confirmed:
+                try:
+                    payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                    confirming_reason = (
+                        f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
+                        f"{miss_row['device_id']} was SUPPRESSED at fp_verdict.confidence in "
+                        f"[{band_lo:.3f}, {band_hi:.3f}) (this scope's threshold {scope_value:.3f} "
+                        f"would suppress it, the parent tier's {parent_value:.3f} would not) -- a "
+                        f"LATER decision {drow['decision_id']} for the same device was CONFIRMED_THREAT"
                     )
                     break
             if confirming_reason:
@@ -677,6 +868,19 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
         circuit_breaker_rollbacks = check_retroactive_misses_and_rollback(store, now=now)
     except Exception:
         LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] retroactive-miss check failed, non-fatal")
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase F): same protection,
+    # extended to the two parameters legacy's write side now proposes through this
+    # same AutotuneEngine infrastructure (see train_fp_classifier.py's
+    # _propose_and_promote()) -- each check is independent and best-effort, same
+    # framing as the one above.
+    try:
+        circuit_breaker_rollbacks += check_arp_sweep_retroactive_misses_and_rollback(store, now=now)
+    except Exception:
+        LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] arp_sweep retroactive-miss check failed, non-fatal")
+    try:
+        circuit_breaker_rollbacks += check_fp_combined_retroactive_misses_and_rollback(store, now=now)
+    except Exception:
+        LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] fp_combined retroactive-miss check failed, non-fatal")
 
     # Release 15 Sheet 03a (2026-09-15): the triggering logic that was the autotuner's
     # one genuine remaining gap -- see _propose_tuning_change()'s own docstring for

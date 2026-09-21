@@ -40,11 +40,33 @@ from argus.graph.store import GraphStore
 # propose a change to. (name -> (min, max, max_step_per_change)). Adding a
 # new tunable parameter means adding a row here, deliberately, not widening
 # an existing bound.
+#
+# max_step_up/max_step_down (optional, both default to max_step when absent)
+# let a parameter have a genuinely asymmetric per-proposal step instead of a
+# single symmetric one -- added 2026-09-21 for the legacy/Sheet 03a
+# reconciliation, where arp_sweep_unique_targets_threshold's source system
+# (train_fp_classifier.py's ARP_SWEEP_RAISE_STEP=4.0 vs
+# ARP_SWEEP_LOWER_STEP=1.0) already has a real, deliberate asymmetry: raising
+# the threshold only ever happens off strong one-sided evidence (>=2 corrected
+# false positives, zero confirmed threats) and is allowed the bigger jump;
+# lowering it moves more cautiously. See _clamp_step()'s own comment for how
+# the two bounds are chosen (by the arithmetic sign of the proposed step, not
+# by _LESS_SENSITIVE_DIRECTION below).
 TUNABLE_PARAMETERS: Dict[str, Dict[str, float]] = {
     "reputation_tier_suspicious_floor": {"min": 1.0, "max": 5.0, "max_step": 0.5},
     "reputation_tier_high_floor": {"min": 2.0, "max": 5.0, "max_step": 0.5},
     "bocpd_hazard_rate": {"min": 1.0 / 2000.0, "max": 1.0 / 100.0, "max_step": 1.0 / 500.0},
     "hard_stop_candidate_sensitivity": {"min": 0.5, "max": 0.99, "max_step": 0.05},
+    # Bounds mirror train_fp_classifier.py's own ARP_SWEEP_MIN_THRESHOLD/
+    # ARP_SWEEP_MAX_THRESHOLD/ARP_SWEEP_RAISE_STEP/ARP_SWEEP_LOWER_STEP.
+    "arp_sweep_unique_targets_threshold": {
+        "min": 4.0, "max": 40.0, "max_step_up": 4.0, "max_step_down": 1.0,
+    },
+    # Bounds mirror AUTOTUNE_ABSOLUTE_FLOOR (the min) and AUTOTUNE_SAFETY_MARGIN-scale
+    # per-cycle movement (the step) from the same source file. Symmetric max_step is
+    # fine here even though legacy's own rule only ever lowers this value -- nothing
+    # stops a future human-approved raise, and propose_change() has no direction lock.
+    "fp_combined_suppress_threshold": {"min": 0.60, "max": 1.0, "max_step": 0.05},
 }
 
 # First-pass, not-yet-empirically-tuned constants (this codebase's own
@@ -64,6 +86,8 @@ _LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
     "reputation_tier_high_floor": 1,         # higher floor -> harder for a destination to reach tier 5
     "bocpd_hazard_rate": -1,                 # lower hazard -> assumes regimes last longer, slower to flag a real change
     "hard_stop_candidate_sensitivity": 1,    # higher bar -> requires more confidence to even be a hard-stop candidate
+    "arp_sweep_unique_targets_threshold": 1,  # higher threshold -> more unique targets needed to flag a sweep
+    "fp_combined_suppress_threshold": -1,     # lower threshold -> suppresses more, less sensitive to real threats
 }
 _MIN_PROMOTIONS_FOR_TREND = 3  # first-pass, not-yet-empirically-tuned (same honesty framing)
 _DEFAULT_DRIFT_LOOKBACK_SECONDS = 7 * 86400.0
@@ -115,13 +139,32 @@ class ProposalResult:
 
 
 def _clamp_step(parameter: str, old_value: float, new_value: float) -> float:
+    """Clamps by the ARITHMETIC SIGN of the proposed step (new_value > old_value
+    uses max_step_up, new_value < old_value uses max_step_down) -- not by
+    _LESS_SENSITIVE_DIRECTION, which is a separate semantic fact about which
+    RAW DIRECTION counts as "less sensitive" for a given parameter and can
+    point either way relative to the arithmetic sign. Both bounds default to
+    the single symmetric max_step, so every pre-existing symmetric parameter
+    is unaffected."""
     bounds = TUNABLE_PARAMETERS[parameter]
+    max_step_up = bounds.get("max_step_up", bounds.get("max_step"))
+    max_step_down = bounds.get("max_step_down", bounds.get("max_step"))
     step = new_value - old_value
-    if step > bounds["max_step"]:
-        new_value = old_value + bounds["max_step"]
-    elif step < -bounds["max_step"]:
-        new_value = old_value - bounds["max_step"]
+    if step > max_step_up:
+        new_value = old_value + max_step_up
+    elif step < -max_step_down:
+        new_value = old_value - max_step_down
     return max(bounds["min"], min(bounds["max"], new_value))
+
+
+def _directional_step_bound(bounds: Dict[str, float], direction: int) -> float:
+    """The max-step bound in the given LESS-SENSITIVE-direction sense (+1/-1,
+    matching _LESS_SENSITIVE_DIRECTION) -- distinct from _clamp_step()'s own
+    arithmetic-sign-based lookup above. Used by the trust-radius check, which
+    measures divergence specifically in the less-sensitive direction. Falls
+    back to the single symmetric max_step for every parameter that has one."""
+    key = "max_step_up" if direction > 0 else "max_step_down"
+    return bounds.get(key, bounds.get("max_step"))
 
 
 class AutotuneEngine:
@@ -333,7 +376,7 @@ class AutotuneEngine:
                 parent_device_type = device_type if row_device_id else None
                 parent_value = self.get_active_value(parameter, device_id=None, device_type=parent_device_type,
                                                         default=default_mid)
-                radius = _TRUST_RADIUS_MAX_STEPS * bounds["max_step"]
+                radius = _TRUST_RADIUS_MAX_STEPS * _directional_step_bound(bounds, direction)
                 divergence = (clamped_new_value - parent_value) * direction  # positive = less-sensitive divergence
                 if divergence > radius:
                     scope_label = f"device {row_device_id}" if row_device_id else f"category {row_device_type}"
@@ -342,6 +385,19 @@ class AutotuneEngine:
                         f"diverge from its parent tier's value {parent_value:.4f} by more than "
                         f"{_TRUST_RADIUS_MAX_STEPS:.0f} max_steps in the less-sensitive direction"
                     ))
+
+        # threshold_history.device_id is a real FK to devices(device_id) (schema.sql).
+        # A device-scoped proposal for a device that has never yet produced graph
+        # evidence (insert_evidence()/insert_decision() upserts devices as a side
+        # effect, but a caller reacting to an operator correction on a brand-new or
+        # otherwise graph-disconnected device may run BEFORE that ever happened) would
+        # otherwise fail this INSERT with a FOREIGN KEY constraint error. Same
+        # defensive auto-upsert pattern already established for this exact situation
+        # elsewhere in this module (see GraphStore.update_device_metadata()'s own
+        # docstring) -- a no-op UPDATE if the device already exists, never touches
+        # device_type/display_label since this call passes neither.
+        if row_device_id is not None:
+            self.store.upsert_device(row_device_id, timestamp=now)
 
         change_id = uuid.uuid4().hex
         self.store._conn.execute(

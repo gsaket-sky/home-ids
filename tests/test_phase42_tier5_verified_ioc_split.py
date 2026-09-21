@@ -87,7 +87,7 @@ check("REGRESSION GUARD: an unrelated hosting provider is NOT swept in by the ne
 # Section B: _is_ip_protected_from_confirmed_intel() / record_confirmed_threat()
 # end-to-end -- an Apple-owned IP is refused, an unrelated one is still recorded
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     apple_protected = fp._is_ip_protected_from_confirmed_intel("17.57.146.55", asn_owner="Apple Inc.")

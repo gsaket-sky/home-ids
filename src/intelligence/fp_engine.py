@@ -39,7 +39,7 @@ runs them through a 3-stage autonomous validation pipeline:
   AUTONOMOUS SELF-HEALING ACTIONS (if stages agree it's FP)
   1. Auto-Immunize the eTLD+1 base domain → dynamic trust cache (14-day TTL)
   2. Widen the device's EWMA baseline sigma by +0.25 per confirmed FP
-  3. Log suppressed alert silently to state/autonomous_muted.jsonl
+  3. Log suppressed alert silently to the graph (decisions.fp_suppression_log)
   4. Expose all decisions via Prometheus metrics for Grafana transparency
 
 ======================================================================================
@@ -84,6 +84,8 @@ from metrics import (
     device_profile_discards_total,
 )
 from intelligence.local_intel import LocalConfirmedIntel
+from argus.autotune.engine import AutotuneEngine  # 2026-09-21, legacy/Sheet 03a autotune reconciliation
+from argus.graph.store import GraphStore
 
 # ---------------------------------------------------------------------------
 # Logger: home_ids.fp_engine appears as its own channel in journalctl
@@ -135,6 +137,15 @@ _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD = 0.55
 
 # How long an immunized domain stays in the trust cache before re-evaluation
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600  # 14 days
+
+# 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G): _write_muted_log()'s
+# fallback window for matching a corrected alert (device_id + the alert's OWN original
+# timestamp, not "now") to its graph decision row, when no in-memory `decision` object
+# is available (every external mark_false_positive() caller). alert_payload["timestamp"]
+# and the graph decision's own timestamp are set from the SAME `now` in the SAME
+# pipeline cycle that originally produced this alert, so this only needs to absorb
+# clock/write jitter, not the (possibly much longer) delay until the correction itself.
+_MUTED_LOG_MATCH_FRESHNESS_SECONDS = 120.0
 
 # PHASE 52 (scoped suppression): a per-entry TTL (e.g. ollama_soc.py's LLM-supplied
 # ttl_seconds, Phase 51) is clamped to this range rather than trusted verbatim -- a
@@ -231,7 +242,7 @@ class AutonomousFPEngine:
     All decisions are:
     - Logged at INFO level in journalctl
     - Exported as Prometheus metrics for Grafana
-    - Written to state/autonomous_muted.jsonl for full audit trail
+    - Written to the graph (decisions.raw_payload_json.fp_suppression_log) for full audit trail
     """
 
     def __init__(self, config: dict, state_dir: str = "state", state_manager: Any = None):
@@ -275,8 +286,14 @@ class AutonomousFPEngine:
         # other _load_*() calls -- it needs self._lock, which isn't set up yet here.
         self._confirmed_counts: dict = {}
 
-        # Every suppressed alert is written here with full context.
-        # Novice users can inspect this file to see what the engine auto-resolved.
+        # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G): retained ONLY
+        # as the source path for the one-time backfill_muted_log_to_graph.py migration
+        # and any pre-existing history readers haven't been rewritten onto the graph
+        # yet -- _write_muted_log() itself no longer writes here (see that method's own
+        # docstring for the new graph-based destination). Safe to delete once the
+        # backfill is verified and every reader (train_fp_classifier.py, retro_hunter.py,
+        # shadow_backtest.py, identify_corrupted_training_rows.py, cl_afpe/engine.py) is
+        # confirmed reading from the graph instead.
         self._muted_log_path = self._state_dir / "autonomous_muted.jsonl"
 
         # Base domains that have been verified safe are cached here (14-day TTL).
@@ -306,6 +323,29 @@ class AutonomousFPEngine:
         # the same architectural home sigma shifts and the trust cache already use.
         self._device_fp_profiles: dict = {}
 
+        # 2026-09-21 (legacy/Sheet 03a autotune reconciliation): lazy AutotuneEngine,
+        # backed by this instance's OWN GraphStore at self._state_dir/"v13_graph.db" --
+        # deliberately NOT argus/ops/live_engine.py's shared module-level singleton
+        # (which is keyed to the MAIN PIPELINE's configured path, not necessarily this
+        # instance's own state_dir): every OTHER piece of this class's state already
+        # lives under self._state_dir (see _muted_log_path/_trust_cache_path above),
+        # and a script-constructed instance (train_fp_classifier.py's own
+        # AutonomousFPEngine, or any test's) must resolve against ITS OWN state_dir,
+        # never a different process's real graph db. In the live pipeline, pipeline.py
+        # passes the SAME state_dir it also configures argus_live_engine with, so both
+        # connections end up pointed at the identical file -- WAL-mode-safe for
+        # concurrent access (documented in middleware/graph_client.py's own module
+        # docstring), just two connections instead of a shared one.
+        #
+        # Read sites below check this FIRST, then fall back to this class's own
+        # pre-existing device-profile/config chain -- inert until train_fp_classifier.py
+        # actually promotes a value (Phase C), at which point it becomes the new
+        # source of truth for these two parameters, without disturbing the untouched
+        # reactive self-heal path in mark_false_positive()/apply_device_fp_profile()
+        # below, which still writes _device_fp_profiles immediately (that path's whole
+        # point is NOT waiting for a canary window -- see its own docstring).
+        self._autotune_engine: Optional[AutotuneEngine] = None
+
         # Thread lock for concurrent access from pipeline worker threads
         self._lock = threading.Lock()
 
@@ -331,7 +371,7 @@ class AutonomousFPEngine:
         # -----------------------------------------------------------------
         LOGGER.info("="*70)
         LOGGER.info("  🤖 Autonomous FP Engine (CL-AFPE) initialising")
-        LOGGER.info("  Muted alert audit log : %s", self._muted_log_path)
+        LOGGER.info("  Muted alert audit log : graph (decisions.fp_suppression_log); pre-migration history at %s", self._muted_log_path)
         LOGGER.info("  Dynamic trust cache   : %s", self._trust_cache_path)
         LOGGER.info("  Stage 2 LGBM threshold: %.2f", self.lgbm_fp_threshold)
         LOGGER.info("  Stage 3 embed threshold: %.2f", self.embed_similarity_threshold)
@@ -391,7 +431,16 @@ class AutonomousFPEngine:
 
     @property
     def combined_suppress_threshold(self) -> float:
-        """Combined confidence required to autonomously suppress the alert."""
+        """Combined confidence required to autonomously suppress the alert.
+
+        Deliberately does NOT itself check AutotuneEngine's global tier -- doing so
+        here would make get_device_suppress_threshold() (which already checks the
+        autotune device/category/global chain as a whole, ahead of this property as
+        its own `default=`) check the global tier TWICE and, worse, let a promoted
+        GLOBAL autotune value silently override an explicit config.yaml/config-
+        override value that this property alone is meant to expose. Every caller
+        that wants the fully-tuned effective value should go through
+        get_device_suppress_threshold(device_id=None), not this property directly."""
         return float(self.config.get("fp_combined_suppress_threshold", _DEFAULT_COMBINED_SUPPRESS_THRESHOLD))
 
     @property
@@ -537,7 +586,8 @@ class AutonomousFPEngine:
                 alert_payload,
                 "TRUST_CACHE_HIT",
                 [f"Target '{cached_target}' is in autonomous trust cache (14-day TTL)"],
-                1.0
+                1.0,
+                decision=decision,
             )
             return {
                 "verdict": "FALSE_POSITIVE",
@@ -745,7 +795,8 @@ class AutonomousFPEngine:
             # hard-stop guard below) for free, instead of a second, narrower
             # reimplementation that only ever knew how to do one kind of fix.
             mark_result = self.mark_false_positive(
-                alert_payload, hostname, target_domain=domain, source="autonomous_stage23"
+                alert_payload, hostname, target_domain=domain, source="autonomous_stage23",
+                decision=decision,
             )
             if mark_result.get("refused"):
                 # The alert this classifier wanted to autonomously suppress turned out
@@ -1633,7 +1684,8 @@ class AutonomousFPEngine:
         return existed
 
     def mark_false_positive(self, alert_payload: dict, hostname: str, target_domain: str = "",
-                             source: str = "operator", ttl_seconds: Optional[float] = None) -> dict:
+                             source: str = "operator", ttl_seconds: Optional[float] = None,
+                             decision: Optional[dict] = None) -> dict:
         """PHASE 52: `ttl_seconds` (optional, new) is threaded straight through to every
         _immunize_domain() call below -- e.g. ollama_soc.py's LLM-supplied ttl_seconds
         (Phase 51). device_id and the winning hypothesis (`signature`, already read
@@ -1668,12 +1720,21 @@ class AutonomousFPEngine:
         reinforcing it as "this pattern = threat" on every future run — actively teaching
         the model the WRONG lesson from a correction the operator already made. This
         method closes that gap the same way the fully-autonomous path already does: by
-        writing the correction to autonomous_muted.jsonl (label=1/FP) via the exact same
-        _write_muted_log() used by AUTONOMOUS_FP_SUPPRESSED, so load_dataset() picks it up
-        as a false-positive training sample without any special-casing on the training
-        side. train_fp_classifier.py's load_dataset() additionally cross-references this
-        log to drop the matching pre-correction entry from the alerts.json "threat" set,
-        so the SAME event doesn't end up labeled both ways in one training run.
+        writing the correction (label=1/FP) via the exact same _write_muted_log() used
+        by AUTONOMOUS_FP_SUPPRESSED, so load_dataset() picks it up as a false-positive
+        training sample without any special-casing on the training side. 2026-09-21
+        (legacy/Sheet 03a autotune reconciliation, Phase G): _write_muted_log() now
+        writes into the graph (decisions.raw_payload_json.fp_suppression_log) instead
+        of the old flat state/autonomous_muted.jsonl file -- train_fp_classifier.py's
+        load_dataset() cross-references this the same way, now querying the graph.
+
+        `decision`: pass the live pipeline's own in-memory decision dict when calling
+        this from INSIDE a per-cycle evaluate() (as evaluate()'s own autonomous
+        Stage2/3 branch does) -- gives _write_muted_log() a free, exact graph-decision
+        lookup. External callers correcting an alert well after the fact (Telegram,
+        ollama_soc.py, pihole_api.py, release_wrongly_blocked_domains.py) have no such
+        object and should leave this None; _write_muted_log() falls back to resolving
+        the matching decision row from alert_payload's own device_id/timestamp.
 
         Returns a dict with `base_domain` (the eTLD+1 that got immunized, or "" if the
         domain couldn't be safely extracted) and `is_new_immunization` for the caller to
@@ -1964,7 +2025,7 @@ class AutonomousFPEngine:
                 f"Marked as false positive for '{domain or 'unknown'}' by {origin_text}.",
                 trust_cache_note,
             ]
-        self._write_muted_log(alert_payload, event_type, reasons, 1.0)
+        self._write_muted_log(alert_payload, event_type, reasons, 1.0, decision=decision)
 
         LOGGER.warning(
             "🛡️  [FP ENGINE » MARK FP] %s: %s-corrected alert (signature=%s) — training "
@@ -2049,6 +2110,27 @@ class AutonomousFPEngine:
     # PHASE 13: PER-DEVICE THRESHOLD PROFILES
     # ==========================================================================
 
+    def _get_autotune_engine(self) -> AutotuneEngine:
+        if self._autotune_engine is None:
+            self._autotune_engine = AutotuneEngine(GraphStore(str(self._state_dir / "v13_graph.db")))
+        return self._autotune_engine
+
+    def close(self) -> None:
+        """Releases this instance's own lazily-opened autotune GraphStore connection,
+        if one was ever opened. The live pipeline's own AutonomousFPEngine instance
+        never calls this (it's meant to live for the process's lifetime, same as
+        every other long-lived engine here) -- this exists for short-lived,
+        script-constructed instances (train_fp_classifier.py's own, and tests') that
+        want deterministic cleanup rather than relying on GC to release the
+        underlying sqlite3 file handle, which this codebase has already found to be
+        unreliable enough on Windows to cause tempdir-cleanup failures in tests."""
+        if self._autotune_engine is not None:
+            try:
+                self._autotune_engine.store.close()
+            except Exception:
+                pass
+            self._autotune_engine = None
+
     def get_device_suppress_threshold(self, device_id: Optional[str]) -> float:
         """The effective fp_combined_suppress_threshold for ONE device: its own calibrated
         profile if one exists (written by train_fp_classifier.py's per-device calibration
@@ -2057,12 +2139,31 @@ class AutonomousFPEngine:
         — see config.py's LiveConfig._load_overrides()). Devices with "strongly different
         profiles" (an IoT bulb vs. a laptop vs. a NAS) get their own number once there's
         enough of their OWN evidence to justify it; everything else shares the global
-        default, same layered-fallback shape as the config override layer."""
+        default, same layered-fallback shape as the config override layer.
+
+        2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase B): checks
+        AutotuneEngine's own threshold_history FIRST -- once train_fp_classifier.py
+        (Phase C) promotes a value for this device (or its category), that value wins
+        here immediately, ahead of the legacy device-profile/global chain below, which
+        becomes the `default=` and is what's still returned until a real promotion
+        exists (inert by construction, no threshold_history rows yet). Best-effort:
+        any failure here must never block a suppression decision."""
         with self._lock:
             profile = self._device_fp_profiles.get(device_id or "")
         if profile and "fp_combined_suppress_threshold" in profile:
-            return float(profile["fp_combined_suppress_threshold"]["value"])
-        return self.combined_suppress_threshold
+            legacy_value = float(profile["fp_combined_suppress_threshold"]["value"])
+        else:
+            legacy_value = self.combined_suppress_threshold
+        try:
+            return self._get_autotune_engine().get_active_value(
+                "fp_combined_suppress_threshold", device_id=device_id, default=legacy_value,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to resolve autotuned fp_combined_suppress_threshold for device %r, "
+                "using legacy value this cycle: %s", device_id, e,
+            )
+            return legacy_value
 
     def _get_device_profile_value(self, device_id: Optional[str], key: str, default: float) -> float:
         """Shared read-path for every per-device learned threshold below -- all of them
@@ -2083,8 +2184,24 @@ class AutonomousFPEngine:
         legitimately ARP-scans the LAN on startup) gets ITS OWN raised threshold
         immediately (mark_false_positive()'s CONNECTION_ABUSE routing below), not just
         a contribution to next week's retrain. Everything else shares the global
-        config.yaml default, same as before this existed."""
-        return self._get_device_profile_value(device_id, "arp_sweep_unique_targets_threshold", default)
+        config.yaml default, same as before this existed.
+
+        2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase B): checks
+        AutotuneEngine's threshold_history FIRST (device -> category -> global tiers),
+        same reasoning as get_device_suppress_threshold() above -- inert until
+        train_fp_classifier.py (Phase C) promotes a value, and best-effort so a lookup
+        failure never blocks the caller (falls back to the untouched legacy chain)."""
+        legacy_value = self._get_device_profile_value(device_id, "arp_sweep_unique_targets_threshold", default)
+        try:
+            return self._get_autotune_engine().get_active_value(
+                "arp_sweep_unique_targets_threshold", device_id=device_id, default=legacy_value,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to resolve autotuned arp_sweep_unique_targets_threshold for device %r, "
+                "using legacy value this cycle: %s", device_id, e,
+            )
+            return legacy_value
 
     def get_device_conn_abuse_unique_ip_threshold(self, device_id: Optional[str], default: float) -> float:
         """BUGFIX (live audit): same per-device self-healing shape as
@@ -2354,24 +2471,65 @@ class AutonomousFPEngine:
         except Exception as exc:
             LOGGER.error("Failed to save trust cache: %s", exc, exc_info=True)
 
-    def _write_muted_log(self, alert_payload: dict, event_type: str, reasons: list, confidence: float):
+    def _write_muted_log(self, alert_payload: dict, event_type: str, reasons: list, confidence: float,
+                          decision: Optional[dict] = None):
         """
-        Append a suppressed alert entry to the JSONL audit log.
+        Writes a suppressed/corrected alert's audit entry into the graph, as
+        `decisions.raw_payload_json.fp_suppression_log` on that alert's own decision
+        row -- replaces the original flat-file `state/autonomous_muted.jsonl` writer
+        (2026-09-21, legacy/Sheet 03a autotune reconciliation, Phase G: that file had
+        no size cap and grew unbounded; see backfill_muted_log_to_graph.py for the
+        one-time migration of its pre-existing history).
 
-        TRANSPARENCY GUARANTEE: Every auto-suppressed alert is ALWAYS written here.
-        Nothing is silently discarded. An admin can run:
-            cat state/autonomous_muted.jsonl | python -m json.tool | less
-        to inspect everything the engine has auto-resolved.
+        TRANSPARENCY GUARANTEE (preserved from the original file-based writer): every
+        auto-suppressed or operator/LLM-corrected alert is ALWAYS written here.
+        Nothing is silently discarded -- an admin can now query:
+            SELECT device_id, timestamp, raw_payload_json FROM decisions
+            WHERE raw_payload_json LIKE '%fp_suppression_log%'
+        to inspect everything this engine has auto-resolved or been corrected on.
 
         Args:
-            alert_payload: Original alert payload
-            event_type:    Classification category string
-            reasons:       List of human-readable suppression reasons
-            confidence:    Final FP confidence score [0.0, 1.0]
+            alert_payload: Original alert payload.
+            event_type:    Classification category string.
+            reasons:       List of human-readable suppression reasons.
+            confidence:    Final FP confidence score [0.0, 1.0].
+            decision:      The live pipeline's own in-memory decision dict for THIS
+                            alert, when the caller has one (evaluate()'s own two call
+                            sites do, since it's already passed into evaluate() as a
+                            parameter) -- gives an exact, free `_graph_decision_id`
+                            lookup. mark_false_positive()'s EXTERNAL callers
+                            (pihole_api.py, ollama_soc.py, the Telegram callback,
+                            release_wrongly_blocked_domains.py) only ever have
+                            `alert_payload` (a corrected alert may be reviewed hours
+                            or days after it originally fired, long after the
+                            in-memory decision object is gone) -- `decision=None`
+                            falls back to resolving the matching decision row by
+                            device_id + the ALERT's OWN original timestamp (not
+                            "now"), within a tight freshness window.
         """
         try:
+            store = self._get_autotune_engine().store
+            graph_decision_id = decision.get("_graph_decision_id") if decision else None
+            if graph_decision_id is None:
+                device_id = alert_payload.get("device", {}).get("id")
+                ts = alert_payload.get("timestamp")
+                if device_id and device_id != "unknown" and ts is not None:
+                    row = store._conn.execute(
+                        "SELECT decision_id FROM decisions WHERE device_id=? AND "
+                        "timestamp BETWEEN ? AND ? ORDER BY ABS(timestamp - ?) LIMIT 1",
+                        (device_id, ts - _MUTED_LOG_MATCH_FRESHNESS_SECONDS,
+                         ts + _MUTED_LOG_MATCH_FRESHNESS_SECONDS, ts),
+                    ).fetchone()
+                    if row is not None:
+                        graph_decision_id = row["decision_id"]
+            if graph_decision_id is None:
+                LOGGER.warning(
+                    "Could not resolve a graph decision row for this %s alert (device=%r) -- "
+                    "fp_suppression_log NOT written for this event.",
+                    event_type, alert_payload.get("device", {}).get("id"),
+                )
+                return
             entry = {
-                # Human-readable timestamp for easy grep/tail inspection
                 "ts_human":    time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 "ts_unix":     time.time(),
                 "type":        event_type,
@@ -2383,11 +2541,10 @@ class AutonomousFPEngine:
                 # Full original alert preserved for human review if needed
                 "original_alert": alert_payload,
             }
-            with open(self._muted_log_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry) + "\n")
-            LOGGER.debug("Muted alert written to audit log: %s", self._muted_log_path)
+            store.update_decision_payload(graph_decision_id, {"fp_suppression_log": entry})
+            LOGGER.debug("fp_suppression_log written to graph decision %s", graph_decision_id)
         except Exception as exc:
-            LOGGER.error("Failed to write muted audit log: %s", exc, exc_info=True)
+            LOGGER.error("Failed to write fp_suppression_log to graph: %s", exc, exc_info=True)
 
     # ==========================================================================
     # HELPER UTILITIES
@@ -2831,7 +2988,7 @@ class AutonomousFPEngine:
     def _weekly_retrain_loop(self):
         """
         Background daemon thread: periodically retrains fp_classifier.onnx
-        every 7 days using alerts.json and autonomous_muted.jsonl history.
+        every 7 days using alerts.json and the graph's fp_suppression_log history.
         """
         time.sleep(120.0)  # Wait 2 minutes after boot before checking
         while True:

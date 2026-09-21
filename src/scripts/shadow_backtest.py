@@ -26,8 +26,8 @@ New logic (the Gap 1 fix):
         if num_independent_sources >= 1:       CRITICAL "Corroborated Reputation Signal" (label-only change)
         else:                                  HIGH     "Strong Reputation Signal (Uncorroborated)" (real downgrade)
 
-Cross-references every flipped alert's device_id against state/autonomous_muted.jsonl (was
-it later corrected -- operator or LLM -- as a false positive?) and
+Cross-references every flipped alert's device_id against the graph's fp_suppression_log
+entries (2026-09-15, was it later corrected -- operator or LLM -- as a false positive?) and
 state/confirmed_threat_counts.json (does this device have OTHER confirmed-threat history,
 suggesting caution about downgrading it?), so the summary shows not just "how many would
 change" but "does the change look right."
@@ -40,6 +40,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 STATE_DIR = ROOT / "state"
+
+# 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G4): _load_muted_devices()
+# below now reads the graph instead of state/autonomous_muted.jsonl -- needs argus.* importable.
+SRC_DIR = ROOT / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+from argus.graph.store import GraphStore  # noqa: E402
 
 _INDEPENDENT_SOURCES_RE = re.compile(r"(\d+)\s+independent evidence source")
 _HYPOTHESES_RE = re.compile(
@@ -60,24 +67,32 @@ def _strip_persistence_suffix(signature: str) -> str:
 
 def _load_muted_devices(state_dir: Path) -> dict:
     """device_id -> sorted list of correction timestamps, from every
-    autonomous_muted.jsonl entry (operator taps, llm_validated, autonomous_stage23)."""
-    path = state_dir / "autonomous_muted.jsonl"
+    fp_suppression_log entry in the graph (operator taps, llm_validated,
+    autonomous_stage23) -- 2026-09-21, replaces the old
+    state/autonomous_muted.jsonl (see fp_engine.py's _write_muted_log())."""
     by_device = defaultdict(list)
-    if not path.exists():
+    db_path = state_dir / "v13_graph.db"
+    if not db_path.exists():
         return by_device
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            dev_id = entry.get("device", {}).get("id")
-            ts = entry.get("ts_unix")
-            if dev_id and ts:
-                by_device[dev_id].append(float(ts))
+    store = GraphStore(str(db_path))
+    try:
+        rows = store._conn.execute(
+            "SELECT raw_payload_json FROM decisions WHERE raw_payload_json LIKE '%fp_suppression_log%'"
+        ).fetchall()
+    finally:
+        store.close()
+    for row in rows:
+        try:
+            payload = json.loads(row["raw_payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        entry = payload.get("fp_suppression_log")
+        if not isinstance(entry, dict):
+            continue
+        dev_id = entry.get("device", {}).get("id")
+        ts = entry.get("ts_unix")
+        if dev_id and ts:
+            by_device[dev_id].append(float(ts))
     for dev_id in by_device:
         by_device[dev_id].sort()
     return by_device

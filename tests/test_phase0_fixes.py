@@ -182,7 +182,7 @@ _utils_mod.tldextract = None  # simulate "tldextract not installed" for this che
 from intelligence.fp_engine import AutonomousFPEngine
 import tempfile
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     base = fp._extract_base_domain("mail.example.co.uk")
     check("base-domain extraction fails CLOSED (returns '') when tldextract is unavailable, "
@@ -202,7 +202,7 @@ _utils_mod.tldextract = _orig_tldextract  # restore
 # already downloaded the full ranked 1M-row list; only the rank column was discarded.
 from intelligence.threat_intel import ThreatIntel
 
-with tempfile.TemporaryDirectory() as tmpdir2:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
     ti = ThreatIntel(cache_dir=tmpdir2)
     ti._tranco_ranks = {"google.com": 1, "example.com": 54321}
 

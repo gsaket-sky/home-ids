@@ -32,12 +32,13 @@ def check(name, cond, detail=""):
 
 from intelligence.fp_engine import AutonomousFPEngine
 from core.state_guard import StateManager
+from argus.graph.store import GraphStore
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: Stage 2 early-return bug — a low LightGBM P(FP) must still reach Stage 3
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     # Force a deterministic, confidently-a-threat LightGBM score (well below the 0.75
@@ -87,17 +88,29 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: mark_false_positive() — operator-feedback closed loop
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     device_id = "dev_operator_1"
     hostname = "laptop-gs"
     domain = "sub.operator-corrected-example.com"
+    alert_ts = time.time()
     alert_payload = {
         "device": {"id": device_id, "hostname": hostname},
         "network_context": {"queried_domain": domain, "destination_ip": "5.6.7.8"},
-        "timestamp": time.time(),
+        "timestamp": alert_ts,
         "risk": 7.2,
     }
+
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G): _write_muted_log()
+    # now resolves this correction's graph decision row by device_id + the alert's OWN
+    # timestamp (see that method's own docstring) -- a real pipeline cycle always has
+    # one (argus_live_engine's own _write_graph() runs unconditionally every cycle), so
+    # this fixture inserts the matching row directly, mirroring that real precondition
+    # rather than exercising the no-matching-row fallback (covered separately below).
+    graph_store = fp._get_autotune_engine().store
+    graph_decision_id = graph_store.insert_decision(
+        device_id, alert_ts, "HIGH", "hypothesis_high", 0.72, 7.2,
+    )
 
     result = fp.mark_false_positive(alert_payload, hostname, domain)
 
@@ -111,21 +124,43 @@ with tempfile.TemporaryDirectory() as tmpdir:
           "against future FPs from this device's baseline)",
           fp.get_sigma_shift(device_id) > 0.0, f"sigma={fp.get_sigma_shift(device_id)}")
 
-    muted_path = Path(tmpdir) / "autonomous_muted.jsonl"
-    check("mark_false_positive() writes a training-correction entry to autonomous_muted.jsonl "
-          "(THIS is what makes the operator's correction actually influence the weekly "
-          "LightGBM retrain — previously the old immunize button never wrote here at all)",
-          muted_path.exists())
-    if muted_path.exists():
-        lines = [json.loads(l) for l in muted_path.read_text().splitlines() if l.strip()]
-        operator_entries = [l for l in lines if l.get("type") == "OPERATOR_MARKED_FALSE_POSITIVE"]
+    decision_row = graph_store._conn.execute(
+        "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (graph_decision_id,),
+    ).fetchone()
+    fp_suppression_log = None
+    if decision_row is not None:
+        fp_suppression_log = json.loads(decision_row["raw_payload_json"] or "{}").get("fp_suppression_log")
+    check("mark_false_positive() writes a training-correction entry into the graph's "
+          "decisions.raw_payload_json.fp_suppression_log (THIS is what makes the operator's "
+          "correction actually influence the weekly LightGBM retrain — previously the old "
+          "immunize button never wrote here at all)",
+          fp_suppression_log is not None, f"decision_row={dict(decision_row) if decision_row else None}")
+    if fp_suppression_log is not None:
         check("the written entry is tagged OPERATOR_MARKED_FALSE_POSITIVE (distinguishable "
               "from AUTONOMOUS_FP_SUPPRESSED in the audit log) and confidence=1.0",
-              len(operator_entries) == 1 and operator_entries[0]["confidence"] == 1.0,
-              f"entries={operator_entries}")
+              fp_suppression_log.get("type") == "OPERATOR_MARKED_FALSE_POSITIVE"
+              and fp_suppression_log.get("confidence") == 1.0,
+              f"entry={fp_suppression_log}")
         check("the written entry preserves the FULL original alert payload for downstream "
               "training feature extraction",
-              operator_entries[0].get("original_alert", {}).get("device", {}).get("id") == device_id)
+              fp_suppression_log.get("original_alert", {}).get("device", {}).get("id") == device_id)
+
+    # No matching graph decision row exists for this second alert -- confirms the
+    # fallback-graceful-degradation path (logs a warning, never crashes or silently
+    # fabricates a row) for the case a real pipeline can still hit today: an alert
+    # whose decision predates argus's graph wiring, or a device on its very first
+    # cycle. Uses a device_id that was never inserted into `devices` at all.
+    no_graph_row_alert = {
+        "device": {"id": "dev_no_graph_row_yet", "hostname": "orphan-host"},
+        "network_context": {"queried_domain": "orphan-example.com", "destination_ip": "1.2.3.4"},
+        "timestamp": time.time(),
+        "risk": 6.5,
+    }
+    result_no_graph_row = fp.mark_false_positive(no_graph_row_alert, "orphan-host", "orphan-example.com")
+    check("mark_false_positive() still succeeds (immunizes, widens sigma, returns a real "
+          "result) even when no matching graph decision row exists to attach the audit "
+          "entry to -- the missing audit trail is a logged warning, not a crash",
+          result_no_graph_row.get("base_domain") == "orphan-example.com", f"got={result_no_graph_row}")
 
     # A domain that can't be safely reduced to an eTLD+1 must not crash the whole flow —
     # trust-cache immunization is skipped, but sigma widening + audit logging still happen.
@@ -143,7 +178,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: StateManager.record_action()'s new `extra` field
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     sm = StateManager(state_path=str(Path(tmpdir) / "state.json"))
     sample_alert_payload = {"device": {"id": "dev_x"}, "network_context": {"queried_domain": "foo.example.com"}}
     sm.record_action(
@@ -173,7 +208,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 import scripts.train_fp_classifier as train_mod
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     state_dir = Path(tmpdir)
     # Bypass the configured-alert-path lookup (which prefers the real repo's
     # state/alerts.json ahead of state_dir's) so this test is fully isolated.
@@ -215,6 +250,10 @@ with tempfile.TemporaryDirectory() as tmpdir:
         encoding="utf-8",
     )
 
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G4): load_dataset()
+    # now reads fp_suppression_log entries from the graph instead of
+    # state/autonomous_muted.jsonl -- write the equivalent decisions rows directly
+    # instead of the old flat file.
     muted_entries = [
         {"ts_unix": autonomous_fp_ts, "type": "AUTONOMOUS_FP_SUPPRESSED", "confidence": 0.9,
          "reasons": [], "device": autonomous_fp_alert["device"], "domain": "sentry.io",
@@ -223,9 +262,13 @@ with tempfile.TemporaryDirectory() as tmpdir:
          "reasons": [], "device": operator_corrected_alert["device"], "domain": "operator-corrected-example.com",
          "original_alert": operator_corrected_alert},
     ]
-    (state_dir / "autonomous_muted.jsonl").write_text(
-        "\n".join(json.dumps(e) for e in muted_entries), encoding="utf-8",
-    )
+    load_dataset_store = GraphStore(str(state_dir / "v13_graph.db"))
+    for entry in muted_entries:
+        load_dataset_store.insert_decision(
+            entry["device"]["id"], entry["ts_unix"], "BENIGN", "test_fixture",
+            entry["confidence"], 0.0, raw_payload={"fp_suppression_log": entry},
+        )
+    load_dataset_store.close()
 
     X, y, stats = train_mod.load_dataset(state_dir)
 

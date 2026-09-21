@@ -64,7 +64,7 @@ from core.decision_engine import DecisionEngine
 # (or NOT re-derivable, which is the bug class this whole section fixes) from raw
 # features with a separately-drifting threshold.
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     alert = {
@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # Section B: Stage-1 Check 1 -- ti_risk threshold now matches classifier.py's
 # confirmed_ioc bar (>2.0), not the old, independently-drifting >0.
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     weak_ti_alert = {
         "device": {"id": "dev_weak_ti", "hostname": "weak-ti-device"},
@@ -136,7 +136,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # separately calling the SAME alert SUSPICIOUS/monitor (confidence=0.40) --
 # precisely the two-subsystems-disagree shape review #12 describes.
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     live_bug_alert = {
@@ -253,7 +253,7 @@ check("REGRESSION GUARD: the SAME 63-char label length on a genuinely unrecogniz
 # calibration labeling never reached the one place a human actually taps
 # approve/reject from.
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir_f:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_f:
     fp_f = AutonomousFPEngine(config={}, state_dir=tmpdir_f)
     uncertain_alert = {
         "device": {"id": "dev_f", "hostname": "paperless"},

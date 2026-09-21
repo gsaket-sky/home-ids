@@ -55,10 +55,9 @@ check("the two signatures have DISTINCT cutoffs (DGA fix landed after DNS_COVERT
 import config as _config_mod
 _orig_alert_path = _config_mod.CONFIG._config.get("alert_json_path")
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     state_dir = _PathForSysPath(tmpdir)
     alerts_path = state_dir / "alerts.json"
-    muted_path = state_dir / "autonomous_muted.jsonl"
 
     # Force the SAME path load_dataset()/_scan() resolve to, so this test never reads
     # real production alerts.json data.
@@ -96,17 +95,27 @@ with tempfile.TemporaryDirectory() as tmpdir:
     ]
     alerts_path.write_text(json.dumps(alerts), encoding="utf-8")
 
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G4): _scan() now reads
+    # fp_suppression_log entries from the graph instead of state/autonomous_muted.jsonl
+    # -- write the equivalent decisions row directly instead of the old flat file.
+    muted_ts = dns_cutoff - 50
     muted_doc = {
         "type": "LLM_VALIDATED_FALSE_POSITIVE",
         "original_alert": {
             "type": "ids_alert", "signature": "DNS_COVERT_TUNNELING",
-            "timestamp": dns_cutoff - 50,
+            "timestamp": muted_ts,
             "device": {"id": "devD", "type": "tablet"},
             "network_context": {"queried_domain": "corrupted3.example"},
             "features": {},
         },
     }
-    muted_path.write_text(json.dumps(muted_doc) + "\n", encoding="utf-8")
+    from argus.graph.store import GraphStore
+    muted_store = GraphStore(str(state_dir / "v13_graph.db"))
+    muted_store.insert_decision(
+        "devD", muted_ts, "BENIGN", "test_fixture", 1.0, 0.0,
+        raw_payload={"fp_suppression_log": muted_doc},
+    )
+    muted_store.close()
 
     found = _scan(state_dir)
 

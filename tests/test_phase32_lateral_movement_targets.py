@@ -103,7 +103,7 @@ def _alert(domain="unrelated-domain.example"):
         "signature": "NETWORK_INTRUSION",
     }
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     # THE CORE FIX: a single-target connection (the real production shape found live --

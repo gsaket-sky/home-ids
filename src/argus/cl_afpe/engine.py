@@ -6,7 +6,8 @@ intelligence/fp_engine.py is 2,847 lines covering many concerns beyond trust-cac
 scoping -- local confirmed-intel poisoning protection, per-device threshold
 profiles (CONNECTION_ABUSE arp-sweep/long-conn/rejected-connection threshold
 bumping), sigma-shift EWMA widening, ML model (LightGBM/FastEmbed) management, and
-training-data write-back to autonomous_muted.jsonl for train_fp_classifier.py. The
+training-data write-back (the graph's fp_suppression_log, 2026-09-21 -- formerly
+autonomous_muted.jsonl) for train_fp_classifier.py. The
 plan scopes v13's CL-AFPE specifically to "trust/immunization scoping as native
 graph edges" -- THIS FILE PORTS THAT AND ONLY THAT, PLUS THE TWO REFUSAL GUARDS AND
 BASELINE FAMILIARITY. Deliberately NOT ported here (tracked as separate, real,

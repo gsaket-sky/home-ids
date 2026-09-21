@@ -110,7 +110,7 @@ check("_trust_entry_hypothesis_base() passes an unsuffixed name through unchange
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: _immunize_domain() write path
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     fp._immunize_domain("scoped-example.com", "host1", source="llm_validated",
@@ -153,7 +153,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: _is_trust_cached() -- the actual gate
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     # Non-device-scoped hypothesis: domain trust is SHARED across devices.
@@ -215,7 +215,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section D: end-to-end via evaluate()'s real trust-cache-hit path
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     fp._immunize_domain("e2e-scoped.com", "laptop", device_id="dev1", hypothesis="DNS_POLICY_BYPASS")
 
@@ -253,7 +253,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section E: mark_false_positive() actually threads device_id/hypothesis/ttl_seconds
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     alert_payload = {
         "device": {"id": "dev_mfp", "hostname": "nas1"},
@@ -296,7 +296,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section F: mixed on-disk cache (old float entries + new dict entries) loads cleanly
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     cache_path = _PathForSysPath(tmpdir) / "fp_trust_cache.json"
     now = time.time()
     cache_path.write_text(json.dumps({

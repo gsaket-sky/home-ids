@@ -494,6 +494,65 @@ check("THE FIX: the cooldown clock is shared across the merge -- an "
       r_merge_propose_2.accepted is False and "cooldown" in r_merge_propose_2.reason,
       r_merge_propose_2.reason)
 
+# =============================================================================
+# Asymmetric step clamping (2026-09-21, legacy/Sheet 03a reconciliation) --
+# arp_sweep_unique_targets_threshold has genuinely different max_step_up
+# (4.0) vs max_step_down (1.0), unlike every other TUNABLE_PARAMETERS entry.
+# =============================================================================
+store7 = GraphStore(":memory:")
+engine7 = AutotuneEngine(store7)
+_insert_backtest(store7, "bt7_pass", True, at=NOW)
+
+arp_bounds = TUNABLE_PARAMETERS["arp_sweep_unique_targets_threshold"]
+check("TUNABLE_PARAMETERS: arp_sweep_unique_targets_threshold has distinct "
+      "max_step_up/max_step_down, not a single symmetric max_step",
+      arp_bounds.get("max_step_up") == 4.0 and arp_bounds.get("max_step_down") == 1.0)
+
+store7.upsert_device("arp_dev_a", device_type="iot", timestamp=NOW)
+store7.upsert_device("arp_dev_b", device_type="iot", timestamp=NOW)
+
+# A big RAISE (e.g. current=10 -> requested=30) must clamp to old_value + max_step_up (4.0),
+# never the (smaller) max_step_down.
+r_arp_raise = engine7.propose_change(
+    "arp_sweep_unique_targets_threshold", 30.0, "corrected false positives, raising threshold",
+    device_id="arp_dev_a", backtest_run_id="bt7_pass", now=NOW,
+)
+check("propose_change: arp_sweep RAISE is accepted", r_arp_raise.accepted, r_arp_raise.reason)
+if r_arp_raise.accepted:
+    row = store7._conn.execute(
+        "SELECT old_value, new_value FROM threshold_history WHERE change_id=?",
+        (r_arp_raise.change_id,),
+    ).fetchone()
+    applied_step = row["new_value"] - row["old_value"]
+    check("propose_change: an oversized RAISE is clamped to max_step_up (4.0), "
+          "not the smaller max_step_down (1.0)",
+          abs(applied_step - 4.0) < 1e-9, f"got step={applied_step}")
+
+# A big LOWER (e.g. current=10 -> requested=4, a 6-unit drop) must clamp to
+# old_value - max_step_down (1.0), never the (bigger) max_step_up.
+r_arp_lower = engine7.propose_change(
+    "arp_sweep_unique_targets_threshold", 4.0, "confirmed real threats, lowering threshold",
+    device_id="arp_dev_b", backtest_run_id="bt7_pass", now=NOW,
+)
+check("propose_change: arp_sweep LOWER is accepted", r_arp_lower.accepted, r_arp_lower.reason)
+if r_arp_lower.accepted:
+    row = store7._conn.execute(
+        "SELECT old_value, new_value FROM threshold_history WHERE change_id=?",
+        (r_arp_lower.change_id,),
+    ).fetchone()
+    applied_step = row["old_value"] - row["new_value"]
+    check("propose_change: an oversized LOWER is clamped to max_step_down (1.0), "
+          "not the bigger max_step_up (4.0)",
+          abs(applied_step - 1.0) < 1e-9, f"got step={applied_step}")
+
+# fp_combined_suppress_threshold stays a plain symmetric parameter -- confirms
+# the optional max_step_up/max_step_down keys don't leak a requirement onto
+# parameters that never define them.
+fp_bounds = TUNABLE_PARAMETERS["fp_combined_suppress_threshold"]
+check("TUNABLE_PARAMETERS: fp_combined_suppress_threshold stays plain-symmetric "
+      "(no max_step_up/max_step_down needed)",
+      "max_step" in fp_bounds and "max_step_up" not in fp_bounds and "max_step_down" not in fp_bounds)
+
 
 print()
 if FAILURES:

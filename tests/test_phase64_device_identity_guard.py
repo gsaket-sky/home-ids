@@ -63,7 +63,7 @@ def _alert(device_id: str, domain: str) -> dict:
 # Section A: no state_manager at all (default None) -- every existing caller that
 # hasn't threaded one through (most standalone scripts) must be completely unaffected
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp_no_sm = AutonomousFPEngine(config={}, state_dir=tmpdir)
     result = fp_no_sm.mark_false_positive(_alert("dev_unverified", "no-sm-check.example.com"), "host")
     check("REGRESSION GUARD: state_manager=None (default) never refuses on device-identity "
@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # Section B: THE FIX -- a device_id that does NOT resolve in the provided StateManager
 # (e.g. it was merged into a different canonical id since this alert was published)
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     sm = _FakeStateManager(known_ids={"dev_still_canonical"})
     fp_stale = AutonomousFPEngine(config={}, state_dir=tmpdir, state_manager=sm)
     result_stale = fp_stale.mark_false_positive(
@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: REGRESSION GUARD -- a device_id that DOES resolve still immunizes normally
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     sm = _FakeStateManager(known_ids={"dev_still_canonical"})
     fp_valid = AutonomousFPEngine(config={}, state_dir=tmpdir, state_manager=sm)
     result_valid = fp_valid.mark_false_positive(
@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # a missing device.id) has nothing to validate against and must not be refused by this
 # check specifically (it may still be refused/no-op for other, unrelated reasons)
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     sm = _FakeStateManager(known_ids={"dev_still_canonical"})
     fp_unknown = AutonomousFPEngine(config={}, state_dir=tmpdir, state_manager=sm)
     alert_no_device = {

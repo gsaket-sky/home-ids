@@ -1,7 +1,8 @@
 """
 identify_corrupted_training_rows.py -- audits the historical alert training data (the
 same sources train_fp_classifier.py's load_dataset() reads: alerts.json / configured
-alert_json_path, and autonomous_muted.jsonl) for rows whose Feature 1
+alert_json_path, and the graph's fp_suppression_log entries -- 2026-09-21, formerly
+state/autonomous_muted.jsonl) for rows whose Feature 1
 (f1_entropy, extract_features_from_alert()'s "first label entropy") was computed from
 the WRONG domain, because of two now-fixed domain-attribution bugs:
 
@@ -20,7 +21,7 @@ forward) -- this script only concerns itself with rows already written to disk b
 each respective fix landed, which train_fp_classifier.py would otherwise keep training
 on with a corrupted f1_entropy value indefinitely.
 
-Rather than mutating or deleting anything in alerts.json / autonomous_muted.jsonl --
+Rather than mutating or deleting anything in alerts.json / the graph's decision history --
 both are shared historical logs other consumers read too (Grafana, retro_hunter.py,
 manual audit) -- this writes a separate, inspectable, deletable overlay file,
 state/training_row_exclusions.json, listing the dedup key (device_id|domain|timestamp,
@@ -49,6 +50,7 @@ if str(SRC_DIR) not in sys.path:
 
 from scripts.train_fp_classifier import (
     _resolve_alert_input_paths, _read_alert_docs, _extract_payload, _alert_dedup_key,
+    _read_muted_docs_from_graph,
 )
 
 # Fix-commit timestamps (unix epoch, from `git show -s --format=%ct <sha>`) -- the
@@ -96,24 +98,21 @@ def _scan(state_dir: Path) -> dict:
                 }
         break  # mirrors load_dataset()'s own "first non-empty source wins" priority
 
-    muted_path = state_dir / "autonomous_muted.jsonl"
-    if muted_path.exists():
-        for line in muted_path.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                doc = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            payload = _extract_payload(doc)
-            if _is_corrupted(payload):
-                key = _alert_dedup_key(payload)
-                found[key] = {
-                    "signature": payload.get("signature"),
-                    "timestamp": payload.get("timestamp"),
-                    "source": "fp",
-                }
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G4): reads the
+    # graph's fp_suppression_log entries instead of the old state/autonomous_muted.jsonl
+    # -- see train_fp_classifier.py's _read_muted_docs_from_graph() for why this is a
+    # drop-in replacement (identical per-entry dict shape). No time bound here (unlike
+    # that helper's OTHER two callers) -- this scan is a one-time/occasional manual
+    # audit tool, not a per-cycle hot path, so an unbounded historical sweep is fine.
+    for doc in _read_muted_docs_from_graph(state_dir):
+        payload = _extract_payload(doc)
+        if _is_corrupted(payload):
+            key = _alert_dedup_key(payload)
+            found[key] = {
+                "signature": payload.get("signature"),
+                "timestamp": payload.get("timestamp"),
+                "source": "fp",
+            }
 
     return found
 
@@ -143,12 +142,12 @@ def main():
         cutoff_human = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(_CORRUPTION_CUTOFFS[sig]))
         print(f"  {sig}: {count} row(s) predating the fix ({cutoff_human})")
     print(f"  ({by_source.get('threat', 0)} from the threat/alert stream, "
-          f"{by_source.get('fp', 0)} from autonomous_muted.jsonl)")
+          f"{by_source.get('fp', 0)} from the graph's fp_suppression_log entries)")
 
     if not apply_changes:
         print(f"\nDry run only -- nothing was changed. Re-run with --apply to write "
               f"{exclusions_path}.")
-        print("Note: this does NOT modify alerts.json/autonomous_muted.jsonl -- it only "
+        print("Note: this does NOT modify alerts.json or the graph -- it only "
               "tells train_fp_classifier.py which existing rows to skip.")
         return
 

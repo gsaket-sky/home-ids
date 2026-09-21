@@ -33,7 +33,7 @@ def check(name, cond, detail=""):
 
 from intelligence.fp_engine import AutonomousFPEngine
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     # ── Test 1: trust-cache fast path re-runs Stage 1 hard-stop on every hit ───────
@@ -107,7 +107,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ── Test 4: StateManager action ledger ──────────────────────────────────────────────
 from core.state_guard import StateManager
 
-with tempfile.TemporaryDirectory() as tmpdir2:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
     sm = StateManager(state_path=f"{tmpdir2}/ids_state.json")
 
     sm.record_action("act1", "immunize_domain", "sub.example.com", "dev1", "test-host", ttl_seconds=3600.0)

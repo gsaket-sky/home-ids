@@ -415,6 +415,98 @@ check("check_retroactive_misses_and_rollback: a DEVICE-scoped (not just "
       "category-scoped) loosened override is also correctly rolled back",
       len(rollbacks6) == 1 and rollbacks6[0]["change_id"] == "cb6_dev", f"got {rollbacks6}")
 
+# =============================================================================
+# check_arp_sweep_retroactive_misses_and_rollback (2026-09-21, legacy/Sheet 03a
+# autotune reconciliation Phase F) -- same shape as the hard-stop check above,
+# but re-bands evidence.VALUE (the raw unique-target count), not confidence.
+# =============================================================================
+def _add_arp_sweep_evidence(store, device_id, value, timestamp):
+    store.insert_evidence(Evidence(
+        device_id=device_id, destination_id=NO_DESTINATION, evidence_type="arp_sweep",
+        independence_family="network_recon", timestamp=timestamp, source="threat_signals",
+        confidence=0.8, value=value,
+    ))
+
+
+store_arp1 = GraphStore(":memory:")
+store_arp1.upsert_device("arp_cb_dev_a", device_type="iot", timestamp=CB_NOW)
+# global=8 (default), category raised to 16 (less sensitive -- higher threshold)
+_promote_scoped_directly(store_arp1, None, "iot", "arp_sweep_unique_targets_threshold", 8.0, 16.0,
+                            CB_NOW - 5000, "arp_cb1_cat")
+# a real sweep of 12 unique targets: parent(8) WOULD flag it, this category's 16 does NOT
+_add_arp_sweep_evidence(store_arp1, "arp_cb_dev_a", value=12.0, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_arp1, "arp_cb_dev_a", timestamp=CB_NOW - 90)
+arp_rollbacks1 = backtest_job.check_arp_sweep_retroactive_misses_and_rollback(store_arp1, now=CB_NOW)
+check("check_arp_sweep_retroactive_misses_and_rollback: rolls back a loosened "
+      "category override when a real arp_sweep near-miss (by raw count, not "
+      "confidence) + a real CONFIRMED_THREAT decision line up",
+      len(arp_rollbacks1) == 1 and arp_rollbacks1[0]["change_id"] == "arp_cb1_cat",
+      f"got {arp_rollbacks1}")
+
+store_arp2 = GraphStore(":memory:")
+store_arp2.upsert_device("arp_cb_dev_b", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_arp2, None, "iot", "arp_sweep_unique_targets_threshold", 8.0, 16.0,
+                            CB_NOW - 5000, "arp_cb2_cat")
+# sweep count of 20 clears BOTH the parent(8) and this category's own 16 -- not a near-miss at all
+_add_arp_sweep_evidence(store_arp2, "arp_cb_dev_b", value=20.0, timestamp=CB_NOW - 100)
+_add_confirmed_threat_decision(store_arp2, "arp_cb_dev_b", timestamp=CB_NOW - 90)
+arp_rollbacks2 = backtest_job.check_arp_sweep_retroactive_misses_and_rollback(store_arp2, now=CB_NOW)
+check("check_arp_sweep_retroactive_misses_and_rollback: a count that clears "
+      "this scope's OWN threshold too (not just the parent's) is not a "
+      "near-miss -- nothing rolled back", arp_rollbacks2 == [], f"got {arp_rollbacks2}")
+
+# =============================================================================
+# check_fp_combined_retroactive_misses_and_rollback (Phase F) -- near-miss is a
+# SUPPRESSED decision's own fp_verdict.confidence, not a separate evidence row;
+# confirmation is a LATER decision for the same device reaching CONFIRMED_THREAT.
+# =============================================================================
+def _add_suppressed_decision(store, device_id, confidence, timestamp):
+    return store.insert_decision(
+        device_id=device_id, timestamp=timestamp, state="BENIGN", decision_path="fp_suppressed",
+        confidence=confidence, risk_score=5.0,
+        raw_payload={"fp_verdict": {"verdict": "FALSE_POSITIVE", "confidence": confidence, "suppress": True}},
+    )
+
+
+store_fpc1 = GraphStore(":memory:")
+store_fpc1.upsert_device("fpc_dev_a", device_type="iot", timestamp=CB_NOW)
+# global=0.80 (default), category LOWERED to 0.65 (less sensitive -- suppresses more)
+_promote_scoped_directly(store_fpc1, None, "iot", "fp_combined_suppress_threshold", 0.80, 0.65,
+                            CB_NOW - 5000, "fpc1_cat")
+# suppressed at confidence=0.70: parent(0.80) would NOT suppress it, this category's 0.65 DOES
+_add_suppressed_decision(store_fpc1, "fpc_dev_a", confidence=0.70, timestamp=CB_NOW - 1000)
+# a LATER, separate decision for the SAME device confirms it's a real threat
+_add_confirmed_threat_decision(store_fpc1, "fpc_dev_a", timestamp=CB_NOW - 100)
+fpc_rollbacks1 = backtest_job.check_fp_combined_retroactive_misses_and_rollback(store_fpc1, now=CB_NOW)
+check("check_fp_combined_retroactive_misses_and_rollback: rolls back a loosened "
+      "category override when a real suppressed near-miss decision is later "
+      "followed by a real CONFIRMED_THREAT decision for the same device",
+      len(fpc_rollbacks1) == 1 and fpc_rollbacks1[0]["change_id"] == "fpc1_cat",
+      f"got {fpc_rollbacks1}")
+
+store_fpc2 = GraphStore(":memory:")
+store_fpc2.upsert_device("fpc_dev_b", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_fpc2, None, "iot", "fp_combined_suppress_threshold", 0.80, 0.65,
+                            CB_NOW - 5000, "fpc2_cat")
+_add_suppressed_decision(store_fpc2, "fpc_dev_b", confidence=0.70, timestamp=CB_NOW - 1000)
+# no later confirmed-threat decision at all for this device -- must not roll back
+fpc_rollbacks2 = backtest_job.check_fp_combined_retroactive_misses_and_rollback(store_fpc2, now=CB_NOW)
+check("check_fp_combined_retroactive_misses_and_rollback: a suppressed "
+      "near-miss with NO later confirmation for that device is never rolled back",
+      fpc_rollbacks2 == [], f"got {fpc_rollbacks2}")
+
+store_fpc3 = GraphStore(":memory:")
+store_fpc3.upsert_device("fpc_dev_c", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_fpc3, None, "iot", "fp_combined_suppress_threshold", 0.80, 0.65,
+                            CB_NOW - 5000, "fpc3_cat")
+# confidence=0.90 is ABOVE the band [0.65, 0.80) -- parent would ALSO have suppressed this one
+_add_suppressed_decision(store_fpc3, "fpc_dev_c", confidence=0.90, timestamp=CB_NOW - 1000)
+_add_confirmed_threat_decision(store_fpc3, "fpc_dev_c", timestamp=CB_NOW - 100)
+fpc_rollbacks3 = backtest_job.check_fp_combined_retroactive_misses_and_rollback(store_fpc3, now=CB_NOW)
+check("check_fp_combined_retroactive_misses_and_rollback: a suppression the "
+      "PARENT tier would have made too (confidence above the band) is not a "
+      "near-miss -- nothing rolled back", fpc_rollbacks3 == [], f"got {fpc_rollbacks3}")
+
 # --- run_backtest() wiring: the circuit breaker runs and its result is surfaced ---
 store_cb7 = GraphStore(":memory:")
 store_cb7.upsert_device("cb_dev_g", device_type="iot", timestamp=CB_NOW)

@@ -35,12 +35,13 @@ def check(name, cond, detail=""):
 
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.fp_engine import AutonomousFPEngine
+from argus.graph.store import GraphStore
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: LocalConfirmedIntel
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     intel = LocalConfirmedIntel(tmpdir, ttl_seconds=3600.0)
 
     check("record() returns True for a genuinely new IOC", intel.record("ip", "1.2.3.4", "devA") is True)
@@ -76,7 +77,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: fp_engine.py -- record_confirmed_threat() + Stage-1 check #7
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     fp.record_confirmed_threat("dev_A", "malicious-c2.example", "6.6.6.6",
@@ -193,7 +194,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     # PUBLIC IP the operator explicitly listed in config.yaml's safe_ips must also be
     # protected, matching safe_ips' own documented promise ("NEVER treated as suspicious
     # ... even if flagged elsewhere").
-    with tempfile.TemporaryDirectory() as tmpdir2:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
         fp_with_config = AutonomousFPEngine(config={"safe_ips": ["203.0.113.50"]}, state_dir=tmpdir2)
         fp_with_config.record_confirmed_threat("dev_J", "", "203.0.113.50", reason="STAGE_1_HARD_STOP")
         check("an explicitly-configured safe_ips entry (a PUBLIC IP, not automatically "
@@ -267,7 +268,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # COMPLEMENT: is_telemetry_domain() only protects domains someone already curated;
 # this fix stops the wrong domain from ever being fed in in the first place.
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir_b2:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
     fp_b2 = AutonomousFPEngine(config={}, state_dir=tmpdir_b2)
 
     def _make_alert(domain, features):
@@ -326,7 +327,7 @@ with tempfile.TemporaryDirectory() as tmpdir_b2:
 # ═══════════════════════════════════════════════════════════════════════════════════
 from scripts.retro_hunter import check_local_intel_history
 
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     state_dir = Path(tmpdir)
     intel = LocalConfirmedIntel(state_dir)
     intel.record("ip", "7.7.7.7", "dev_confirmed_it")
@@ -359,6 +360,67 @@ with tempfile.TemporaryDirectory() as tmpdir:
           "dev_confirmed_it" not in matched_devices, f"got devices={matched_devices}")
     check("unrelated traffic never appears in the results",
           "dev_unrelated" not in matched_devices, f"got devices={matched_devices}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section D0: train_fp_classifier.py -- calibrate_suppress_threshold() direct coverage
+# (2026-09-21, legacy/Sheet 03a autotune reconciliation Phase E: confirmed via grep this
+# pure function had ZERO direct unit tests before this -- only ever exercised indirectly
+# through the full run_threshold_calibration() integration below.)
+# ═══════════════════════════════════════════════════════════════════════════════════
+from scripts.train_fp_classifier import (
+    calibrate_suppress_threshold, AUTOTUNE_MIN_SAMPLES, AUTOTUNE_SAFETY_MARGIN, AUTOTUNE_ABSOLUTE_FLOOR,
+)
+
+cst_val, cst_reason = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.70] * AUTOTUNE_MIN_SAMPLES, uncorrected_uncertain_scores=[],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check(">= min_samples confirmed FPs with no ambiguous overlap LOWERS the threshold to "
+      "AUTOTUNE_SAFETY_MARGIN below the lowest confirmed-FP score",
+      cst_val is not None and abs(cst_val - (0.70 - AUTOTUNE_SAFETY_MARGIN)) < 1e-9,
+      f"got={cst_val}, reason={cst_reason}")
+
+cst_val2, cst_reason2 = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.70] * (AUTOTUNE_MIN_SAMPLES - 1), uncorrected_uncertain_scores=[],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("below min_samples confirmed FPs makes NO change",
+      cst_val2 is None and cst_reason2.startswith("Only "), f"got={cst_val2}, reason={cst_reason2}")
+
+cst_val3, cst_reason3 = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.70] * AUTOTUNE_MIN_SAMPLES, uncorrected_uncertain_scores=[0.72],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("an uncorrected UNCERTAIN alert scoring AT OR ABOVE the lowest confirmed-FP score "
+      "refuses to calibrate -- the ambiguous-overlap guard",
+      cst_val3 is None and cst_reason3.startswith("Refusing to calibrate"),
+      f"got={cst_val3}, reason={cst_reason3}")
+
+cst_val4, cst_reason4 = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.70] * AUTOTUNE_MIN_SAMPLES, uncorrected_uncertain_scores=[0.50],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("an uncorrected UNCERTAIN alert scoring safely BELOW the lowest confirmed-FP score "
+      "does not block calibration",
+      cst_val4 is not None, f"got={cst_val4}, reason={cst_reason4}")
+
+cst_val5, cst_reason5 = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.10] * AUTOTUNE_MIN_SAMPLES, uncorrected_uncertain_scores=[],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("the lowered threshold never goes below AUTOTUNE_ABSOLUTE_FLOOR regardless of how "
+      "low the confirmed-FP evidence scores",
+      cst_val5 is not None and abs(cst_val5 - AUTOTUNE_ABSOLUTE_FLOOR) < 1e-9,
+      f"got={cst_val5}, reason={cst_reason5}")
+
+cst_val6, cst_reason6 = calibrate_suppress_threshold(
+    corrected_fp_scores=[0.90] * AUTOTUNE_MIN_SAMPLES, uncorrected_uncertain_scores=[],
+    current=0.80, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("calibration NEVER raises the threshold, even when the confirmed-FP evidence would "
+      "otherwise compute a candidate ABOVE the current value -- one-directional by design",
+      cst_val6 is None and "would not lower" in cst_reason6, f"got={cst_val6}, reason={cst_reason6}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -398,21 +460,28 @@ check("the lowered threshold never goes below its floor",
 # Section D2: full end-to-end integration -- real muted-log evidence -> real per-device
 # threshold change, via the actual run_threshold_calibration() entry point
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     state_dir = Path(tmpdir)
     fp = AutonomousFPEngine(config={}, state_dir=str(state_dir))
     device_id = "dev_smart_hub_autocal"
+    d2_store = fp._get_autotune_engine().store
 
     # Two real CONNECTION_ABUSE corrections via the actual mark_false_positive() path
     # (not hand-written JSONL) -- proves the whole chain from a real operator
-    # correction through to automatic threshold calibration.
+    # correction through to automatic threshold calibration. Each needs a matching
+    # graph decision row for _write_muted_log() to attach its fp_suppression_log to
+    # (see that method's own docstring) -- a real pipeline cycle always has one
+    # (argus_live_engine's own _write_graph() runs unconditionally every cycle); this
+    # fixture inserts it directly, same precondition test_phase6's own rewrite uses.
     for i in range(ARP_SWEEP_MIN_CORRECTED_SAMPLES):
+        alert_ts = time.time()
         alert = {
             "device": {"id": device_id, "hostname": "smart-hub"},
             "network_context": {"queried_domain": "", "destination_ip": ""},
             "signature": "CONNECTION_ABUSE",
-            "timestamp": time.time(),
+            "timestamp": alert_ts,
         }
+        d2_store.insert_decision(device_id, alert_ts, "SUSPICIOUS", "hypothesis_suspicious", 0.5, 5.0)
         fp.mark_false_positive(alert, "smart-hub", source="operator")
 
     corrections = _collect_connection_abuse_corrections(state_dir)
@@ -420,14 +489,49 @@ with tempfile.TemporaryDirectory() as tmpdir:
           corrections.get(device_id, 0) == ARP_SWEEP_MIN_CORRECTED_SAMPLES, f"got={corrections}")
 
     before = fp.get_device_arp_sweep_threshold(device_id, default=8.0)
-    run_threshold_calibration(state_dir)
+    run1_now = time.time()
+    run_threshold_calibration(state_dir, now=run1_now)
+    fp.close()
+
+    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase C): the write side now
+    # routes through AutotuneEngine's own propose -> canary -> promote lifecycle instead
+    # of writing device_fp_profiles.json directly -- a single run only PROPOSES a change,
+    # it is not immediately live. Verify the proposal landed in threshold_history first...
+    store = GraphStore(str(state_dir / "v13_graph.db"))
+    proposed_row = store._conn.execute(
+        "SELECT change_id, new_value, promoted_at FROM threshold_history WHERE "
+        "parameter='arp_sweep_unique_targets_threshold' AND device_id=? "
+        "ORDER BY proposed_at DESC LIMIT 1",
+        (device_id,),
+    ).fetchone()
+    check("a single run_threshold_calibration() pass PROPOSES a real threshold_history row "
+          "for this device from real correction evidence, but does not promote it yet",
+          proposed_row is not None and proposed_row["new_value"] > before
+          and proposed_row["promoted_at"] is None,
+          f"got={dict(proposed_row) if proposed_row else None}, before={before}")
+    store.close()
+
+    fp_immediate = AutonomousFPEngine(config={}, state_dir=str(state_dir))
+    immediate_value = fp_immediate.get_device_arp_sweep_threshold(device_id, default=8.0)
+    check("...and get_device_arp_sweep_threshold() still returns the UNCHANGED value while "
+          "the proposal is only in canary -- no premature effect before promotion",
+          immediate_value == before, f"got={immediate_value}, before={before}")
+    fp_immediate.close()
+
+    # ...then, once the canary window has elapsed, a SECOND run (same recurring cron this
+    # script already runs on) opportunistically promotes it -- see _propose_and_promote()'s
+    # own docstring for why this reuses the existing cadence rather than a new concept.
+    run2_now = run1_now + 6.0 * 3600.0 + 1.0
+    run_threshold_calibration(state_dir, now=run2_now)
+
     fp2 = AutonomousFPEngine(config={}, state_dir=str(state_dir))  # fresh instance, forces a real disk reload
     after = fp2.get_device_arp_sweep_threshold(device_id, default=8.0)
+    fp2.close()
 
-    check("THE CORE INTEGRATION ('enable per device tuning'): a real run of "
-          "run_threshold_calibration() actually raises this device's own "
-          "arp_sweep_unique_targets_threshold end-to-end, from real correction evidence "
-          "on disk, reloadable by a completely fresh AutonomousFPEngine instance",
+    check("THE CORE INTEGRATION ('enable per device tuning'): a SECOND run.threshold_"
+          "calibration() pass, after the canary window elapses, actually PROMOTES this "
+          "device's own arp_sweep_unique_targets_threshold end-to-end, from real correction "
+          "evidence on disk, reloadable by a completely fresh AutonomousFPEngine instance",
           after > before, f"before={before} after={after}")
 
     autotune_stats_path = state_dir / "autotune_stats.json"

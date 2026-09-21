@@ -37,7 +37,7 @@ from intelligence.fp_engine import AutonomousFPEngine
 # Section A: get_device_arp_sweep_threshold -- layered fallback, same shape as
 # get_device_suppress_threshold()
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
 
     check("a device with no profile yet falls back to the caller-supplied default",
@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: mark_false_positive() -- DNS_EVASION signature routes to IP immunization
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     device_id, hostname, unexplained_ip = "dev_iphone_vpn", "iphone-gs", "5.6.7.8"
 
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: mark_false_positive() -- CONNECTION_ABUSE signature routes to threshold bump
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     device_id, hostname = "dev_smart_hub", "smart-home-hub"
 
@@ -134,7 +134,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # Section D: regression guard -- a signature-less (regular) alert keeps the EXACT
 # domain-based behavior from before Phase 21D2
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     regular_alert = {
         "device": {"id": "dev_regular", "hostname": "regular-host"},

@@ -48,7 +48,7 @@ from ollama_soc import _apply_confidence_calibration
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: LocalConfirmedIntel per-entry TTL override
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     intel = LocalConfirmedIntel(tmpdir, ttl_seconds=3600.0)  # instance default: 1 hour
     intel.record("ip", "1.2.3.4", "devA", ttl_seconds=0.01)  # this entry: ~effectively already expired
     time.sleep(0.05)
@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: record_confirmed_threat() threads ttl_seconds through to BOTH branches
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     # NOTE: RFC 5737 documentation-range addresses (198.51.100.0/24 etc.) will NOT
     # work here -- Python's ipaddress module classifies them as is_private=True, which
@@ -107,7 +107,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # Section C: end-to-end self-activation -- byte-identical until real volume exists,
 # then modulates automatically, matching the benign wiring's own proven behavior
 # ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory() as tmpdir:
+with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     calibrator = ConfidenceCalibrator(tmpdir + "/confidence_calibration.json")
 
     # Before any real observations: get_calibrated() returns None (self-gated), so
