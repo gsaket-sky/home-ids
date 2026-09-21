@@ -23,6 +23,7 @@ main.py's existing shutdown_handler.
 import logging
 import os
 import signal
+import threading
 import time
 from typing import Callable, Dict, Tuple, TYPE_CHECKING
 
@@ -35,6 +36,38 @@ LOGGER = logging.getLogger("home_ids.healing_actions")
 
 
 _SIGKILL_ESCALATION_ATTEMPT = 3  # see BUGFIX #2 below
+_HARD_FALLBACK_TIMEOUT_SECONDS = 45.0  # matches soc.service's own TimeoutStopSec
+
+
+def _arm_hard_fallback_kill(timeout: float = _HARD_FALLBACK_TIMEOUT_SECONDS) -> None:
+    """BUGFIX #3 (found live, 2026-09-21, same OOM/pressure incident as BUGFIX #2):
+    confirmed live that a self-triggered SIGTERM's own graceful shutdown sequence
+    can itself get stuck (this time inside state_guard.py's flush_to_disk(), fixed
+    separately) for 20+ minutes with ZERO external supervision -- systemd's own
+    TimeoutStopSec=45s only ever applies when SYSTEMD requests the stop
+    (systemctl stop/restart); a process sending itself a signal is completely
+    invisible to that machinery. The existing attempt-3 SIGKILL escalation above
+    depends on RecoveryBackoff's own schedule re-evaluating the component as still
+    unhealthy on a LATER health_manager cycle -- which, live, didn't happen fast
+    enough (or possibly at all) while _check_cycle() itself was intermittently
+    timing out under the same pressure. This is independent of that: a bare
+    OS-level timer, armed the moment ANY self-restart attempt fires (not just the
+    3rd), that unconditionally SIGKILLs this process after `timeout` seconds --
+    no condition to check, no cycle to depend on. If the graceful shutdown
+    succeeds first, this process (and this daemon thread with it) is simply gone
+    before the timer ever fires; sending a real SIGKILL to an already-exited PID
+    is otherwise harmless."""
+    def _watchdog():
+        time.sleep(timeout)
+        LOGGER.critical(
+            "Health manager's hard fallback fired: this process is still alive "
+            "%.0fs after a self-restart was triggered (the graceful shutdown "
+            "itself is stuck, or never received/processed the signal) -- "
+            "escalating to an unconditional SIGKILL now.", timeout,
+        )
+        os.kill(os.getpid(), getattr(signal, "SIGKILL", signal.SIGTERM))
+
+    threading.Thread(target=_watchdog, daemon=True, name="health_manager_hard_fallback").start()
 
 
 def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]:
@@ -113,6 +146,10 @@ def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]
         "Health manager triggered a self-restart (component=%s, attempt=%d). %s.",
         component, backoff_attempt, action_detail,
     )
+    if not escalate:
+        # Only needed ahead of a plain SIGTERM -- an escalated SIGKILL here is
+        # already unconditional and immediate, nothing to fall back FROM.
+        _arm_hard_fallback_kill()
     os.kill(os.getpid(), sig)
     return True, action_detail
 

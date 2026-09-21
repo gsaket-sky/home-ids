@@ -17,6 +17,29 @@ if str(SRC_DIR) not in sys.path:
 
 from core import healing_actions  # noqa: E402
 
+# Captured before the autouse fixture below ever patches the module attribute,
+# so the one test that needs the REAL timer (not the autouse-mocked no-op) can
+# still reach it.
+_REAL_ARM_HARD_FALLBACK_KILL = healing_actions._arm_hard_fallback_kill
+
+
+@pytest.fixture(autouse=True)
+def _no_real_hard_fallback_timer(monkeypatch):
+    """SAFETY: restart_own_process() now arms _arm_hard_fallback_kill() on every
+    non-escalated (SIGTERM) call -- a REAL 45s background thread that ends in an
+    unconditional os.kill(os.getpid(), SIGKILL). Left unpatched, that thread
+    outlives any single test function and fires AFTER pytest's own monkeypatch
+    fixture has already reverted os.kill back to the real one -- which would
+    kill this actual test process/runner 45 seconds after any such test ran.
+    Autouse so every test in this file (existing and future) is protected
+    without needing to remember to patch it individually; dedicated tests below
+    verify _arm_hard_fallback_kill()'s own real timer behavior in isolation,
+    with a short timeout and explicit synchronization instead of relying on
+    this default."""
+    calls = []
+    monkeypatch.setattr(healing_actions, "_arm_hard_fallback_kill", lambda *a, **k: calls.append((a, k)))
+    return calls
+
 
 class FakeAlertManager:
     def __init__(self):
@@ -112,6 +135,50 @@ def test_restart_own_process_escalates_to_sigkill_after_repeated_failed_attempts
     assert success is True
     if expected_sig != healing_actions.signal.SIGTERM:
         assert "SIGKILL" in detail
+
+
+# BUGFIX #3 regression (found live, 2026-09-21, same OOM/pressure incident as
+# BUGFIX #2): a self-triggered SIGTERM's own graceful shutdown can itself get
+# stuck (that specific time, inside state_guard.py's flush_to_disk(), fixed
+# separately) with ZERO external supervision -- systemd's TimeoutStopSec only
+# ever applies when SYSTEMD requests the stop, not a self-sent signal. The
+# existing attempt-3 SIGKILL escalation depends on a LATER health_manager cycle
+# re-evaluating the component as still unhealthy, which live, didn't happen
+# fast enough while _check_cycle() itself was intermittently timing out under
+# the same pressure. _arm_hard_fallback_kill() is independent of that: a bare
+# timer armed on every attempt, not just the 3rd.
+
+def test_restart_own_process_arms_hard_fallback_on_a_plain_sigterm_attempt(monkeypatch, _no_real_hard_fallback_timer):
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: None)
+    hm = _fake_hm()
+    healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert len(_no_real_hard_fallback_timer) == 1
+
+
+def test_restart_own_process_does_not_double_arm_on_an_already_escalated_sigkill(monkeypatch, _no_real_hard_fallback_timer):
+    # An escalated SIGKILL is already unconditional and immediate -- there is
+    # nothing for a fallback timer to fall back FROM.
+    monkeypatch.setattr(healing_actions.os, "kill", lambda pid, sig: None)
+    hm = _fake_hm_with_backoff(3)
+    healing_actions.restart_own_process(hm, "pipeline_main_loop")
+    assert _no_real_hard_fallback_timer == []
+
+
+def test_arm_hard_fallback_kill_sends_sigkill_after_the_process_is_still_alive(monkeypatch):
+    """Real timer, real thread -- but a tiny timeout and an explicit join so
+    this test controls exactly when it fires instead of trusting real time."""
+    import threading as _threading
+    kills = []
+    fired = _threading.Event()
+
+    def _fake_kill(pid, sig):
+        kills.append((pid, sig))
+        fired.set()
+
+    monkeypatch.setattr(healing_actions.os, "kill", _fake_kill)
+    _REAL_ARM_HARD_FALLBACK_KILL(timeout=0.05)
+    assert fired.wait(timeout=2.0), "hard fallback timer never fired"
+    assert kills == [(healing_actions.os.getpid(), getattr(healing_actions.signal, "SIGKILL", healing_actions.signal.SIGTERM))]
 
 
 def test_restart_own_process_missing_get_record_defaults_to_sigterm(monkeypatch):
