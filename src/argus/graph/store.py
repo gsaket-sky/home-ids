@@ -407,6 +407,7 @@ class GraphStore:
                 explanation_text           TEXT,
                 explanation_embedding       BLOB,
                 autotune_state_json          TEXT NOT NULL DEFAULT '{}',
+                plain_explanation             TEXT,
                 alert_payload_json            TEXT NOT NULL DEFAULT '{}',
                 backfilled                    INTEGER NOT NULL DEFAULT 0
             );
@@ -441,6 +442,15 @@ class GraphStore:
         # below (must also run, and commit, before any future index references this column).
         try:
             self._conn.execute("ALTER TABLE containment_actions ADD COLUMN alert_event_id TEXT REFERENCES alert_events(alert_event_id)")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        # plain_explanation (2026-09-22): alert_events itself predates this column
+        # on any db that already had the table created earlier the SAME day this
+        # session shipped it (containment_actions above is the general pattern
+        # for exactly this situation -- CREATE TABLE IF NOT EXISTS no-ops
+        # regardless of columns).
+        try:
+            self._conn.execute("ALTER TABLE alert_events ADD COLUMN plain_explanation TEXT")
         except sqlite3.OperationalError:
             pass  # column already exists
         # 2026-09-16, per-device/category autotuning plan: threshold_history predates
@@ -920,6 +930,7 @@ class GraphStore:
                              fp_stage: Optional[str] = None, explanation_text: Optional[str] = None,
                              explanation_embedding: Optional[bytes] = None,
                              autotune_state: Optional[Dict[str, Any]] = None,
+                             plain_explanation: Optional[str] = None,
                              alert_payload: Optional[Dict[str, Any]] = None,
                              backfilled: bool = False) -> str:
         """One row per qualifying cycle (state crosses SUSPICIOUS+): FIRED (a real
@@ -937,11 +948,12 @@ class GraphStore:
         self._conn.execute(
             "INSERT INTO alert_events (alert_event_id, decision_id, device_id, incident_id, "
             "timestamp, status, fp_verdict, fp_confidence, fp_stage, explanation_text, "
-            "explanation_embedding, autotune_state_json, alert_payload_json, backfilled) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "explanation_embedding, autotune_state_json, plain_explanation, alert_payload_json, backfilled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (alert_event_id, decision_id, device_id, incident_id, timestamp, status,
              fp_verdict, fp_confidence, fp_stage, explanation_text, explanation_embedding,
-             json.dumps(autotune_state or {}), json.dumps(alert_payload or {}), int(backfilled)),
+             json.dumps(autotune_state or {}), plain_explanation,
+             json.dumps(alert_payload or {}), int(backfilled)),
         )
         self._maybe_commit()
         return alert_event_id
@@ -1036,7 +1048,7 @@ class GraphStore:
             rows = self._conn.execute(
                 f"""
                 SELECT alert_event_id, decision_id, device_id, incident_id, timestamp,
-                       status, fp_verdict, fp_confidence, fp_stage, explanation_text
+                       status, fp_verdict, fp_confidence, fp_stage, explanation_text, plain_explanation
                 FROM (
                     SELECT *, ROW_NUMBER() OVER (
                         PARTITION BY decision_id ORDER BY timestamp DESC

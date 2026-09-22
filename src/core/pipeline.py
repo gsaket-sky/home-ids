@@ -42,6 +42,7 @@ from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggreg
 from incident_key import incident_key as _incident_key
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator
+from mitigation.plain_explanation import build_plain_explanation
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
@@ -2944,6 +2945,59 @@ class EnginePipeline:
                                     explanation_embedding = (
                                         self.fp_engine.embed_text(primary_sig) if self.fp_engine else None
                                     )
+
+                                    # Plain-English narrative (2026-09-22, user request: "rewrite the
+                                    # telegram alert ... readability for a normal user in plain text,
+                                    # no technical words"). Two lookups here, both bounded/cheap:
+                                    # get_device_id_for_ip() is an in-memory index (no network), and
+                                    # reverse_dns()/lookup() are local-mmdb-or-cached (see their own
+                                    # docstrings in geoip.py) -- only reverse_dns() is a real network
+                                    # PTR query, and only ever fires for a raw external IP with no
+                                    # known domain, lru_cache'd 2s-timeout-bounded at the geoip layer.
+                                    # asn_owner here was resolved earlier for `dest_ip` (this cycle's
+                                    # raw destination), which can differ from alert_dest_ip in the rare
+                                    # case a signature-specific override above chose a different IP --
+                                    # an accepted, narrative-only approximation, not a scoring input.
+                                    peer_hostname = peer_ip = None
+                                    if alert_dest_ip and alert_dest_ip not in ("unknown", ""):
+                                        try:
+                                            peer_device_id = self.state_manager.get_device_id_for_ip(alert_dest_ip)
+                                            if peer_device_id and peer_device_id != dev_id:
+                                                with self.state_manager.lock_device(peer_device_id) as peer_state:
+                                                    ph = getattr(peer_state, "hostname", None)
+                                                    if ph and ph != "unknown":
+                                                        peer_hostname, peer_ip = ph, alert_dest_ip
+                                        except Exception:
+                                            pass
+                                    dest_hostname, asn_country = None, None
+                                    if (not peer_hostname and alert_dest_ip and alert_dest_ip not in ("unknown", "")
+                                            and (not alert_target_domain or alert_target_domain == "unknown") and self.geoip_engine):
+                                        try:
+                                            ipaddress.ip_address(alert_dest_ip)
+                                            dest_hostname = self.geoip_engine.reverse_dns(alert_dest_ip)
+                                            city_res = self.geoip_engine.lookup(alert_dest_ip)
+                                            asn_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+                                        except ValueError:
+                                            pass
+                                        except Exception:
+                                            pass
+                                    plain_explanation = build_plain_explanation(
+                                        hostname=hostname, client_ip=client_ip, device_type=getattr(state, "device_type", None),
+                                        dest_ip=alert_dest_ip, dest_domain=alert_target_domain,
+                                        hee_hypotheses=alert_payload.get("hee_hypotheses", {}),
+                                        winning_name=decision.get("explanation"),
+                                        hee_evidence_types=alert_payload.get("hee_evidence_types", []),
+                                        fp_verdict=fp_verdict.get("verdict"), fp_stage=fp_verdict.get("stage"),
+                                        alert_status=alert_event_status,
+                                        peer_hostname=peer_hostname, peer_ip=peer_ip,
+                                        dest_hostname=dest_hostname, asn_owner=asn_owner, asn_country=asn_country,
+                                    )
+                                    # Threaded forward to the Telegram-message-building site further
+                                    # below (mirrors "_graph_decision_id"/"_autotune_state"'s own
+                                    # already-established pattern) so it's computed exactly once and
+                                    # reused, not re-derived a second time.
+                                    decision["_plain_explanation"] = plain_explanation
+
                                     alert_event_id = argus_live_engine.get_graph_store().insert_alert_event(
                                         decision_id=graph_decision_id, device_id=dev_id, timestamp=now,
                                         status=alert_event_status, incident_id=incident_id,
@@ -2953,6 +3007,7 @@ class EnginePipeline:
                                         explanation_text=primary_sig,
                                         explanation_embedding=explanation_embedding,
                                         autotune_state=decision.get("_autotune_state", {}),
+                                        plain_explanation=plain_explanation,
                                         alert_payload=alert_payload,
                                     )
                                 except Exception as exc:
@@ -3301,7 +3356,23 @@ class EnginePipeline:
                                         action_summary, mixed_signal
                                     )
 
+                                    # Plain-English lead (2026-09-22, user request: "rewrite the
+                                    # telegram alert ... readability for a normal user in plain
+                                    # text, no technical words") -- computed once, earlier this
+                                    # cycle, alongside the alert_event graph write
+                                    # (decision["_plain_explanation"]). This is now the FIRST thing
+                                    # a reader sees; nothing below it is removed -- the existing
+                                    # "Already done/Your move/If you do nothing" status block and
+                                    # everything after it (facts, evidence, confidence) stays intact
+                                    # as the technical detail for anyone who wants it, just no
+                                    # longer the only content. Falls back to the old header alone
+                                    # in the rare case the graph write itself failed this cycle
+                                    # (graph_decision_id was never set) -- the Telegram send must
+                                    # never be blocked by that.
+                                    plain_explanation = decision.get("_plain_explanation", "")
+                                    plain_lead = f"🗣 {plain_explanation}\n\n" if plain_explanation else ""
                                     alert_msg = (
+                                        f"{plain_lead}"
                                         f"🚨 *THREAT — {hostname}* ({client_ip})\n\n"
                                         f"{severity_badge}  *{threat_name}*\n\n"
                                         f"{status_emoji} *Already done:* {status_done}\n"

@@ -1650,11 +1650,16 @@ function renderGraphView(){
     } else if (n.kind==='destination') {
       fields = [['kind',n.sub],['label',n.label]];
     } else if (n.kind==='alert_event') {
-      fields = [['status', n.label], ['explanation', n.sub || '—'],
+      // Plain-English narrative (2026-09-22, user request) leads; the raw
+      // hypothesis code stays available underneath as 'signature', same
+      // "readable first, technical secondary" ordering as the alerts table.
+      fields = [['status', n.label]];
+      if (n.plain_explanation) fields.push(['explanation', n.plain_explanation]);
+      fields.push(['signature', n.sub || '—'],
                 ['fp_verdict', n.fp_verdict||'—'],
                 ['fp_confidence', n.fp_confidence!=null ? Number(n.fp_confidence).toFixed(3) : '—'],
                 ['incident_id', n.incident_id || '—'],
-                ['timestamp', fmtTime(n.timestamp)]];
+                ['timestamp', fmtTime(n.timestamp)]);
     } else {
       var explanation = n.winning_hypothesis_label
         ? n.winning_hypothesis_label + (n.winning_hypothesis_description ? ' — ' + n.winning_hypothesis_description : '')
@@ -1709,10 +1714,18 @@ function renderAlertRow(a){
   var autotuneNote = (autotune.hard_stop_candidate_sensitivity != null)
     ? '<div style="font-size:10px;color:var(--text-faint);margin-top:2px;">hard-stop sensitivity: '+esc(String(autotune.hard_stop_candidate_sensitivity))+'</div>'
     : '';
+  // Plain-English narrative (2026-09-22, user request) is the PRIMARY thing
+  // shown -- the raw hypothesis code (a.explanation_text, e.g.
+  // "PEER_COHORT_DEVIATION") becomes a small technical sub-label underneath
+  // it instead of the main content, same "readable first, technical detail
+  // available but secondary" ordering the Telegram alert itself now uses.
+  var explanationCell = a.plain_explanation
+    ? '<div>'+esc(a.plain_explanation)+'</div><div style="font-size:10px;color:var(--text-faint);margin-top:3px;">'+esc(a.explanation_text||'')+'</div>'+autotuneNote
+    : esc(a.explanation_text||'—')+autotuneNote;
   return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(a.device_id)+'\')">'
     + '<td class="cell-mono">'+fmtTime(a.timestamp)+'</td>'
     + '<td class="cell-mono">'+esc(a.device_id)+'</td>'
-    + '<td>'+esc(a.explanation_text||'—')+autotuneNote+'</td>'
+    + '<td style="max-width:420px;">'+explanationCell+'</td>'
     + '<td>'+alertStatusPill(a.status)+'</td>'
     + '<td class="cell-mono">'+esc(a.fp_verdict||'—')+(a.fp_confidence!=null?' ('+Number(a.fp_confidence).toFixed(2)+')':'')+'</td>'
     + '<td class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(a.incident_id||'—')+'</td>'

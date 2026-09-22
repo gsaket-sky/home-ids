@@ -67,6 +67,16 @@ HYPOTHESIS_LABELS = {
     "DEVICE_PROFILE_TELEMETRY": ("Device telemetry", "Routine telemetry/check-in traffic typical of this device's own profile -- benign."),
     "UNKNOWN_BENIGN": ("No concerning pattern found", "Nothing about this evidence matched any attack hypothesis -- treated as benign by default, not because it was actively cleared."),
     "DIRECT_IOC_HIT": ("Matched a known-benign indicator", "Matched an entry the system already has confirmed as benign."),
+    # Found missing (2026-09-22, plain-English alert rewrite): these 5 real
+    # hypothesis names (argus/hypotheses/engine.py's own super().__init__()/
+    # _NAME_* calls) had no entry here at all -- PEER_COHORT_DEVIATION and
+    # COORDINATED_TARGETING both fire routinely in production, confirmed
+    # against .94's real alert_events, so this wasn't a hypothetical gap.
+    "PEER_COHORT_DEVIATION": ("Unusual compared to similar devices", "This device's behavior (e.g. how many different destinations it talks to) differs noticeably from other devices of the same type on this network."),
+    "COORDINATED_TARGETING": ("Coordinated targeting", "Multiple devices on this network independently contacted the same suspicious destination in a short window -- suggests a coordinated campaign rather than one device acting alone."),
+    "LATERAL_MOVEMENT": ("Internal lateral movement", "This device made rapid connection attempts to many other devices or ports on your own network -- the pattern of something trying to spread internally, not just talk to the outside internet."),
+    "PORT_SCAN": ("Port scanning", "This device probed many different ports on one or more targets in quick succession -- the classic pattern of searching for an open door, not normal application traffic."),
+    "INTERNAL_RECONNAISSANCE": ("Internal network scanning", "This device probed multiple other devices or services on your own network in a pattern consistent with mapping out what's there, not routine use."),
 }
 
 

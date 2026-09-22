@@ -194,6 +194,10 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "timestamp": ae["timestamp"], "device_id": ae["device_id"],
             "fp_verdict": ae.get("fp_verdict"), "fp_confidence": ae.get("fp_confidence"),
             "incident_id": ae.get("incident_id"),
+            # Plain-English narrative (2026-09-22, user request) -- built once at
+            # write time by mitigation/plain_explanation.py, shown as-is here so
+            # the console never has to re-derive it client-side.
+            "plain_explanation": ae.get("plain_explanation"),
         })
         edges.append({
             "from": f"decision:{ae['decision_id']}", "to": f"alert_event:{ae['alert_event_id']}",

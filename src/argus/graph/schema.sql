@@ -340,6 +340,13 @@ CREATE TABLE IF NOT EXISTS alert_events (
     explanation_text           TEXT,
     explanation_embedding       BLOB,          -- 384 x float32, NULL until embedded
     autotune_state_json          TEXT NOT NULL DEFAULT '{}',  -- active tunables + change_id/scope this cycle
+    -- Plain-English narrative (2026-09-22, user request: "rewrite the telegram
+    -- alert ... readability for a normal user in plain text, no technical
+    -- words"), built once at write time by mitigation/plain_explanation.py --
+    -- device/evidence/hypothesis/counter-argument/outcome in one paragraph, no
+    -- evidence-type codes or confidence percentages. NULL for backfilled rows
+    -- (not recoverable from alerts.json's history the same way).
+    plain_explanation             TEXT,
     alert_payload_json            TEXT NOT NULL DEFAULT '{}',
     backfilled                    INTEGER NOT NULL DEFAULT 0
 );
