@@ -298,6 +298,15 @@ var state = {
   graphMultiSelected: {}, // {nodeId: true} -- nodes selected as a group; dragging any one of them moves the whole set
   graphDrag: null, // {kind:'node', id, dx, dy} or {kind:'pan', startX, startY, panX0, panY0} while a pointer drag is in progress
 
+  // Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): a
+  // sub-view within the same Evidence Graph tab, not a new top-level tab -- the
+  // fired/suppressed alert list this project didn't have a real view for before
+  // (only alerts.json's own raw log, via Telegram history or a file tail).
+  graphSubView: 'graph', // 'graph' | 'alerts'
+  alertsLoading: false, alertsLoaded: false, alertsLoadError: null,
+  alertsList: [], alertsOffset: 0, alertsStatusFilter: null, alertsDeviceFilter: null,
+  alertsSearchQuery: '', alertsSearchResults: null, alertsSearchLoading: false, alertsSearchError: null,
+
   // --- real, server-backed config state ---
   configSection: null,        // set once rows load, to the first section
   configSearch: '',
@@ -479,6 +488,40 @@ async function loadGraph(){
     state.graphLoadError = err.message || String(err);
   } finally {
     state.graphLoading = false; render();
+  }
+}
+
+async function loadAlerts(reset){
+  if (reset) { state.alertsOffset = 0; state.alertsList = []; }
+  state.alertsLoading = true; state.alertsLoadError = null; render();
+  try {
+    var params = new URLSearchParams({ limit: '50', offset: String(state.alertsOffset) });
+    if (state.alertsStatusFilter) params.set('status', state.alertsStatusFilter);
+    if (state.alertsDeviceFilter) params.set('device_id', state.alertsDeviceFilter);
+    var data = await apiFetch('/api/graph/alerts?' + params.toString());
+    state.alertsList = reset ? data.alerts : state.alertsList.concat(data.alerts);
+    state.alertsOffset += data.alerts.length;
+    state.alertsLoaded = true;
+  } catch (err) {
+    state.alertsLoadError = err.message || String(err);
+  } finally {
+    state.alertsLoading = false; render();
+  }
+}
+
+async function searchAlerts(){
+  if (!state.alertsSearchQuery.trim()) { state.alertsSearchResults = null; render(); return; }
+  state.alertsSearchLoading = true; state.alertsSearchError = null; render();
+  try {
+    var params = new URLSearchParams({ q: state.alertsSearchQuery.trim(), limit: '20' });
+    if (state.alertsDeviceFilter) params.set('device_id', state.alertsDeviceFilter);
+    var data = await apiFetch('/api/graph/alerts/search?' + params.toString());
+    state.alertsSearchResults = data.results;
+  } catch (err) {
+    state.alertsSearchError = err.message || String(err);
+    state.alertsSearchResults = null;
+  } finally {
+    state.alertsSearchLoading = false; render();
   }
 }
 
@@ -1615,6 +1658,113 @@ function renderGraphView(){
     + '<div class="graph-drawer">'+drawer+'</div></div></div>';
 }
 
+/* ============================= Evidence Graph: alerts sub-view ============================= */
+// Documentation/ALERT_TRACE_GRAPH_PLAN.md (2026-09-22): "I want to see in console
+// all the alerts fired or suppressed under evidence graph" -- alert_events is the
+// append-only per-cycle record the node graph above can't show (decisions dedupe
+// a recurring incident into one row, overwritten each cycle; this never is).
+
+function graphSubViewToggle(){
+  var tabs = [['graph','Graph'],['alerts','Alerts (fired/suppressed)']];
+  return '<div style="display:flex;gap:6px;margin:0 0 10px 0;">' + tabs.map(function(t){
+    var active = state.graphSubView === t[0];
+    return '<button class="btn btn-sm '+(active?'btn-primary':'btn-ghost')+'" onclick="app.setGraphSubView(\''+t[0]+'\')">'+t[1]+'</button>';
+  }).join('') + '</div>';
+}
+
+function alertStatusPill(status){
+  var colors = {
+    FIRED: ['#e0743f','rgba(224,116,63,.3)','#e0743f'],
+    SUPPRESSED_AUTONOMOUS: ['#8b93a3','rgba(139,147,163,.25)','#8b93a3'],
+    LOGGED_ONLY: ['#5aa7f0','rgba(90,167,240,.3)','#5aa7f0'],
+  };
+  var c = colors[status] || colors.LOGGED_ONLY;
+  var label = { FIRED: 'Fired', SUPPRESSED_AUTONOMOUS: 'Suppressed', LOGGED_ONLY: 'Logged only' }[status] || status;
+  return '<span class="pill" style="color:'+c[0]+';border-color:'+c[2]+';background:'+c[1]+'"><span class="dot" style="background:'+c[0]+'"></span>'+label+'</span>';
+}
+
+function renderAlertRow(a){
+  var autotune = a.autotune_state || {};
+  var autotuneNote = (autotune.hard_stop_candidate_sensitivity != null)
+    ? '<div style="font-size:10px;color:var(--text-faint);margin-top:2px;">hard-stop sensitivity: '+esc(String(autotune.hard_stop_candidate_sensitivity))+'</div>'
+    : '';
+  return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(a.device_id)+'\')">'
+    + '<td class="cell-mono">'+fmtTime(a.timestamp)+'</td>'
+    + '<td class="cell-mono">'+esc(a.device_id)+'</td>'
+    + '<td>'+esc(a.explanation_text||'—')+autotuneNote+'</td>'
+    + '<td>'+alertStatusPill(a.status)+'</td>'
+    + '<td class="cell-mono">'+esc(a.fp_verdict||'—')+(a.fp_confidence!=null?' ('+Number(a.fp_confidence).toFixed(2)+')':'')+'</td>'
+    + '<td class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(a.incident_id||'—')+'</td>'
+    + '</tr>';
+}
+
+function renderAlertsListView(){
+  var topbarHead = topbarWithRefresh('Evidence graph', 'Every alert_events row -- one per cycle that crossed SUSPICIOUS+, fired to Telegram, autonomously suppressed by CL-AFPE, or logged-only (monitor-only/deduped repeat). Append-only: unlike the graph\'s decision nodes, a recurring incident never overwrites an earlier entry here. Click a row to open that device.', 'reloadAlerts', state.alertsLoading);
+  var toggle = graphSubViewToggle();
+
+  var searchBox = '<div class="panel" style="margin-bottom:12px;padding:10px 12px;">'
+    + '<div style="display:flex;gap:8px;align-items:center;">'
+    + '<input class="input" style="flex:1;" placeholder="Search alert explanations (e.g. \'dns tunneling\', \'peer deviation\') — searches the last 30 days" '
+    + 'value="'+esc(state.alertsSearchQuery)+'" onchange="app.onAlertsSearchInput(this.value)" onkeydown="if(event.key===\'Enter\') app.onAlertsSearchInput(this.value)">'
+    + (state.alertsSearchQuery ? '<button class="btn btn-ghost btn-sm" onclick="app.clearAlertsSearch()">Clear</button>' : '')
+    + '</div>'
+    + (state.alertsSearchLoading ? '<div style="font-size:11px;color:var(--text-faint);margin-top:6px;">Searching…</div>' : '')
+    + (state.alertsSearchError ? '<div style="font-size:11px;color:var(--danger, #e0743f);margin-top:6px;">'+esc(state.alertsSearchError)+'</div>' : '')
+    + '</div>';
+
+  var statusFilters = '<div style="display:flex;gap:6px;margin-bottom:10px;">'
+    + [null,'FIRED','SUPPRESSED_AUTONOMOUS','LOGGED_ONLY'].map(function(s){
+        var active = state.alertsStatusFilter === s;
+        var label = s ? ({FIRED:'Fired',SUPPRESSED_AUTONOMOUS:'Suppressed',LOGGED_ONLY:'Logged only'})[s] : 'All';
+        return '<button class="btn btn-sm '+(active?'btn-primary':'btn-ghost')+'" onclick="app.setAlertsStatusFilter('+(s?"'"+s+"'":'null')+')">'+label+'</button>';
+      }).join('')
+    + '</div>';
+
+  if (state.alertsSearchResults !== null) {
+    var results = state.alertsSearchResults;
+    var searchRows = results.length
+      ? results.map(function(r){
+          return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(r.device_id)+'\')">'
+            + '<td class="cell-mono">'+fmtTime(r.timestamp)+'</td>'
+            + '<td class="cell-mono">'+esc(r.device_id)+'</td>'
+            + '<td>'+esc(r.explanation_text||'—')+'</td>'
+            + '<td>'+alertStatusPill(r.status)+'</td>'
+            + '<td class="cell-mono">'+(r.similarity!=null?Number(r.similarity).toFixed(3):'—')+'</td>'
+            + '</tr>';
+        }).join('')
+      : '<tr><td colspan="5"><div class="empty-state">No matching alerts found in the searched window.</div></td></tr>';
+    return topbarHead + '<div class="content">' + toggle + searchBox + statusFilters
+      + '<div class="panel"><div class="table-wrap"><table><thead><tr><th>When</th><th>Device</th><th>Explanation</th><th>Status</th><th>Similarity</th></tr></thead><tbody>'+searchRows+'</tbody></table></div></div></div>';
+  }
+
+  if (state.alertsLoadError) {
+    return topbarHead + '<div class="content">' + toggle + '<div class="error-banner">Could not load alerts: '+esc(state.alertsLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadAlerts()">Retry</button></div></div>';
+  }
+  if (state.alertsLoading && !state.alertsLoaded) {
+    return topbarHead + '<div class="content">' + toggle + '<div class="empty-state">Loading alerts…</div></div>';
+  }
+  var rows = state.alertsList.length
+    ? state.alertsList.map(renderAlertRow).join('')
+    : '<tr><td colspan="6"><div class="empty-state">No alerts recorded yet.</div></td></tr>';
+
+  return topbarHead + '<div class="content">' + toggle + searchBox + statusFilters
+    + '<div class="panel"><div class="table-wrap"><table><thead><tr><th>When</th><th>Device</th><th>Explanation</th><th>Status</th><th>FP verdict</th><th>Incident</th></tr></thead><tbody>'+rows+'</tbody></table></div>'
+    + '<div style="margin-top:10px;"><button class="btn btn-ghost btn-sm" onclick="app.loadMoreAlerts()" '+(state.alertsLoading?'disabled':'')+'>Load more</button></div>'
+    + '</div></div>';
+}
+
+function renderGraphTab(){
+  if (state.graphSubView === 'alerts') return renderAlertsListView();
+  // Prepend the toggle onto the node-graph view too -- renderGraphView() itself
+  // builds its own topbar/content, so the toggle is spliced in right after the
+  // topbar div closes, same insertion point the alerts view uses structurally.
+  var html = renderGraphView();
+  var marker = '<div class="content">';
+  var idx = html.indexOf(marker);
+  if (idx === -1) return html;
+  return html.slice(0, idx + marker.length) + graphSubViewToggle() + html.slice(idx + marker.length);
+}
+
 /* ============================= Evidence Graph: drag / pan / zoom ============================= */
 
 function _updateGraphTransform(){
@@ -1938,7 +2088,7 @@ function renderApp(){
   else if (state.activeView==='devices') view = renderDevicesView();
   else if (state.activeView==='deviceDetail') view = renderDeviceDetailView();
   else if (state.activeView==='hunt') view = renderHuntView();
-  else if (state.activeView==='graph') view = renderGraphView();
+  else if (state.activeView==='graph') view = renderGraphTab();
   else if (state.activeView==='blocking') view = renderBlockingView();
   else if (state.activeView==='suricata') view = renderSuricataView();
   else if (state.activeView==='health') view = renderHealthView();
@@ -1960,7 +2110,7 @@ function render(){
       if (selStart !== null) { try { el.setSelectionRange(selStart, selEnd); } catch(e){} }
     }
   }
-  if (state.activeView === 'graph') attachGraphInteraction();
+  if (state.activeView === 'graph' && state.graphSubView === 'graph') attachGraphInteraction();
 }
 
 /* ============================= app actions ============================= */
@@ -2004,6 +2154,15 @@ var app = {
   onDeviceSearch: function(v){ state.deviceSearch=v; render(); },
   reloadDevices: function(){ state.devicesLoaded=false; loadDevices(); },
   reloadGraph: function(){ state.graphLoaded=false; loadGraph(); },
+  setGraphSubView: function(v){
+    state.graphSubView = v; render();
+    if (v === 'alerts' && !state.alertsLoading && !state.alertsLoaded) loadAlerts(true);
+  },
+  reloadAlerts: function(){ loadAlerts(true); },
+  loadMoreAlerts: function(){ loadAlerts(false); },
+  setAlertsStatusFilter: function(s){ state.alertsStatusFilter = s; loadAlerts(true); },
+  onAlertsSearchInput: function(v){ state.alertsSearchQuery = v; searchAlerts(); },
+  clearAlertsSearch: function(){ state.alertsSearchQuery=''; state.alertsSearchResults=null; render(); },
 
   goHuntMode: function(m){ state.huntMode=m; state.huntRan=false; state.huntResult=null; state.huntError=null; render(); },
   runHuntQuery: function(){ runHuntQuery(); },

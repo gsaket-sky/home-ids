@@ -50,12 +50,17 @@ Node/edge layout (x/y positions) is NOT computed here -- the console's existing
 client-side layout logic (grouping by kind into columns) already does that; this
 endpoint returns plain kind/label/sub/relation data for it to consume.
 """
-from fastapi import APIRouter, Depends, Query
+import threading
+import time
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from middleware.humanize import label_evidence_type, label_hypothesis
 from core.state_guard import StateManager
+from argus.graph.store import AlertSearchScopeTooLarge
 
 router = APIRouter()
 
@@ -185,3 +190,124 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
         edges.append({"from": node_id, "to": f"decision:{e['dst_id']}", "relation": e["relation"]})
 
     return {"nodes": nodes, "edges": edges, "decision_count": len(decisions)}
+
+
+# ==============================================================================
+# Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): the
+# console's fired/suppressed alert list + bounded semantic search. Reads
+# alert_events via the new indexed table (GraphStore.get_alert_events()/
+# search_alert_events_by_embedding()), replacing _alert_log_utils.py's bounded-
+# backward-scan hack over alerts.json's 170MB+ NDJSON file for this specific view.
+# ==============================================================================
+
+DEFAULT_ALERT_LIST_LIMIT = 50
+MAX_ALERT_LIST_LIMIT = 200
+DEFAULT_SEARCH_WINDOW_DAYS = 30.0
+MAX_SEARCH_WINDOW_DAYS = 365.0
+
+
+@router.get("/api/graph/alerts")
+def get_alerts(
+    limit: int = Query(DEFAULT_ALERT_LIST_LIMIT, ge=1, le=MAX_ALERT_LIST_LIMIT),
+    offset: int = Query(0, ge=0),
+    device_id: Optional[str] = None,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    status: Optional[str] = None,
+    token: str = Depends(verify_token),
+):
+    """Paginated fired/suppressed alert list for the console -- one row per
+    alert_events entry (append-only, never overwritten by a recurring
+    incident -- see the plan doc), newest first."""
+    with open_store() as store:
+        if store is None:
+            return {"alerts": [], "count": 0}
+        alerts = store.get_alert_events(
+            limit=limit, offset=offset, device_id=device_id,
+            since=since, until=until, status=status,
+        )
+        return {"alerts": alerts, "count": len(alerts)}
+
+
+# Lazy-loaded, process-local FastEmbed instance for embedding SEARCH QUERY text in
+# this API process. Deliberately NOT the same in-memory object as the main pipeline
+# process's fp_engine.py instance (they are separate OS processes -- middleware.
+# main_api:app runs as its own uvicorn subprocess, per soc.service's own unit file)
+# -- this is the smallest honest deviation from "reuse the exact same instance"
+# the plan doc's resource analysis assumed: the underlying ~85MB ONNX model file is
+# still the SAME already-disk-cached artifact (models/fastembed_cache/), so this is
+# a cheap from-cache load, not a second real download/training cost, and it loads
+# lazily on first search request (not at API startup) rather than slowing down
+# every console page load for a feature most requests never touch.
+_query_embed_model = None
+_query_embed_lock = threading.Lock()
+
+
+def _get_query_embed_model():
+    global _query_embed_model
+    if _query_embed_model is None:
+        with _query_embed_lock:
+            if _query_embed_model is None:
+                from fastembed import TextEmbedding
+                from pathlib import Path as _P
+                # Matches fp_engine.py's own _model_dir() derivation EXACTLY
+                # (config's model_path, defaulting to "models/ids_model.pkl") --
+                # not state_path's own directory, a different one -- so this loads
+                # the SAME already-downloaded cache the main pipeline process
+                # already populated, never re-downloads.
+                cache_dir = str(_P(CONFIG.get("model_path", "models/ids_model.pkl")).parent / "fastembed_cache")
+                _query_embed_model = TextEmbedding(
+                    model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir, threads=1)
+    return _query_embed_model
+
+
+@router.get("/api/graph/alerts/search")
+def search_alerts(
+    q: str = Query(..., min_length=1, description="Natural-language search text"),
+    device_id: Optional[str] = None,
+    since: Optional[float] = None,
+    until: Optional[float] = None,
+    limit: int = Query(20, ge=1, le=100),
+    token: str = Depends(verify_token),
+):
+    """Bounded semantic search over alert_events.explanation_text (plan doc's
+    "Semantic search (bounded add-on)" section) -- survives this project's
+    frequent evidence-type/hypothesis-taxonomy renames, e.g. finding an old
+    "zeek_notice" alert when searching for its current "zeek_notice_weak" name.
+
+    `since` is REQUIRED-in-effect: defaults to DEFAULT_SEARCH_WINDOW_DAYS (30)
+    back, capped at MAX_SEARCH_WINDOW_DAYS (365) -- no unscoped "search
+    everything" code path exists anywhere in this stack, per the plan doc's
+    bounding rules. Returns HTTP 422 (not a silent truncation) if the scoped
+    candidate set still exceeds GraphStore.ALERT_SEARCH_CANDIDATE_CAP -- the
+    caller must narrow (shorter window and/or a device_id)."""
+    now = time.time()
+    if since is None:
+        since = now - DEFAULT_SEARCH_WINDOW_DAYS * 86400
+    elif since < now - MAX_SEARCH_WINDOW_DAYS * 86400:
+        since = now - MAX_SEARCH_WINDOW_DAYS * 86400
+
+    try:
+        model = _get_query_embed_model()
+        query_vector = list(model.embed([q]))[0].astype("float32").tobytes()
+    except ImportError:
+        raise HTTPException(status_code=503, detail="Semantic search unavailable: fastembed not installed.")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Semantic search embedding failed: {exc}")
+
+    with open_store() as store:
+        if store is None:
+            return {"results": [], "count": 0}
+        try:
+            results = store.search_alert_events_by_embedding(
+                query_vector, since=since, until=until, device_id=device_id, limit=limit,
+            )
+        except AlertSearchScopeTooLarge as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Search scope too large ({exc.candidate_count} candidate alerts, "
+                    f"cap is {exc.cap}) -- narrow the time window and/or specify a device_id."
+                ),
+            )
+        return {"results": results, "count": len(results)}
