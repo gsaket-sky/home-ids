@@ -333,6 +333,42 @@ class GlobalMLEngine:
 
 
 class MultiDeviceMLEngine:
+    # Chronic pipeline-freeze root cause, found live 2026-09-22: pipeline.py's main
+    # loop calls save_models() synchronously, inline, every 60s (same block as
+    # state_guard.py's own flush_to_disk() -- see that method's own
+    # _FLUSH_IO_TIMEOUT_SECONDS/_bounded_io, added 2026-09-21 for the EXACT same
+    # class of bug). flush_to_disk() was already bounded to 20s; save_models()
+    # right next to it never was. Confirmed live via py-spy: pipeline_main_loop's
+    # own MainThread caught mid-way through this exact call while the heartbeat
+    # was stale. journalctl showed 25 self-restarts in one day, heartbeat-stale
+    # durations up to 1819s (30+ min of zero detection coverage), 84% of which
+    # needed a hard SIGKILL fallback because the graceful shutdown handler was
+    # ALSO blocked on this same synchronous joblib.dump() loop. A slow SD-card
+    # write (contending with Zeek's own log writes, reactive packet captures, and
+    # the graph db's WAL) now degrades to "this cycle's model save is skipped,
+    # retried in 60s" instead of freezing the whole pipeline. Same small local
+    # copy (not a cross-module import) as state_guard.py's own precedent.
+    _SAVE_IO_TIMEOUT_SECONDS = 20.0
+
+    @staticmethod
+    def _bounded_io(fn, timeout: float):
+        result: dict = {}
+
+        def _target():
+            try:
+                result["value"] = fn()
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(target=_target, daemon=True, name="ml_save_io")
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None, True
+        if "error" in result:
+            raise result["error"]
+        return result.get("value"), False
+
     def __init__(self, model_dir: Optional[Any] = None, global_model_path: Optional[Any] = None, **kwargs):
         self._lock = threading.RLock()
         self.global_engine = GlobalMLEngine()
@@ -433,20 +469,37 @@ class MultiDeviceMLEngine:
     def save_models(self):
         if not self.model_dir:
             return
-        try:
+
+        def _do_save():
             saved_devs = 0
             if self.global_model_path and self.global_engine.warmed_up:
                 joblib.dump(self.global_engine.model, self.global_model_path)
-                
+
             with self._lock:
                 devices_snapshot = list(self.devices.items())
-                
+
             for dev_id, engine in devices_snapshot:
                 if engine.warmed_up:
                     dev_path = self.model_dir / f"{dev_id}.pkl"
                     joblib.dump(engine.model, dev_path)
                     saved_devs += 1
-                    
+            return saved_devs
+
+        try:
+            saved_devs, timed_out = self._bounded_io(_do_save, timeout=self._SAVE_IO_TIMEOUT_SECONDS)
+            if timed_out:
+                # See this class's own _SAVE_IO_TIMEOUT_SECONDS comment -- abandoning
+                # the write (rather than blocking the caller, which IS the main
+                # detection loop's own heartbeat thread) means this cycle's model
+                # save is simply skipped; the next successful 60s-later flush
+                # catches up. The abandoned write may still complete later on its
+                # own leaked daemon thread and silently finish on disk.
+                LOGGER.error(
+                    "ML model save did not complete within %.0fs (likely a slow/"
+                    "stalled disk write) -- abandoning this save rather than "
+                    "blocking the pipeline's own main loop.", self._SAVE_IO_TIMEOUT_SECONDS,
+                )
+                return
             LOGGER.info("Successfully persisted Global Model and %d Device ML models to disk[cite: 14, 22].", saved_devs)
         except Exception as exc:
             LOGGER.error("Failed to save ML models: %s[cite: 14, 22]", exc)
