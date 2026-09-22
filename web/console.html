@@ -325,6 +325,7 @@ var state = {
   // fired/suppressed alert list this project didn't have a real view for before
   // (only alerts.json's own raw log, via Telegram history or a file tail).
   graphSubView: 'graph', // 'graph' | 'alerts'
+  graphDeviceFilter: null, // scopes /api/graph to one device instead of the whole network's most recent N decisions
   alertsLoading: false, alertsLoaded: false, alertsLoadError: null,
   alertsList: [], alertsOffset: 0, alertsStatusFilter: null, alertsDeviceFilter: null,
   alertsSearchQuery: '', alertsSearchResults: null, alertsSearchLoading: false, alertsSearchError: null,
@@ -515,7 +516,9 @@ function computeGraphLayout(nodes, edges){
 async function loadGraph(){
   state.graphLoading = true; state.graphLoadError = null; render();
   try {
-    var data = await apiFetch('/api/graph?limit=25');
+    var params = new URLSearchParams({ limit: '25' });
+    if (state.graphDeviceFilter) params.set('device_id', state.graphDeviceFilter);
+    var data = await apiFetch('/api/graph?' + params.toString());
     var laid = computeGraphLayout(data.nodes, data.edges);
     state.graphNodes = laid.nodes;
     state.graphEdges = laid.edges;
@@ -1809,7 +1812,8 @@ function renderAlertRow(a){
   // hostname") -- hostname primary, device_id small secondary, same
   // <div class="cell-title">/<div class="cell-mono"> pattern every other
   // console tab (Devices/Blocking/Suricata/Autonomy) already established.
-  var deviceCell = '<div class="cell-title">'+esc(a.device_hostname || a.device_id)+'</div><div class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(a.device_id)+'</div>';
+  var deviceCell = '<div class="cell-title">'+esc(a.device_hostname || a.device_id)+'</div><div class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(a.device_id)+'</div>'
+    + '<button class="btn btn-ghost btn-sm" style="margin-top:4px;padding:1px 6px;font-size:10px;" onclick="app.viewAlertInGraph(\''+esc(a.device_id)+'\', event)">View in graph</button>';
   return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(a.device_id)+'\')" title="Incident: '+esc(a.incident_id||'—')+'">'
     + '<td class="cell-mono">'+fmtTime(a.timestamp)+'</td>'
     + '<td>'+deviceCell+'</td>'
@@ -1884,6 +1888,22 @@ function renderAlertsListView(){
     + '</div></div>';
 }
 
+function graphDeviceFilterBox(){
+  // Found live 2026-09-22 ("i still do not see the alert in graph"): the
+  // graph canvas only ever shows the most recent N decisions ACROSS THE
+  // WHOLE NETWORK, so a single device's older alert gets pushed off within
+  // minutes on a busy network no matter how long ago it actually happened.
+  // This scopes the same query to one device (device_id now threaded through
+  // /api/graph, see graph_api.py) instead of trying to out-scroll the firehose.
+  var active = !!state.graphDeviceFilter;
+  return '<div class="panel" style="margin-bottom:10px;padding:8px 12px;display:flex;gap:8px;align-items:center;">'
+    + '<input class="input mono" style="flex:1;max-width:320px;" placeholder="Filter to one device_id (e.g. from an alert row)" '
+    + 'value="'+esc(state.graphDeviceFilter||'')+'" onchange="app.setGraphDeviceFilter(this.value)" onkeydown="if(event.key===\'Enter\') app.setGraphDeviceFilter(this.value)">'
+    + (active ? '<button class="btn btn-ghost btn-sm" onclick="app.clearGraphDeviceFilter()">Show whole network</button>' : '')
+    + (active ? '<span style="font-size:11px;color:var(--text-faint);">showing '+esc(state.graphDeviceFilter)+'\'s own most recent decisions</span>' : '')
+    + '</div>';
+}
+
 function renderGraphTab(){
   if (state.graphSubView === 'alerts') return renderAlertsListView();
   // Prepend the toggle onto the node-graph view too -- renderGraphView() itself
@@ -1893,7 +1913,7 @@ function renderGraphTab(){
   var marker = '<div class="content">';
   var idx = html.indexOf(marker);
   if (idx === -1) return html;
-  return html.slice(0, idx + marker.length) + graphSubViewToggle() + html.slice(idx + marker.length);
+  return html.slice(0, idx + marker.length) + graphSubViewToggle() + graphDeviceFilterBox() + html.slice(idx + marker.length);
 }
 
 /* ============================= Evidence Graph: drag / pan / zoom ============================= */
@@ -2308,6 +2328,28 @@ var app = {
   setGraphSubView: function(v){
     state.graphSubView = v; render();
     if (v === 'alerts' && !state.alertsLoading && !state.alertsLoaded) loadAlerts(true);
+  },
+  setGraphDeviceFilter: function(v){
+    v = (v||'').trim();
+    state.graphDeviceFilter = v || null;
+    state.graphLoaded = false; state.graphSelected = null; state.graphMultiSelected = {};
+    loadGraph();
+  },
+  clearGraphDeviceFilter: function(){
+    state.graphDeviceFilter = null;
+    state.graphLoaded = false; state.graphSelected = null; state.graphMultiSelected = {};
+    loadGraph();
+  },
+  // Found live 2026-09-22 ("i still do not see the alert in graph") -- lets an
+  // Alerts-tab row jump straight to that device's own graph, instead of
+  // hoping it's still within the whole network's most recent N decisions.
+  viewAlertInGraph: function(deviceId, e){
+    if (e) e.stopPropagation();
+    state.activeView = 'graph'; state.graphSubView = 'graph';
+    state.graphDeviceFilter = deviceId;
+    state.graphLoaded = false; state.graphSelected = null; state.graphMultiSelected = {};
+    render();
+    loadGraph();
   },
   reloadAlerts: function(){ loadAlerts(true); },
   loadMoreAlerts: function(){ loadAlerts(false); },

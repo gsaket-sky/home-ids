@@ -1761,7 +1761,7 @@ class GraphStore:
             d["raw_payload"] = {}
         return d
 
-    def get_recent_decisions(self, limit: int) -> List[Dict[str, Any]]:
+    def get_recent_decisions(self, limit: int, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """The console API's graph-view endpoint's actual read pattern: the most
         recent `limit` decisions across ALL devices, newest first -- NOT "every
         decision ever made, sorted and truncated in Python" (that used to be
@@ -1772,11 +1772,26 @@ class GraphStore:
         already fixed for edges via get_edges(limit_most_recent=...), just not
         caught here yet). `ORDER BY timestamp DESC LIMIT ?` pushed into SQL, backed
         by idx_decisions_timestamp (schema.sql) so it's an index-order scan, not a
-        full-table sort."""
-        rows = self._conn.execute(
-            "SELECT * FROM decisions ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        full-table sort.
+
+        `device_id` (found live 2026-09-22, "i still do not see the alert in
+        graph": a real geofencing alert for one device was correctly present in
+        the graph but unreachable from the console, because this call had no way
+        to look past the most recent `limit` decisions ACROSS THE WHOLE NETWORK
+        -- on a busy network that's a matter of minutes, no matter how old the
+        target decision actually is) -- optional, scopes the same query to one
+        device via idx_decisions_device_ts (schema.sql), still an index-order
+        scan, not a full-table sort."""
+        if device_id:
+            rows = self._conn.execute(
+                "SELECT * FROM decisions WHERE device_id = ? ORDER BY timestamp DESC LIMIT ?",
+                (device_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM decisions ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
         out = []
         for r in rows:
             d = dict(r)

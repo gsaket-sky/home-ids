@@ -98,12 +98,16 @@ ALERT_EVENTS_PER_DECISION_CAP = 10
 
 
 @router.get("/api/graph")
-def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_token)):
+def get_graph(
+    limit: int = Query(25, ge=1, le=200),
+    device_id: Optional[str] = Query(None, description="Scope to one device's own most recent decisions, instead of the most recent across the whole network"),
+    token: str = Depends(verify_token),
+):
     with open_store() as store:
         if store is None:
             return {"nodes": [], "edges": [], "decision_count": 0}
 
-        decisions = store.get_recent_decisions(limit)
+        decisions = store.get_recent_decisions(limit, device_id=device_id)
         decision_ids = [d["decision_id"] for d in decisions]
         device_ids = sorted({d["device_id"] for d in decisions})
 
