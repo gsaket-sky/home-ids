@@ -67,6 +67,12 @@ router = APIRouter()
 # See module docstring -- a real decision in production had 56,073 supporting edges.
 EVIDENCE_PER_DECISION_CAP = 15
 
+# Same "cap the busy-entity case" discipline as EVIDENCE_PER_DECISION_CAP above,
+# applied to alert_events -- see GraphStore.get_alert_events_by_decision_ids()'s
+# own docstring for why alert_events specifically (unlike evidence) can pile up
+# per decision.
+ALERT_EVENTS_PER_DECISION_CAP = 10
+
 
 @router.get("/api/graph")
 def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_token)):
@@ -87,6 +93,14 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
 
         destination_ids = sorted({e.destination_id for e in evidence_list})
         destinations = store.get_destinations_by_ids(destination_ids)
+
+        # Alert-trace graph (2026-09-22, user request: "is it possible to show
+        # [alerts] directly in graph"): the alert_events belonging to these SAME
+        # decisions, capped per-decision by the store method itself -- see its
+        # own docstring for why (a long-running incident's decision never
+        # changes state, so alert_events -- deliberately never deduped, unlike
+        # evidence -- can pile up against one decision_id).
+        alert_events = store.get_alert_events_by_decision_ids(decision_ids, cap_per_decision=ALERT_EVENTS_PER_DECISION_CAP)
 
     sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
     sm.load_from_disk()
@@ -167,6 +181,23 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "evidence_truncated": total_edges > EVIDENCE_PER_DECISION_CAP,
             # see evidence node's own comment above -- same device-clustering reason.
             "device_id": d["device_id"],
+        })
+
+    # Alert-trace graph: alert_event nodes + decision->alert_event 'raised' edges.
+    # Real facts about the alert (status/fp_verdict/explanation) live as columns
+    # on this ONE node, not a second lookup -- same "scalar fact about one thing
+    # stays a column" rule the alert_events table itself follows.
+    for ae in alert_events:
+        nodes.append({
+            "id": f"alert_event:{ae['alert_event_id']}", "kind": "alert_event",
+            "label": ae["status"], "sub": ae.get("explanation_text") or "",
+            "timestamp": ae["timestamp"], "device_id": ae["device_id"],
+            "fp_verdict": ae.get("fp_verdict"), "fp_confidence": ae.get("fp_confidence"),
+            "incident_id": ae.get("incident_id"),
+        })
+        edges.append({
+            "from": f"decision:{ae['decision_id']}", "to": f"alert_event:{ae['alert_event_id']}",
+            "relation": "raised",
         })
 
     # evidence->decision edges, rewritten to point at each evidence item's

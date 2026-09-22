@@ -228,8 +228,18 @@ var GRAPH_LEGEND_DEFS = [
   { kind:'device', label:'Device', color:'#5aa7f0', bg:'rgba(90,167,240,.3)' },
   { kind:'evidence', label:'Evidence', color:'#8b93a3', bg:'rgba(139,147,163,.25)' },
   { kind:'destination', label:'Destination', color:'#9e6ee0', bg:'rgba(158,110,224,.3)' },
-  { kind:'decision', label:'Decision', color:'#e0b23f', bg:'rgba(224,178,63,.3)' }
+  { kind:'decision', label:'Decision', color:'#e0b23f', bg:'rgba(224,178,63,.3)' },
+  { kind:'alert_event', label:'Alert', color:'#e0743f', bg:'rgba(224,116,63,.3)' }
 ];
+
+// Per-status coloring for alert_event nodes (matches alertStatusPill's palette,
+// defined further below in the alerts-table code) -- one legend swatch above
+// ('Alert', a single orange), but the actual node fill on the canvas still
+// distinguishes fired/suppressed/logged-only, same as decision nodes already
+// vary by severity color under one 'Decision' legend entry.
+var ALERT_EVENT_NODE_COLORS = {
+  FIRED: '#e0743f', SUPPRESSED_AUTONOMOUS: '#8b93a3', LOGGED_ONLY: '#5aa7f0'
+};
 
 var ICONS = {
   devices:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="4" width="18" height="12" rx="1.5"></rect><path d="M8 20h8M12 16v4"></path></svg>',
@@ -292,7 +302,7 @@ var state = {
   graphLoading: false, graphLoaded: false, graphLoadError: null,
   graphNodes: [], graphEdges: [],
   graphSelected: null,
-  graphShow: { device:true, evidence:true, destination:true, decision:true },
+  graphShow: { device:true, evidence:true, destination:true, decision:true, alert_event:true },
   graphPan: { x: 0, y: 0 }, graphZoom: 1,
   graphFitPending: false,
   graphMultiSelected: {}, // {nodeId: true} -- nodes selected as a group; dragging any one of them moves the whole set
@@ -416,16 +426,16 @@ async function runHuntQuery(){
 // nearby rows instead of scattered across the whole column, keeping edges short
 // and mostly horizontal instead of criss-crossing the whole canvas.
 function computeGraphLayout(nodes, edges){
-  var colX = { device: 110, evidence: 460, destination: 980, decision: 1400 };
-  var radius = { decision: 11, device: 12, destination: 10, evidence: 7 };
+  var colX = { device: 110, evidence: 460, destination: 980, decision: 1400, alert_event: 1820 };
+  var radius = { decision: 11, device: 12, destination: 10, evidence: 7, alert_event: 10 };
   // Minimum gap between adjacent circle EDGES in the same column (not centers) --
   // sized to clear the two-line label ("type" + "sub", drawn beside the node, see
   // renderGraphView) so labels don't overlap between one row and the next even
   // when node radius alone wouldn't need that much room. Evidence rows can run
   // into the hundreds, so they're deliberately the tightest packing.
-  var minGap = { decision: 22, device: 22, destination: 22, evidence: 14 };
+  var minGap = { decision: 22, device: 22, destination: 22, evidence: 14, alert_event: 22 };
 
-  var byKind = { device: [], evidence: [], destination: [], decision: [] };
+  var byKind = { device: [], evidence: [], destination: [], decision: [], alert_event: [] };
   nodes.forEach(function(n){ (byKind[n.kind] || (byKind[n.kind] = [])).push(n); });
 
   byKind.device.sort(function(a,b){ return (a.label||'').localeCompare(b.label||''); });
@@ -442,6 +452,7 @@ function computeGraphLayout(nodes, edges){
   }
   if (byKind.evidence) byKind.evidence.sort(byDeviceThenRecency);
   if (byKind.decision) byKind.decision.sort(byDeviceThenRecency);
+  if (byKind.alert_event) byKind.alert_event.sort(byDeviceThenRecency);
 
   var byId = {};
   var laidOut = [];
@@ -456,6 +467,10 @@ function computeGraphLayout(nodes, edges){
       if (n.kind === 'decision') { out.fill = hexA(sevColor(n.label), 0.85); out.stroke = sevColor(n.label); }
       else if (n.kind === 'device') { out.fill = 'rgba(90,167,240,.3)'; out.stroke = '#5aa7f0'; }
       else if (n.kind === 'destination') { out.fill = 'rgba(155,110,224,.25)'; out.stroke = '#9e6ee0'; }
+      else if (n.kind === 'alert_event') {
+        var ac = ALERT_EVENT_NODE_COLORS[n.label] || ALERT_EVENT_NODE_COLORS.LOGGED_ONLY;
+        out.fill = hexA(ac, 0.85); out.stroke = ac;
+      }
       else { out.fill = 'rgba(226,229,235,.18)'; out.stroke = '#8b93a3'; }
       byId[n.id] = out;
       laidOut.push(out);
@@ -464,7 +479,7 @@ function computeGraphLayout(nodes, edges){
   });
 
   var laidOutEdges = edges.map(function(e){
-    var relColor = { observed:'#4a5568', targets:'#5a6478', supports:'#22c7e0', contradicts:'#e0523f' };
+    var relColor = { observed:'#4a5568', targets:'#5a6478', supports:'#22c7e0', contradicts:'#e0523f', raised:'#e0743f' };
     return Object.assign({}, e, { stroke: relColor[e.relation] || '#6b7280', dash: e.relation==='contradicts' ? '4,3' : '' });
   });
 
@@ -1566,7 +1581,7 @@ function renderAutonomyByDevicePanel(){
 }
 
 function renderGraphView(){
-  var topbarHead = topbarWithRefresh('Evidence graph', 'Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions. Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background (or press Esc) to deselect/pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence is capped per-decision (see the drawer for "N of TOTAL" when truncated).', 'reloadGraph', state.graphLoading);
+  var topbarHead = topbarWithRefresh('Evidence graph', 'Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions → alerts (orange nodes: fired/suppressed/logged-only). Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background (or press Esc) to deselect/pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence and alerts are each capped per-decision (see the drawer for "N of TOTAL" when truncated).', 'reloadGraph', state.graphLoading);
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -1634,6 +1649,12 @@ function renderGraphView(){
       }
     } else if (n.kind==='destination') {
       fields = [['kind',n.sub],['label',n.label]];
+    } else if (n.kind==='alert_event') {
+      fields = [['status', n.label], ['explanation', n.sub || '—'],
+                ['fp_verdict', n.fp_verdict||'—'],
+                ['fp_confidence', n.fp_confidence!=null ? Number(n.fp_confidence).toFixed(3) : '—'],
+                ['incident_id', n.incident_id || '—'],
+                ['timestamp', fmtTime(n.timestamp)]];
     } else {
       var explanation = n.winning_hypothesis_label
         ? n.winning_hypothesis_label + (n.winning_hypothesis_description ? ' — ' + n.winning_hypothesis_description : '')

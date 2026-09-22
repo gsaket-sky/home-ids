@@ -1014,6 +1014,41 @@ class GraphStore:
             out.append(d)
         return out
 
+    def get_alert_events_by_decision_ids(self, decision_ids: List[str],
+                                           cap_per_decision: int = 10) -> List[Dict[str, Any]]:
+        """Console Evidence Graph tab (2026-09-22, user request: "is it possible
+        to show [alerts] directly in graph"): the alert_events belonging to a
+        capped set of decisions, for rendering as real graph nodes rather than
+        only a separate table. Capped per-decision (most-recent-first, a SQL
+        window function -- same "cap the write/read side, never let one busy
+        entity blow up the response" discipline this module already applies to
+        evidence-per-decision -- see EVIDENCE_PER_DECISION_CAP's own docstring in
+        graph_api.py for the real 56,073-edge incident that established this
+        pattern) because a single long-running incident whose decision never
+        changes state can accumulate many alert_events against the SAME
+        decision_id (unlike evidence, alert_events are deliberately never
+        deduped/collapsed -- see this table's own module docstring)."""
+        if not decision_ids:
+            return []
+        out: List[Dict[str, Any]] = []
+        for chunk in _chunked(decision_ids, _SQLITE_DELETE_BATCH_SIZE):
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._conn.execute(
+                f"""
+                SELECT alert_event_id, decision_id, device_id, incident_id, timestamp,
+                       status, fp_verdict, fp_confidence, fp_stage, explanation_text
+                FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY decision_id ORDER BY timestamp DESC
+                    ) AS rn
+                    FROM alert_events WHERE decision_id IN ({placeholders})
+                ) WHERE rn <= ?
+                """,
+                chunk + [cap_per_decision],
+            ).fetchall()
+            out.extend(dict(r) for r in rows)
+        return out
+
     def search_alert_events_by_embedding(self, query_vector: bytes, since: float,
                                            until: Optional[float] = None,
                                            device_id: Optional[str] = None,
