@@ -4,8 +4,11 @@ part of the pytest suite — run directly: `python3 test_phase7_scheduling.py`. 
 the real scripts/scheduler.py cron logic and scripts/train_fp_classifier.py dataset
 loader against your actual repo layout and config.yaml, no mocks.
 
-Covers two confirmed bugs found while auditing the scheduled scripts (ollama_soc,
-retro_hunter, top_domains_report, train_fp_classifier) plus ai_soc:
+Covers two confirmed bugs found while auditing the scheduled scripts (originally
+ollama_soc, retro_hunter, top_domains_report, train_fp_classifier; ollama_soc.py
+itself was retired in v16 in favor of live_llm_review.py, but Section C below stays
+relevant regardless -- alerts.json may still carry historical ollama_transparency
+entries it wrote before that, which train_fp_classifier.py must keep excluding):
 
   1. config.yaml's scheduler job key "retrohunter" never matched the actual filename
      scripts/retro_hunter.py — scheduler.py silently logged "not found" and the retro
@@ -92,9 +95,9 @@ def resolve(job_name, cfg):
     return SCRIPTS_DIR / cfg.get("script", f"{job_name}.py")
 
 check("scheduler.py-style resolution of a job WITHOUT a \"script\" override still falls "
-      "back to '<job_name>.py' (unchanged behavior for ollama_soc/top_domains_report, "
-      "whose job keys already match their filenames exactly)",
-      resolve("ollama_soc", {}).name == "ollama_soc.py")
+      "back to '<job_name>.py' (unchanged behavior for top_domains_report, whose job key "
+      "already matches its filename exactly)",
+      resolve("top_domains_report", {}).name == "top_domains_report.py")
 check("scheduler.py-style resolution of a job WITH an explicit \"script\" override uses "
       "that filename instead of '<job_name>.py' — this is the defensive fix that keeps "
       "a future job-name/filename mismatch from silently never running again",

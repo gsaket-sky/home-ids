@@ -2,22 +2,33 @@
 live_llm_review.py - schedules v13's own LLM-review (src/v13/llm_review/) against
 `.94`'s own live graph (v13 full-architecture plan, Phase 5).
 
-DESIGN DECISION (2026-09-07, user confirmed): batch-script shape, mirroring how
-scripts/ollama_soc.py already runs -- NOT in-cycle invocation from pipeline.py. Lower
-risk, ships the JSON-schema-constrained-decoding fix without touching the live 2s
-poll loop's timing at all. In-cycle invocation stays a real, separately-scoped future
-option if the batch-script's own results (once compared against ollama_soc.py's) show
-it's worth the added complexity.
+DESIGN DECISION (2026-09-07, user confirmed): batch-script shape (a separate scheduled
+subprocess), NOT in-cycle invocation from pipeline.py. Lower risk, ships the
+JSON-schema-constrained-decoding fix without touching the live 2s poll loop's timing
+at all. In-cycle invocation stays a real, separately-scoped future option if it's ever
+worth the added complexity.
 
-RUNS ALONGSIDE scripts/ollama_soc.py, NOT a replacement for it (config key
-"ollama_soc", still enabled, unchanged). ollama_soc.py has several real, currently-
-used features this script deliberately does NOT have yet: persistent alert
-dedup/grouping across noisy repeats, cross-device campaign correlation, Telegram
-digest building, and GeoIP-enriched reporting. Writes to its OWN file
-(state/ollama_analysis_v13.jsonl), never touching ollama_soc.py's own
-state/ollama_analysis_cache.json, so the two can be compared on real decisions
-without either overwriting the other -- the explicit point of this phase, per the
-plan: confirm parity/improvement before ever considering retiring ollama_soc.py.
+v16: the sole Layer-3 LLM review engine. scripts/ollama_soc.py (and its dedicated
+intelligence/ai_soc.py validator) were retired once this script reached feature
+parity with it -- persistent alert dedup/grouping, cross-device campaign
+correlation, Telegram digest building, and GeoIP-enriched reporting, all listed
+below under their original Phase numbers, are now all wired in. Writes to
+state/ollama_analysis_v13.jsonl (the filename predates the rename -- kept as-is,
+matching this project's standing policy on renaming live data files for zero
+functional benefit).
+
+Advisory/reporting only, deliberately: an LLM verdict here does NOT autonomously
+suppress or confirm anything. That decision-triggering authority was retired in
+Release 15 Sheet 05 (scripts/ollama_soc.py's own OLLAMA_HAS_DECISION_AUTHORITY,
+before this file existed) in favor of two independent, backtest-gated mechanisms
+that don't route through an LLM or a human Telegram tap at all: the closed-loop
+autotuner (argus/autotune/engine.py) and CL-AFPE composite trust
+(argus/cl_afpe/composite_trust.py). Consolidating down to this one script does
+not reopen that decision.
+
+Gated by config.yaml's detection_engine.llm_review_enabled (default true) --
+main() no-ops immediately if disabled, read fresh at the top of every scheduled
+run since each run is a separate subprocess, not the long-running soc.service.
 
 WHAT IT REVIEWS: v13's own decisions (state/v13_graph.db), not v-current's
 alerts.json -- v13's DeterministicValidator.build_ground_truth() is already built to
@@ -27,10 +38,9 @@ SUSPICIOUS/HIGH/CRITICAL decision from the lookback window that hasn't been revi
 yet (tracked by decision_id in the output file itself -- no separate cache needed),
 up to a per-run cap.
 
-RATE LIMITING: DEFAULT_MAX_QUERIES_PER_RUN mirrors ollama_soc.py's own
-DEFAULT_MAX_QUERIES_PER_RUN (5) exactly, same reasoning (each call can take up to
-OllamaClient's own 900s worst-case timeout, so 5 bounds a single run to a sane worst
-case regardless of how many decisions are pending). Calls are made strictly one at a
+RATE LIMITING: DEFAULT_MAX_QUERIES_PER_RUN (5) bounds a single run to a sane worst
+case regardless of how many decisions are pending (each call can take up to
+OllamaClient's own 900s worst-case timeout). Calls are made strictly one at a
 time in a plain sequential loop -- never threaded/async -- respecting the standing
 "never send more than one in-flight request to `.94`'s own Ollama (-np 1)" rule by
 construction, not by an explicit lock (nothing in this process ever issues a second
@@ -47,11 +57,10 @@ idea. 8c (INDEPENDENCE_FAMILY_MAP validation) lives in its own module,
 v13/ops/independence_family_report.py -- a genuinely separate concern (divergence-
 data analysis, not LLM review), not this file's job.
 
-NOT PORTED from ollama_soc.py, consistent with the plan's own scope cut (each a
-real, separately-scoped follow-up once this basic wiring is confirmed working):
-local-model triage pre-filtering (OllamaClient.query_triage() exists and is usable,
-but its own docstring says specificity isn't validated yet -- deliberately gated on
-Group B2's own open validation question), job-health per-device breakdown.
+NOT YET IMPLEMENTED (each a real, separately-scoped follow-up): local-model triage
+pre-filtering (OllamaClient.query_triage() exists and is usable, but its own
+docstring says specificity isn't validated yet -- deliberately gated on that open
+validation question), job-health per-device breakdown.
 
 Release 14, Workstream 4 (2026-09-07): cross-device campaign correlation and
 GeoIP-enriched reporting are now both wired in.
@@ -397,6 +406,16 @@ def build_llm_review_digest_message(entries: List[Dict[str, Any]],
 def main() -> None:
     run_start = time.time()
     state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
+
+    # v16: config.yaml-driven on/off switch for this job -- see this module's own
+    # docstring for why this is advisory/reporting-only either way (never gates an
+    # autonomous action). Checked before anything else opens, so a disabled run
+    # costs nothing beyond a config read and a job-health write.
+    if not bool(CONFIG.get("llm_review_enabled", True)):
+        write_job_health(state_dir, "live_llm_review", time.time() - run_start,
+                          extra={"reviewed": 0, "skipped": "llm_review_disabled"})
+        return
+
     db_path = state_dir / "v13_graph.db"
     output_path = state_dir / _OUTPUT_FILENAME
 

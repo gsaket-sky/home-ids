@@ -213,14 +213,12 @@ check("REGRESSION GUARD: an unrecognized/legacy severity string ranks as 0 (neve
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section E: pipeline.py / ollama_soc.py source-guards
+# Section E: pipeline.py source-guards
 # ═══════════════════════════════════════════════════════════════════════════════════
 import inspect
 from core import pipeline as _pipeline_module
-from scripts import ollama_soc as _ollama_soc_module
 
 _pipeline_src = inspect.getsource(_pipeline_module)
-_ollama_src = inspect.getsource(_ollama_soc_module)
 
 check("SOURCE-GUARD: pipeline.py instantiates IncidentTracker with config-driven windows",
       "self.incident_tracker = IncidentTracker(" in _pipeline_src)
@@ -231,12 +229,6 @@ check("SOURCE-GUARD: the Telegram send gate consults incident_notify.should_noti
 check("SOURCE-GUARD: the incident key is derived from the corrected alert_dest_ip/"
       "alert_target_domain, not the raw dest_ip/target_malicious_domain fallbacks",
       "incident_id = _incident_key(dev_id, alert_dest_ip, alert_target_domain, primary_sig_base)" in _pipeline_src)
-check("SOURCE-GUARD: ollama_soc.py now imports the shared incident_key module instead "
-      "of maintaining its own independent grouping-key logic",
-      # PHASE 59: reformatted to a multi-line import (also pulls in signature_base) --
-      # see test_phase59_evidence_relevance.py for that change's own coverage.
-      "from incident_key import (" in _ollama_src
-      and "target_for_key as _target_for_key_raw, incident_key as _incident_key," in _ollama_src)
 
 
 print()

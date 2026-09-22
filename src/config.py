@@ -137,11 +137,6 @@ DEFAULT_CONFIG = {
     "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "paperless", "fritz", "repeater"],
     "ollama_url": "",         
     "ollama_model": "llama3", 
-    # PHASE 11: scripts/ollama_soc.py's per-pattern verdict cache TTL and per-run fresh-
-    # query cap -- see config.yaml's threat_intel_and_ai category for the full rationale
-    # (a live diagnostic run found single Ollama calls taking 14+ minutes under real load).
-    "ollama_cache_ttl_seconds": 604800.0,
-    "ollama_max_queries_per_run": 5,
     # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are
     # minute/hour/day/month/dow with only "*", "*/N", or an exact integer supported per
     # field (no comma-lists, no ranges). "script" is an optional filename override for
@@ -149,10 +144,13 @@ DEFAULT_CONFIG = {
     # needs this because its job key doesn't match its own filename under the "scheduler"
     # key. The weekly/nightly retrain job (train_fp_classifier.py) is scheduled separately
     # via autotune_enabled/autotune_schedule_cron below, not through this dict. Times below
-    # (2am / every-4h-from-midnight / 6am) are chosen so no two jobs fire in the same hour
-    # as each other or as autotune_schedule_cron's 3am default.
+    # (2:45am / every-4h-from-midnight-at-:45 / 6am) are chosen so no two jobs fire in the
+    # same hour as each other or as autotune_schedule_cron's 3am default.
     "scheduler": {
-        "ollama_soc": {"enabled": True, "cron": "0 */4 * * *"},
+        # v16: the sole Layer-3 LLM review job (scripts/ollama_soc.py retired the same
+        # release) — see config.yaml's own scheduled_jobs.scheduler.live_llm_review
+        # comment for why. Also gated by detection_engine.llm_review_enabled.
+        "live_llm_review": {"enabled": True, "cron": "45 */4 * * *", "script": "../argus/ops/live_llm_review.py"},
         "retro_hunter": {"enabled": True, "cron": "0 2 * * *", "script": "retro_hunter.py"},
         "top_domains_report": {"enabled": True, "cron": "0 6 * * *"},
     },

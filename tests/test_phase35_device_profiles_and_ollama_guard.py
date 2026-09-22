@@ -22,18 +22,12 @@ UNKNOWN_BENIGN catch-all every time. Pure audit-trail/explanation-quality improv
 does not relax any containment threshold (decision_engine.py only reads a benign
 hypothesis's name when nothing attack-worthy won anyway).
 
-#15/#16 OLLAMA CIRCULAR-REASONING GUARD: the local LLM validator (src/scripts/
-ollama_soc.py) used to prompt with the WHOLE raw alert_payload undiscriminated,
-including this system's own "risk": 9.9 / "signature": "Confirmed Malicious IOC" /
-fp_verdict sitting right next to genuinely raw evidence -- confirmed via a third-party
-review that this let the model simply reflect an existing verdict back as "confirmation"
-instead of reasoning independently. Fixed with _build_evidence_only_payload() (strips
-every verdict-shaped field before prompting), an updated system prompt instructing
-independent reasoning, and a defense-in-depth check in ai_soc.py's
-DeterministicValidator that rejects a "malicious" verdict whose free-text reasoning
-cites the exact original risk score it should never have been shown. The existing
-benign-only/multi-device-spread-guard asymmetry (this validator can only ever relax
-containment, never escalate it) is completely unchanged.
+v16 NOTE: this file originally also covered #15/#16, the Ollama circular-reasoning
+guard in the now-retired scripts/ollama_soc.py and intelligence/ai_soc.py (both
+deleted -- Layer-3 LLM review consolidated onto argus/ops/live_llm_review.py, whose
+own argus/llm_review/validator.py DeterministicValidator carries the equivalent
+original_risk circular-reasoning check, covered by that module's own tests). Sections
+C and D, which tested those two deleted files directly, were removed along with them.
 
 Covers:
   A. hypotheses/engine.py -- every existing hypothesis's evaluate() signature accepts
@@ -41,11 +35,6 @@ Covers:
      scoring behavior across category/reputation-tier combinations; UNKNOWN_BENIGN is
      no longer reached for the cases this hypothesis now covers.
   B. decision_engine.py -- device_type threaded end-to-end through evaluate().
-  C. ollama_soc.py -- _build_evidence_only_payload strips every verdict-shaped field
-     and keeps every genuine raw-evidence field.
-  D. ai_soc.py -- DeterministicValidator's new circular-reasoning check: rejects a
-     malicious verdict citing the exact original risk score, accepts one that reasons
-     independently, and the pre-existing IOC/telemetry checks are unaffected.
   E. Source-guards for the pipeline.py wiring (device_type threaded from state to
      decision_engine.evaluate()).
 """
@@ -167,85 +156,6 @@ check("THE CORE FIX (full decision_engine path): a smart_tv's trusted telemetry 
 check("BACKWARD-COMPAT: decision_engine.evaluate() still works with device_type "
       "omitted entirely (defaults to '')",
       de.evaluate([], ReputationVector(domain="x", tier=3))["state"] == DecisionState.BENIGN)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section C: ollama_soc.py -- _build_evidence_only_payload
-# ═══════════════════════════════════════════════════════════════════════════════════
-from scripts.ollama_soc import _build_evidence_only_payload, _VERDICT_SHAPED_FIELDS
-
-_REAL_ALERT_SHAPE = {
-    "type": "ids_alert", "timestamp": NOW,
-    "device": {"id": "d1", "ip": "192.168.1.94", "hostname": "paperless", "type": "laptop"},
-    "network_context": {"destination_ip": "149.154.166.110", "destination_port": 443, "queried_domain": "unknown"},
-    "risk": 9.9, "signature": "Confirmed Malicious IOC",
-    "factors": [{"name": "Confirmed Malicious IOC", "score": 9.9}],
-    "features": {"ti_risk": 0.0, "abuseipdb_risk": 3.78, "vt_risk": 0.066},
-    "schema": "home_ids_alerts_v3", "evidence_verification_required": True,
-    "hypothesis_weight": 0.8, "reasoning_trail": ["Verdict: CRITICAL / block"],
-    "incident_id": "d1|149.154.166.110|Confirmed Malicious IOC",
-}
-sanitized = _build_evidence_only_payload(_REAL_ALERT_SHAPE)
-
-check("THE CORE FIX: every verdict-shaped field (risk/signature/factors/fp_verdict/"
-      "hypothesis_weight/evidence_verification_required/reasoning_trail) is stripped "
-      "from the LLM prompt payload",
-      not any(k in sanitized for k in _VERDICT_SHAPED_FIELDS), f"leaked={set(sanitized) & _VERDICT_SHAPED_FIELDS}")
-check("REGRESSION GUARD: genuinely raw evidence fields (device, network_context, "
-      "features -- including ti_risk/abuse_risk/vt_risk, which are input signals for "
-      "the model to weigh, not this system's own verdict) survive intact",
-      sanitized.get("device") == _REAL_ALERT_SHAPE["device"] and
-      sanitized.get("network_context") == _REAL_ALERT_SHAPE["network_context"] and
-      sanitized.get("features") == _REAL_ALERT_SHAPE["features"])
-check("REGRESSION GUARD: incident_id (a stable identifier, not a verdict) survives",
-      sanitized.get("incident_id") == _REAL_ALERT_SHAPE["incident_id"])
-check("a payload missing some verdict-shaped keys entirely (e.g. an older alert "
-      "record without fp_verdict) is handled without KeyError",
-      _build_evidence_only_payload({"device": {}, "features": {}}) == {"device": {}, "features": {}})
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section D: ai_soc.py -- DeterministicValidator's circular-reasoning check
-# ═══════════════════════════════════════════════════════════════════════════════════
-from intelligence.ai_soc import DeterministicValidator
-
-v = DeterministicValidator()
-
-check("THE CORE FIX: a 'malicious' verdict whose reasoning cites the EXACT original "
-      "risk score (that it should never have been shown) is rejected",
-      not v.validate({"classification": "malicious", "reason": "This connection has risk 9.9 and matches known bad infrastructure."},
-                      [], original_risk=9.9))
-check("THE CORE FIX: the same check catches a differently-formatted but still exact "
-      "match of the original risk value",
-      not v.validate({"classification": "malicious", "reason": "risk=9.90 confirms malicious intent"},
-                      [], original_risk=9.90))
-check("REGRESSION GUARD: a 'malicious' verdict that reasons independently (no mention "
-      "of the withheld risk score) is accepted",
-      v.validate({"classification": "malicious", "reason": "Connects to an IP with elevated AbuseIPDB score and no DNS resolution history."},
-                 [], original_risk=9.9))
-check("REGRESSION GUARD: original_risk=None (e.g. a caller that hasn't been updated) "
-      "never triggers the new check -- backward compatible",
-      v.validate({"classification": "malicious", "reason": "risk 9.9 confirmed"}, [], original_risk=None))
-check("REGRESSION GUARD: a coincidental small-number match (e.g. reason mentions "
-      "'port 80' while original_risk=8.0) is NOT what this checks for -- only an exact "
-      "formatted risk-value substring match triggers it",
-      v.validate({"classification": "malicious", "reason": "connected on port 80 repeatedly"}, [], original_risk=8.0))
-
-# Pre-existing checks unaffected by the new parameter.
-ev_bad_ioc = [Evidence(type="reputation", source="ti", timestamp=NOW, device="d1", value=4.5, confidence=0.9)]
-check("REGRESSION GUARD: the pre-existing 'benign despite confirmed IOC' rejection "
-      "still works unchanged",
-      not v.validate({"classification": "benign", "reason": "just ads"}, ev_bad_ioc))
-check("REGRESSION GUARD: a genuinely benign verdict with no contradicting evidence "
-      "is still accepted",
-      # PHASE 51 (structured evidence contract, added after this file): a non-empty
-      # supporting_evidence is now a separate, unconditional requirement for any
-      # "benign" verdict -- see test_phase51_ollama_structured_contract.py for that
-      # check in isolation. Added here purely so this pre-existing check keeps testing
-      # what it always tested (a genuinely benign verdict with no bad-reputation
-      # evidence passes), unaffected by the later, independent requirement.
-      v.validate({"classification": "benign", "reason": "just ads",
-                  "supporting_evidence": ["destination matches known ad-network domain list"]}, []))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

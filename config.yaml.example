@@ -264,6 +264,21 @@ detection_engine:
   # evidence this cycle" if it ever needs to be paused. [LIVE]
   baseline_scoring_enabled: true
 
+  # Enable/disable the Layer-3 LLM review job (argus/ops/live_llm_review.py,
+  # scheduled via scheduled_jobs.scheduler.live_llm_review below). Read fresh at
+  # the top of every scheduled run (a separate subprocess each time, not the
+  # long-running soc.service), so a change here takes effect on the NEXT
+  # scheduled run -- no restart needed. This is the sole Layer-3 reviewer as of
+  # v16 (scripts/ollama_soc.py retired the same release -- see
+  # Documentation/ARGUS_DECISIONS.md). Advisory/reporting only: LLM verdicts do
+  # NOT autonomously suppress or confirm anything -- that authority was
+  # deliberately retired to the closed-loop autotuner (argus/autotune/engine.py)
+  # and CL-AFPE composite trust (argus/cl_afpe/composite_trust.py) in Release 15
+  # Sheet 05, and this change does not reopen that. Set false to stop the job
+  # from doing anything (main() no-ops and exits) without removing its
+  # scheduler entry.
+  llm_review_enabled: true
+
   # Decay factor for domain-count baselines — 0.995 gives a ~4.6 minute
   # half-life. [LIVE]
   decay_factor: 0.995
@@ -863,31 +878,18 @@ scheduled_jobs:
   # match its own filename (needed for retro_hunter — see
   # CONFIG_AUDIT_REPORT.md's Phase 7 note on why that override exists).
   scheduler:
-    # LLM-based alert triage summaries, every 4 hours starting at midnight.
-    # BUGFIX (2026-08-27): this had drifted to "30 4 * * *" -- once/day at 4:30am --
-    # despite the comment (and ollama_soc.py's own DEFAULT_MAX_QUERIES_PER_RUN comment,
-    # config.yaml's ollama_max_queries_per_run comment, and the "well inside the 4h gap
-    # between scheduled runs" reasoning throughout that file) all assuming a 4-hourly
-    # cadence. Corrected to match the documented intent instead of editing the comment
-    # to match the wrong behavior.
-    ollama_soc:
-      enabled: true
-      cron: "30 */4 * * *"
-
-    # v13 full-architecture plan, Phase 5 -- v13's OWN LLM-review
-    # (src/v13/llm_review/), reviewing v13's own decisions/evidence graph directly
-    # rather than v-current's alerts.json. Runs ALONGSIDE the ollama_soc job above,
-    # NOT a replacement for it -- ollama_soc.py still does its own alert dedup/
-    # grouping, campaign correlation, and Telegram digest, none of which this has
-    # yet (see src/v13/ops/live_llm_review.py's own module docstring for the full
-    # scope cut). Writes to its own state/ollama_analysis_v13.jsonl, never touching
-    # ollama_soc.py's own state/ollama_analysis_cache.json, so the two can be
-    # compared on real decisions without either overwriting the other -- the
-    # explicit point of this phase before ever considering retiring ollama_soc.py.
-    # Scheduled 15 minutes after ollama_soc's own :30 run purely as a courtesy
-    # spacing (Ollama's own -np 1 setting already serializes any overlap safely;
-    # this isn't a correctness requirement). Lives in src/v13/ops/, not scripts/,
-    # hence the "script" override below.
+    # v16: the sole Layer-3 LLM review job -- scripts/ollama_soc.py (and
+    # intelligence/ai_soc.py, its own dedicated validator) retired the same
+    # release once this script reached feature parity (persistent pattern
+    # cache/dedup, cross-device campaign correlation, Telegram digest,
+    # GeoIP-enriched reporting -- see this file's own module docstring and
+    # Documentation/ARGUS_DECISIONS.md for the parity check). Reviews Argus's
+    # own decisions/evidence graph (state/v13_graph.db) directly. Gated by
+    # detection_engine.llm_review_enabled above; that flag stops the job from
+    # doing anything without needing this scheduler entry removed. Advisory
+    # only -- see llm_review_enabled's own comment for why this deliberately
+    # does not autonomously act. Lives in src/argus/ops/, not scripts/, hence
+    # the "script" override below.
     live_llm_review:
       enabled: true
       cron: "45 */4 * * *"
