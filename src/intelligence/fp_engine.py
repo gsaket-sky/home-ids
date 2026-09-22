@@ -1497,6 +1497,28 @@ class AutonomousFPEngine:
     # STAGE 3: FastEmbed Vector Similarity Matcher
     # ==========================================================================
 
+    def embed_text(self, text: str) -> Optional[bytes]:
+        """Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22):
+        public entry point for pipeline.py to embed an alert_event's explanation
+        text for the bounded semantic-search feature, reusing this EXACT loaded
+        FastEmbed instance -- the same "< 15ms, already resident in the process"
+        model _stage3_embed() above already uses for domain-pattern matching, not
+        a second copy. Returns raw float32 bytes (ready for
+        GraphStore.insert_alert_event()'s explanation_embedding column) or None
+        if the model hasn't finished its background load yet (matches
+        _stage3_embed()'s own "(None, None) if FastEmbed model is still loading"
+        degrade-gracefully convention) -- never blocks or raises, an alert_event
+        without a vector just isn't searchable yet, nothing else is affected."""
+        if self._embed_model is None or not text:
+            return None
+        try:
+            import numpy as np
+            vec = np.array(list(self._embed_model.embed([text]))[0], dtype=np.float32)
+            return vec.tobytes()
+        except Exception as exc:
+            LOGGER.debug("embed_text() failed (non-fatal, alert_event just won't be searchable): %s", exc)
+            return None
+
     def _stage3_embed(self, domain: str, hostname: str):
         """
         Compare the queried domain against pre-computed safe vendor embeddings.

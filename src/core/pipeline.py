@@ -2933,6 +2933,17 @@ class EnginePipeline:
                                         alert_event_status = "FIRED"
                                     else:
                                         alert_event_status = "LOGGED_ONLY"
+                                    # Bounded semantic search (plan doc's own
+                                    # "Semantic search (bounded add-on)" section):
+                                    # embed-ONCE-at-write-time, reusing fp_engine's
+                                    # already-loaded FastEmbed instance -- never a
+                                    # second model copy, never re-embedded at query
+                                    # time. None (not yet loaded / embed failed)
+                                    # just means this one alert_event isn't
+                                    # searchable yet -- everything else is unaffected.
+                                    explanation_embedding = (
+                                        self.fp_engine.embed_text(primary_sig) if self.fp_engine else None
+                                    )
                                     alert_event_id = argus_live_engine.get_graph_store().insert_alert_event(
                                         decision_id=graph_decision_id, device_id=dev_id, timestamp=now,
                                         status=alert_event_status, incident_id=incident_id,
@@ -2940,6 +2951,7 @@ class EnginePipeline:
                                         fp_confidence=fp_verdict.get("confidence"),
                                         fp_stage=fp_verdict.get("stage"),
                                         explanation_text=primary_sig,
+                                        explanation_embedding=explanation_embedding,
                                         autotune_state=decision.get("_autotune_state", {}),
                                         alert_payload=alert_payload,
                                     )
