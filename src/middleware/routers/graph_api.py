@@ -58,11 +58,34 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
-from middleware.humanize import label_evidence_type, label_hypothesis
+from middleware.humanize import label_evidence_type, label_hypothesis, resolve_destination_info, resolve_device_hostname
 from core.state_guard import StateManager
 from argus.graph.store import AlertSearchScopeTooLarge
 
 router = APIRouter()
+
+# Lazy singleton, same config-key pattern core/pipeline.py's own GeoIPEngine
+# construction already uses (geoip_db/geoip_asn_db) -- a second, read-only
+# instance in this API process is cheap (local mmdb file reads), same
+# reasoning already established for this router's own GraphStore-per-request
+# pattern in middleware/graph_client.py.
+_geoip_engine_singleton = None
+_geoip_engine_lock = threading.Lock()
+
+
+def _get_geoip_engine():
+    global _geoip_engine_singleton
+    if _geoip_engine_singleton is None:
+        with _geoip_engine_lock:
+            if _geoip_engine_singleton is None:
+                from pathlib import Path as _P
+                from intelligence.geoip import GeoIPEngine
+                state_dir = _P(CONFIG.get("state_path", "state/ids_state.json")).parent
+                _geoip_engine_singleton = GeoIPEngine(
+                    db_path=CONFIG.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")),
+                    asn_db_path=CONFIG.get("geoip_asn_db", ""),
+                )
+    return _geoip_engine_singleton
 
 # See module docstring -- a real decision in production had 56,073 supporting edges.
 EVIDENCE_PER_DECISION_CAP = 15
@@ -163,10 +186,29 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
         if destination_id != "(none)":
             edges.append({"from": node_id, "to": f"destination:{destination_id}", "relation": "targets"})
 
+    # Humanize destinations (2026-09-22, user request: "apply the same logic
+    # in console over every view ... destination ip, if local hostname, if
+    # foreign domain name or ASN information"): the SAME resolve_destination_
+    # info() the plain-English Telegram narrative already uses, not a second
+    # copy. `label` becomes the resolved hostname/domain when one exists --
+    # `sub` keeps the raw destination_id (and ASN owner, when known) so the
+    # exact underlying value is still visible, same "readable first,
+    # technical/raw secondary" convention as alert_event/evidence nodes.
     for did, dest in destinations.items():
         if dest is None or did == "(none)":
             continue
-        nodes.append({"id": f"destination:{did}", "kind": "destination", "label": did, "sub": dest["kind"]})
+        info = resolve_destination_info(did, sm, _get_geoip_engine())
+        sub_parts = [dest["kind"]]
+        if info["kind"] == "local_device":
+            sub_parts = ["your network", did]
+        elif info.get("asn_owner"):
+            sub_parts.append(info["asn_owner"])
+        nodes.append({
+            "id": f"destination:{did}", "kind": "destination",
+            "label": info["label"], "sub": " · ".join(sub_parts),
+            "destination_id": did, "resolved_kind": info["kind"],
+            "asn_owner": info.get("asn_owner"), "country": info.get("country"),
+        })
 
     for d in decisions:
         winning = (d.get("raw_payload") or {}).get("explanation")
@@ -203,6 +245,26 @@ def get_graph(limit: int = Query(25, ge=1, le=200), token: str = Depends(verify_
             "from": f"decision:{ae['decision_id']}", "to": f"alert_event:{ae['alert_event_id']}",
             "relation": "raised",
         })
+        # Explanation as its own node (2026-09-22, user request: "add the
+        # human explanation directly as a node in graph" -- the drawer field
+        # from the previous pass wasn't enough, they want it visible ON the
+        # canvas, not just on click). One per alert_event, only when a
+        # narrative actually exists (best-effort at write time -- see
+        # plain_explanation.py). `label` carries a short on-canvas preview;
+        # the FULL text travels in `full_text` for the drawer, same "short
+        # label, full detail on click" convention every other node kind uses.
+        if ae.get("plain_explanation"):
+            full_text = ae["plain_explanation"]
+            preview = full_text if len(full_text) <= 60 else full_text[:57] + "..."
+            nodes.append({
+                "id": f"explanation:{ae['alert_event_id']}", "kind": "explanation",
+                "label": preview, "full_text": full_text,
+                "timestamp": ae["timestamp"], "device_id": ae["device_id"],
+            })
+            edges.append({
+                "from": f"alert_event:{ae['alert_event_id']}", "to": f"explanation:{ae['alert_event_id']}",
+                "relation": "explains",
+            })
 
     # evidence->decision edges, rewritten to point at each evidence item's
     # (possibly grouped) node id, deduping repeats of the exact same
@@ -261,7 +323,16 @@ def get_alerts(
             limit=limit, offset=offset, device_id=device_id,
             since=since, until=until, status=status,
         )
-        return {"alerts": alerts, "count": len(alerts)}
+    # Humanize (2026-09-22, user request: "device id should be replaced by
+    # hostname" -- the Alerts table was showing ONLY the raw device_id, the
+    # one real gap a console-wide audit found; every other tab already
+    # follows the hostname-primary/id-secondary convention). One StateManager
+    # load for the whole page of results, not per-row.
+    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
+    sm.load_from_disk()
+    for a in alerts:
+        a["device_hostname"] = resolve_device_hostname(a.get("device_id"), sm)
+    return {"alerts": alerts, "count": len(alerts)}
 
 
 # Lazy-loaded, process-local FastEmbed instance for embedding SEARCH QUERY text in
@@ -345,4 +416,8 @@ def search_alerts(
                     f"cap is {exc.cap}) -- narrow the time window and/or specify a device_id."
                 ),
             )
-        return {"results": results, "count": len(results)}
+    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
+    sm.load_from_disk()
+    for r in results:
+        r["device_hostname"] = resolve_device_hostname(r.get("device_id"), sm)
+    return {"results": results, "count": len(results)}
