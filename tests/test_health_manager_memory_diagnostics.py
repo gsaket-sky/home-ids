@@ -247,6 +247,52 @@ def test_captured_entry_has_the_expected_shape(hm, fake_psutil, tmp_path):
     assert "graph_db" in entry
 
 
+# --- bounding the snapshot itself (2026-09-22 live incident) ------------------
+
+def test_snapshot_capture_bounds_a_hung_tracemalloc_call(hm, fake_psutil, monkeypatch, tmp_path):
+    """2026-09-22 (live incident on .94): tracemalloc.take_snapshot() (plus the
+    gc.get_objects() walk right after it) was the ONE call in this function
+    still unbounded -- the RSS/cgroup reads a few lines below it were already
+    bounded in an earlier pass the same day. Confirmed live via a py-spy
+    thread dump: under sustained memory pressure, take_snapshot() stalled in
+    kernel-level uninterruptible sleep (D state) for 20+ minutes straight,
+    with the outer _check_cycle() bound never recovering from it in
+    practice -- the same "outer bound isn't reliably catching this specific
+    call" pattern test_snapshot_bounds_a_hung_rss_read_and_falls_back_to_
+    last_known (test_health_manager_state_machine.py) already documented for
+    a different call the day before. This must not hang or raise, and must
+    still record a (detail-less) entry rather than silently dropping it."""
+    real_bounded_call = hm._bounded_call
+
+    def _fake_bounded_call(fn, timeout):
+        # Only the snapshot closure hangs -- pressure classification (which
+        # ALSO goes through _bounded_call, for _gather_pressure_signals) must
+        # keep working normally so the escalation this test is exercising
+        # actually happens in the first place.
+        if getattr(fn, "__name__", "") == "_snapshot_stats":
+            return None, True
+        return real_bounded_call(fn, timeout)
+
+    monkeypatch.setattr(hm, "_bounded_call", _fake_bounded_call)
+    fake_psutil.state.update(rss_mb=2000)
+    hm._evaluate_resource_pressure()  # must not hang or raise
+    entries = _read_diagnostics(tmp_path)
+    assert len(entries) == 1
+    assert entries[0]["top_allocations"] == []
+    assert entries[0]["top_object_types"] == []
+
+
+def test_snapshot_capture_still_returns_real_data_when_not_hung(hm, fake_psutil, tmp_path):
+    """Regression guard: the bounding above must not turn the happy path into
+    a permanently-empty capture -- real allocation/object data must still
+    come through when nothing is actually hung."""
+    fake_psutil.state.update(rss_mb=2000)
+    hm._evaluate_resource_pressure()
+    entry = _read_diagnostics(tmp_path)[0]
+    assert entry["top_allocations"]  # tracemalloc always has SOME tracked allocations here
+    assert entry["top_object_types"]
+
+
 def test_graph_db_stats_reads_real_size_and_row_counts(hm, tmp_path):
     db_path = tmp_path / "v13_graph.db"
     conn = sqlite3.connect(str(db_path))

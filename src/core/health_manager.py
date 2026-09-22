@@ -742,15 +742,46 @@ class HealthManager:
             # until the next restart picks up the new config at startup.
             return
 
-        top_stats = tracemalloc.take_snapshot().statistics("lineno")[:15]
-        top_allocations = [
-            {"location": str(stat.traceback), "size_mb": round(stat.size / (1024 * 1024), 3),
-             "count": stat.count}
-            for stat in top_stats
-        ]
+        # BUGFIX (2026-09-22, live incident on .94): this pair (a tracemalloc
+        # snapshot walk + a gc.get_objects() walk over the whole heap) was the
+        # ONE call in this function still unbounded -- the RSS/cgroup reads
+        # below were already bounded in an earlier pass the same day, but this
+        # one was missed. Confirmed live via a py-spy thread dump: under
+        # sustained memory pressure (~3.2GB RSS), take_snapshot() stalled in
+        # kernel-level uninterruptible sleep (D state, confirmed via
+        # /proc/<pid>/task/<tid>/stat) for 20+ minutes straight -- the exact
+        # same kernel-stall class already fixed at 4 other call sites earlier
+        # the same day (health_manager.py's RSS/cgroup probes,
+        # flush_to_disk()), just missed here since this one doesn't touch
+        # /proc directly, it allocates memory for the snapshot itself, which
+        # can hit the identical kernel-level stall once a cgroup is deep
+        # enough into memory pressure. Bounded the same way as everything
+        # else in this function now.
+        def _snapshot_stats():
+            stats = tracemalloc.take_snapshot().statistics("lineno")[:15]
+            allocations = [
+                {"location": str(stat.traceback), "size_mb": round(stat.size / (1024 * 1024), 3),
+                 "count": stat.count}
+                for stat in stats
+            ]
+            type_counts = collections.Counter(type(o).__name__ for o in gc.get_objects())
+            object_types = [{"type": t, "count": c} for t, c in type_counts.most_common(20)]
+            return allocations, object_types
 
-        type_counts = collections.Counter(type(o).__name__ for o in gc.get_objects())
-        top_object_types = [{"type": t, "count": c} for t, c in type_counts.most_common(20)]
+        snapshot_result, snapshot_timed_out = self._bounded_call(
+            _snapshot_stats,
+            timeout=float(self.config.get("health_manager_diagnostics_snapshot_timeout_seconds", 10.0)),
+        )
+        if snapshot_timed_out or snapshot_result is None:
+            LOGGER.warning(
+                "Health manager: memory-diagnostics snapshot did not return in "
+                "time (likely the same kernel-level stall class this bound "
+                "exists to catch) -- recording this diagnostic entry without "
+                "allocation detail rather than blocking the watchdog on it."
+            )
+            top_allocations, top_object_types = [], []
+        else:
+            top_allocations, top_object_types = snapshot_result
 
         # Same reasoning as snapshot()'s and _send_pressure_alert()'s own fixes --
         # bound this process's own direct psutil/sysfs reads rather than relying
@@ -767,16 +798,30 @@ class HealthManager:
                 process_rss_mb[name] = round(psutil.Process(proc.pid).memory_info().rss / (1024 * 1024), 1)
             except Exception:
                 pass
-        process_rss_mb.update(self._external_component_rss_mb())
+        # BUGFIX (2026-09-22, same incident): these two also do filesystem/
+        # process-table I/O (a SQLite read-only connection; a system-wide
+        # psutil.process_iter() scan) in the same function already proven to
+        # stall under memory pressure -- bounded for the same reason as the
+        # snapshot above, rather than waiting for a future incident to find
+        # each one individually the same way tracemalloc was found here.
+        external_rss, external_timed_out = self._bounded_call(self._external_component_rss_mb, timeout=5.0)
+        if not external_timed_out and external_rss:
+            process_rss_mb.update(external_rss)
 
-        graph_db = self._graph_db_diagnostic_stats()
+        graph_db, graph_db_timed_out = self._bounded_call(self._graph_db_diagnostic_stats, timeout=5.0)
+        if graph_db_timed_out or graph_db is None:
+            graph_db = {}
+
+        active_jobs, active_jobs_timed_out = self._bounded_call(self._active_scheduled_job_processes, timeout=5.0)
+        if active_jobs_timed_out or active_jobs is None:
+            active_jobs = []
 
         entry = {
             "timestamp": time.time(),
             "pressure_level": level,
             "process_rss_mb": process_rss_mb,
             "cgroup_memory_pct": cgroup_pct,
-            "active_scheduled_jobs": self._active_scheduled_job_processes(),
+            "active_scheduled_jobs": active_jobs,
             "top_allocations": top_allocations,
             "top_object_types": top_object_types,
             "graph_db": graph_db,
