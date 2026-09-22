@@ -19,18 +19,19 @@ score, stated honestly, not glossed over.
 """
 from typing import Any, Dict, List, Optional
 
-from middleware.humanize import label_evidence_type, label_hypothesis
+from middleware.humanize import label_evidence_type, label_hypothesis, resolve_destination_info
 
 
-def _describe_target(
-    dest_ip: str, dest_domain: str,
-    peer_hostname: Optional[str], peer_ip: Optional[str],
-    dest_hostname: Optional[str], asn_owner: Optional[str], asn_country: Optional[str],
-) -> Optional[str]:
+def _describe_target(dest_ip: str, dest_domain: str, dest_info: Dict[str, Any]) -> Optional[str]:
     """Returns a plain-English clause describing what was contacted, or None if
     this alert genuinely has no single destination (e.g. PEER_COHORT_DEVIATION's
     evidence is a device-level behavioral statistic, not one connection -- see
-    pipeline.py's own PEER_COHORT_DEVIATION special-casing for the same reason)."""
+    pipeline.py's own PEER_COHORT_DEVIATION special-casing for the same reason).
+
+    `dest_info` is resolve_destination_info()'s own output (middleware/
+    humanize.py) -- the SAME resolution every other console view uses now
+    (2026-09-22, user request: "apply the same logic ... everywhere"), not a
+    second, separately-drifting copy."""
     has_domain = bool(dest_domain) and dest_domain != "unknown"
     has_ip = bool(dest_ip) and dest_ip != "unknown"
     if not has_domain and not has_ip:
@@ -40,8 +41,8 @@ def _describe_target(
     # both a genuine "peer device" (coordinated activity, lateral movement) and
     # the common case of a destination IP simply belonging to a tracked local
     # device (e.g. a honeypot decoy host, an internal target of a port scan).
-    if peer_hostname and peer_ip:
-        return f"another device on your network, {peer_hostname} ({peer_ip})"
+    if dest_info.get("kind") == "local_device" and dest_info.get("hostname"):
+        return f"another device on your network, {dest_info['hostname']} ({dest_ip})"
 
     if has_domain:
         ip_note = f", at address {dest_ip}" if has_ip else ""
@@ -50,9 +51,10 @@ def _describe_target(
     # IP-only destination -- use its resolved hostname when one exists, and
     # name whoever operates it (ASN owner) when that's known, so a bare IP
     # address is never the ONLY thing a non-technical reader is given.
+    dest_hostname, asn_owner, asn_country = dest_info.get("hostname"), dest_info.get("asn_owner"), dest_info.get("country")
     who = f", known as {dest_hostname}" if dest_hostname else ""
     operator = None
-    if asn_owner and asn_owner != "Unknown":
+    if asn_owner:
         operator = asn_owner + (f" in {asn_country}" if asn_country else "")
     operator_note = f", run by {operator}" if operator else ""
     return f"an outside server at {dest_ip}{who}{operator_note}"
@@ -95,15 +97,19 @@ def build_plain_explanation(
     hee_evidence_types: List[str],
     fp_verdict: Optional[str], fp_stage: Optional[str],
     alert_status: str,
-    peer_hostname: Optional[str] = None, peer_ip: Optional[str] = None,
-    dest_hostname: Optional[str] = None, asn_owner: Optional[str] = None,
-    asn_country: Optional[str] = None,
+    dest_info: Optional[Dict[str, Any]] = None,
+    autotune_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Returns a short, plain-English paragraph explaining this specific alert --
     what device, what was noticed, where it happened, why the system leaned
-    toward a threat, what the counter argument was, and what happened as a
+    toward a threat, what the counter argument was, whether a personalized
+    (per-device) sensitivity setting played a role, and what happened as a
     result. No jargon, no evidence-type codes, no confidence percentages --
-    those stay in the existing technical section for anyone who wants them."""
+    those stay in the existing technical section for anyone who wants them.
+
+    `dest_info` is resolve_destination_info()'s own output (middleware/
+    humanize.py) -- pass None when there's no single destination to resolve
+    (e.g. PEER_COHORT_DEVIATION)."""
     device_label = hostname if hostname and hostname != "unknown" else client_ip
     who = f"Your {device_type.replace('_', ' ')} \"{device_label}\" ({client_ip})" if device_type and device_type != "unknown" \
         else f"Your device \"{device_label}\" ({client_ip})"
@@ -116,7 +122,7 @@ def build_plain_explanation(
         evidence_labels.append(label.lower())
     noticed = (", ".join(evidence_labels)) if evidence_labels else "unusual network behavior"
 
-    target_clause = _describe_target(dest_ip, dest_domain, peer_hostname, peer_ip, dest_hostname, asn_owner, asn_country)
+    target_clause = _describe_target(dest_ip, dest_domain, dest_info or {})
 
     sentences = [f"{who} did something the system flagged for review: {noticed}."]
     if target_clause:
@@ -130,6 +136,22 @@ def build_plain_explanation(
     counter = _describe_counter_argument(hee_hypotheses, winning_name)
     if counter:
         sentences.append(counter)
+
+    # Autonomous-tuning transparency (2026-09-22, user request: "the
+    # autotuning information global and per device is missing, add this
+    # too"): says explicitly when THIS device has its own, personalized
+    # sensitivity (not the network-wide default) -- the autotune_state dict
+    # already distinguishes device-scoped from global by whichever value
+    # get_active_value() actually resolved; a device-specific value is only
+    # ever <> the hardcoded default (0.8) once a real per-device promotion
+    # exists (AutotuneEngine.get_active_value()'s own 3-tier fallback).
+    hss = (autotune_state or {}).get("hard_stop_candidate_sensitivity")
+    if hss is not None and abs(hss - 0.8) > 1e-9:
+        direction = "more sensitive" if hss < 0.8 else "less sensitive"
+        sentences.append(
+            f"This device has its own, personalized alert sensitivity ({direction} than the network-wide "
+            f"default) based on its own history, which shaped this decision."
+        )
 
     closing = _STATUS_CLOSING.get(alert_status, "")
     if closing:

@@ -167,8 +167,8 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     disagree after any recent deploy restart; both now come from this same
     scan of the same file, so they can't disagree with each other again)."""
     empty = {
-        "by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0,
-        "fp_evaluations_by_day": {}, "fp_suppressed_by_day": {}, "fp_confirmed_threats_by_day": {},
+        "by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0, "fp_uncertain": 0,
+        "fp_evaluations_by_day": {}, "fp_suppressed_by_day": {}, "fp_confirmed_threats_by_day": {}, "fp_uncertain_by_day": {},
     }
     if not alerts_path.exists():
         return dict(empty, note=f"No alert log found at {alerts_path}.")
@@ -190,9 +190,20 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     fp_evaluations_by_day: Dict[str, int] = {}
     fp_suppressed_by_day: Dict[str, int] = {}
     fp_confirmed_threats_by_day: Dict[str, int] = {}
+    # BUGFIX (2026-09-22, user report: the Overview numbers "should be
+    # mathematically logical" for a new user): fp_verdict.verdict has a REAL
+    # third value, "UNCERTAIN" (fp_engine.py writes it at several stages,
+    # confirmed by reading the code, not assumed) -- fp_evaluations only ever
+    # counted FALSE_POSITIVE + CONFIRMED_THREAT before this fix, so
+    # Suppressed + Confirmed silently fell short of Evaluations by however
+    # many UNCERTAIN verdicts existed, with no third number shown anywhere to
+    # explain the gap. Tracked the same way as the other two so
+    # Evaluations == Suppressed + Confirmed + Uncertain always holds exactly.
+    fp_uncertain_by_day: Dict[str, int] = {}
     fp_evaluations = 0
     fp_suppressed = 0
     fp_confirmed_threats = 0
+    fp_uncertain = 0
     scanned_lines = 0
     try:
         for line in iter_lines_reverse(alerts_path, _ALERT_VOLUME_MAX_SCAN_BYTES):
@@ -223,6 +234,14 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
                     fp_confirmed_threats += 1
                     if day is not None:
                         fp_confirmed_threats_by_day[day] = fp_confirmed_threats_by_day.get(day, 0) + 1
+                else:
+                    # Covers "UNCERTAIN" and any other verdict string a future
+                    # fp_engine.py stage might introduce -- counted here rather
+                    # than silently dropped, so fp_evaluations never again
+                    # exceeds fp_suppressed + fp_confirmed_threats + fp_uncertain.
+                    fp_uncertain += 1
+                    if day is not None:
+                        fp_uncertain_by_day[day] = fp_uncertain_by_day.get(day, 0) + 1
 
             if len(by_day) > _ALERT_VOLUME_MAX_DAYS:
                 break
@@ -234,9 +253,11 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
         "fp_evaluations": fp_evaluations,
         "fp_suppressed": fp_suppressed,
         "fp_confirmed_threats": fp_confirmed_threats,
+        "fp_uncertain": fp_uncertain,
         "fp_evaluations_by_day": fp_evaluations_by_day,
         "fp_suppressed_by_day": fp_suppressed_by_day,
         "fp_confirmed_threats_by_day": fp_confirmed_threats_by_day,
+        "fp_uncertain_by_day": fp_uncertain_by_day,
         "scanned_lines": scanned_lines,
         "note": (
             f"Computed from the most recent ~{_ALERT_VOLUME_MAX_SCAN_BYTES // (1024 * 1024)}MB "
@@ -264,7 +285,8 @@ def _per_device_tuning_summary() -> Dict[str, Any]:
     every other console endpoint that reads it."""
     with open_store() as store:
         if store is None:
-            return {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None}
+            return {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None,
+                     "global_params_tuned": 0, "global_changes": []}
         row = store._conn.execute(
             "SELECT COUNT(DISTINCT device_id) AS devices_tuned, "
             "COUNT(DISTINCT device_type) AS categories_tuned, "
@@ -272,10 +294,32 @@ def _per_device_tuning_summary() -> Dict[str, Any]:
             "FROM threshold_history WHERE promoted_at IS NOT NULL AND rolled_back_at IS NULL "
             "AND (device_id IS NOT NULL OR device_type IS NOT NULL)"
         ).fetchone()
+        # BUGFIX (2026-09-22, user report: "the autotuning information global
+        # and per device is missing"): the query above deliberately EXCLUDES
+        # global-scoped promotions (device_id IS NULL AND device_type IS
+        # NULL, i.e. the network-wide default itself was retuned) -- so a
+        # global sensitivity change had ZERO visibility anywhere on Overview
+        # before this fix, only per-device/category ones did. Most-recent
+        # promoted row per parameter (a parameter can be promoted more than
+        # once over time; only the current live value matters here).
+        global_rows = store._conn.execute(
+            "SELECT parameter, new_value, promoted_at FROM threshold_history t1 "
+            "WHERE promoted_at IS NOT NULL AND rolled_back_at IS NULL "
+            "AND device_id IS NULL AND device_type IS NULL "
+            "AND promoted_at = (SELECT MAX(promoted_at) FROM threshold_history t2 "
+            "  WHERE t2.parameter = t1.parameter AND t2.device_id IS NULL AND t2.device_type IS NULL "
+            "  AND t2.promoted_at IS NOT NULL AND t2.rolled_back_at IS NULL) "
+            "ORDER BY promoted_at DESC"
+        ).fetchall()
     return {
         "devices_tuned": row["devices_tuned"] or 0,
         "categories_tuned": row["categories_tuned"] or 0,
         "last_activity_at": row["last_activity_at"],
+        "global_params_tuned": len(global_rows),
+        "global_changes": [
+            {"parameter": r["parameter"], "value": r["new_value"], "promoted_at": r["promoted_at"]}
+            for r in global_rows
+        ],
     }
 
 
@@ -295,6 +339,7 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
     self_healing["fp_evaluations"] = stats["fp_evaluations"]
     self_healing["fp_suppressed"] = stats["fp_suppressed"]
     self_healing["fp_confirmed_threats"] = stats["fp_confirmed_threats"]
+    self_healing["fp_uncertain"] = stats["fp_uncertain"]
 
     return {
         "counters_available": scrape_ok,
@@ -321,6 +366,7 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
         "fp_evaluations_by_day": stats["fp_evaluations_by_day"],
         "fp_suppressed_by_day": stats["fp_suppressed_by_day"],
         "fp_confirmed_threats_by_day": stats["fp_confirmed_threats_by_day"],
-        "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"],
+        "fp_uncertain_by_day": stats["fp_uncertain_by_day"],
+        "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats", "fp_uncertain"],
         "per_device_tuning": _per_device_tuning_summary(),
     }

@@ -43,6 +43,7 @@ from incident_key import incident_key as _incident_key
 from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator
 from mitigation.plain_explanation import build_plain_explanation
+from middleware.humanize import resolve_destination_info
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
@@ -2948,39 +2949,20 @@ class EnginePipeline:
 
                                     # Plain-English narrative (2026-09-22, user request: "rewrite the
                                     # telegram alert ... readability for a normal user in plain text,
-                                    # no technical words"). Two lookups here, both bounded/cheap:
-                                    # get_device_id_for_ip() is an in-memory index (no network), and
-                                    # reverse_dns()/lookup() are local-mmdb-or-cached (see their own
-                                    # docstrings in geoip.py) -- only reverse_dns() is a real network
-                                    # PTR query, and only ever fires for a raw external IP with no
-                                    # known domain, lru_cache'd 2s-timeout-bounded at the geoip layer.
-                                    # asn_owner here was resolved earlier for `dest_ip` (this cycle's
-                                    # raw destination), which can differ from alert_dest_ip in the rare
-                                    # case a signature-specific override above chose a different IP --
-                                    # an accepted, narrative-only approximation, not a scoring input.
-                                    peer_hostname = peer_ip = None
+                                    # no technical words ... apply the same logic ... everywhere").
+                                    # resolve_destination_info() is the ONE shared resolver every
+                                    # console view now uses too (middleware/humanize.py) -- local
+                                    # peer device (in-memory, no network) / known domain / external IP
+                                    # with reverse-DNS hostname + ASN owner + country (geoip_engine --
+                                    # only reverse_dns() is a real, timeout-bounded network call, see
+                                    # geoip.py's own docstring). Guarded against resolving to THIS
+                                    # same alerting device (e.g. a loopback-like address).
+                                    dest_info = None
                                     if alert_dest_ip and alert_dest_ip not in ("unknown", ""):
-                                        try:
-                                            peer_device_id = self.state_manager.get_device_id_for_ip(alert_dest_ip)
-                                            if peer_device_id and peer_device_id != dev_id:
-                                                with self.state_manager.lock_device(peer_device_id) as peer_state:
-                                                    ph = getattr(peer_state, "hostname", None)
-                                                    if ph and ph != "unknown":
-                                                        peer_hostname, peer_ip = ph, alert_dest_ip
-                                        except Exception:
-                                            pass
-                                    dest_hostname, asn_country = None, None
-                                    if (not peer_hostname and alert_dest_ip and alert_dest_ip not in ("unknown", "")
-                                            and (not alert_target_domain or alert_target_domain == "unknown") and self.geoip_engine):
-                                        try:
-                                            ipaddress.ip_address(alert_dest_ip)
-                                            dest_hostname = self.geoip_engine.reverse_dns(alert_dest_ip)
-                                            city_res = self.geoip_engine.lookup(alert_dest_ip)
-                                            asn_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
-                                        except ValueError:
-                                            pass
-                                        except Exception:
-                                            pass
+                                        dest_info = resolve_destination_info(alert_dest_ip, self.state_manager, self.geoip_engine)
+                                        if dest_info.get("kind") == "local_device" and \
+                                                self.state_manager.get_device_id_for_ip(alert_dest_ip) == dev_id:
+                                            dest_info = None
                                     plain_explanation = build_plain_explanation(
                                         hostname=hostname, client_ip=client_ip, device_type=getattr(state, "device_type", None),
                                         dest_ip=alert_dest_ip, dest_domain=alert_target_domain,
@@ -2989,8 +2971,7 @@ class EnginePipeline:
                                         hee_evidence_types=alert_payload.get("hee_evidence_types", []),
                                         fp_verdict=fp_verdict.get("verdict"), fp_stage=fp_verdict.get("stage"),
                                         alert_status=alert_event_status,
-                                        peer_hostname=peer_hostname, peer_ip=peer_ip,
-                                        dest_hostname=dest_hostname, asn_owner=asn_owner, asn_country=asn_country,
+                                        dest_info=dest_info, autotune_state=decision.get("_autotune_state", {}),
                                     )
                                     # Threaded forward to the Telegram-message-building site further
                                     # below (mirrors "_graph_decision_id"/"_autotune_state"'s own

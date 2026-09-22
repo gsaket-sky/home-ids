@@ -1190,12 +1190,21 @@ function renderOverviewView(){
     + restartNote
     + '</div></div>';
 
+  // BUGFIX (2026-09-22, user report: these numbers "should be mathematically
+  // logical" for a new user): Evaluations used to look unrelated to Suppressed
+  // + Confirmed (off by however many landed in a 3rd verdict, "UNCERTAIN",
+  // that was silently never counted anywhere -- see overview_api.py's own
+  // BUGFIX comment). Now shown explicitly, with a plain-language line stating
+  // the exact relationship, instead of leaving a new reader to notice the
+  // numbers almost-but-not-quite add up with no explanation.
   var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-healing (autonomous FP engine)</div></div>'
     + '<div class="panel-body">'
+    + '<div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">Every alert is evaluated exactly once: it\'s either confirmed as a real threat, automatically suppressed as a false alarm, or left uncertain for you to judge. <span class="cell-mono">Evaluations = Confirmed + Suppressed + Uncertain</span>.</div>'
     + statGrid([
         statTileDayAware('Evaluations', heal.fp_evaluations, d.fp_evaluations_by_day, selectedDay, false),
-        statTileDayAware('Suppressed (FP)', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
         statTileDayAware('Confirmed threats', heal.fp_confirmed_threats, d.fp_confirmed_threats_by_day, selectedDay, false),
+        statTileDayAware('Suppressed (false alarms)', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
+        statTileDayAware('Uncertain (needs your review)', heal.fp_uncertain, d.fp_uncertain_by_day, selectedDay, false),
         statTileDayAware('Domains immunized', heal.domains_immunized, null, selectedDay, true),
         statTileDayAware('Sensitivity adjustments', heal.sigma_shifts, null, selectedDay, true),
       ])
@@ -1210,17 +1219,34 @@ function renderOverviewView(){
   // the Autonomy tab, which already has the full timeline with direction/
   // status badges -- this tile is deliberately just the at-a-glance count.
   var tuning = d.per_device_tuning || {};
-  var hasTuning = (tuning.devices_tuned || 0) > 0 || (tuning.categories_tuned || 0) > 0;
-  var tuningPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Per-device tuning</div></div>'
+  var hasScopedTuning = (tuning.devices_tuned || 0) > 0 || (tuning.categories_tuned || 0) > 0;
+  var globalChanges = tuning.global_changes || [];
+  var hasGlobalTuning = globalChanges.length > 0;
+  // BUGFIX (2026-09-22, user report: "the autotuning information global and
+  // per device is missing"): this panel used to show ONLY scoped (device/
+  // category) overrides -- a global-level sensitivity change (the network-
+  // wide default itself retuned, no device_id/device_type) had zero
+  // visibility anywhere on Overview. Renamed from "Per-device tuning" to
+  // "Autonomous tuning" and split into both scopes explicitly, so a new
+  // user can see BOTH "is my whole network's sensitivity different from
+  // the shipped default" and "does any specific device have its own".
+  var globalList = hasGlobalTuning
+    ? globalChanges.map(function(g){
+        return '<div class="kv-row"><div class="kv-key">'+esc(g.parameter)+'</div><div class="kv-val cell-mono">'+esc(String(g.value))+' <span style="color:var(--text-faint);font-size:10.5px;">('+agoText(g.promoted_at)+')</span></div></div>';
+      }).join('')
+    : '';
+  var tuningPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autonomous tuning (global &amp; per-device)</div></div>'
     + '<div class="panel-body">'
-    + (hasTuning
-        ? statGrid([
-            statTile('Devices with their own tuning', fmtCount(tuning.devices_tuned)),
-            statTile('Categories with their own tuning', fmtCount(tuning.categories_tuned)),
-            statTile('Last change promoted', tuning.last_activity_at != null ? agoText(tuning.last_activity_at) : '—'),
-          ])
-        : '<div class="empty-state">No device- or category-scoped overrides have promoted yet — every threshold is still at the global default.</div>')
-    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:10px;">Counts live, promoted, non-rolled-back overrides from the autotuner\'s Wilson-bound safety gate — see the <a href="#" onclick="app.goView(\'autonomy\');return false;" style="color:var(--accent);">Autonomy tab</a> for the full per-change timeline.</div>'
+    + statGrid([
+        statTile('Network-wide settings changed', fmtCount(tuning.global_params_tuned || 0)),
+        statTile('Devices with their own tuning', fmtCount(tuning.devices_tuned)),
+        statTile('Categories with their own tuning', fmtCount(tuning.categories_tuned)),
+        statTile('Last change promoted', tuning.last_activity_at != null ? agoText(tuning.last_activity_at) : '—'),
+      ])
+    + (hasGlobalTuning ? '<div style="margin-top:10px;">'+globalList+'</div>' : '')
+    + (!hasScopedTuning && !hasGlobalTuning
+        ? '<div class="empty-state" style="margin-top:10px;">No autotuner changes have promoted yet — every threshold is still at its shipped default.</div>' : '')
+    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:10px;">Counts live, promoted, non-rolled-back changes from the autotuner\'s Wilson-bound safety gate — see the <a href="#" onclick="app.goView(\'autonomy\');return false;" style="color:var(--accent);">Autonomy tab</a> for the full per-change timeline.</div>'
     + '</div></div>';
 
   var volumePanel = '<div class="panel"><div class="panel-header"><div class="panel-title">Alert volume</div></div>'
@@ -2136,6 +2162,24 @@ function render(){
   var id = (active && active.id) ? active.id : null;
   var selStart = null, selEnd = null;
   if (active && typeof active.selectionStart === 'number') { selStart = active.selectionStart; selEnd = active.selectionEnd; }
+  // BUGFIX (2026-09-22, user report: "make sure the console page don't scroll
+  // away to beginning when clicked anywhere like details"): every render()
+  // call replaces #app's ENTIRE innerHTML, which destroys and recreates the
+  // scrollable .content div (see its own CSS, overflow-y:auto) -- a brand new
+  // DOM element always starts at scrollTop 0, so any click that triggers a
+  // re-render (which is almost every click in this app -- selecting a device,
+  // toggling a filter, etc.) silently snapped the view back to the top. Same
+  // save-before/restore-after pattern this function already uses for focused-
+  // input selection range, applied to scroll position too.
+  // Only preserve scroll when re-rendering the SAME view (selecting a graph
+  // node, toggling a filter, opening an inline detail) -- a genuine tab/view
+  // switch (state.activeView itself changed, e.g. app.goView()/selectDevice())
+  // should still land at the top of the new view, same as any normal
+  // navigation would.
+  var sameView = state._lastRenderedView === state.activeView;
+  state._lastRenderedView = state.activeView;
+  var oldContent = document.querySelector('.content');
+  var scrollTop = (sameView && oldContent) ? oldContent.scrollTop : 0;
   document.getElementById('app').innerHTML = renderApp();
   if (id) {
     var el = document.getElementById(id);
@@ -2144,6 +2188,8 @@ function render(){
       if (selStart !== null) { try { el.setSelectionRange(selStart, selEnd); } catch(e){} }
     }
   }
+  var newContent = document.querySelector('.content');
+  if (newContent && scrollTop) newContent.scrollTop = scrollTop;
   if (state.activeView === 'graph' && state.graphSubView === 'graph') attachGraphInteraction();
 }
 

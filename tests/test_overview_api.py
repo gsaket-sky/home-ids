@@ -319,12 +319,14 @@ def test_get_overview_summary_exposes_day_filterable_metrics_and_breakdowns(tmp_
     result = overview_api.get_overview_summary(token="test")
     today = datetime.fromtimestamp(_day_ts(0), tz=timezone.utc).strftime("%Y-%m-%d")
     assert result["fp_suppressed_by_day"][today] == 1
-    # Only the 4 metrics with a REAL per-day source are advertised as
+    # Only the 5 metrics with a REAL per-day source are advertised as
     # filterable -- the 6 Prometheus since-restart counters (pihole_blocks
     # etc., all present and non-zero in _SAMPLE_METRICS_TEXT above) must NOT
     # be in this list, since there is no honest per-day number for them.
+    # fp_uncertain (2026-09-22 fix): the 3rd fp_verdict bucket (UNCERTAIN),
+    # previously silently uncounted -- now tracked the same way as the other 3.
     assert set(result["day_filterable_metrics"]) == {
-        "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats"
+        "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats", "fp_uncertain"
     }
     assert "pihole_blocks" not in result["day_filterable_metrics"]
 
@@ -347,7 +349,13 @@ def _insert_scoped_threshold_row(store, change_id, device_id, device_type, promo
 def test_per_device_tuning_summary_empty_store(tmp_path, monkeypatch):
     monkeypatch.setattr(graph_client, "GRAPH_DB_PATH", tmp_path / "does_not_exist.db")
     result = overview_api._per_device_tuning_summary()
-    assert result == {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None}
+    # global_params_tuned/global_changes (2026-09-22 fix, user report: "the
+    # autotuning information global ... is missing"): global-scoped
+    # promotions (device_id IS NULL AND device_type IS NULL) previously had
+    # zero visibility anywhere on Overview -- now reported alongside the
+    # existing per-device/category counts.
+    assert result == {"devices_tuned": 0, "categories_tuned": 0, "last_activity_at": None,
+                        "global_params_tuned": 0, "global_changes": []}
 
 
 def test_per_device_tuning_summary_counts_active_scoped_overrides(tmp_path, monkeypatch):

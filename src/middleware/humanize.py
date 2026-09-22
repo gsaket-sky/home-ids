@@ -19,7 +19,7 @@ fallback -- a title-cased version of the raw string -- so a future new evidence 
 never shows as a dead/missing label, just an un-glossed (but still readable) one until
 this dict is updated for it.
 """
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 EVIDENCE_TYPE_LABELS = {
     "arp_spoofing": ("ARP spoofing (MAC flip)", "A device's IP address suddenly answered from a different MAC address twice within 10 minutes -- the classic signature of an on-LAN man-in-the-middle attempt."),
@@ -100,3 +100,101 @@ def label_hypothesis(name: Optional[str]) -> Tuple[str, str]:
     if entry:
         return entry
     return name.replace("_", " ").title(), ""
+
+
+def resolve_device_hostname(device_id: Optional[str], state_manager) -> str:
+    """StateManager is the live hostname source, device_id is the last-resort
+    fallback -- the SAME convention devices_api.py's list_devices() and (until
+    2026-09-22, when this moved here to be shared) autonomy_api.py's own
+    private _resolve_hostname() each already established independently.
+    Moved here (2026-09-22, user request: "apply the same logic in console
+    over every view, device id should be replaced by hostname") so every
+    console view calls ONE function instead of each tab re-deriving its own
+    slightly-different copy."""
+    if device_id and device_id != "unattributed" and state_manager.has_device(device_id):
+        with state_manager.lock_device(device_id) as st:
+            hostname = getattr(st, "hostname", None)
+            if hostname and hostname != "unknown":
+                return hostname
+    return device_id or "unattributed"
+
+
+def resolve_destination_info(destination_id: Optional[str], state_manager, geoip_engine) -> Dict[str, Any]:
+    """Same destination-resolution logic mitigation/plain_explanation.py's
+    Telegram narrative already uses (2026-09-22, user request: "destination ip,
+    if local hostname, if foreign domain name or ASN information ... apply the
+    humanize everywhere") -- centralized here instead of duplicated per console
+    view/API router, the same "one function, many callers" consolidation as
+    resolve_device_hostname() above.
+
+    Returns {"label": <best display string>, "kind": "local_device" | "domain"
+    | "external_ip", "hostname": <resolved PTR hostname, external IPs only>,
+    "asn_owner": ..., "country": ...} -- kind lets a caller style/link a local
+    peer device differently from an external server without re-deriving which
+    one it is.
+
+    Resolution order: (1) a destination IP that's actually a device tracked on
+    THIS network (StateManager.get_device_id_for_ip() -- in-memory, no
+    network) is shown as that device's own hostname, kind='local_device'; (2) a
+    known domain is shown as-is, kind='domain'; (3) a raw external IP gets a
+    best-effort reverse-DNS hostname plus ASN owner/country (geoip_engine --
+    local mmdb reads are cheap/cached, reverse_dns() is the one real, timeout-
+    bounded network call, see geoip.py's own docstrings), kind='external_ip'.
+    Every lookup is best-effort: a failure degrades to showing the raw
+    destination_id, never raises."""
+    out: Dict[str, Any] = {"label": destination_id or "unknown", "kind": "external_ip",
+                             "hostname": None, "asn_owner": None, "country": None}
+    if not destination_id or destination_id in ("unknown", "(none)"):
+        return out
+
+    if state_manager is not None:
+        try:
+            peer_device_id = state_manager.get_device_id_for_ip(destination_id)
+            if peer_device_id:
+                with state_manager.lock_device(peer_device_id) as peer_state:
+                    ph = getattr(peer_state, "hostname", None)
+                    if ph and ph != "unknown":
+                        out["label"], out["kind"], out["hostname"] = ph, "local_device", ph
+                        return out
+        except Exception:
+            pass
+
+    try:
+        import ipaddress
+        ipaddress.ip_address(destination_id)
+        is_ip = True
+    except ValueError:
+        is_ip = False
+
+    if not is_ip:
+        out["kind"] = "domain"
+        out["label"] = destination_id
+        return out
+
+    if geoip_engine is not None:
+        try:
+            hostname = geoip_engine.reverse_dns(destination_id)
+            if hostname:
+                out["hostname"] = hostname
+        except Exception:
+            pass
+        try:
+            asn_res = geoip_engine.lookup_asn(destination_id)
+            owner = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+            if owner:
+                out["asn_owner"] = owner
+        except Exception:
+            pass
+        try:
+            city_res = geoip_engine.lookup(destination_id)
+            country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
+            if country:
+                out["country"] = country
+        except Exception:
+            pass
+
+    if out["hostname"]:
+        out["label"] = out["hostname"]
+    elif out["asn_owner"]:
+        out["label"] = f"{destination_id} ({out['asn_owner']})"
+    return out

@@ -34,6 +34,7 @@ from middleware.graph_client import open_store
 from argus.autotune.engine import TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
 from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR
 from core.state_guard import StateManager
+from middleware.humanize import resolve_device_hostname
 
 router = APIRouter()
 
@@ -154,19 +155,6 @@ def _load_state_manager() -> StateManager:
     return sm
 
 
-def _resolve_hostname(sm: StateManager, device_id: str) -> str:
-    """Same 'StateManager is the live hostname source, device_id is the last-resort
-    fallback' convention devices_api.py's list_devices() already uses -- no need for
-    a second, graph-side display_label lookup here since composite trust/autotuner
-    data is only ever interesting for a device StateManager still actively tracks."""
-    if device_id and device_id != "unattributed" and sm.has_device(device_id):
-        with sm.lock_device(device_id) as st:
-            hostname = st.hostname
-            if hostname and hostname != "unknown":
-                return hostname
-    return device_id or "unattributed"
-
-
 @router.get("/api/autonomy/devices")
 def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = Depends(verify_token)):
     """2026-09-16 (user request: "in autonomy, i want to see per device effect/
@@ -210,7 +198,7 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
         if device_id not in by_device:
             by_device[device_id] = {
                 "device_id": device_id,
-                "hostname": _resolve_hostname(sm, device_id),
+                "hostname": resolve_device_hostname(device_id, sm),
                 "trust_grants": [],
                 "building_trust": [],
                 "autotuner": [],
