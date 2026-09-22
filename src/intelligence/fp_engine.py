@@ -87,6 +87,8 @@ from metrics import (
 )
 from intelligence.local_intel import LocalConfirmedIntel
 from argus.autotune.engine import AutotuneEngine  # 2026-09-21, legacy/Sheet 03a autotune reconciliation
+from core import resource_gate  # 2026-09-22, resource-aware scheduling for the weekly retrain
+from core import job_coordinator  # 2026-09-22, resource-aware scheduling for the weekly retrain
 from argus.graph.store import GraphStore
 
 # ---------------------------------------------------------------------------
@@ -2991,7 +2993,19 @@ class AutonomousFPEngine:
         """
         Background daemon thread: periodically retrains fp_classifier.onnx
         every 7 days using alerts.json and the graph's fp_suppression_log history.
+
+        Resource-aware scheduling (2026-09-22, Documentation/RESOURCE_AWARE_SCHEDULING.md):
+        the trainer runs as a real subprocess (see the 2026-09-22 OOM crash-loop
+        BUGFIX note below), coordinated through core/job_coordinator.py's shared
+        mutex+priority lock -- the SAME one scripts/scheduler.py's own 6 cron jobs
+        use, under the job name "train_fp_classifier" (scripts/scheduler.py's legacy
+        `autotune` cron entry invokes the identical script and shares this exact job
+        name so the two can never run concurrently). Delays starting under system
+        pressure, can be preempted (SIGSTOP) by a higher-priority job and later
+        resumed, and self-throttles (pauses itself) under sustained CRITICAL pressure
+        even with nothing else competing for the slot.
         """
+        job_coordinator.reconcile_on_boot(self._state_dir)  # this thread's own boot -- reclaim any orphan that survived a prior main.py restart
         time.sleep(120.0)  # Wait 2 minutes after boot before checking
         while True:
             try:
@@ -3006,42 +3020,7 @@ class AutonomousFPEngine:
 
                 # Retrain once every 7 days (604,800 seconds)
                 if (now - last_ts) >= 7 * 24 * 3600:
-                    LOGGER.info("📅 [FP ENGINE] Scheduled 7-day model retraining interval reached. Launching trainer...")
-                    # BUGFIX (2026-09-22 OOM crash-loop): this used to import
-                    # train_and_export_onnx() and call it IN-PROCESS, on this same
-                    # background thread -- loading the entire alerts.json (hundreds of MB)
-                    # via json.loads() and training LightGBM inside the LIVE detection
-                    # engine's own process. That memory spike routinely outran
-                    # health_manager's debounced self-heal (CRITICAL pressure must sustain
-                    # 3x15s checks before it acts) and hit the cgroup's hard MemoryMax
-                    # first, so the kernel's OOM-killer SIGKILLed the whole engine --
-                    # instantly and ungracefully, before .last_retrain could ever be
-                    # written. That meant the NEXT restart re-triggered the identical
-                    # retrain 2 minutes later, forever: a self-sustaining crash loop that
-                    # ran for 25+ straight hours (Sep 21 12:16 - Sep 22 13:11) before being
-                    # caught. Launching the trainer as a real subprocess -- exactly how the
-                    # scheduler's daily 3am cron already invokes this same script's main()
-                    # -- isolates that memory spike in its own address space, freed
-                    # automatically on exit; a worst-case OOM there kills only the trainer,
-                    # not the live engine.
-                    trainer_script = Path(__file__).resolve().parent.parent / "scripts" / "train_fp_classifier.py"
-                    success = False
-                    try:
-                        result = subprocess.run(
-                            [sys.executable, str(trainer_script)],
-                            timeout=1800.0,
-                            capture_output=True,
-                            text=True,
-                        )
-                        success = result.returncode == 0
-                        if not success:
-                            LOGGER.error(
-                                "❌ [FP ENGINE] Trainer subprocess exited with code %d. stderr tail: %s",
-                                result.returncode, (result.stderr or "")[-2000:],
-                            )
-                    except subprocess.TimeoutExpired:
-                        LOGGER.error("❌ [FP ENGINE] Trainer subprocess timed out after 30 minutes -- killed.")
-
+                    success = self._run_weekly_retrain_subprocess()
                     if success:
                         last_retrain_file.parent.mkdir(parents=True, exist_ok=True)
                         last_retrain_file.write_text(str(now))
@@ -3060,3 +3039,137 @@ class AutonomousFPEngine:
                 LOGGER.error("❌ Exception during scheduled weekly retrain loop: %s", exc, exc_info=True)
 
             time.sleep(3600.0)  # Check once per hour
+
+    def _run_weekly_retrain_subprocess(self) -> bool:
+        """Launches train_fp_classifier.py as an isolated subprocess and drives it
+        through job_coordinator's shared mutex/priority/pause-resume protocol until
+        it exits. Returns True only on a real, uninterrupted, zero-exit-code
+        completion.
+
+        BUGFIX (2026-09-22 OOM crash-loop): this used to import train_and_export_onnx()
+        and call it IN-PROCESS, on this same background thread -- loading the entire
+        alerts.json (hundreds of MB) via json.loads() and training LightGBM inside the
+        LIVE detection engine's own process. That memory spike routinely outran
+        health_manager's debounced self-heal (CRITICAL pressure must sustain 3x15s
+        checks before it acts) and hit the cgroup's hard MemoryMax first, so the
+        kernel's OOM-killer SIGKILLed the whole engine -- instantly and ungracefully,
+        before .last_retrain could ever be written. That meant the NEXT restart
+        re-triggered the identical retrain 2 minutes later, forever: a self-sustaining
+        crash loop that ran for 25+ straight hours (Sep 21 12:16 - Sep 22 13:11) before
+        being caught. Launching the trainer as a real subprocess -- exactly how the
+        scheduler's daily 3am cron already invokes this same script's main() -- isolates
+        that memory spike in its own address space, freed automatically on exit; a
+        worst-case OOM there kills only the trainer, not the live engine.
+        """
+        LOGGER.info("📅 [FP ENGINE] Scheduled 7-day model retraining interval reached. Launching trainer...")
+        job_name = "train_fp_classifier"
+        priority = int(self.config.get("autotune_priority", 2))
+        pausable = bool(self.config.get("autotune_pausable", True))
+        max_runtime_minutes = float(self.config.get("autotune_max_runtime_minutes", 40))
+        poll_interval = 10.0
+
+        if not resource_gate.may_admit_new_job(self.config):
+            LOGGER.info("[FP ENGINE] Weekly retrain deferred -- system under pressure; will re-check next hourly interval.")
+            return False
+        if not job_coordinator.peek_admission(self._state_dir, priority):
+            LOGGER.info("[FP ENGINE] Weekly retrain deferred -- job slot held by a higher/equal-priority job; will re-check next hourly interval.")
+            return False
+
+        trainer_script = Path(__file__).resolve().parent.parent / "scripts" / "train_fp_classifier.py"
+        proc = subprocess.Popen([sys.executable, str(trainer_script)], start_new_session=True)
+
+        outcome = job_coordinator.acquire_or_preempt(
+            self._state_dir, job_name, proc.pid, priority, pausable, max_runtime_minutes
+        )
+        if outcome == job_coordinator.DENIED:
+            LOGGER.info("[FP ENGINE] Weekly retrain lost the race for the job slot -- stopping it; will re-check next hourly interval.")
+            try:
+                proc.terminate()
+                proc.wait(timeout=10)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            return False
+        if outcome.startswith(job_coordinator.PREEMPTED_PREFIX):
+            old_pid = int(outcome.split(":", 1)[1])
+            job_coordinator.pause_process(old_pid)
+            LOGGER.info("[FP ENGINE] Preempted pid %s to run the weekly retrain (pid %s).", old_pid, proc.pid)
+
+        running_elapsed = 0.0
+        last_tick = time.monotonic()
+        is_paused = False
+        critical_streak = 0
+        calm_streak = 0
+        timed_out = False
+
+        while True:
+            ret = proc.poll()
+            if ret is not None:
+                break
+
+            if not job_coordinator.owns_slot(self._state_dir, job_name, proc.pid):
+                # Someone else preempted us (higher priority) -- they already sent
+                # SIGSTOP; just wait until we're promoted back and told it's safe.
+                if job_coordinator.should_resume(self._state_dir, job_name, proc.pid):
+                    job_coordinator.resume_process(proc.pid)
+                    job_coordinator.mark_running(self._state_dir, job_name, proc.pid)
+                    LOGGER.info("[FP ENGINE] Weekly retrain resumed after preemption (pid %s).", proc.pid)
+                    last_tick = time.monotonic()
+                time.sleep(poll_interval)
+                continue
+
+            if is_paused:
+                tier = resource_gate.get_job_pressure_tier(self.config)
+                if tier in (resource_gate.NORMAL, resource_gate.RESOURCE_PRESSURE):
+                    calm_streak += 1
+                else:
+                    calm_streak = 0
+                if calm_streak >= 2:
+                    job_coordinator.resume_process(proc.pid)
+                    job_coordinator.mark_running(self._state_dir, job_name, proc.pid)
+                    LOGGER.info("[FP ENGINE] Weekly retrain self-resumed (pid %s) -- pressure back to normal.", proc.pid)
+                    is_paused = False
+                    calm_streak = 0
+                    last_tick = time.monotonic()
+            else:
+                now_mono = time.monotonic()
+                running_elapsed += now_mono - last_tick
+                last_tick = now_mono
+                tier = resource_gate.get_job_pressure_tier(self.config)
+                if tier == resource_gate.CRITICAL:
+                    critical_streak += 1
+                else:
+                    critical_streak = 0
+                if critical_streak >= 2 and pausable:
+                    job_coordinator.pause_process(proc.pid)
+                    job_coordinator.mark_paused(self._state_dir, job_name, proc.pid)
+                    LOGGER.warning("[FP ENGINE] Weekly retrain self-paused (pid %s) -- system pressure CRITICAL.", proc.pid)
+                    is_paused = True
+                    critical_streak = 0
+                elif running_elapsed / 60.0 >= max_runtime_minutes:
+                    LOGGER.error(
+                        "[FP ENGINE] Weekly retrain exceeded its %.0f-minute running budget -- killing it (pid %s).",
+                        max_runtime_minutes, proc.pid,
+                    )
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                    timed_out = True
+                    break
+
+            time.sleep(poll_interval)
+
+        job_coordinator.release(self._state_dir, job_name, proc.pid)
+        if timed_out:
+            return False
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        success = proc.returncode == 0
+        if not success:
+            LOGGER.error("[FP ENGINE] Trainer subprocess exited with code %s.", proc.returncode)
+        return success

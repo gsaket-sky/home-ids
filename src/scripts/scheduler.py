@@ -11,9 +11,16 @@ import yaml
 # Ensures the script can resolve modules from the src directory
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from core.heartbeat import write_component_heartbeat  # noqa: E402 -- needs the sys.path.append above first
+from core import resource_gate  # noqa: E402
+from core import job_coordinator  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
+
+# Coordinator job name shared with fp_engine.py's own _weekly_retrain_loop() -- both
+# invoke the literal same script (train_fp_classifier.py) and must mutex against
+# EACH OTHER, not just the 6 jobs below. Keep this string identical on both sides.
+TRAIN_FP_CLASSIFIER_JOB_NAME = "train_fp_classifier"
 
 
 def _flatten_config_categories(raw: dict) -> dict:
@@ -35,9 +42,9 @@ def _flatten_config_categories(raw: dict) -> dict:
 
 def check_cron(cron_str: str, current_time: datetime) -> bool:
     parts = cron_str.split()
-    if len(parts) != 5: 
+    if len(parts) != 5:
         return False
-    
+
     def match(val: int, part: str) -> bool:
         # A comma-separated list (e.g. "2,6,10,14,18,22") matches if any sub-part does --
         # added after live_llm_review's cron silently never fired for days: this used to
@@ -51,11 +58,11 @@ def check_cron(cron_str: str, current_time: datetime) -> bool:
             except: return False
         try: return val == int(part)
         except: return False
-        
+
     # Standard cron day_of_week is 0-6 (Sunday=0), Python weekday() is 0-6 (Monday=0).
     # Since we only use * for day_of_week in our configs, we can just map it simply.
-    python_dow = (current_time.weekday() + 1) % 7 
-    
+    python_dow = (current_time.weekday() + 1) % 7
+
     return (match(current_time.minute, parts[0]) and
             match(current_time.hour, parts[1]) and
             match(current_time.day, parts[2]) and
@@ -75,29 +82,130 @@ def load_config():
         LOGGER.error(f"Failed to load config: {e}")
         return {}
 
+
 def main():
     LOGGER.info("Starting Home-IDS Background Scheduler Daemon...")
     scripts_dir = Path(__file__).resolve().parent
-    
+
+    config = load_config()  # already flat -- merged across every config.yaml category
+    state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
+
+    # Resource-aware scheduling (Documentation/RESOURCE_AWARE_SCHEDULING.md): before
+    # this process does anything else, reclaim any job left stuck past its own
+    # recorded budget by a previous scheduler.py life (a restart/crash of THIS
+    # process does not kill its children -- see job_coordinator.reconcile_on_boot()'s
+    # own docstring for why that matters).
+    job_coordinator.reconcile_on_boot(state_dir)
+
     # Track when a job was last run to prevent multiple executions within the same minute
     last_run = {}
-    
+    # job_name -> timestamp it FIRST became due but was deferred (pressure or mutex) --
+    # the starvation backstop's own clock. Cleared once the job actually dispatches.
+    pending_since = {}
+    # job_name -> {"proc": Popen, "priority": int, "pausable": bool, "paused": bool} --
+    # every job THIS scheduler.py instance has launched and not yet seen exit.
+    running = {}
+
+    def _reap_and_resume():
+        """Every tick: notice any tracked job that has exited (release its slot, or
+        promote a paused one back to active), and resume any job THIS process itself
+        previously paused once the coordinator says it's safe to."""
+        for job_name in list(running.keys()):
+            proc = running[job_name]["proc"]
+            if proc.poll() is not None:
+                job_coordinator.release(state_dir, job_name, proc.pid)
+                del running[job_name]
+        for job_name, info in list(running.items()):
+            if info.get("paused") and job_coordinator.should_resume(state_dir, job_name, info["proc"].pid):
+                job_coordinator.resume_process(info["proc"].pid)
+                job_coordinator.mark_running(state_dir, job_name, info["proc"].pid)
+                info["paused"] = False
+                LOGGER.info(f"Resumed previously-preempted job '{job_name}' (pid {info['proc'].pid}).")
+
+    def _try_dispatch(job_name: str, priority: int, pausable: bool,
+                       max_runtime_minutes: float, launch_fn) -> bool:
+        """Runs launch_fn() (a zero-arg callable returning a Popen or None) only if
+        admitted by BOTH the system-pressure gate and the job-priority mutex.
+        Deferred jobs are retried every subsequent tick (not just their next cron
+        match) via pending_since, with a pressure-only starvation backstop -- the
+        mutex itself is never bypassed; a stuck mutex holder past its own budget is
+        instead reclaimed by job_coordinator.reconcile_on_boot(), called every tick
+        below, so starvation from a stuck occupant is closed safely without ever
+        risking a genuine double-run."""
+        max_defer = float(config.get("job_max_defer_minutes", 60))
+        first_seen = pending_since.get(job_name)
+        deferred_minutes = (time.time() - first_seen) / 60.0 if first_seen else 0.0
+        pressure_force = first_seen is not None and deferred_minutes >= max_defer
+
+        if not pressure_force and not resource_gate.may_admit_new_job(config):
+            pending_since.setdefault(job_name, time.time())
+            LOGGER.info(f"Deferring '{job_name}' -- system under pressure ({deferred_minutes:.1f} min so far).")
+            return False
+        if pressure_force:
+            LOGGER.warning(
+                f"'{job_name}' deferred {deferred_minutes:.1f} min by system pressure alone -- "
+                f"admitting despite pressure (starvation backstop). The job mutex itself is never bypassed."
+            )
+
+        if not job_coordinator.peek_admission(state_dir, priority):
+            pending_since.setdefault(job_name, time.time())
+            LOGGER.info(f"Deferring '{job_name}' -- slot held by a higher/equal-priority job ({deferred_minutes:.1f} min so far).")
+            return False
+
+        proc = launch_fn()
+        if proc is None:
+            return False
+
+        outcome = job_coordinator.acquire_or_preempt(
+            state_dir, job_name, proc.pid, priority, pausable, max_runtime_minutes
+        )
+        if outcome == job_coordinator.DENIED:
+            # Lost the claim race between peek_admission() and the real launch --
+            # rare (claim-protected), but must not leave an unowned subprocess
+            # running outside the coordinator's view.
+            LOGGER.info(f"'{job_name}' lost the race for the slot -- stopping the subprocess just started and deferring.")
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            pending_since.setdefault(job_name, time.time())
+            return False
+        if outcome.startswith(job_coordinator.PREEMPTED_PREFIX):
+            old_pid = int(outcome.split(":", 1)[1])
+            job_coordinator.pause_process(old_pid)
+            LOGGER.info(f"Preempted pid {old_pid} to run higher-priority '{job_name}' (pid {proc.pid}).")
+
+        running[job_name] = {"proc": proc, "priority": priority, "pausable": pausable, "paused": False}
+        pending_since.pop(job_name, None)
+        return True
+
     while True:
         now = datetime.now()
         now_str = now.strftime("%Y-%m-%d %H:%M")
         jobs_dispatched_this_tick = 0
-        
+
         config = load_config()  # already flat -- merged across every config.yaml category
+        state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
+
+        job_coordinator.reconcile_on_boot(state_dir)  # general watchdog every tick, not just at boot -- see its own docstring
+        _reap_and_resume()
 
         # 1. Check legacy autotune
         if config.get("autotune_enabled", False):
             cron = config.get("autotune_schedule_cron", "0 3 * * *")
             if check_cron(cron, now) and last_run.get("autotune") != now_str:
-                LOGGER.info("Triggering legacy autotune (train_fp_classifier.py)...")
                 script_path = scripts_dir / "train_fp_classifier.py"
-                subprocess.Popen([sys.executable, str(script_path)])
-                last_run["autotune"] = now_str
-                jobs_dispatched_this_tick += 1
+                priority = int(config.get("autotune_priority", 2))
+                pausable = bool(config.get("autotune_pausable", True))
+                max_runtime = float(config.get("autotune_max_runtime_minutes", 40))
+
+                def _launch(script_path=script_path):
+                    LOGGER.info("Triggering legacy autotune (train_fp_classifier.py)...")
+                    return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+
+                if _try_dispatch(TRAIN_FP_CLASSIFIER_JOB_NAME, priority, pausable, max_runtime, _launch):
+                    last_run["autotune"] = now_str
+                    jobs_dispatched_this_tick += 1
 
         # 2. Check new granular scheduler
         scheduler_cfg = config.get("scheduler", {})
@@ -115,11 +223,12 @@ def main():
                     # can be corrected in config.json without needing a code change, and
                     # can't silently recur for a future script the same way.
                     script_filename = cfg.get("script", f"{script_name}.py")
-                    LOGGER.info(f"Triggering scheduled script: {script_filename} (job='{script_name}') ...")
                     script_path = scripts_dir / script_filename
-                    if script_path.exists():
-                        subprocess.Popen([sys.executable, str(script_path)])
-                    else:
+                    priority = int(cfg.get("priority", 5))
+                    pausable = bool(cfg.get("pausable", False))
+                    max_runtime = float(cfg.get("max_runtime_minutes", 30))
+
+                    if not script_path.exists():
                         LOGGER.error(
                             f"Scheduled job '{script_name}' is enabled but its script "
                             f"{script_path} does not exist — it will NOT run until this "
@@ -127,8 +236,16 @@ def main():
                             f"override in config.yaml's scheduled_jobs.scheduler.{script_name}, "
                             f"or create the missing file)."
                         )
-                    last_run[script_name] = now_str
-                    jobs_dispatched_this_tick += 1
+                        last_run[script_name] = now_str
+                        continue
+
+                    def _launch(script_name=script_name, script_path=script_path):
+                        LOGGER.info(f"Triggering scheduled script: {script_path.name} (job='{script_name}') ...")
+                        return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+
+                    if _try_dispatch(script_name, priority, pausable, max_runtime, _launch):
+                        last_run[script_name] = now_str
+                        jobs_dispatched_this_tick += 1
 
         # BUGFIX (health manager): self-reports this process's own liveness once per
         # minute-tick, since it's a separate OS process from the main pipeline that
@@ -137,7 +254,6 @@ def main():
         # memory. Written at the end of the tick (not the start) so it can include how
         # many jobs this tick actually dispatched.
         try:
-            state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
             write_component_heartbeat(
                 state_dir, "scheduler_subprocess",
                 extra={"pid": os.getpid(), "events_processed": jobs_dispatched_this_tick},

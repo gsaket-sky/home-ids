@@ -53,6 +53,7 @@ USAGE:
 
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -123,6 +124,28 @@ SYNTHETIC_X = [
     [0.7, 0.30, 0.35, 0.05, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0, 0.2],  # FP: laptop on a recognized VPN, low unexplained ratio
 ]
 SYNTHETIC_Y = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """write_text() to a temp file in the SAME directory then os.replace() -- a kill
+    (OOM, a forced restart, or -- new with resource-aware scheduling -- a SIGKILL of
+    this job while SIGSTOP-paused mid-write) can never leave a truncated/corrupt file
+    at `path`: either the old good version or the new complete one, never a partial
+    one. `path` is fp_calibration.json, read by fp_engine.py's _load_calibration()
+    every boot and every hot-reload -- a torn write here silently degrades FP
+    suppression until the next successful retrain, not something to risk."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Same guarantee as _atomic_write_text(), for fp_classifier.onnx -- the model
+    file fp_engine.py's _load_lgbm_model() loads into onnxruntime every boot and every
+    hot-reload."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def _safe_float(val, default=0.0) -> float:
@@ -1209,13 +1232,13 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
             raw_calib_probs = pipeline.predict_proba(X_calib)[:, 1]
             iso = IsotonicRegression(out_of_bounds="clip")
             iso.fit(raw_calib_probs, y_calib)
-            calibrator_path.write_text(json.dumps({
+            _atomic_write_text(calibrator_path, json.dumps({
                 "reliable": True,
                 "x_thresholds": [float(v) for v in iso.X_thresholds_],
                 "y_thresholds": [float(v) for v in iso.y_thresholds_],
                 "fit_at": time.time(),
                 "calibration_sample_count": len(X_calib),
-            }, indent=2), encoding="utf-8")
+            }, indent=2))
             LOGGER.info("📐 Isotonic calibration fit on %d held-out samples (never used for "
                         "training), saved to %s", len(X_calib), calibrator_path)
         else:
@@ -1223,12 +1246,12 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
             # explicit "unreliable" marker, not a silently-stale or fabricated-from-
             # too-few-points curve. fp_engine.py must fall back to the raw,
             # explicitly-labeled-as-uncalibrated score when this is present.
-            calibrator_path.write_text(json.dumps({
+            _atomic_write_text(calibrator_path, json.dumps({
                 "reliable": False,
                 "reason": f"only {len(X_calib)} held-out sample(s) available "
                           f"(need >=20 with both classes present for a trustworthy curve)",
                 "fit_at": time.time(),
-            }, indent=2), encoding="utf-8")
+            }, indent=2))
             LOGGER.warning("⚠️ Not enough held-out data (%d sample(s)) for reliable calibration -- "
                            "wrote an explicit 'unreliable' marker; fp_engine.py will use the raw, "
                            "uncalibrated score (FP_MODEL_SCORE) instead of a fabricated calibration.",
@@ -1245,9 +1268,7 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
         )
 
         onnx_path = model_dir / "fp_classifier.onnx"
-
-        with open(onnx_path, "wb") as f:
-            f.write(onnx_model.SerializeToString())
+        _atomic_write_bytes(onnx_path, onnx_model.SerializeToString())
 
         LOGGER.info("🎉 Retrained LightGBM/ONNX model exported to: %s (%.1f KB)", onnx_path, onnx_path.stat().st_size / 1024.0)
         return True

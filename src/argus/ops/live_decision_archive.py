@@ -31,6 +31,7 @@ decision dict. x86_16gb/custom keep the original 365-day default unchanged.
 """
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,9 +84,18 @@ def main() -> None:
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             export_path = archive_dir / f"decisions_{stamp}.jsonl"
 
-            with open(export_path, "w", encoding="utf-8") as f:
+            # Write to a temp file then os.replace() -- atomic rename, so a kill
+            # mid-write (OOM, a forced restart, or resource-aware scheduling pausing
+            # then losing this job) can never leave a PARTIAL file sitting at
+            # export_path looking deceptively complete to a future audit. The
+            # export-then-delete ordering below already tolerates a fully-failed
+            # write (nothing gets deleted); this closes the "half-written but present"
+            # gap that ordering alone doesn't cover.
+            tmp_export_path = export_path.with_name(export_path.name + ".tmp")
+            with open(tmp_export_path, "w", encoding="utf-8") as f:
                 for d in to_archive:
                     f.write(json.dumps(d) + "\n")
+            os.replace(tmp_export_path, export_path)
 
             # The export write above completed without raising -- only NOW is it
             # safe to remove these rows from the live graph (see this module's

@@ -138,7 +138,12 @@ def generate_report():
     report_file = reports_dir / f"top_domains_{datetime.now().strftime('%Y%m%d')}.md"
     
     try:
-        report_file.write_text("\n".join(report_lines))
+        # Atomic write (temp file + os.replace()) -- a kill mid-write (OOM, a forced
+        # restart, or a SIGKILL of this job while resource-aware scheduling has it
+        # SIGSTOP-paused) can then never leave a truncated report at the final path.
+        tmp_report_file = report_file.with_name(report_file.name + ".tmp")
+        tmp_report_file.write_text("\n".join(report_lines))
+        os.replace(tmp_report_file, report_file)
         LOGGER.info(f"Report saved to {report_file}")
     except Exception as e:
         LOGGER.error(f"Failed to write report file: {e}")
