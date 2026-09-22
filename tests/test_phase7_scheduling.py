@@ -75,11 +75,12 @@ if config_path.exists():
               f"the retrohunter/retro_hunter.py mismatch before it shipped",
               script_path.exists(), f"resolved path={script_path}")
 
-    check("THE SPECIFIC BUG: the retro hunter job is now keyed 'retro_hunter' (or has an "
-          "explicit \"script\" override) so it actually resolves to scripts/retro_hunter.py, "
-          "not the never-existing scripts/retrohunter.py",
+    check("THE SPECIFIC BUG: the retro hunter job (now 'live_retro_hunter', v16 -- "
+          "scripts/retro_hunter.py itself retired) has an explicit \"script\" override "
+          "so it actually resolves to an existing file, not a never-existing "
+          "scripts/<job_name>.py guess",
           any(
-              (SCRIPTS_DIR / cfg.get("script", f"{name}.py")).name == "retro_hunter.py"
+              (SCRIPTS_DIR / cfg.get("script", f"{name}.py")).name == "live_retro_hunter.py"
               for name, cfg in scheduler_cfg.items()
           ),
           f"scheduler_cfg keys={list(scheduler_cfg.keys())}")

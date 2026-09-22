@@ -140,9 +140,9 @@ DEFAULT_CONFIG = {
     # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are
     # minute/hour/day/month/dow with only "*", "*/N", or an exact integer supported per
     # field (no comma-lists, no ranges). "script" is an optional filename override for
-    # when the job key doesn't match "<job_name>.py" — see scripts/retro_hunter.py, which
-    # needs this because its job key doesn't match its own filename under the "scheduler"
-    # key. The weekly/nightly retrain job (train_fp_classifier.py) is scheduled separately
+    # when the job key doesn't match "<job_name>.py" — every job below needs it since
+    # each one lives in src/argus/ops/, not src/scripts/. The weekly/nightly retrain job
+    # (train_fp_classifier.py) is scheduled separately
     # via autotune_enabled/autotune_schedule_cron below, not through this dict. Times below
     # (2:45am / every-4h-from-midnight-at-:45 / 6am) are chosen so no two jobs fire in the
     # same hour as each other or as autotune_schedule_cron's 3am default.
@@ -151,7 +151,10 @@ DEFAULT_CONFIG = {
         # release) — see config.yaml's own scheduled_jobs.scheduler.live_llm_review
         # comment for why. Also gated by detection_engine.llm_review_enabled.
         "live_llm_review": {"enabled": True, "cron": "45 */4 * * *", "script": "../argus/ops/live_llm_review.py"},
-        "retro_hunter": {"enabled": True, "cron": "0 2 * * *", "script": "retro_hunter.py"},
+        # v16: the sole retro-hunt job (scripts/retro_hunter.py retired the same
+        # release) — see config.yaml's own scheduled_jobs.scheduler.live_retro_hunter
+        # comment for why.
+        "live_retro_hunter": {"enabled": True, "cron": "45 2 * * *", "script": "../argus/ops/live_retro_hunter.py"},
         "top_domains_report": {"enabled": True, "cron": "0 6 * * *"},
     },
     "decay_factor": 0.995,

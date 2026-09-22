@@ -322,44 +322,12 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
           fp_b2_cached.local_intel.check("domain", "nflximg.com") is None)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section C: retro_hunter.py -- check_local_intel_history()
-# ═══════════════════════════════════════════════════════════════════════════════════
-from scripts.retro_hunter import check_local_intel_history
-
-with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    state_dir = Path(tmpdir)
-    intel = LocalConfirmedIntel(state_dir)
-    intel.record("ip", "7.7.7.7", "dev_confirmed_it")
-
-    alerts_path = state_dir / "alerts.json"
-    now = time.time()
-    with open(alerts_path, "w", encoding="utf-8") as f:
-        # A DIFFERENT device that touched the same IP 2 days ago, below its own
-        # threshold at the time -- exactly the case this is supposed to catch.
-        f.write(json.dumps({
-            "timestamp": now - 2 * 86400, "device": {"id": "dev_missed_it", "hostname": "missed-host"},
-            "network_context": {"queried_domain": "", "destination_ip": "7.7.7.7"},
-        }) + "\n")
-        # The SAME device that already confirmed it -- must be excluded (not a new finding).
-        f.write(json.dumps({
-            "timestamp": now - 1 * 86400, "device": {"id": "dev_confirmed_it", "hostname": "confirmed-host"},
-            "network_context": {"queried_domain": "", "destination_ip": "7.7.7.7"},
-        }) + "\n")
-        # Unrelated traffic -- must not appear.
-        f.write(json.dumps({
-            "timestamp": now - 1 * 86400, "device": {"id": "dev_unrelated", "hostname": "unrelated-host"},
-            "network_context": {"queried_domain": "", "destination_ip": "8.8.8.8"},
-        }) + "\n")
-
-    matches = check_local_intel_history(alerts_path, intel, days_back=14)
-    matched_devices = {m["device_id"] for m in matches}
-    check("THE CORE FIX: a DIFFERENT device's historical touch of a since-confirmed IOC is found",
-          "dev_missed_it" in matched_devices, f"got devices={matched_devices}")
-    check("the device that already confirmed the IOC itself is EXCLUDED (not a new finding)",
-          "dev_confirmed_it" not in matched_devices, f"got devices={matched_devices}")
-    check("unrelated traffic never appears in the results",
-          "dev_unrelated" not in matched_devices, f"got devices={matched_devices}")
+# Section C (retro_hunter.py -- check_local_intel_history()) removed: scripts/
+# retro_hunter.py was retired (v16 cleanup) once its findings/local-intel-store
+# counters stayed flat across multiple live checks while argus/retro_hunter.py's
+# own RetroHunter.check_local_intel_history() (a direct port of the same logic)
+# kept running as the sole retro-hunt engine -- see tests/test_argus_retro_hunter.py
+# for equivalent coverage of the surviving implementation.
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════

@@ -3,11 +3,12 @@ live_retro_hunter.py - schedules v13's RetroHunter (src/v13/retro_hunter.py) aga
 `.94`'s own live graph (v13 full-architecture plan, Phase 4).
 
 Registered as its own scheduled job (config.yaml's scheduled_jobs.scheduler.live_retro_hunter,
-same mechanism as live_prune.py/retro_hunter.py) -- NOT a replacement for v-current's own
-scripts/retro_hunter.py job (config key "retro_hunter", still enabled, still does its own
-local-intel cross-reference, Telegram notification, and fp_engine sigma-tuning, none of
-which v13's RetroHunter has -- see retro_hunter.py's own module docstring for the documented
-scope cut). This job re-scans v13's OWN graph-backed destination history (state/v13_graph.db,
+same mechanism as live_prune.py). v16: the sole retro-hunt job -- v-current's own
+scripts/retro_hunter.py was retired the same release once its findings/local-intel-store
+activity stayed flat across multiple live checks while this job (which by then had reached
+full feature parity: local-intel cross-reference, Telegram notification, and the
+fp_engine-sigma-tuning-equivalent loop-closing action below) kept running as the sole
+engine. This job re-scans Argus's OWN graph-backed destination history (state/v13_graph.db,
 Phase 1) against fresh threat intel and writes any newly-confirmed-malicious destination back
 as a real `reputation` Evidence item for the device that touched it -- picked up by that
 device's very next live decision cycle through the same HypothesisEngine/DecisionEngine path
