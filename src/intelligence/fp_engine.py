@@ -57,6 +57,8 @@ MEMORY BUDGET ON BOSGAME E4 (AMD Ryzen 5 3550H, 16GB RAM)
 import json
 import logging
 import math
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -3005,28 +3007,55 @@ class AutonomousFPEngine:
                 # Retrain once every 7 days (604,800 seconds)
                 if (now - last_ts) >= 7 * 24 * 3600:
                     LOGGER.info("📅 [FP ENGINE] Scheduled 7-day model retraining interval reached. Launching trainer...")
-                    from scripts.train_fp_classifier import train_and_export_onnx, run_threshold_calibration
-                    # BUGFIX (2026-09-07): must write to the SAME directory _load_lgbm_model()
-                    # reads from (self._model_dir(), the single source of truth) or a
-                    # freshly-trained model is silently never picked up -- found live:
-                    # this used to write to state/models/ while the loader reads from
-                    # config's model_path directory, so every weekly retrain was discarded.
-                    success = train_and_export_onnx(self._state_dir, model_dir=self._model_dir())
+                    # BUGFIX (2026-09-22 OOM crash-loop): this used to import
+                    # train_and_export_onnx() and call it IN-PROCESS, on this same
+                    # background thread -- loading the entire alerts.json (hundreds of MB)
+                    # via json.loads() and training LightGBM inside the LIVE detection
+                    # engine's own process. That memory spike routinely outran
+                    # health_manager's debounced self-heal (CRITICAL pressure must sustain
+                    # 3x15s checks before it acts) and hit the cgroup's hard MemoryMax
+                    # first, so the kernel's OOM-killer SIGKILLed the whole engine --
+                    # instantly and ungracefully, before .last_retrain could ever be
+                    # written. That meant the NEXT restart re-triggered the identical
+                    # retrain 2 minutes later, forever: a self-sustaining crash loop that
+                    # ran for 25+ straight hours (Sep 21 12:16 - Sep 22 13:11) before being
+                    # caught. Launching the trainer as a real subprocess -- exactly how the
+                    # scheduler's daily 3am cron already invokes this same script's main()
+                    # -- isolates that memory spike in its own address space, freed
+                    # automatically on exit; a worst-case OOM there kills only the trainer,
+                    # not the live engine.
+                    trainer_script = Path(__file__).resolve().parent.parent / "scripts" / "train_fp_classifier.py"
+                    success = False
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, str(trainer_script)],
+                            timeout=1800.0,
+                            capture_output=True,
+                            text=True,
+                        )
+                        success = result.returncode == 0
+                        if not success:
+                            LOGGER.error(
+                                "❌ [FP ENGINE] Trainer subprocess exited with code %d. stderr tail: %s",
+                                result.returncode, (result.stderr or "")[-2000:],
+                            )
+                    except subprocess.TimeoutExpired:
+                        LOGGER.error("❌ [FP ENGINE] Trainer subprocess timed out after 30 minutes -- killed.")
+
                     if success:
                         last_retrain_file.parent.mkdir(parents=True, exist_ok=True)
                         last_retrain_file.write_text(str(now))
-                        # Hot-reload ONNX session with the newly trained model
+                        # Hot-reload ONNX session with the newly trained model. Cheap: just
+                        # opens the finished .onnx file the subprocess already wrote to
+                        # self._model_dir() -- train_and_export_onnx()'s own default
+                        # resolves to that identical directory (both derive from config's
+                        # model_path), so no path needs passing across the process boundary.
                         self._load_lgbm_model()
                         LOGGER.info("✅ [FP ENGINE] Retrained LightGBM ONNX model hot-reloaded successfully.")
-                    # PHASE 13 FIX: this in-process 7-day loop is a second, independent path
-                    # to the exact same train_fp_classifier.py module the scheduler's daily
-                    # 3am cron job invokes as a standalone script — but only the standalone
-                    # script's main() called run_threshold_calibration(). This path called
-                    # train_and_export_onnx() directly, silently skipping self-calibration
-                    # every time IT fired. Threshold calibration is independent of whether
-                    # the (expensive) ONNX retrain above succeeded — same reasoning as
-                    # main()'s own unconditional call — so it runs regardless of `success`.
-                    run_threshold_calibration(self._state_dir)
+                    # train_fp_classifier.py's own main() (which the subprocess just ran)
+                    # already calls run_threshold_calibration() unconditionally after
+                    # train_and_export_onnx(), so that step is covered without a separate
+                    # in-process call here.
             except Exception as exc:
                 LOGGER.error("❌ Exception during scheduled weekly retrain loop: %s", exc, exc_info=True)
 
