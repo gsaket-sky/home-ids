@@ -21,6 +21,7 @@ Fritz!Box needed to unit-test a timeout constant).
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_fritz_hosts_connection_cache.py`
 """
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -65,6 +66,17 @@ def main() -> None:
               fh3 is not fh1)
 
     mod._fritz_hosts_cached = None  # leave clean for any other test importing this module
+
+    # REGRESSION GUARD (console-freeze fix): get_dhcp_hosts() calls fh.get_hosts_info()
+    # synchronously -- several seconds of real TR-064 network I/O. Every other handler
+    # in this app is a plain `def` so FastAPI dispatches it to a worker thread; if this
+    # one is ever declared `async def` again, that blocking call runs directly on
+    # uvicorn's single event loop and freezes the ENTIRE console/API for its duration
+    # on every one of identity.py's ~60s background polls -- confirmed live symptom
+    # ("console feels stuck, like nothing is working").
+    check("get_dhcp_hosts is a plain sync def, NOT async -- must run in FastAPI's "
+          "threadpool, not block the shared event loop",
+          not inspect.iscoroutinefunction(mod.get_dhcp_hosts))
 
     print()
     if FAILURES:

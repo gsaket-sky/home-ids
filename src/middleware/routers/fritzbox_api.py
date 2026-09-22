@@ -122,7 +122,7 @@ async def isolate_device(
     return {"status": "Accepted", "message": f"Router {action_lower} command queued for execution."}
 
 @router.get("/hosts", response_model=List[Dict[str, Any]])
-async def get_dhcp_hosts(token: str = Depends(verify_token)):
+def get_dhcp_hosts(token: str = Depends(verify_token)):
     fritz_ip = CONFIG.get("fritz_ip", "192.168.1.1")
     fritz_user = CONFIG.get("fritz_user", "admin")
     fritz_pass = CONFIG.get("fritz_password", "")
