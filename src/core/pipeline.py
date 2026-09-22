@@ -2879,6 +2879,11 @@ class EnginePipeline:
                             # rather than adding a second graph write. Best-effort: a failure here
                             # must never affect the alert already decided/written above.
                             graph_decision_id = decision.get("_graph_decision_id")
+                            # Set unconditionally so the "published_alert" ledger record
+                            # further below (~line 3541) can always reference it, whether
+                            # or not a graph_decision_id/alert_event ends up existing this
+                            # cycle (e.g. graph write failed, or GraphStore unavailable).
+                            alert_event_id = None
                             if graph_decision_id:
                                 try:
                                     argus_live_engine.get_graph_store().update_decision_payload(
@@ -2899,6 +2904,49 @@ class EnginePipeline:
                                     LOGGER.warning(
                                         "Failed to enrich graph decision %r with alert_payload/fp_verdict/incident "
                                         "for %s -- alerts.json/Telegram are already decided and unaffected: %s",
+                                        graph_decision_id, hostname, exc,
+                                    )
+
+                                # Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md,
+                                # 2026-09-22): append-only alert_events row -- unlike the
+                                # update_decision_payload() enrichment just above, this is
+                                # NEVER overwritten by a later cycle of the same recurring
+                                # incident (confirmed live: 71,669 alerts.json lines vs
+                                # 45,650 total decision rows -- proof most individual
+                                # firings/suppressions were only ever in the flat file
+                                # before this table existed). status: FIRED only when a
+                                # real Telegram send actually happens this cycle
+                                # (not fp_verdict["suppress"] AND telegram_worthy AND
+                                # incident_notify.should_notify); SUPPRESSED_AUTONOMOUS
+                                # when CL-AFPE suppressed it; LOGGED_ONLY otherwise (a
+                                # SUSPICIOUS-only monitor cycle, or a deduped repeat
+                                # occurrence of an already-notified incident -- PHASE 21's
+                                # own "no alert for suspicion" rule). Whether hardware
+                                # containment is separately awaiting HITL approval stays
+                                # inside alert_payload's own containment_status field, not
+                                # a 4th status value here -- see schema.sql's own comment.
+                                # Best-effort, same convention as the enrichment call above.
+                                try:
+                                    if fp_verdict["suppress"]:
+                                        alert_event_status = "SUPPRESSED_AUTONOMOUS"
+                                    elif telegram_worthy and incident_notify.should_notify:
+                                        alert_event_status = "FIRED"
+                                    else:
+                                        alert_event_status = "LOGGED_ONLY"
+                                    alert_event_id = argus_live_engine.get_graph_store().insert_alert_event(
+                                        decision_id=graph_decision_id, device_id=dev_id, timestamp=now,
+                                        status=alert_event_status, incident_id=incident_id,
+                                        fp_verdict=fp_verdict.get("verdict"),
+                                        fp_confidence=fp_verdict.get("confidence"),
+                                        fp_stage=fp_verdict.get("stage"),
+                                        explanation_text=primary_sig,
+                                        autotune_state=decision.get("_autotune_state", {}),
+                                        alert_payload=alert_payload,
+                                    )
+                                except Exception as exc:
+                                    LOGGER.warning(
+                                        "Failed to write alert_event for decision %r, %s -- "
+                                        "alerts.json/Telegram are already decided and unaffected: %s",
                                         graph_decision_id, hostname, exc,
                                     )
 
@@ -3495,7 +3543,14 @@ class EnginePipeline:
                                         self.state_manager.record_action(
                                             action_id=publish_action_id, action_type="published_alert",
                                             target=target_display, device_id=dev_id, hostname=hostname,
-                                            ttl_seconds=feedback_ttl, extra={"alert_payload": alert_payload},
+                                            ttl_seconds=feedback_ttl,
+                                            # alert_event_id (2026-09-22): lets a later operator tap
+                                            # (immunize/revoke) record a real operator_actions row
+                                            # against the SAME alert_event this ledger entry is about,
+                                            # instead of having zero durable link between the two.
+                                            # None whenever this cycle's graph write didn't happen --
+                                            # the Telegram action itself is entirely unaffected either way.
+                                            extra={"alert_payload": alert_payload, "alert_event_id": alert_event_id},
                                         )
                                         inline_keyboard.append([
                                             {"text": "🛡️ Mark False Positive", "callback_data": f"immunize:{publish_action_id}"}

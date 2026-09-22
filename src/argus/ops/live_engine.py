@@ -406,25 +406,43 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
                 for ev in new_v2:
                     store.insert_evidence(ev)
                 if decision_changed:
+                    # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
+                    # (_inject_graph_derived_evidence()) that is deliberately never passed
+                    # to insert_evidence() above -- an evidence->decision 'supports' edge
+                    # for an evidence_id that was never actually persisted would be a
+                    # dangling reference. All three synthetic evidence types share the
+                    # "v13_live_engine:" provenance prefix, so filtering on that (rather
+                    # than threading a separate is-synthetic flag through several layers)
+                    # is enough to exclude them here.
+                    real_evidence_ids = [
+                        ev.evidence_id for ev in merged_v2
+                        if not ev.provenance.startswith("v13_live_engine:")
+                    ]
                     new_decision_id = store.insert_decision(
                         device_id=device_id, timestamp=timestamp,
                         state=decision["state"], decision_path=decision["decision_path"],
                         confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
                         risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
                         raw_payload=decision,
-                        # Phase 1a: merged_v2 also carries synthetic, graph-DERIVED evidence
-                        # (_inject_graph_derived_evidence()) that is deliberately never passed
-                        # to insert_evidence() above -- an evidence->decision 'supports' edge
-                        # for an evidence_id that was never actually persisted would be a
-                        # dangling reference. All three synthetic evidence types share the
-                        # "v13_live_engine:" provenance prefix, so filtering on that (rather
-                        # than threading a separate is-synthetic flag through several layers)
-                        # is enough to exclude them here.
-                        evidence_ids=[
-                            ev.evidence_id for ev in merged_v2
-                            if not ev.provenance.startswith("v13_live_engine:")
-                        ],
+                        evidence_ids=real_evidence_ids,
                     )
+                    # Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md,
+                    # 2026-09-22): the hypothesis layer insert_decision() alone never
+                    # populates (winning_hypothesis_id confirmed 0/45,650 rows on .94's
+                    # real graph) -- best-effort, same convention as every other graph
+                    # enrichment call in this module (a failure here must never affect
+                    # the already-returned live decision).
+                    try:
+                        store.add_hypothesis_edges(
+                            new_decision_id, decision.get("hypotheses", {}),
+                            decision.get("explanation"), real_evidence_ids, timestamp,
+                        )
+                    except Exception as e:
+                        LOGGER.warning(
+                            "Failed to write hypothesis edges for decision %r, device %r "
+                            "-- the live decision itself is already made and unaffected: %s",
+                            new_decision_id, device_id, e,
+                        )
                     _last_decision_key[device_id] = current_key
                     _last_decision_id[device_id] = new_decision_id
             # Only mark as written AFTER a successful commit -- a failed write leaves
@@ -902,12 +920,31 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         # before Sheet 03a's live wiring.
         tuned_rep = rep_vector
         hard_stop_sensitivity = None
+        # Autonomous-behavior traceability (Documentation/ALERT_TRACE_GRAPH_PLAN.md,
+        # 2026-09-22): the actually-active tunable values this cycle used, stashed
+        # onto the decision dict so pipeline.py can persist them onto the matching
+        # alert_event's autotune_state_json -- otherwise this 3-tier resolution
+        # (device -> device_type -> global, AutotuneEngine.get_active_value()'s own
+        # docstring) happens here and is gone, with no way for an operator looking
+        # at a specific alert to see whether/how autotuning shaped it. Values only
+        # (not which threshold_history.change_id produced each one) -- a smaller,
+        # lower-risk first cut; resolving the exact change_id per parameter would
+        # mean threading _promoted_value_at_scope()'s internals out through a public
+        # return, deferred rather than done speculatively here.
+        autotune_state: Dict[str, Any] = {}
         if device_id:
             try:
                 autotune = _get_autotune_engine()
                 tuned_rep = _tuned_rep_vector(rep_vector, device_id, autotune)
                 hard_stop_sensitivity = autotune.get_active_value(
                     "hard_stop_candidate_sensitivity", device_id, default=None)
+                autotune_state = {
+                    "hard_stop_candidate_sensitivity": hard_stop_sensitivity,
+                    "reputation_tier_suspicious_floor": autotune.get_active_value(
+                        "reputation_tier_suspicious_floor", device_id, default=2.0),
+                    "reputation_tier_high_floor": autotune.get_active_value(
+                        "reputation_tier_high_floor", device_id, default=4.0),
+                }
             except Exception as e:
                 LOGGER.warning(
                     "Failed to resolve live-tunable autotuner parameters for device %r, "
@@ -919,6 +956,13 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
             now=ts, hard_stop_candidate_sensitivity=hard_stop_sensitivity,
         )
+        # See autotune_state's own comment above -- attached here (not persisted
+        # into raw_payload_json by insert_decision(), which runs on this SAME dict
+        # a few lines below via _write_graph(), so it also rides along there for
+        # free as decision audit context) so pipeline.py can read it back later via
+        # decision.get("_autotune_state") to populate the alert_event, mirroring
+        # how "_graph_decision_id" already gets attached the same way below.
+        decision["_autotune_state"] = autotune_state
 
         if device_id:
             # Feeds the NEXT cycle's `risk` baseline metric (see

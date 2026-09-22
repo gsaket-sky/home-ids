@@ -310,8 +310,15 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
 
 -- Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): one row
--- per qualifying cycle (state crosses SUSPICIOUS+), FIRED or SUPPRESSED_AUTONOMOUS
--- or AWAITING_APPROVAL, never overwritten -- unlike `decisions`, which dedupes on
+-- per qualifying cycle (state crosses SUSPICIOUS+): FIRED (a real Telegram send
+-- happened), SUPPRESSED_AUTONOMOUS (CL-AFPE suppressed it), or LOGGED_ONLY
+-- (neither -- a SUSPICIOUS-only monitor-only cycle, or a deduped repeat occurrence
+-- of an already-notified ongoing incident, PHASE 21's own "no alert for suspicion"
+-- rule). Whether hardware containment is separately awaiting HITL operator
+-- approval is NOT a 4th status here -- that's orthogonal to whether a Telegram
+-- message was sent (an awaiting-approval alert still IS a FIRED message, just with
+-- pending containment) and stays inside alert_payload_json's own containment_status
+-- field, same as it already is in alerts.json today. Never overwritten -- unlike `decisions`, which dedupes on
 -- (state, decision_path) and gets its own raw_payload_json overwritten by a
 -- recurring incident, this is append-only so every individual firing/suppression
 -- survives. Deliberately NOT routed through the generic `edges` table (see the
@@ -326,7 +333,7 @@ CREATE TABLE IF NOT EXISTS alert_events (
     incident_id            TEXT REFERENCES incidents(incident_id),
     timestamp               REAL NOT NULL,
     status                  TEXT NOT NULL CHECK (status IN
-                               ('FIRED','SUPPRESSED_AUTONOMOUS','AWAITING_APPROVAL')),
+                               ('FIRED','SUPPRESSED_AUTONOMOUS','LOGGED_ONLY')),
     fp_verdict               TEXT,
     fp_confidence             REAL,
     fp_stage                  TEXT,

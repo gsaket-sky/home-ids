@@ -78,7 +78,7 @@ alert_event   --resulted_in-->     containment_action   NEW
 alert_event   --reviewed_by-->     operator_action      NEW
 ```
 
-`alert_event` carries `status` (`FIRED` | `SUPPRESSED_AUTONOMOUS` | `AWAITING_APPROVAL`)
+`alert_event` carries `status` (`FIRED` | `SUPPRESSED_AUTONOMOUS` | `LOGGED_ONLY` -- refined during implementation: 'awaiting HITL approval' is orthogonal to whether a Telegram message was sent, so it stays inside `alert_payload_json`'s own `containment_status` field rather than being a 4th status value)
 and the `fp_verdict` fields (verdict/confidence/stage) as real columns on that node —
 not a graph violation, the same way `evidence.confidence` is already a column on
 `evidence`. The rule this plan follows: **relationships are edges you can traverse;
@@ -255,7 +255,7 @@ CREATE TABLE alert_events (
     incident_id            TEXT REFERENCES incidents(incident_id),
     timestamp               REAL NOT NULL,
     status                  TEXT NOT NULL CHECK (status IN
-                               ('FIRED','SUPPRESSED_AUTONOMOUS','AWAITING_APPROVAL')),
+                               ('FIRED','SUPPRESSED_AUTONOMOUS','LOGGED_ONLY')),
     fp_verdict               TEXT,
     fp_confidence             REAL,
     fp_stage                  TEXT,

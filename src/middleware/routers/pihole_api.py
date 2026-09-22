@@ -65,6 +65,43 @@ def _get_argus_cl_afpe_engine() -> ClAfpeEngine:
                 _argus_cl_afpe_singleton = ClAfpeEngine(store)
     return _argus_cl_afpe_singleton
 
+# Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): same
+# lazy-singleton pattern as _get_argus_cl_afpe_engine() above, its own connection
+# rather than reaching into ClAfpeEngine's internals -- SQLite WAL mode is built
+# for exactly this (multiple readers/writers against the same file), so a second
+# lightweight connection here costs nothing meaningful.
+_operator_action_store_singleton: Optional[GraphStore] = None
+_operator_action_store_lock = threading.Lock()
+
+def _get_graph_store_for_operator_actions() -> GraphStore:
+    global _operator_action_store_singleton
+    if _operator_action_store_singleton is None:
+        with _operator_action_store_lock:
+            if _operator_action_store_singleton is None:
+                state_path = CONFIG.get("state_path", "state/ids_state.json")
+                db_path = str(Path(state_path).parent / "v13_graph.db")
+                _operator_action_store_singleton = GraphStore(db_path)
+    return _operator_action_store_singleton
+
+def _record_operator_action(entry: Optional[Dict[str, Any]], action: str, result: Dict[str, Any]) -> None:
+    """Best-effort write of one operator_actions row, IF the ledger entry this
+    Telegram tap responded to carries an alert_event_id (see pipeline.py's
+    "published_alert" ledger comment for when it does/doesn't -- immunize/revoke
+    always do, since they're action_id-addressed against a specific published
+    alert; approve/release/block operate on a raw target string instead, with no
+    single alert_event to attribute the tap to, so this is a no-op for those,
+    not a bug). Never raises -- an operator's Telegram tap must succeed/fail on
+    its own real effect (unblock, correction, etc.), never on this audit write."""
+    alert_event_id = (entry or {}).get("extra", {}).get("alert_event_id")
+    if not alert_event_id:
+        return
+    try:
+        _get_graph_store_for_operator_actions().insert_operator_action(
+            alert_event_id, action, result=result)
+    except Exception as exc:
+        LOGGER.warning("Failed to record operator_action (%s) for alert_event %r: %s",
+                        action, alert_event_id, exc)
+
 @router.post("/api/ipc/immunize")
 def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
     return _ipc_immunize_logic(payload.target)
@@ -164,6 +201,9 @@ def _ipc_immunize_logic(action_id: str):
 
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
+        _record_operator_action(entry, "immunize", {
+            "immunized": base_domain or result.get("domain", target), "unblocked": unblocked,
+        })
         return {
             "status": "success",
             "action_id": action_id,

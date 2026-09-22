@@ -400,7 +400,7 @@ class GraphStore:
                 incident_id            TEXT REFERENCES incidents(incident_id),
                 timestamp               REAL NOT NULL,
                 status                  TEXT NOT NULL CHECK (status IN
-                                           ('FIRED','SUPPRESSED_AUTONOMOUS','AWAITING_APPROVAL')),
+                                           ('FIRED','SUPPRESSED_AUTONOMOUS','LOGGED_ONLY')),
                 fp_verdict               TEXT,
                 fp_confidence             REAL,
                 fp_stage                  TEXT,
@@ -922,8 +922,9 @@ class GraphStore:
                              autotune_state: Optional[Dict[str, Any]] = None,
                              alert_payload: Optional[Dict[str, Any]] = None,
                              backfilled: bool = False) -> str:
-        """One row per qualifying cycle (state crosses SUSPICIOUS+), FIRED,
-        SUPPRESSED_AUTONOMOUS, or AWAITING_APPROVAL -- append-only, NEVER
+        """One row per qualifying cycle (state crosses SUSPICIOUS+): FIRED (a real
+        Telegram send happened), SUPPRESSED_AUTONOMOUS (CL-AFPE suppressed it), or
+        LOGGED_ONLY (neither) -- append-only, NEVER
         overwritten (unlike decisions.raw_payload_json, which a recurring
         incident's repeated update_decision_payload() calls DO overwrite --
         confirmed live: 71,669 alerts.json lines vs 45,650 total decision rows,

@@ -34,7 +34,9 @@ sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from config import CONFIG  # noqa: E402
 from utils import write_job_health  # noqa: E402
 from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
-from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
+from argus.graph.store import (  # noqa: E402
+    GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS, DEFAULT_DECISION_RETENTION_DAYS,
+)
 
 LOGGER = logging.getLogger("live_prune")
 
@@ -42,6 +44,20 @@ _RETENTION_DAYS_BY_PROFILE = {
     "pi_8gb": 30.0,
     "x86_16gb": DEFAULT_EVIDENCE_RETENTION_DAYS,
     "custom": DEFAULT_EVIDENCE_RETENTION_DAYS,
+}
+
+# Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): decisions/
+# alert_events get their own, much longer retention window than evidence -- decisions
+# are the audit trail, meant to legitimately outlive the evidence that fed them (same
+# "two different retention windows" split schema.sql already documents for evidence
+# vs. decisions). Mirrors GraphStore's own _DECISION_RETENTION_DAYS_BY_PROFILE,
+# duplicated here rather than imported since that dict is private to store.py (same
+# "private to its own module, small enough to keep in sync by hand" precedent as
+# this file's own _RETENTION_DAYS_BY_PROFILE above).
+_DECISION_RETENTION_DAYS_BY_PROFILE = {
+    "pi_8gb": 180.0,
+    "x86_16gb": DEFAULT_DECISION_RETENTION_DAYS,
+    "custom": DEFAULT_DECISION_RETENTION_DAYS,
 }
 
 
@@ -93,6 +109,13 @@ def main() -> None:
         # DELETE (see GraphStore.prune_orphaned_device_baselines()'s own
         # docstring for why threshold_history is deliberately NOT included here).
         orphaned_baselines_deleted = store.prune_orphaned_device_baselines()
+        # Alert-trace graph (2026-09-22): decisions had NO pruning job at all before
+        # this -- riding along on this job's existing daily cadence, same reasoning
+        # as prune_orphaned_device_baselines() above (a real but not per-cycle-urgent
+        # sweep, no need for its own cron entry).
+        decision_retention_days = _DECISION_RETENTION_DAYS_BY_PROFILE.get(
+            load_hardware_profile(CONFIG), DEFAULT_DECISION_RETENTION_DAYS)
+        decision_prune_counts = store.prune_decisions_and_alerts(older_than_days=decision_retention_days)
         # MOVED (2026-09-20, data-lifecycle retuning) to its own, much more frequent
         # job -- live_prune_weak_notices.py, every 4h instead of this job's own daily
         # 3:15am. Running only once/day meant a weak notice created just after this
@@ -106,13 +129,18 @@ def main() -> None:
         # weak-notice sweep along with it.
         store.close()
         LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) "
-                     "older than %d days, %d orphaned device_baselines row(s), from %s",
-                     deleted, retention_days, dd_deleted, retention_days, orphaned_baselines_deleted, db_path)
+                     "older than %d days, %d orphaned device_baselines row(s), %d decision(s)/"
+                     "%d alert_event(s) older than %d days, from %s",
+                     deleted, retention_days, dd_deleted, retention_days, orphaned_baselines_deleted,
+                     decision_prune_counts["decisions"], decision_prune_counts["alert_events"],
+                     decision_retention_days, db_path)
         write_job_health(state_dir, "live_prune", time.time() - run_start,
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
                                  "device_destinations_retention_days": retention_days,
-                                 "orphaned_device_baselines_deleted": orphaned_baselines_deleted})
+                                 "orphaned_device_baselines_deleted": orphaned_baselines_deleted,
+                                 "decision_retention_days": decision_retention_days,
+                                 **{f"{k}_deleted": v for k, v in decision_prune_counts.items()}})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_prune", time.time() - run_start, extra={"error": str(e)})
