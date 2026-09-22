@@ -18,7 +18,7 @@ evidence at all, only against the ORIGINAL decision_path reaching a strong bar -
 a pattern that hadn't yet escalated that far could still be talked into "benign,
 suppress" by a device-type explanation that never engaged with the actual trigger.
 
-The fix, in three parts:
+The fix:
   1. hypotheses/evidence.py gains a module-level ATTACK_SHAPED_EVIDENCE_TYPES,
      hoisted from what used to be DeviceProfileBenignHypothesis's own private class
      attribute -- single source of truth for both consumers now.
@@ -26,32 +26,30 @@ The fix, in three parts:
      names present, not just their coarser independence_group families -- family
      granularity is too coarse, e.g. "dns_dga_burst" and the ambiguous
      "dns_rate"/"dns_entropy" all share the same "dns_behavior" family).
-  3. ai_soc.py's DeterministicValidator.validate() rejects "benign" outright if
+  3. The DeterministicValidator's validate() rejects "benign" outright if
      ground_truth["evidence_types"] intersects ATTACK_SHAPED_EVIDENCE_TYPES --
      structural, not content-judging which evidence the model's own reasoning cites.
 
-VALIDATOR_SCHEMA_VERSION bumped 2 -> 3 (ai_soc.py) -- the first actual use of Phase
-57's versioning mechanism, so every already-cached "benign" verdict computed before
-this change becomes unreachable via the persistent cache immediately.
+v16 NOTE: this file originally also covered (Section B) `intelligence/ai_soc.py`'s
+own DeterministicValidator directly, and (part of Section C) its VALIDATOR_SCHEMA_VERSION
+bump and scripts/ollama_soc.py's prompt-stripping/ground_truth-threading wiring. Both
+files were retired in the v16 cleanup; the equivalent behavior on the surviving
+validator (argus/llm_review/validator.py) is covered by
+tests/test_argus_llm_review_validator.py ("a 'benign' verdict is rejected when genuine
+attack-shaped evidence is present..."). Only Section A (still-live hypotheses code)
+and the pipeline.py half of Section C remain below.
 
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_phase58_validator_attack_shaped_evidence.py`
 
 Sections:
-  A. ATTACK_SHAPED_EVIDENCE_TYPES -- single source of truth, same object identity
-     in both hypotheses/engine.py and ai_soc.py
-  B. DeterministicValidator.validate() -- rejects benign when attack-shaped evidence
-     is present regardless of decision_path; still accepts benign when only
-     ambiguous dns_behavior-family evidence (dns_rate/dns_entropy) is present;
-     backward-compatible when evidence_types is absent entirely (pre-Phase-58 alert)
+  A. ATTACK_SHAPED_EVIDENCE_TYPES -- single source of truth in hypotheses/engine.py
   C. Source-level wiring -- pipeline.py persists hee_evidence_types from the same
-     active_evidence list as hee_evidence_families; ollama_soc.py strips it from the
-     LLM prompt and threads it into ground_truth; VALIDATOR_SCHEMA_VERSION bumped
+     active_evidence list as hee_evidence_families
 """
 import sys
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts"))
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -71,7 +69,6 @@ def check(name, cond, detail=""):
 
 from intelligence.hypotheses.evidence import ATTACK_SHAPED_EVIDENCE_TYPES
 from intelligence.hypotheses.engine import DeviceProfileBenignHypothesis
-from intelligence.ai_soc import DeterministicValidator, VALIDATOR_SCHEMA_VERSION
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -101,64 +98,6 @@ check("deliberately excludes the ambiguous dns_behavior-family signals (dns_rate
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: DeterministicValidator.validate()
-# ═══════════════════════════════════════════════════════════════════════════════════
-print("\n--- Section B: DeterministicValidator.validate() ---")
-
-validator = DeterministicValidator()
-
-_benign_rec_full = {
-    "classification": "benign", "reason": "smart tv telemetry",
-    "supporting_evidence": ["low query rate", "no suspicious domains"],
-    "contradicting_evidence": [], "recommended_action": "suppress",
-}
-
-check("REJECTS 'benign' when evidence_types includes an attack-shaped type "
-      "(arp_sweep) -- the exact Fire-TV/Echo-Show scenario this phase closes, even "
-      "though decision_path is only 'hypothesis_suspicious' (well below "
-      "_STRONG_ATTACK_DECISION_PATHS' bar, so the pre-existing check wouldn't catch it)",
-      validator.validate(
-          _benign_rec_full, [],
-          ground_truth={"decision_path": "hypothesis_suspicious", "evidence_types": ["arp_sweep"]},
-      ) is False)
-
-check("REJECTS 'benign' when the ORIGINAL decision_path was empty/absent (e.g. a "
-      "single not-yet-corroborated MAC flip) but evidence_types still shows the "
-      "attack-shaped signal directly",
-      validator.validate(
-          _benign_rec_full, [],
-          ground_truth={"decision_path": "", "evidence_types": ["arp_spoof_pending"]},
-      ) is False)
-
-check("ACCEPTS 'benign' when evidence_types is present but contains only non-attack-"
-      "shaped types (e.g. a bare 'reputation' entry, already covered by the "
-      "separate IOC>=4.0 check elsewhere)",
-      validator.validate(
-          _benign_rec_full, [],
-          ground_truth={"decision_path": "", "evidence_types": ["reputation"]},
-      ) is True)
-
-check("BACKWARD COMPATIBLE: an alert published before Phase 58 (ground_truth has no "
-      "'evidence_types' key at all) degrades to a no-op for this specific check -- "
-      "doesn't crash, doesn't reject solely because the field is missing",
-      validator.validate(
-          _benign_rec_full, [],
-          ground_truth={"decision_path": ""},
-      ) is True)
-
-check("BACKWARD COMPATIBLE: ground_truth=None entirely (pre-Phase-50 caller/tests) "
-      "still works, still accepts a well-formed benign verdict",
-      validator.validate(_benign_rec_full, [], ground_truth=None) is True)
-
-check("does NOT affect 'malicious' classifications at all (this check is gated "
-      "the same way every other benign-only check in validate() already is)",
-      validator.validate(
-          {"classification": "malicious", "reason": "confirmed", "recommended_action": "block"},
-          [], ground_truth={"decision_path": "", "evidence_types": ["arp_sweep"]},
-      ) is True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: source-level wiring
 # ═══════════════════════════════════════════════════════════════════════════════════
 print("\n--- Section C: source-level wiring ---")
@@ -174,26 +113,6 @@ check("pipeline.py persists hee_evidence_types from the SAME active_evidence lis
       "hee_evidence_families already reads (not a separately-fetched, potentially "
       "stale list)",
       '{ev.type for ev in active_evidence} | set(decision.get("evidence_types", []))' in _pipeline_src)
-
-_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
-check("ollama_soc.py strips hee_evidence_types from the LLM prompt "
-      "(_VERDICT_SHAPED_FIELDS)",
-      '"hee_evidence_types"' in _soc_src.split("_VERDICT_SHAPED_FIELDS = frozenset({", 1)[1].split("})", 1)[0])
-
-check("ollama_soc.py threads hee_evidence_types into ground_truth as 'evidence_types'",
-      '"evidence_types": representative.get("hee_evidence_types", [])' in _soc_src)
-
-_ai_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "ai_soc.py").read_text(encoding="utf-8")
-check("VALIDATOR_SCHEMA_VERSION was actually bumped for this change (not left at "
-      "Phase 57's value 2 -- a validator logic change with no version bump would defeat "
-      "the entire point of Phase 57's cache-key versioning). >=3 rather than ==3 since "
-      "a later phase (58b) legitimately bumps it further -- see "
-      "test_phase58b_validator_destination_baseline.py for that one's own coverage.",
-      VALIDATOR_SCHEMA_VERSION >= 3)
-
-check("ATTACK_SHAPED_EVIDENCE_TYPES is imported from hypotheses/evidence.py, not "
-      "redefined locally in ai_soc.py",
-      "from intelligence.hypotheses.evidence import Evidence, ATTACK_SHAPED_EVIDENCE_TYPES" in _ai_soc_src)
 
 print()
 if FAILURES:

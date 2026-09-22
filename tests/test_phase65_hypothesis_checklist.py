@@ -88,48 +88,8 @@ check("REGRESSION GUARD: an empty ev_store (no attack hypothesis wins, DIRECT_IO
       result_c["attack"]["checklist"] is None, f"got {result_c['attack']}")
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section D: ollama_soc.py's _hypothesis_checklist_line() renders correctly and
-# degrades to None for pre-Phase-65 alerts / no winning hypothesis
-# ═══════════════════════════════════════════════════════════════════════════════════
-sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts"))
-from ollama_soc import _hypothesis_checklist_line
-
-rep_with_checklist = {
-    "hee_hypotheses": {
-        "attack": {
-            "name": "DGA_BOTNET_C2", "score": 4.0,
-            "checklist": {"required_satisfied": True, "strong_score": 1.0, "contradicting_score": 0.0},
-        },
-    },
-}
-line = _hypothesis_checklist_line(rep_with_checklist)
-check("renders a non-None line for a real checklist",
-      line is not None, f"got {line!r}")
-check("the rendered line names the hypothesis",
-      line is not None and "DGA_BOTNET_C2" in line, f"got {line!r}")
-check("the rendered line says the required evidence was satisfied",
-      line is not None and "required evidence satisfied" in line, f"got {line!r}")
-check("the rendered line includes the strong-corroboration score",
-      line is not None and "strong-corroboration score=1.0" in line, f"got {line!r}")
-
-rep_not_satisfied = {
-    "hee_hypotheses": {"attack": {"name": "X", "checklist": {
-        "required_satisfied": False, "strong_score": 0.0, "contradicting_score": 0.0,
-    }}},
-}
-line_not_satisfied = _hypothesis_checklist_line(rep_not_satisfied)
-check("renders 'NOT satisfied' when required_satisfied is False",
-      line_not_satisfied is not None and "NOT satisfied" in line_not_satisfied,
-      f"got {line_not_satisfied!r}")
-
-check("REGRESSION GUARD: a pre-Phase-65 alert (hee_hypotheses present, no 'checklist' "
-      "key at all) degrades to None, not a crash",
-      _hypothesis_checklist_line({"hee_hypotheses": {"attack": {"name": "X", "score": 3.0}}}) is None)
-check("REGRESSION GUARD: an alert with no hee_hypotheses key at all (pre-Phase-50) "
-      "degrades to None",
-      _hypothesis_checklist_line({}) is None)
-
+# Section D (scripts/ollama_soc.py's _hypothesis_checklist_line()) removed -- that
+# script was retired in the v16 cleanup.
 
 print()
 if FAILURES:

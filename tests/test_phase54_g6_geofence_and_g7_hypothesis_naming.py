@@ -103,14 +103,11 @@ check("the uncorroborated case gets its own decision_path, distinct from 'hard_s
       "uncorroborated tier-4/5 reputation signal",
       result_alone["decision_path"] == "geofence_uncorroborated", f"got {result_alone['decision_path']}")
 
-from intelligence.ai_soc import _STRONG_ATTACK_DECISION_PATHS
-check("REGRESSION GUARD: 'geofence_uncorroborated' is deliberately NOT in "
-      "_STRONG_ATTACK_DECISION_PATHS -- an LLM benign verdict may still review it "
-      "(same as tier4_unconfirmed/tier5_uncorroborated)",
-      "geofence_uncorroborated" not in _STRONG_ATTACK_DECISION_PATHS)
-check("REGRESSION GUARD: 'hard_stop' is still in _STRONG_ATTACK_DECISION_PATHS -- the "
-      "corroborated geofence case still gets Phase 50's ground-truth protection",
-      "hard_stop" in _STRONG_ATTACK_DECISION_PATHS)
+# v16 NOTE: this used to also check 'geofence_uncorroborated'/'hard_stop' against
+# intelligence/ai_soc.py's own _STRONG_ATTACK_DECISION_PATHS (now retired along with
+# scripts/ollama_soc.py). The surviving argus/llm_review/validator.py has its own
+# _STRONG_ATTACK_DECISION_PATHS with equivalent coverage in
+# tests/test_argus_llm_review_validator.py.
 
 _fp_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "fp_engine.py").read_text(encoding="utf-8")
 check("REGRESSION GUARD: fp_engine.py's _HARD_STOP_SIGNATURES still contains the exact "
