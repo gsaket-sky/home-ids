@@ -100,7 +100,14 @@ ALERT_EVENTS_PER_DECISION_CAP = 10
 @router.get("/api/graph")
 def get_graph(
     limit: int = Query(25, ge=1, le=200),
-    device_id: Optional[str] = Query(None, description="Scope to one device's own most recent decisions, instead of the most recent across the whole network"),
+    # Bare `None` default (matching search_alerts()'s own device_id param below),
+    # not Query(None, ...) -- BUGFIX found by this file's own test suite: a
+    # Query(...) object is only resolved to its real value by FastAPI's request
+    # handling, so calling get_graph() directly as a plain function (exactly
+    # what every test in test_graph_api.py already does) left device_id bound
+    # to the literal Query object itself whenever the caller omitted it, which
+    # then failed downstream trying to bind that object as a SQL parameter.
+    device_id: Optional[str] = None,
     token: str = Depends(verify_token),
 ):
     with open_store() as store:

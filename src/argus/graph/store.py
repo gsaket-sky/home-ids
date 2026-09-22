@@ -204,6 +204,13 @@ def _chunked(seq: List[Any], size: int):
 
 
 class GraphStore:
+    # Process-lifetime cache of db_paths that have already run _migrate_existing_db()
+    # once -- see that call site's own BUGFIX comment below for why this exists.
+    # Class-level (not per-instance): the whole point is to survive across the many
+    # short-lived GraphStore instances open_store() constructs, one per console
+    # API request.
+    _migrated_db_paths: set = set()
+
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
         self.db_path = db_path
         self._hardware_profile = hardware_profile
@@ -250,7 +257,7 @@ class GraphStore:
         self._in_transaction = False
         if is_new:
             self._apply_schema()
-        else:
+        elif db_path not in GraphStore._migrated_db_paths:
             # v13 full-architecture plan, IPS containment unification: schema.sql
             # is ONLY ever executescript()'d for a brand-new db file (`is_new`
             # above) -- an EXISTING db (e.g. .94's real, already-populated
@@ -258,10 +265,28 @@ class GraphStore:
             # after a deployment's first run would never actually reach that
             # deployment. containment_actions' own CREATE TABLE/INDEX statements
             # already use IF NOT EXISTS specifically so this lightweight migration
-            # step is safe to run unconditionally here too -- a no-op on a db that
-            # already has it (including a freshly-created one, which already got it
-            # via _apply_schema() above), the actual migration on one that doesn't.
+            # step was ASSUMED safe to run unconditionally here too -- a no-op on
+            # a db that already has it.
+            #
+            # BUGFIX (found live 2026-09-22, "the query takes too long"): that
+            # no-op assumption held for a single long-lived writer, but
+            # graph_client.py's open_store() constructs a FRESH GraphStore (and
+            # so re-ran this DDL) on EVERY console API request. Each ALTER/CREATE
+            # still needs a real write-intent lock, and with the main pipeline
+            # process committing decisions/evidence every 1-4s plus the WAL
+            # having grown large, several concurrent console requests piled up
+            # here waiting out PRAGMA busy_timeout (10s) one after another --
+            # confirmed live via py-spy: 6+ threads simultaneously stuck at this
+            # exact call, /api/graph taking 40s+ to answer even limit=1. The
+            # actual schema only ever needs migrating once per process (nothing
+            # else in this same process alters it again mid-run) -- cached here,
+            # per db_path, so only the FIRST GraphStore built in a process's
+            # lifetime (still correctly migrating a freshly-restarted process
+            # after a real schema change) pays this cost; every request after
+            # that opens a plain, uncontended connection like the module
+            # docstring always assumed.
             self._migrate_existing_db()
+            GraphStore._migrated_db_paths.add(db_path)
 
     def _apply_schema(self) -> None:
         with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:

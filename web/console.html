@@ -1858,7 +1858,8 @@ function renderAlertsListView(){
     var results = state.alertsSearchResults;
     var searchRows = results.length
       ? results.map(function(r){
-          var devCell = '<div class="cell-title">'+esc(r.device_hostname || r.device_id)+'</div><div class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(r.device_id)+'</div>';
+          var devCell = '<div class="cell-title">'+esc(r.device_hostname || r.device_id)+'</div><div class="cell-mono" style="font-size:10.5px;color:var(--text-faint);">'+esc(r.device_id)+'</div>'
+            + '<button class="btn btn-ghost btn-sm" style="margin-top:4px;padding:1px 6px;font-size:10px;" onclick="app.viewAlertInGraph(\''+esc(r.device_id)+'\', event)">View in graph</button>';
           return '<tr class="row-clickable" onclick="app.selectDevice(\''+esc(r.device_id)+'\')">'
             + '<td class="cell-mono">'+fmtTime(r.timestamp)+'</td>'
             + '<td>'+devCell+'</td>'
