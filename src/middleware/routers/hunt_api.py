@@ -19,6 +19,7 @@ from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from middleware.humanize import label_evidence_type, label_hypothesis
 from core.state_guard import StateManager
+from middleware.state_client import get_cached_state_manager
 from argus.ops import threat_hunt, decision_replay
 
 router = APIRouter()
@@ -46,8 +47,10 @@ def devices_touching(destination: str = Query(..., min_length=1),
                       since_days: Optional[float] = Query(None, ge=0),
                       token: str = Depends(verify_token)):
     since = _since_from_days(since_days)
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-restarted-instance-per-request here was pure waste).
+    sm = get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
 
     with open_store() as store:
         if store is None:

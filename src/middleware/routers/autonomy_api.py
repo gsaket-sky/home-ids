@@ -34,6 +34,7 @@ from middleware.graph_client import open_store
 from argus.autotune.engine import TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
 from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR
 from core.state_guard import StateManager
+from middleware.state_client import get_cached_state_manager
 from middleware.humanize import resolve_device_hostname
 
 router = APIRouter()
@@ -150,9 +151,10 @@ def get_autonomy(limit: int = Query(50, ge=1, le=200), token: str = Depends(veri
 
 
 def _load_state_manager() -> StateManager:
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
-    return sm
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-restarted-instance-per-request here was pure waste).
+    return get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
 
 
 @router.get("/api/autonomy/devices")

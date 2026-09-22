@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from middleware.auth import verify_token, CONFIG, LOGGER
 from middleware.graph_client import open_store
 from core.state_guard import StateManager
+from middleware.state_client import get_cached_state_manager
 
 router = APIRouter()
 
@@ -39,9 +40,10 @@ TOP_DOMAINS_NOTE = (
 
 
 def _load_state_manager() -> StateManager:
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
-    return sm
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-restarted-instance-per-request here was pure waste).
+    return get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
 
 
 def _identity_dict(sm: StateManager, device_id: str) -> Optional[Dict[str, Any]]:

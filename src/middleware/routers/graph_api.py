@@ -60,6 +60,7 @@ from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from middleware.humanize import label_evidence_type, label_hypothesis, resolve_destination_info, resolve_device_hostname
 from core.state_guard import StateManager
+from middleware.state_client import get_cached_state_manager
 from argus.graph.store import AlertSearchScopeTooLarge
 
 router = APIRouter()
@@ -136,8 +137,10 @@ def get_graph(
         # evidence -- can pile up against one decision_id).
         alert_events = store.get_alert_events_by_decision_ids(decision_ids, cap_per_decision=ALERT_EVENTS_PER_DECISION_CAP)
 
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-reloaded-instance-per-request here was pure waste).
+    sm = get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
 
     nodes = []
     edges = []
@@ -339,8 +342,10 @@ def get_alerts(
     # one real gap a console-wide audit found; every other tab already
     # follows the hostname-primary/id-secondary convention). One StateManager
     # load for the whole page of results, not per-row.
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-reloaded-instance-per-request here was pure waste).
+    sm = get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
     for a in alerts:
         a["device_hostname"] = resolve_device_hostname(a.get("device_id"), sm)
     return {"alerts": alerts, "count": len(alerts)}
@@ -427,8 +432,10 @@ def search_alerts(
                     f"cap is {exc.cap}) -- narrow the time window and/or specify a device_id."
                 ),
             )
-    sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
-    sm.load_from_disk()
+    # Cached, mtime-invalidated -- see state_client.py's own docstring (chronic
+    # console latency, found live 2026-09-22: this endpoint is read-only, so a
+    # freshly-reloaded-instance-per-request here was pure waste).
+    sm = get_cached_state_manager(CONFIG.get("state_path", "state/ids_state.json"))
     for r in results:
         r["device_hostname"] = resolve_device_hostname(r.get("device_id"), sm)
     return {"results": results, "count": len(results)}
