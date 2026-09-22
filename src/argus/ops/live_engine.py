@@ -473,6 +473,76 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
             del _written_evidence_keys[device_id]
 
 
+def write_supplementary_decision(device_id: str, timestamp: float, new_evidence_v1: List,
+                                   decision: Dict[str, Any]) -> Optional[str]:
+    """For a decision computed OUTSIDE the main per-cycle evaluate() call above --
+    currently only pipeline.py's geofencing hard-stop re-evaluation, which
+    deliberately calls evaluate() WITHOUT device_id (see that call site's own
+    2026-08-27 comment) to avoid re-running evaluate()'s device_id-gated graph
+    injections a second time this cycle. Re-running those was never actually safe
+    to fix by just passing device_id: _inject_baseline_evidence() calls
+    BaselineEngine.score_metric(), which MUTATES the device's persistent Bayesian/
+    BOCPD posteriors on every call -- a second call in the same cycle would
+    double-count that cycle's own observation into the baseline model. This
+    function instead does ONLY the plain graph write (new evidence + one decision
+    row + hypothesis edges), with none of evaluate()'s read/injection side effects.
+
+    Found live 2026-09-22: a real geofencing HIGH alert (paperless/52a469cfd274,
+    Russia-blocklisted destination) fired correctly to Telegram but was completely
+    absent from the graph/console/Evidence-Graph/alert narrative, because the
+    original re-evaluation path never set decision["_graph_decision_id"] at all
+    (evaluate() only sets it when device_id is passed) -- so pipeline.py's whole
+    downstream alert_event/plain_explanation block silently no-op'd for every
+    geofencing-triggered alert. Caller is expected to set
+    decision["_graph_decision_id"] itself from this function's return value.
+
+    Same best-effort, content-key dedup (_written_evidence_keys, shared with
+    _write_graph() above) and "never raises, never affects the already-made
+    decision" contract as everywhere else in this module. Returns the new
+    decision_id, or None if there was nothing new to write."""
+    try:
+        fresh_v2 = _convert_active_evidence(new_evidence_v1, {})
+        written = _written_evidence_keys.setdefault(device_id, set())
+        new_v2 = [ev for ev in fresh_v2 if _content_key(ev) not in written]
+        if not new_v2:
+            return None
+        store = _get_graph_store()
+        with store.transaction():
+            for ev in new_v2:
+                store.insert_evidence(ev)
+            new_evidence_ids = [ev.evidence_id for ev in new_v2]
+            new_decision_id = store.insert_decision(
+                device_id=device_id, timestamp=timestamp,
+                state=decision["state"], decision_path=decision["decision_path"],
+                confidence=float(decision.get("threat_confidence", 0.0) or 0.0),
+                risk_score=float(decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0),
+                raw_payload=decision,
+                evidence_ids=new_evidence_ids,
+            )
+            try:
+                store.add_hypothesis_edges(
+                    new_decision_id, decision.get("hypotheses", {}),
+                    decision.get("explanation"), new_evidence_ids, timestamp,
+                )
+            except Exception as e:
+                LOGGER.warning(
+                    "Failed to write hypothesis edges for supplementary decision %r, "
+                    "device %r -- the live decision itself is already made and "
+                    "unaffected by this: %s", new_decision_id, device_id, e,
+                )
+        written.update(_content_key(ev) for ev in new_v2)
+        _last_decision_key[device_id] = (decision["state"], decision["decision_path"])
+        _last_decision_id[device_id] = new_decision_id
+        return new_decision_id
+    except Exception as e:
+        LOGGER.error(
+            "Failed to write supplementary decision to GraphStore for device %r -- "
+            "the live decision itself is already made and unaffected by this: %s",
+            device_id, e, exc_info=True,
+        )
+        return None
+
+
 def _dga_shape_key(domain: str) -> str:
     """Release 14, N4: normalizes a DGA-shaped domain into a coarse "generation
     shape" fingerprint -- the first label's length, its TLD, and its character-

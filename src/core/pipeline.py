@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from prometheus_client import start_http_server
 
 from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, ZEEK_NOTICE_TIER_SCORE_WEIGHT, ZEEK_NOTICE_EVIDENCE_TYPES
@@ -1881,6 +1881,15 @@ class EnginePipeline:
                     # dest_ips rather than a second Zeek query -- best-effort, never
                     # blocks the real decision (record_device_traffic()'s own contract).
                     argus_live_engine.record_device_traffic(dev_id, dest_ips, now=now)
+                    # Alert-trace graph gap fix (found live 2026-09-22, real "paperless"
+                    # geofencing alert missing from console/Evidence Graph): the
+                    # geofencing re-evaluation below deliberately calls evaluate()
+                    # without device_id, so it never sets decision["_graph_decision_id"]
+                    # itself -- collected here so the graph write can happen once,
+                    # after the loop, from the FINAL decision (not once per contacted
+                    # foreign IP, which would leave superseded decision rows behind for
+                    # no reason within the same cycle).
+                    geofencing_evidence_this_cycle: List[Evidence] = []
                     if self.geoip_engine and dest_ips:
                         for d_ip in dest_ips:
                             should_export = (d_ip not in state.geo_exported_ips) or (risk >= alert_threshold)
@@ -1912,7 +1921,9 @@ class EnginePipeline:
                                             # connected to most recently. domain=d_ip here, consumed by the
                                             # "Geofencing Policy Violation" branch below, same pattern as every
                                             # other hard-stop evidence type.
-                                            active_evidence.append(Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip))
+                                            geofencing_evidence_item = Evidence(type="geofencing_violation", source="geoip", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"Blocklisted Country: {country_code}", domain=d_ip)
+                                            active_evidence.append(geofencing_evidence_item)
+                                            geofencing_evidence_this_cycle.append(geofencing_evidence_item)
                                             # Force re-evaluate decision (V13 FAST CUTOVER: same engine
                                             # selection as the main call site above, kept consistent).
                                             # Deliberately NOT passed device_id/now here (Phase 1, v13
@@ -1935,6 +1946,13 @@ class EnginePipeline:
                                             factors = [{"name": decision["explanation"], "score": risk}]
                                 
                                     self.metrics_exporter.export_geoip_telemetry(geo_info, asn_info, risk=risk, features=features, alert_threshold=alert_threshold)
+
+                    if geofencing_evidence_this_cycle:
+                        supplementary_decision_id = argus_live_engine.write_supplementary_decision(
+                            dev_id, now, geofencing_evidence_this_cycle, decision,
+                        )
+                        if supplementary_decision_id:
+                            decision["_graph_decision_id"] = supplementary_decision_id
 
                     if not is_poisoned:
                         self.state_manager.update_baselines(state, features, now, window_seconds, current_risk=risk)
