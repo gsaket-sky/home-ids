@@ -127,6 +127,12 @@ CREATE TABLE IF NOT EXISTS containment_actions (
     action_id       TEXT PRIMARY KEY,
     device_id       TEXT NOT NULL REFERENCES devices(device_id),
     decision_id     TEXT REFERENCES decisions(decision_id),
+    -- Alert-trace graph (2026-09-22): links this action to the specific alert_event
+    -- that caused it -- a real FK instead of the timestamp/device-proximity guess
+    -- that was the only option before alert_events existed. Forward reference to a
+    -- table defined later in this file is fine -- SQLite resolves REFERENCES by
+    -- name at enforcement time, not CREATE TABLE time.
+    alert_event_id   TEXT REFERENCES alert_events(alert_event_id),
     action_type     TEXT NOT NULL CHECK (action_type IN
                        ('dns_block','tarpit','router_isolate','release','retry','dead_letter')),
     target          TEXT,               -- domain or MAC, whichever action_type implies
@@ -302,6 +308,64 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     overall_pass              INTEGER NOT NULL DEFAULT 0    -- 0/1, the autotuner's actual gate
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
+
+-- Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): one row
+-- per qualifying cycle (state crosses SUSPICIOUS+), FIRED or SUPPRESSED_AUTONOMOUS
+-- or AWAITING_APPROVAL, never overwritten -- unlike `decisions`, which dedupes on
+-- (state, decision_path) and gets its own raw_payload_json overwritten by a
+-- recurring incident, this is append-only so every individual firing/suppression
+-- survives. Deliberately NOT routed through the generic `edges` table (see the
+-- plan doc's "Schema-safety refinement" section): edges' relation/kind CHECK
+-- constraints would need a live 8M+-row table rebuild to widen, for no benefit --
+-- this is a structured 1:1-with-its-decision relationship, exactly the same shape
+-- containment_actions already established a direct-FK precedent for.
+CREATE TABLE IF NOT EXISTS alert_events (
+    alert_event_id       TEXT PRIMARY KEY,
+    decision_id           TEXT NOT NULL REFERENCES decisions(decision_id),
+    device_id             TEXT NOT NULL REFERENCES devices(device_id),
+    incident_id            TEXT REFERENCES incidents(incident_id),
+    timestamp               REAL NOT NULL,
+    status                  TEXT NOT NULL CHECK (status IN
+                               ('FIRED','SUPPRESSED_AUTONOMOUS','AWAITING_APPROVAL')),
+    fp_verdict               TEXT,
+    fp_confidence             REAL,
+    fp_stage                  TEXT,
+    explanation_text           TEXT,
+    explanation_embedding       BLOB,          -- 384 x float32, NULL until embedded
+    autotune_state_json          TEXT NOT NULL DEFAULT '{}',  -- active tunables + change_id/scope this cycle
+    alert_payload_json            TEXT NOT NULL DEFAULT '{}',
+    backfilled                    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_alert_events_device_ts ON alert_events(device_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_alert_events_ts ON alert_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_alert_events_decision ON alert_events(decision_id);
+CREATE INDEX IF NOT EXISTS idx_alert_events_incident ON alert_events(incident_id);
+
+-- One row per ongoing incident (replaces the bare incident_id string alert_payload
+-- used to carry with no queryable entity behind it). Updated in place as new
+-- alert_events belong_to it -- occurrence_count/last_seen accumulate, never a
+-- fresh row per occurrence.
+CREATE TABLE IF NOT EXISTS incidents (
+    incident_id          TEXT PRIMARY KEY,
+    device_id              TEXT NOT NULL REFERENCES devices(device_id),
+    first_seen              REAL NOT NULL,
+    last_seen                REAL NOT NULL,
+    occurrence_count          INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_incidents_device_last_seen ON incidents(device_id, last_seen);
+
+-- One row per operator response to an alert_event (Telegram approve/release/
+-- revoke/immunize/block tap). Previously had ZERO durable trace anywhere --
+-- alerts.py's in-memory "published_alert" ledger is process-lifetime only.
+CREATE TABLE IF NOT EXISTS operator_actions (
+    operator_action_id    TEXT PRIMARY KEY,
+    alert_event_id           TEXT NOT NULL REFERENCES alert_events(alert_event_id),
+    action                    TEXT NOT NULL CHECK (action IN
+                                 ('approve','release','revoke','immunize','block')),
+    timestamp                  REAL NOT NULL,
+    result_json                  TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_operator_actions_alert_event ON operator_actions(alert_event_id);
 
 -- Seed row: the explicit "no real target" sentinel evidence rows use instead of NULL.
 INSERT INTO destinations (destination_id, kind, first_seen, last_seen, metadata_json)

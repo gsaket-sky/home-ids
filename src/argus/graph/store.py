@@ -166,6 +166,37 @@ _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW = 100
 # under it regardless of which SQLite build a given deployment ships.
 _SQLITE_DELETE_BATCH_SIZE = 400
 
+# Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): decisions
+# and alert_events share the SAME retention window -- an alert_event without its
+# parent decision is meaningless, so they're pruned together, in one job. Closes a
+# real, pre-existing gap: schema.sql documents a "1 year (180 days pi_8gb), then
+# archived" policy for decisions, but no prune_decisions() of any kind existed
+# before this constant + prune_decisions_and_alerts() -- decisions grew unbounded
+# (45,650+ rows and still growing on .94's real deployment, confirmed by grepping
+# this file for prune_decisions/archive_decisions before adding either).
+DEFAULT_DECISION_RETENTION_DAYS = 365.0
+_DECISION_RETENTION_DAYS_BY_PROFILE: Dict[str, float] = {
+    "pi_8gb": 180.0,
+    "x86_16gb": DEFAULT_DECISION_RETENTION_DAYS,
+    "custom": DEFAULT_DECISION_RETENTION_DAYS,
+}
+
+# Bounded semantic search (plan doc's "Semantic search (bounded add-on)" section):
+# every query MUST supply a scope filter (time window and/or device_id) BEFORE
+# embeddings are touched, and the scoped candidate set is hard-capped -- an honest
+# "narrow your search" error past this, never a silent partial-result truncation.
+ALERT_SEARCH_CANDIDATE_CAP = 5000
+
+
+class AlertSearchScopeTooLarge(Exception):
+    """Raised by search_alert_events_by_embedding() when the scoped candidate set
+    still exceeds ALERT_SEARCH_CANDIDATE_CAP -- the caller must narrow the query
+    (shorter time window and/or a device_id), never silently truncated."""
+    def __init__(self, candidate_count: int, cap: int):
+        self.candidate_count = candidate_count
+        self.cap = cap
+        super().__init__(f"{candidate_count} candidates exceeds cap of {cap} -- narrow the search")
+
 
 def _chunked(seq: List[Any], size: int):
     for i in range(0, len(seq), size):
@@ -359,8 +390,59 @@ class GraphStore:
                 overall_pass              INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
+
+            -- Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22) --
+            -- kept in exact sync with schema.sql's own copies; extend both together.
+            CREATE TABLE IF NOT EXISTS alert_events (
+                alert_event_id       TEXT PRIMARY KEY,
+                decision_id           TEXT NOT NULL REFERENCES decisions(decision_id),
+                device_id             TEXT NOT NULL REFERENCES devices(device_id),
+                incident_id            TEXT REFERENCES incidents(incident_id),
+                timestamp               REAL NOT NULL,
+                status                  TEXT NOT NULL CHECK (status IN
+                                           ('FIRED','SUPPRESSED_AUTONOMOUS','AWAITING_APPROVAL')),
+                fp_verdict               TEXT,
+                fp_confidence             REAL,
+                fp_stage                  TEXT,
+                explanation_text           TEXT,
+                explanation_embedding       BLOB,
+                autotune_state_json          TEXT NOT NULL DEFAULT '{}',
+                alert_payload_json            TEXT NOT NULL DEFAULT '{}',
+                backfilled                    INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_alert_events_device_ts ON alert_events(device_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_ts ON alert_events(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_decision ON alert_events(decision_id);
+            CREATE INDEX IF NOT EXISTS idx_alert_events_incident ON alert_events(incident_id);
+
+            CREATE TABLE IF NOT EXISTS incidents (
+                incident_id          TEXT PRIMARY KEY,
+                device_id              TEXT NOT NULL REFERENCES devices(device_id),
+                first_seen              REAL NOT NULL,
+                last_seen                REAL NOT NULL,
+                occurrence_count          INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_incidents_device_last_seen ON incidents(device_id, last_seen);
+
+            CREATE TABLE IF NOT EXISTS operator_actions (
+                operator_action_id    TEXT PRIMARY KEY,
+                alert_event_id           TEXT NOT NULL REFERENCES alert_events(alert_event_id),
+                action                    TEXT NOT NULL CHECK (action IN
+                                             ('approve','release','revoke','immunize','block')),
+                timestamp                  REAL NOT NULL,
+                result_json                  TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_operator_actions_alert_event ON operator_actions(alert_event_id);
             """
         )
+        # alert_event_id on containment_actions predates this column on any db created
+        # before 2026-09-22 -- CREATE TABLE IF NOT EXISTS above no-ops on an existing
+        # table regardless of columns, same ADD-COLUMN idiom as threshold_history.device_type
+        # below (must also run, and commit, before any future index references this column).
+        try:
+            self._conn.execute("ALTER TABLE containment_actions ADD COLUMN alert_event_id TEXT REFERENCES alert_events(alert_event_id)")
+        except sqlite3.OperationalError:
+            pass  # column already exists
         # 2026-09-16, per-device/category autotuning plan: threshold_history predates
         # this column -- CREATE TABLE IF NOT EXISTS above is a no-op on a db that
         # already has the table (regardless of which columns it has), so an existing
@@ -750,6 +832,238 @@ class GraphStore:
         )
         self._maybe_commit()
         return True
+
+    # --- alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22) ---
+
+    def upsert_hypothesis(self, name: str, kind: str) -> str:
+        """Catalog row, one per hypothesis TYPE (e.g. 'PEER_COHORT_DEVIATION'),
+        reused across every decision that ever names it -- not one row per
+        decision (confirmed feasible against real data: decision.get("hypotheses")
+        already carries {"attack": {"name": ..., "score": ...}, "benign": {...}}
+        every cycle, so the catalog just needs one row per distinct name seen,
+        never hardcoded). `name` IS the hypothesis_id (schema.sql's own PK shape,
+        e.g. 'NETWORK_INTRUSION') -- upserting on that makes repeat calls
+        idempotent by construction, no separate existence check needed. `kind` is
+        'attack' or 'benign' (schema.sql's own CHECK)."""
+        self._conn.execute(
+            "INSERT INTO hypotheses (hypothesis_id, kind, version) VALUES (?, ?, 1) "
+            "ON CONFLICT(hypothesis_id) DO NOTHING",
+            (name, kind),
+        )
+        self._maybe_commit()
+        return name
+
+    def add_hypothesis_edges(self, decision_id: str, hypotheses: Dict[str, Any],
+                               winning_name: Optional[str], evidence_ids: List[str],
+                               timestamp: float) -> None:
+        """Writes the hypothesis layer of the trace graph insert_decision() alone
+        never populated (winning_hypothesis_id is confirmed 0/45,650 rows on
+        .94's real graph -- graph_api.py's own docstring). One 'corroborates'
+        edge per hypothesis this cycle's HEE actually scored (typically
+        {'attack': {...}, 'benign': {...}}, the SAME dict decision.get(
+        "hypotheses") already carries every cycle -- no new computation), with
+        {"won": bool, "score": ...} in the edge's own metadata_json distinguishing
+        the winner from a considered-but-lost hypothesis. Reuses the already-
+        allowed 'corroborates' relation (confirmed unused as a real written edge
+        anywhere else in this codebase -- only mentioned in an unrelated
+        docstring about a different table) rather than adding new CHECK values,
+        which would force a rebuild of the live 8M+-row `edges` table for no
+        benefit (see the plan doc's "Schema-safety refinement" section).
+
+        `winning_name` is decisions.raw_payload_json["explanation"] -- the SAME
+        field graph_api.py's get_graph() already reads back to recover the
+        winner client-side; reused here, not a second convention.
+
+        Also links `evidence_ids` (the SAME capped list insert_decision() already
+        received) to the WINNING hypothesis via 'supports' (already-allowed,
+        zero schema risk). Deliberately NOT attempted for the losing hypothesis:
+        decision_engine.py's HEE does not compute a per-evidence-item hypothesis
+        attribution anywhere today (confirmed by reading it) -- an evidence->
+        losing-hypothesis 'contradicts' edge would be inventing data this
+        codebase doesn't actually have, not recovering it.
+
+        Best-effort BY THE CALLER, same convention as update_decision_payload()
+        -- this method itself still raises on a real DB error."""
+        for key, h in (hypotheses or {}).items():
+            if not isinstance(h, dict):
+                continue
+            name = h.get("name")
+            if not name:
+                continue
+            kind = key if key in ("attack", "benign") else "attack"
+            self.upsert_hypothesis(name, kind)
+            won = bool(winning_name) and name == winning_name
+            self.add_edge("hypothesis", name, "decision", decision_id, "corroborates",
+                           timestamp, metadata={"won": won, "score": h.get("score")})
+            if won:
+                for eid in evidence_ids:
+                    self.add_edge("evidence", eid, "hypothesis", name, "supports", timestamp)
+
+    def upsert_incident(self, incident_id: str, device_id: str, timestamp: float) -> None:
+        """One row per ongoing incident (schema.sql's own `incidents` table) --
+        replaces the bare incident_id string alert_payload used to carry with no
+        queryable entity behind it. Upserts occurrence_count/last_seen in place,
+        the same INSERT...ON CONFLICT pattern upsert_device() already
+        established, rather than one fresh row per occurrence."""
+        self._conn.execute(
+            "INSERT INTO incidents (incident_id, device_id, first_seen, last_seen, occurrence_count) "
+            "VALUES (?, ?, ?, ?, 1) "
+            "ON CONFLICT(incident_id) DO UPDATE SET "
+            "last_seen = excluded.last_seen, occurrence_count = occurrence_count + 1",
+            (incident_id, device_id, timestamp, timestamp),
+        )
+        self._maybe_commit()
+
+    def insert_alert_event(self, decision_id: str, device_id: str, timestamp: float,
+                             status: str, incident_id: Optional[str] = None,
+                             fp_verdict: Optional[str] = None, fp_confidence: Optional[float] = None,
+                             fp_stage: Optional[str] = None, explanation_text: Optional[str] = None,
+                             explanation_embedding: Optional[bytes] = None,
+                             autotune_state: Optional[Dict[str, Any]] = None,
+                             alert_payload: Optional[Dict[str, Any]] = None,
+                             backfilled: bool = False) -> str:
+        """One row per qualifying cycle (state crosses SUSPICIOUS+), FIRED,
+        SUPPRESSED_AUTONOMOUS, or AWAITING_APPROVAL -- append-only, NEVER
+        overwritten (unlike decisions.raw_payload_json, which a recurring
+        incident's repeated update_decision_payload() calls DO overwrite --
+        confirmed live: 71,669 alerts.json lines vs 45,650 total decision rows,
+        proof most individual firings/suppressions were never durable in the
+        graph before this table existed). This is what replaces alerts.json's
+        per-cycle history going forward. Returns the generated alert_event_id."""
+        alert_event_id = uuid.uuid4().hex
+        if incident_id:
+            self.upsert_incident(incident_id, device_id, timestamp)
+        self._conn.execute(
+            "INSERT INTO alert_events (alert_event_id, decision_id, device_id, incident_id, "
+            "timestamp, status, fp_verdict, fp_confidence, fp_stage, explanation_text, "
+            "explanation_embedding, autotune_state_json, alert_payload_json, backfilled) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (alert_event_id, decision_id, device_id, incident_id, timestamp, status,
+             fp_verdict, fp_confidence, fp_stage, explanation_text, explanation_embedding,
+             json.dumps(autotune_state or {}), json.dumps(alert_payload or {}), int(backfilled)),
+        )
+        self._maybe_commit()
+        return alert_event_id
+
+    def insert_operator_action(self, alert_event_id: str, action: str,
+                                 timestamp: Optional[float] = None,
+                                 result: Optional[Dict[str, Any]] = None) -> str:
+        """One row per Telegram tap (approve/release/revoke/immunize/block)
+        against a specific alert_event -- previously had ZERO durable trace
+        anywhere (alerts.py's "published_alert" ledger is in-memory,
+        process-lifetime only, lost on every restart). Returns the generated
+        operator_action_id."""
+        operator_action_id = uuid.uuid4().hex
+        ts = timestamp if timestamp is not None else time.time()
+        self._conn.execute(
+            "INSERT INTO operator_actions (operator_action_id, alert_event_id, action, timestamp, result_json) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (operator_action_id, alert_event_id, action, ts, json.dumps(result or {})),
+        )
+        self._maybe_commit()
+        return operator_action_id
+
+    def link_containment_action(self, action_id: str, alert_event_id: str) -> bool:
+        """Best-effort: links an already-written containment_actions row to its
+        alert_event after the fact (insert_containment_action() itself doesn't
+        take alert_event_id -- IPSMitigator's own call sites don't always have
+        one in scope at write time). Returns False if action_id doesn't exist."""
+        cur = self._conn.execute(
+            "UPDATE containment_actions SET alert_event_id = ? WHERE action_id = ?",
+            (alert_event_id, action_id),
+        )
+        self._maybe_commit()
+        return cur.rowcount > 0
+
+    def get_alert_events(self, limit: int = 50, offset: int = 0, device_id: Optional[str] = None,
+                           since: Optional[float] = None, until: Optional[float] = None,
+                           status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Paginated, indexed read over alert_events (idx_alert_events_device_ts /
+        idx_alert_events_ts) -- replaces _alert_log_utils.py's bounded-backward-
+        scan hack over alerts.json's 170MB+ NDJSON file with a real indexed
+        query, for the console's fired/suppressed alert view."""
+        clauses: List[str] = []
+        params: List[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        if since is not None:
+            clauses.append("timestamp >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM alert_events {where} ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d.pop("explanation_embedding", None)  # binary vector, never serialized to the API
+            for col in ("autotune_state_json", "alert_payload_json"):
+                try:
+                    d[col[:-5]] = json.loads(d.pop(col) or "{}")
+                except (TypeError, ValueError):
+                    d[col[:-5]] = {}
+            out.append(d)
+        return out
+
+    def search_alert_events_by_embedding(self, query_vector: bytes, since: float,
+                                           until: Optional[float] = None,
+                                           device_id: Optional[str] = None,
+                                           limit: int = 20) -> List[Dict[str, Any]]:
+        """Cosine-similarity search over alert_events.explanation_embedding,
+        scoped by a MANDATORY time window (`since` is a required parameter -- no
+        unscoped "search everything" code path exists, per the plan doc's
+        bounding rules) plus an optional device_id. Brute-force numpy over the
+        scoped candidate set -- deliberately not an ANN index (sqlite-vec/FAISS):
+        at this project's real scale a bounded brute-force scan is simpler and,
+        per the plan doc's own resource analysis, well within the Pi-8GB budget.
+        Raises AlertSearchScopeTooLarge if the scoped candidate count exceeds
+        ALERT_SEARCH_CANDIDATE_CAP -- the caller must narrow the query (shorter
+        window and/or a device_id), never a silent partial-result truncation."""
+        import numpy as np
+        clauses = ["explanation_embedding IS NOT NULL", "timestamp >= ?"]
+        params: List[Any] = [since]
+        if until is not None:
+            clauses.append("timestamp <= ?")
+            params.append(until)
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        where = " AND ".join(clauses)
+
+        count = self._conn.execute(
+            f"SELECT COUNT(*) AS c FROM alert_events WHERE {where}", params,
+        ).fetchone()["c"]
+        if count > ALERT_SEARCH_CANDIDATE_CAP:
+            raise AlertSearchScopeTooLarge(count, ALERT_SEARCH_CANDIDATE_CAP)
+        if count == 0:
+            return []
+
+        rows = self._conn.execute(
+            f"SELECT alert_event_id, device_id, timestamp, status, explanation_text, "
+            f"explanation_embedding FROM alert_events WHERE {where}", params,
+        ).fetchall()
+        q = np.frombuffer(query_vector, dtype=np.float32)
+        q_norm = q / (np.linalg.norm(q) or 1.0)
+        mat = np.stack([np.frombuffer(r["explanation_embedding"], dtype=np.float32) for r in rows])
+        mat_norm = mat / (np.linalg.norm(mat, axis=1, keepdims=True) + 1e-9)
+        scores = mat_norm @ q_norm
+        order = np.argsort(-scores)[:limit]
+        return [
+            {
+                "alert_event_id": rows[i]["alert_event_id"], "device_id": rows[i]["device_id"],
+                "timestamp": rows[i]["timestamp"], "status": rows[i]["status"],
+                "explanation_text": rows[i]["explanation_text"], "similarity": float(scores[i]),
+            }
+            for i in order
+        ]
 
     # --- containment actions (v13 full-architecture plan, IPS unification) -----
 
@@ -1770,6 +2084,89 @@ class GraphStore:
         cur = self._conn.execute("DELETE FROM device_destinations WHERE last_seen < ?", (cutoff,))
         self._maybe_commit()
         return cur.rowcount
+
+    def prune_decisions_and_alerts(self, older_than_days: float = DEFAULT_DECISION_RETENTION_DAYS,
+                                     now: Optional[float] = None) -> Dict[str, int]:
+        """Deletes decisions (and everything the alert-trace graph hangs off
+        them -- operator_actions, alert_events, hypothesis/evidence edges
+        pointing at the decision) older than the cutoff.
+
+        Found genuinely necessary, not speculative: no prune_decisions() of any
+        kind existed in this file before this method -- schema.sql documents a
+        "1 year (180 days pi_8gb), then archived" policy that was never actually
+        enforced (confirmed by grep before writing this), so decisions grew
+        unbounded (45,650+ rows and still growing, .94's real deployment).
+        alert_events shares this SAME retention window rather than getting its
+        own clock, because an alert_event without its parent decision is
+        meaningless -- see Documentation/ALERT_TRACE_GRAPH_PLAN.md's "Bounded
+        growth" section.
+
+        FK-safe delete order (PRAGMA foreign_keys = ON, so children must go
+        first): operator_actions -> alert_events -> hypothesis/evidence edges
+        referencing the decision -> the decision row itself. containment_actions
+        rows are NEVER deleted here (schema.sql's own documented policy: "no
+        automated retention yet... row count is inherently small" -- a hardware
+        block is real audit history independent of how long the decision that
+        triggered it is kept) -- instead their decision_id/alert_event_id FKs are
+        nulled so the row survives detached, the same pattern already used for
+        merged-device tombstoning elsewhere in this file. incidents are cleaned
+        up last, only once NO alert_event references them any more (an incident
+        can legitimately span both sides of the cutoff while it's still being
+        pruned incrementally). Returns a dict of per-table deleted counts."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        deleted = {"decisions": 0, "alert_events": 0, "operator_actions": 0, "edges": 0, "incidents": 0}
+        with self.transaction():
+            decision_rows = self._conn.execute(
+                "SELECT decision_id FROM decisions WHERE timestamp < ?", (cutoff,),
+            ).fetchall()
+            if not decision_rows:
+                return deleted
+            decision_ids = [r["decision_id"] for r in decision_rows]
+
+            for chunk in _chunked(decision_ids, _SQLITE_DELETE_BATCH_SIZE):
+                placeholders = ",".join("?" * len(chunk))
+
+                alert_event_rows = self._conn.execute(
+                    f"SELECT alert_event_id FROM alert_events WHERE decision_id IN ({placeholders})", chunk,
+                ).fetchall()
+                alert_event_ids = [r["alert_event_id"] for r in alert_event_rows]
+                for ae_chunk in _chunked(alert_event_ids, _SQLITE_DELETE_BATCH_SIZE):
+                    ae_placeholders = ",".join("?" * len(ae_chunk))
+                    cur = self._conn.execute(
+                        f"DELETE FROM operator_actions WHERE alert_event_id IN ({ae_placeholders})", ae_chunk,
+                    )
+                    deleted["operator_actions"] += cur.rowcount
+                    self._conn.execute(
+                        f"UPDATE containment_actions SET alert_event_id = NULL "
+                        f"WHERE alert_event_id IN ({ae_placeholders})", ae_chunk,
+                    )
+                    cur = self._conn.execute(
+                        f"DELETE FROM alert_events WHERE alert_event_id IN ({ae_placeholders})", ae_chunk,
+                    )
+                    deleted["alert_events"] += cur.rowcount
+
+                self._conn.execute(
+                    f"UPDATE containment_actions SET decision_id = NULL WHERE decision_id IN ({placeholders})",
+                    chunk,
+                )
+                cur = self._conn.execute(
+                    f"DELETE FROM edges WHERE "
+                    f"(src_kind = 'decision' AND src_id IN ({placeholders})) OR "
+                    f"(dst_kind = 'decision' AND dst_id IN ({placeholders}))",
+                    chunk + chunk,
+                )
+                deleted["edges"] += cur.rowcount
+                cur = self._conn.execute(
+                    f"DELETE FROM decisions WHERE decision_id IN ({placeholders})", chunk,
+                )
+                deleted["decisions"] += cur.rowcount
+
+            cur = self._conn.execute(
+                "DELETE FROM incidents WHERE incident_id NOT IN "
+                "(SELECT DISTINCT incident_id FROM alert_events WHERE incident_id IS NOT NULL)"
+            )
+            deleted["incidents"] = cur.rowcount
+        return deleted
 
     def prune_orphaned_device_baselines(self) -> int:
         """Deletes device_baselines rows whose device_id has since been merged
