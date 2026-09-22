@@ -1,7 +1,12 @@
 # Alert Trace Graph Plan
 
-Status: **PLANNED (2026-09-22)** — design agreed in conversation, nothing implemented
-yet. Written in response to: "if we ignore alerts.json's history and consider the
+Status: **PHASES 1-6 SHIPPED + LIVE-VERIFIED ON .94 (2026-09-22)** — schema,
+pipeline wiring (hypothesis edges, alert_events, autotune-state capture,
+operator_actions for immunize), bounded-search embeddings, retention/pruning, the
+two new API endpoints, and the console's new Alerts sub-view are all deployed and
+confirmed working against real production data (see "Live verification" section
+near the end). Phase 8 (backfilling `alerts.json`'s existing history) is NOT yet
+done. Written in response to: "if we ignore alerts.json's history and consider the
 new architecture, if we would have implemented it afresh how will it look like...
 end to end trace in evidence graph for every entry from now on:
 device-evidence-hypothesis-decision-alerts-suppressed... the graph db should follow
@@ -413,3 +418,40 @@ are always distinguishable from real live ones; never deletes or modifies
 - Backfill: attempt it wherever the data supports it (`alert_events`, `incidents`,
   hypothesis edges — all confirmed feasible against real data); accept the gap for
   `operator_action` and exact `containment_action` linkage on historical rows only.
+
+## Live verification (2026-09-22)
+
+Every phase below was deployed to `.94` (git pull + `soc.service` restart) and
+checked against the real, live production database — not just local tests.
+
+- **Schema migration**: ran against a `.backup`-taken copy of the real 969MB live
+  db first (969MB, 45,659 decisions, 545,587 edges) — completed in 0.00s (all
+  `IF NOT EXISTS`/`ADD COLUMN`, no table rebuild), existing data byte-for-byte
+  unaffected. Confirmed the SAME result against the actual live db after deploy.
+- **Pipeline wiring**: `soc.service` restarted 3 times across the rollout
+  (schema → pipeline wiring → embeddings/API/console), zero crashes each time
+  (`NRestarts=0`). Within minutes of the pipeline-wiring deploy, real rows
+  appeared: 21 `alert_events`, 15 `incidents`, 94 hypothesis `corroborates` edges
+  from genuine live traffic (multiple real devices — a laptop, a phone, a Fire TV
+  — hitting PEER_COHORT_DEVIATION/NETWORK_INTRUSION hypotheses).
+- **Autotune-state capture**: a real alert_event's `autotune_state_json` showed
+  `hard_stop_candidate_sensitivity: 0.795` — a genuinely active per-device
+  autotuner override, not the 0.8 hardcoded default — confirming the
+  autonomous-behavior-traceability requirement actually works, not just compiles.
+- **Embeddings**: the newest rows right after a restart showed `NULL` (written in
+  the ~9-second gap between process start and the FastEmbed background loader
+  finishing — expected, graceful degradation, not a bug); confirmed the model
+  loads successfully from `journalctl` output.
+- **API endpoints**: curled directly against `.94` (`127.0.0.1:8010`, which
+  bypasses token auth for loopback requests per `middleware/auth.py`).
+  `/api/graph/alerts` returned real, full alert records including nested
+  `alert_payload`/`autotune_state`. `/api/graph/alerts/search?q=peer+cohort+deviation`
+  correctly matched real embedded rows with 0.965 cosine similarity.
+- **Console**: fetched the deployed `/console` page directly and confirmed the new
+  JS functions (`renderAlertsListView`, `setGraphSubView`, `graphSubViewToggle`)
+  are present and intact in the served file. **Not verified in an actual browser**
+  — no browser tooling is available in this environment, so click-through/visual
+  behavior of the new Alerts sub-view is unconfirmed; only the served source and
+  the API responses it calls are confirmed correct.
+
+Not yet done: Phase 8 (the `alerts.json` history backfill script).
