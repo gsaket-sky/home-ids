@@ -1166,6 +1166,17 @@ class EnginePipeline:
         safe_ips = set(self.config.get("safe_ips", []))
         safe_patterns = {str(p).lower().strip() for p in self.config.get("safe_host_patterns", []) if str(p).strip()}
 
+        # 2026-09-23 (live incident): must be called ONCE here, before the
+        # per-device loop -- export_device_telemetry() below calls into
+        # MetricsExporter's stale-label purge for every device in this loop,
+        # and each of those used to re-scan every Prometheus metric's full
+        # label set from scratch (O(devices) work x every device = real
+        # O(devices^2) per cycle). This primes one shared per-cycle cache
+        # instead. See metrics_sync.py's own __init__ comment for the full
+        # correctness argument (why a per-cycle reset, not an incremental
+        # invalidate-on-remove-only cache, is what keeps this safe).
+        self.metrics_exporter.begin_metrics_cycle()
+
         for dev_id in self.state_manager.get_all_device_ids():
             try:
                 # ─── PHASE 1: Snapshot state data (short lock window) ───────────────────

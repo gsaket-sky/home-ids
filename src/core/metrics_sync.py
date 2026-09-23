@@ -115,13 +115,58 @@ class MetricsExporter:
         # not security-critical state, so losing one transition across a restart is fine.
         self._last_poisoned: Dict[str, bool] = {}
         self._last_probation: Dict[str, bool] = {}
+        # 2026-09-23 (live incident, py-spy-confirmed): _get_metric_keys() calls
+        # metric.collect() -- a full scan of EVERY currently-registered label
+        # combination for that metric, across every device -- and pipeline.py's
+        # _step() calls the *_purge_stale_*() methods below once PER DEVICE,
+        # every cycle. That's O(devices) work inside an O(devices) loop: real
+        # O(devices^2) work per cycle, times ~50 metrics in _DEVICE_GAUGES,
+        # caught live stalling the main detection loop for 15-20s. Caching each
+        # metric's collect() result for the duration of one export cycle turns
+        # this into one real scan per metric per cycle (O(devices)) instead of
+        # one per device (O(devices^2)) -- network/install-agnostic, no
+        # assumption about device count or naming. Cleared by
+        # begin_metrics_cycle(), which pipeline.py's _step() calls once before
+        # the per-device loop starts (not per device) -- so a label that
+        # becomes stale mid-cycle is caught on the VERY NEXT cycle (~2s later),
+        # never permanently missed the way an incrementally-patched cache
+        # (invalidated only on removal, not on every new .labels().set() call
+        # scattered across ~50 call sites) could silently regress into exactly
+        # the unbounded-label-leak bug this file was already patched for once
+        # (see the killchain_phase_metric comment on _DEVICE_GAUGES above).
+        self._metric_keys_cache: Dict[int, set] = {}
 
-    def _get_metric_keys(self, metric) -> list:
-        keys = []
+    def begin_metrics_cycle(self) -> None:
+        """Call once per detection cycle, before exporting any device's
+        telemetry -- NOT once per device. See the cache comment in __init__."""
+        self._metric_keys_cache = {}
+
+    def _get_metric_keys(self, metric) -> set:
+        cached = self._metric_keys_cache.get(id(metric))
+        if cached is not None:
+            return cached
+        keys = set()
         for mf in metric.collect():
             for sample in mf.samples:
-                keys.append(tuple(sample.labels[l] for l in metric._labelnames))
-        return set(keys)
+                keys.add(tuple(sample.labels[l] for l in metric._labelnames))
+        self._metric_keys_cache[id(metric)] = keys
+        return keys
+
+    def _remove_and_uncache(self, metric, k: tuple) -> None:
+        """metric.remove(*k) plus keeping this cycle's cached key set for
+        `metric` consistent with the live registry -- without this, a
+        removal wouldn't be reflected in _get_metric_keys() for the REST of
+        this same cycle (the cache is only refreshed at the next
+        begin_metrics_cycle()), so a later caller in the same cycle checking
+        the same metric would see a key that's already gone from Prometheus
+        itself."""
+        try:
+            metric.remove(*k)
+        except KeyError:
+            return
+        cached = self._metric_keys_cache.get(id(metric))
+        if cached is not None:
+            cached.discard(k)
 
     def remove_device_metric_labels(self, dev_id: str, hostname: str, device_type: str, keep_safe_flag: bool = False) -> None:
         if not dev_id:
@@ -135,10 +180,7 @@ class MetricsExporter:
             try:
                 keys_to_remove = [k for k in self._get_metric_keys(metric) if k[0] == str_id]
                 for k in keys_to_remove:
-                    try:
-                        metric.remove(*k)
-                    except KeyError:
-                        pass
+                    self._remove_and_uncache(metric, k)
             except Exception as exc:
                 LOGGER.debug("Could not purge internal metric label for dev_id %s: %s", str_id, exc)
 
@@ -150,10 +192,7 @@ class MetricsExporter:
             try:
                 stale_keys = [k for k in self._get_metric_keys(metric) if k[0] == str_dev_id and k[1] != current_host]
                 for k in stale_keys:
-                    try:
-                        metric.remove(*k)
-                    except KeyError:
-                        pass
+                    self._remove_and_uncache(metric, k)
             except Exception:
                 pass
 
@@ -164,10 +203,7 @@ class MetricsExporter:
             # top_domain_risk_metric has labels: device, hostname, device_type, domain
             stale_keys = [k for k in self._get_metric_keys(top_domain_risk_metric) if k[0] == str_dev_id and (k[1] != current_host or k[3] not in active_domains)]
             for k in stale_keys:
-                try:
-                    top_domain_risk_metric.remove(*k)
-                except KeyError:
-                    pass
+                self._remove_and_uncache(top_domain_risk_metric, k)
         except Exception:
             pass
 
@@ -176,28 +212,26 @@ class MetricsExporter:
             valid_blocks = set(ips_state.get("blocked_domains", {}).keys())
             stale_blocks = [k for k in self._get_metric_keys(ips_active_blocks_gauge) if k[2] not in valid_blocks]
             for k in stale_blocks:
-                try: ips_active_blocks_gauge.remove(*k)
-                except KeyError: pass
+                self._remove_and_uncache(ips_active_blocks_gauge, k)
 
             valid_retries = set(ips_state.get("retry_queue", {}).keys())
             stale_retries = [k for k in self._get_metric_keys(ips_queue_status_gauge) if k[2] not in valid_retries]
             for k in stale_retries:
-                try: ips_queue_status_gauge.remove(*k)
-                except KeyError: pass
+                self._remove_and_uncache(ips_queue_status_gauge, k)
 
             valid_dead = set(ips_state.get("dead_letter", {}).keys())
             stale_dead = [k for k in self._get_metric_keys(ips_dead_letter_gauge) if k[2] not in valid_dead]
             for k in stale_dead:
-                try: ips_dead_letter_gauge.remove(*k)
-                except KeyError: pass
-                
+                self._remove_and_uncache(ips_dead_letter_gauge, k)
+
             valid_tarpit_macs = {meta.get("mac") for meta in ips_state.get("tarpit_targets", {}).values()}
             stale_tarpits = [k for k in self._get_metric_keys(ips_tarpit_active) if k[2] not in valid_tarpit_macs]
             for k in stale_tarpits:
                 try:
                     ips_tarpit_active.labels(*k).set(0.0)
-                    ips_tarpit_active.remove(*k)
-                except KeyError: pass
+                except KeyError:
+                    pass
+                self._remove_and_uncache(ips_tarpit_active, k)
 
             valid_router_macs = set(ips_state.get("router_isolated_devices", {}).keys())
             stale_routers = [k for k in self._get_metric_keys(ips_router_isolated_active) if k[2] not in valid_router_macs]
