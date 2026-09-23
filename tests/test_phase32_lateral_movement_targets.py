@@ -158,6 +158,14 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 # Section C: pipeline.py source-guard -- lateral_threat (tarpit authorization)
 # ═══════════════════════════════════════════════════════════════════════════════════
 pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+_pipeline_src_flat = " ".join(pipeline_src.split())
+
+
+def _has_statements(*lines: str) -> bool:
+    """Consecutive statements in pipeline.py, independent of indentation -- the
+    reputation_target blocks moved one nesting level deeper when the
+    _dest_ip_is_real_host guard was added, which is not a behavior change."""
+    return " ".join(lines) in _pipeline_src_flat
 
 check("THE FIX: lateral_threat (which authorizes Layer-2 tarpit, bypassing the normal "
       "risk>=9.0 floor) now requires zeek_lateral_unique_targets to clear the "
@@ -320,13 +328,13 @@ check("THE CORE FIX: reputation_target is now tracked separately from top_domain
       "reputation_target = top_domain" in pipeline_src)
 check("THE CORE FIX: the ti_risk domain-loop updates reputation_target to the SPECIFIC "
       "domain that produced a new max, not just the running risk number",
-      "if cur_risk > ti_risk:\n                            ti_risk = cur_risk\n                            reputation_target = domain" in pipeline_src)
+      _has_statements("if cur_risk > ti_risk:", "ti_risk = cur_risk", "reputation_target = domain"))
 check("THE CORE FIX: the ti_risk IP lookup updates reputation_target to dest_ip when "
       "THAT'S what produced the max",
-      "if cur_ip_risk > ti_risk:\n                            ti_risk = cur_ip_risk\n                            reputation_target = dest_ip" in pipeline_src)
+      _has_statements("if cur_ip_risk > ti_risk:", "ti_risk = cur_ip_risk", "reputation_target = dest_ip"))
 check("THE CORE FIX: abuse_risk (always IP-sourced when nonzero) updates "
       "reputation_target to dest_ip when it exceeds the running best",
-      "if abuse_risk > _best_risk_seen:\n                    _best_risk_seen = abuse_risk\n                    reputation_target = dest_ip" in pipeline_src)
+      _has_statements("if abuse_risk > _best_risk_seen:", "_best_risk_seen = abuse_risk", "reputation_target = dest_ip"))
 check("THE CORE FIX: vt_risk tracks whether its max came from the IP or domain "
       "contribution, and updates reputation_target to whichever one actually won",
       "if vt_ip_risk >= vt_domain_risk:" in pipeline_src and "vt_risk_source = dest_ip" in pipeline_src and "vt_risk_source = top_domain" in pipeline_src)

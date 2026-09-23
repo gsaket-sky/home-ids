@@ -38,6 +38,9 @@ def isolated_overrides(tmp_path, monkeypatch):
     monkeypatch.setattr(config_api, "_AUDIT_LOG_PATH", audit_path)
     monkeypatch.setattr(CONFIG, "_overrides_path", overrides_path)
     snapshot = dict(CONFIG._config)
+    # _touch_sync_signal() writes next to state_path (where the pipeline watches for
+    # it); without this the test needs a state/ dir in the cwd and pokes a real one.
+    CONFIG._config["state_path"] = str(tmp_path / "ids_state.json")
     yield overrides_path, audit_path
     CONFIG._config.clear()
     CONFIG._config.update(snapshot)
