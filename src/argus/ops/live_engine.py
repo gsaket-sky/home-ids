@@ -866,44 +866,60 @@ def _inject_baseline_evidence(device_id: str, features: dict, fresh_v2: List, ts
         hour = time.localtime(ts).tm_hour
         new_evidence: List[Evidence] = []
 
-        gaussian_inputs = {metric: features.get(feature_key) for metric, feature_key in _GAUSSIAN_INPUT_KEYS.items()}
-        gaussian_inputs["risk"] = _last_risk_score.get(device_id)
-        for metric, value in gaussian_inputs.items():
-            if value is None:
-                continue
-            ev = engine.score_metric(device_id, metric, "gaussian", (float(value),), hour, now=ts)
-            if ev is not None:
-                new_evidence.append(ev)
-
-        # Beta-Binomial metrics need the real per-cycle trial count, not a fixed
-        # trials=1.0 -- skipped outright when this cycle had no DNS activity at all
-        # (an empty window carries no real Binomial observation to update on), same
-        # gate daemon.py's own _score_baselines() uses.
-        trials = float(features.get("total", 0.0) or 0.0)
-        if trials > 0:
-            for metric, feature_key in _BETA_INPUT_KEYS.items():
-                ratio = features.get(feature_key)
-                if ratio is None:
+        # 2026-09-23 (live incident, py-spy-confirmed): each score_metric()/
+        # score_activity_transition() call below persists via _save_tracker(),
+        # which -- outside a transaction() block -- commits (fsyncs) on its
+        # own. Up to 7+ of these ran per device, every single cycle, each
+        # paying its own commit cost on the main detection loop's own thread;
+        # one device's stall inside this block's own json.dumps() blew the
+        # heartbeat watchdog's deadline. GraphStore.transaction() (already
+        # used elsewhere in this module for the same reason -- see its own
+        # docstring) batches the whole cycle's worth of trackers for this
+        # device into ONE commit instead. As a side benefit this also makes
+        # the block atomic with the try/except below: previously a mid-loop
+        # failure could leave some trackers committed to disk with no
+        # Evidence actually returned (this function degrades to [] on any
+        # exception) -- now either everything this cycle commits or nothing
+        # does, matching what's actually returned.
+        with engine.store.transaction():
+            gaussian_inputs = {metric: features.get(feature_key) for metric, feature_key in _GAUSSIAN_INPUT_KEYS.items()}
+            gaussian_inputs["risk"] = _last_risk_score.get(device_id)
+            for metric, value in gaussian_inputs.items():
+                if value is None:
                     continue
-                successes = float(ratio) * trials
-                ev = engine.score_metric(device_id, metric, "beta", (successes, trials), hour, now=ts)
+                ev = engine.score_metric(device_id, metric, "gaussian", (float(value),), hour, now=ts)
                 if ev is not None:
                     new_evidence.append(ev)
 
-        # fresh_v2, not merged_v2 -- this cycle's OWN real detector output, matching
-        # daemon.py's own evidence_items (this cycle's fresh items only, never the
-        # graph-window history merged_v2 also carries).
-        dga_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "dns_dga_burst")
-        honeypot_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "honeypot_access")
-        for metric, count in (("dga_hits", dga_count), ("honeypot_touches", honeypot_count)):
-            ev = engine.score_metric(device_id, metric, "poisson", (float(count),), hour, now=ts)
-            if ev is not None:
-                new_evidence.append(ev)
+            # Beta-Binomial metrics need the real per-cycle trial count, not a fixed
+            # trials=1.0 -- skipped outright when this cycle had no DNS activity at all
+            # (an empty window carries no real Binomial observation to update on), same
+            # gate daemon.py's own _score_baselines() uses.
+            trials = float(features.get("total", 0.0) or 0.0)
+            if trials > 0:
+                for metric, feature_key in _BETA_INPUT_KEYS.items():
+                    ratio = features.get(feature_key)
+                    if ratio is None:
+                        continue
+                    successes = float(ratio) * trials
+                    ev = engine.score_metric(device_id, metric, "beta", (successes, trials), hour, now=ts)
+                    if ev is not None:
+                        new_evidence.append(ev)
 
-        activity_types = [ev.evidence_type for ev in fresh_v2]
-        markov_ev = engine.score_activity_transition(device_id, activity_types, now=ts)
-        if markov_ev is not None:
-            new_evidence.append(markov_ev)
+            # fresh_v2, not merged_v2 -- this cycle's OWN real detector output, matching
+            # daemon.py's own evidence_items (this cycle's fresh items only, never the
+            # graph-window history merged_v2 also carries).
+            dga_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "dns_dga_burst")
+            honeypot_count = sum(1 for ev in fresh_v2 if ev.evidence_type == "honeypot_access")
+            for metric, count in (("dga_hits", dga_count), ("honeypot_touches", honeypot_count)):
+                ev = engine.score_metric(device_id, metric, "poisson", (float(count),), hour, now=ts)
+                if ev is not None:
+                    new_evidence.append(ev)
+
+            activity_types = [ev.evidence_type for ev in fresh_v2]
+            markov_ev = engine.score_activity_transition(device_id, activity_types, now=ts)
+            if markov_ev is not None:
+                new_evidence.append(markov_ev)
 
         return new_evidence
     except Exception as e:

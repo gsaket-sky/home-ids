@@ -1027,6 +1027,49 @@ check("K: evaluate() for a device with a huge single-type evidence backlog still
 
 _k_store.close()
 
+# --- L: _inject_baseline_evidence() batches its whole cycle's worth of
+# score_metric()/score_activity_transition() calls into ONE commit
+# (2026-09-23, restart-cadence investigation continued) -- previously each
+# of the up to 7+ trackers scored per device per cycle committed (fsync'd)
+# on its own, on the main detection loop's own thread; a py-spy capture on
+# .94 caught the main thread stuck for 15-25s inside this exact code path's
+# json.dumps(), just under the restart threshold. GraphStore.transaction()
+# now wraps the whole block. This confirms the WIRING actually batches the
+# commits (not just that transaction() itself works in isolation -- that's
+# test_argus_graph_store.py's job).
+_l_tmpdir = tempfile.mkdtemp(prefix="v13_live_engine_baseline_commit_test_")
+_l_graph_db_path = str(_PathForSysPath(_l_tmpdir) / "l_graph.db")
+live_engine.configure(_l_graph_db_path)
+_l_store = live_engine._get_graph_store()
+_l_now = 6_000_000.0
+
+# sqlite3's own set_trace_callback() -- a real, documented API, not a
+# monkeypatch -- fires for every SQL statement the backend actually
+# executes, including the implicit COMMIT commit() issues. Counting COMMITs
+# this way observes the real behavior through sqlite3's own instrumentation
+# hook rather than substituting a fake connection object.
+_l_statement_log = []
+_l_store._conn.set_trace_callback(_l_statement_log.append)
+
+# spike_features (reused from Section J) drives several distinct trackers in
+# one call: multiple Gaussian metrics (incl. risk), both Beta metrics
+# (total > 0), both Poisson metrics, and the Markov axis -- exactly the
+# multi-tracker-per-cycle shape the live restart incident hit.
+live_engine._inject_baseline_evidence(
+    "devL1",
+    {"query_rate": 50.0, "entropy_avg": 2.5, "unique_domains": 10.0, "nxdomain_ratio": 0.05,
+     "blocked_ratio": 0.05, "total": 20.0, "zeek_outbound_bytes": 5000.0},
+    [dga_ev, honeypot_ev], _l_now,
+)
+_l_store._conn.set_trace_callback(None)
+_l_commit_count = sum(1 for stmt in _l_statement_log if stmt.strip().upper() == "COMMIT")
+check("L: a single _inject_baseline_evidence() call -- which scores several "
+      "distinct trackers -- commits to the graph db exactly once, not once per "
+      "tracker",
+      _l_commit_count == 1, f"got {_l_commit_count} commit(s) in {len(_l_statement_log)} statement(s)")
+
+_l_store.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")

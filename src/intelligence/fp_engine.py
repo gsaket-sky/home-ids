@@ -2278,12 +2278,56 @@ class AutonomousFPEngine:
             device_id, key, value, baseline, sample_count, reason
         )
 
+    # 2026-09-23 (live incident, py-spy-confirmed): this is called every cycle
+    # from record_device_baseline_observation() -> pipeline.py's _step(), on
+    # the main detection loop's own thread. Same "unbounded blocking I/O on
+    # the hot path" pattern already found and bounded twice before (state_
+    # guard.py's flush_to_disk(), ml_engine.py's save_models()) -- caught this
+    # time via freeze-watcher.service's live heartbeat-stale captures on .94.
+    _SAVE_IO_TIMEOUT_SECONDS = 10.0
+
+    @staticmethod
+    def _bounded_io(fn, timeout: float):
+        """Same shape as state_guard.py's own _bounded_io() -- kept as a small
+        local copy rather than importing across that module boundary, matching
+        this codebase's established precedent for this kind of narrow,
+        self-contained helper. Runs fn() on a throwaway daemon thread with a
+        hard wall-clock bound; a stuck fn() leaks one thread (bounded by
+        process lifetime) instead of freezing the caller forever."""
+        result: dict = {}
+
+        def _target():
+            try:
+                result["value"] = fn()
+            except Exception as exc:
+                result["error"] = exc
+
+        t = threading.Thread(target=_target, daemon=True, name="fp_profiles_save_io")
+        t.start()
+        t.join(timeout=timeout)
+        if t.is_alive():
+            return None, True
+        if "error" in result:
+            raise result["error"]
+        return result.get("value"), False
+
     def _save_device_fp_profiles(self):
         try:
             p = self._state_dir / "device_fp_profiles.json"
             with self._lock:
                 snapshot = dict(self._device_fp_profiles)
-            p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+            def _write():
+                p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+
+            _, timed_out = self._bounded_io(_write, timeout=self._SAVE_IO_TIMEOUT_SECONDS)
+            if timed_out:
+                LOGGER.error(
+                    "Device FP profiles save to %s did not complete within %.0fs "
+                    "(likely a kernel-level I/O stall) -- abandoning this save "
+                    "attempt rather than blocking the main detection loop.",
+                    p, self._SAVE_IO_TIMEOUT_SECONDS,
+                )
         except Exception:
             LOGGER.error("Failed to save device FP profiles.", exc_info=True)
 
