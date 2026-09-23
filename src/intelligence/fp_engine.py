@@ -57,6 +57,7 @@ MEMORY BUDGET ON BOSGAME E4 (AMD Ryzen 5 3550H, 16GB RAM)
 import json
 import logging
 import math
+import os
 import subprocess
 import sys
 import threading
@@ -326,6 +327,7 @@ class AutonomousFPEngine:
         # per-device granularity — this stays scoped to AutonomousFPEngine's own state,
         # the same architectural home sigma shifts and the trust cache already use.
         self._device_fp_profiles: dict = {}
+        self._device_fp_profiles_dirty = False
 
         # 2026-09-21 (legacy/Sheet 03a autotune reconciliation): lazy AutotuneEngine,
         # backed by this instance's OWN GraphStore at self._state_dir/"v13_graph.db" --
@@ -2314,11 +2316,19 @@ class AutonomousFPEngine:
     def _save_device_fp_profiles(self):
         try:
             p = self._state_dir / "device_fp_profiles.json"
+            # Serialize under the lock: the old shallow dict() copy shared every nested
+            # profile dict with the live store, so a save that outlived its timeout
+            # could raise "dictionary changed size during iteration" mid-dump.
             with self._lock:
-                snapshot = dict(self._device_fp_profiles)
+                payload = json.dumps(self._device_fp_profiles, separators=(",", ":"))
+                self._device_fp_profiles_dirty = False
+            tmp = p.with_name(p.name + ".tmp")
 
             def _write():
-                p.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+                # Atomic: a kill mid-write used to leave a truncated file, and the
+                # next start then loaded no profiles at all.
+                tmp.write_text(payload, encoding="utf-8")
+                os.replace(tmp, p)
 
             _, timed_out = self._bounded_io(_write, timeout=self._SAVE_IO_TIMEOUT_SECONDS)
             if timed_out:
@@ -2330,6 +2340,13 @@ class AutonomousFPEngine:
                 )
         except Exception:
             LOGGER.error("Failed to save device FP profiles.", exc_info=True)
+
+    def flush_device_fp_profiles(self) -> None:
+        """Persists baseline observations recorded since the last save. Called on the
+        pipeline's periodic state-flush cadence and at shutdown -- see
+        record_device_baseline_observation() for why it no longer saves itself."""
+        if getattr(self, "_device_fp_profiles_dirty", False):
+            self._save_device_fp_profiles()
 
     def discard_device_profile(self, device_id: str, reason: str = "merge") -> bool:
         """Drops a device's learned FP-calibration profile (suppress/arp-sweep/conn-abuse/
@@ -2440,8 +2457,14 @@ class AutonomousFPEngine:
                     entry["count"] = int(entry.get("count", 0)) + 1
                     entry["last_seen"] = now
                 touched = True
-        if touched:
-            self._save_device_fp_profiles()
+            if touched:
+                # 2026-09-23 (live profiling on .94): this used to rewrite the whole
+                # device_fp_profiles.json on EVERY observation -- once per device per
+                # cycle, ~6.5 full rewrites a second, 11% of the main detection loop's
+                # wall time spent waiting on it. Observations are counters; persisting
+                # them on the periodic flush (flush_device_fp_profiles()) loses at
+                # most one flush interval of counts on a hard kill.
+                self._device_fp_profiles_dirty = True
 
     def get_baseline_familiarity(self, device_id: str, *, dest_port=None,
                                   asn_owner: Optional[str] = None,

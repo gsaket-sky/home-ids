@@ -78,6 +78,7 @@ CREATE INDEX idx_evidence_family ON evidence(independence_family);
 -- explicit user request, 2026-09-09, after confirming live that zeek_notice
 -- evidence was 98.3% of this table's total rows on .94's real graph.
 CREATE INDEX idx_evidence_type_ts ON evidence(evidence_type, timestamp);
+CREATE INDEX idx_evidence_device_type_ts ON evidence(device_id, evidence_type, timestamp);
 
 -- Named hypothesis catalog (NETWORK_INTRUSION, DGA_BOTNET_C2, DEVICE_PROFILE_TELEMETRY,
 -- ...). `version` mirrors this codebase's existing VALIDATOR_SCHEMA_VERSION pattern

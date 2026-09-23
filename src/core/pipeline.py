@@ -3862,6 +3862,7 @@ class EnginePipeline:
             LOGGER.debug("Triggering periodic state/model flush to disk.")
             self.state_manager.flush_to_disk()
             if self.ml_registry: self.ml_registry.save_models()
+            if self.fp_engine: self.fp_engine.flush_device_fp_profiles()
             self._last_flush = now
 
         LOGGER.debug("Pipeline step finished.")
@@ -3872,6 +3873,7 @@ class EnginePipeline:
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
         if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models()
+        if getattr(self, "fp_engine", None): self.fp_engine.flush_device_fp_profiles()
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
 
     def _select_target_domain(self, state, ti_engine) -> str:

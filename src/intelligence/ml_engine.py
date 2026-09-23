@@ -23,6 +23,7 @@ import threading
 from typing import Optional, Any
 import time
 from config import CONFIG
+from intelligence.iforest_fast import compile_model
 from metrics import (
     ml_warmup_completions_total,
     ml_retrain_events_total,
@@ -57,6 +58,29 @@ _RETRAIN_N = 500       # retrain every 500 new samples (~17 min) for faster adap
 REJECT_THREAT_WINDOW_SECONDS = 120.0  # ~1 pipeline cycle worth of "don't learn from this" guard
 
 
+class _FastScorer:
+    """Per-engine cache of the compiled form of the CURRENT model (see
+    intelligence/iforest_fast.py for why: sklearn's single-row decision_function()
+    costs ~21 ms of fixed overhead, paid for every device on every cycle). Recompiled
+    only when the model object is swapped by a background fit or a load; any model
+    the compiler can't handle, or input it doesn't model, falls back to sklearn."""
+    __slots__ = ("_model", "_compiled")
+
+    def __init__(self):
+        self._model = None
+        self._compiled = None
+
+    def decision_function_one(self, model, vec: np.ndarray) -> float:
+        if model is not self._model:
+            self._model = model
+            self._compiled = compile_model(model)
+        if self._compiled is not None:
+            value = self._compiled.decision_function_one(vec[0])
+            if value is not None:
+                return value
+        return float(model.decision_function(vec)[0])
+
+
 class DeviceMLEngine:
     def __init__(self, device_id: str):
         self.device_id = device_id
@@ -66,6 +90,7 @@ class DeviceMLEngine:
         self._samples_since_retrain = 0
         self._fit_lock = threading.Lock()   # guards model swap during background fit
         self._fit_in_progress = False
+        self._scorer = _FastScorer()
         self._last_missing_feature_log = 0.0
         # PHASE 0 FIX: reject_threat() used to be a pure log statement — it never actually
         # stopped a confirmed-threat sample from being trained on. This tracks a short
@@ -201,7 +226,7 @@ class DeviceMLEngine:
             return 0.0
 
         try:
-            raw_score = model.decision_function(vec)[0]
+            raw_score = self._scorer.decision_function_one(model, vec)
             anomaly_val = float(max(0.0, -raw_score))
             return min(1.0, anomaly_val)
         except Exception as exc:
@@ -217,6 +242,7 @@ class GlobalMLEngine:
         self._samples_since_retrain = 0
         self._fit_lock = threading.Lock()
         self._fit_in_progress = False
+        self._scorer = _FastScorer()
         self._last_missing_feature_log = 0.0
         self._reject_until = 0.0  # PHASE 0 FIX: see DeviceMLEngine._reject_until
         LOGGER.debug("Initialized GlobalMLEngine.")
@@ -325,7 +351,7 @@ class GlobalMLEngine:
             return 0.0
 
         try:
-            raw_score = model.decision_function(vec)[0]
+            raw_score = self._scorer.decision_function_one(model, vec)
             anomaly_val = float(max(0.0, -raw_score))
             return min(1.0, anomaly_val)
         except Exception as exc:
@@ -375,6 +401,13 @@ class MultiDeviceMLEngine:
         self.global_engine = GlobalMLEngine()
         self.devices = OrderedDict()
         self.max_active_devices = 200
+        # path -> the model object last written there (or loaded from there). A model
+        # is only ever replaced, never mutated in place (background fits swap in a new
+        # object), so an identity check tells whether the file is already current.
+        # Before (2026-09-23, live profiling on .94): every 60 s flush re-dumped every
+        # warmed-up model (13 files, ~15 MB) although each refits only every
+        # _RETRAIN_N samples -- ~6% of the main loop's wall time spent waiting on it.
+        self._persisted = {}
         self.model_dir = Path(model_dir) if model_dir else None
         if self.model_dir:
             self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -432,6 +465,8 @@ class MultiDeviceMLEngine:
         if self.model_dir:
             old_path = self.model_dir / f"{old_id}.pkl"
             new_path = self.model_dir / f"{new_id}.pkl"
+            self._persisted.pop(old_path, None)
+            self._persisted.pop(new_path, None)
             if old_path.exists():
                 try:
                     old_path.rename(new_path)
@@ -456,6 +491,7 @@ class MultiDeviceMLEngine:
         removed_file = False
         if self.model_dir:
             model_path = self.model_dir / f"{device_id}.pkl"
+            self._persisted.pop(model_path, None)
             if model_path.exists():
                 try:
                     model_path.unlink()
@@ -484,18 +520,23 @@ class MultiDeviceMLEngine:
         if not self.model_dir:
             return
 
+        def _save_if_changed(model, path: Path) -> bool:
+            if self._persisted.get(path) is model and path.exists():
+                return False
+            self._atomic_dump(model, path)
+            self._persisted[path] = model
+            return True
+
         def _do_save():
             saved_devs = 0
             if self.global_model_path and self.global_engine.warmed_up:
-                self._atomic_dump(self.global_engine.model, self.global_model_path)
+                _save_if_changed(self.global_engine.model, self.global_model_path)
 
             with self._lock:
                 devices_snapshot = list(self.devices.items())
 
             for dev_id, engine in devices_snapshot:
-                if engine.warmed_up:
-                    dev_path = self.model_dir / f"{dev_id}.pkl"
-                    self._atomic_dump(engine.model, dev_path)
+                if engine.warmed_up and _save_if_changed(engine.model, self.model_dir / f"{dev_id}.pkl"):
                     saved_devs += 1
             return saved_devs
 
@@ -514,7 +555,8 @@ class MultiDeviceMLEngine:
                     "blocking the pipeline's own main loop.", self._SAVE_IO_TIMEOUT_SECONDS,
                 )
                 return
-            LOGGER.info("Successfully persisted Global Model and %d Device ML models to disk[cite: 14, 22].", saved_devs)
+            if saved_devs:
+                LOGGER.info("Persisted %d changed Device ML model(s) to disk.", saved_devs)
         except Exception as exc:
             LOGGER.error("Failed to save ML models: %s[cite: 14, 22]", exc)
 
@@ -557,6 +599,7 @@ class MultiDeviceMLEngine:
                 if self._verify_model_shape(target_model, expected_features=11):
                     self.global_engine.model = target_model
                     self.global_engine.warmed_up = True
+                    self._persisted[self.global_model_path] = target_model
                     LOGGER.info("Loaded Global ML Model from disk.")
                 else:
                     LOGGER.warning("Legacy global ML model found. Discarding and resetting to current 11-feature schema.")
@@ -581,6 +624,7 @@ class MultiDeviceMLEngine:
             if self._verify_model_shape(target_model, expected_features=11):
                 engine.model = target_model
                 engine.warmed_up = True
+                self._persisted[dev_path] = target_model
                 loaded_devs += 1
             else:
                 LOGGER.warning("Legacy device ML model for %s found with incompatible feature shape. Discarding.", dev_id)

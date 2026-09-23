@@ -924,8 +924,14 @@ class StateManager:
             tmp_path = self.state_path.with_suffix(".tmp")
 
             def _write_and_replace():
+                # json.dumps(), not json.dump(): CPython only uses its C encoder for
+                # one-shot encoding; the streaming json.dump() runs the pure-Python
+                # encoder -- ~3x slower on .94's 5.7 MB snapshot (0.49 s vs 0.16 s
+                # alone, several seconds under live load), all of it holding the GIL
+                # while the main detection loop waits on this thread.
+                payload = json.dumps(full_snapshot, separators=(",", ":"))
                 with open(tmp_path, "w", encoding="utf-8") as f:
-                    json.dump(full_snapshot, f, separators=(",", ":"))
+                    f.write(payload)
                 tmp_path.replace(self.state_path)
 
             _, timed_out = self._bounded_io(_write_and_replace, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)

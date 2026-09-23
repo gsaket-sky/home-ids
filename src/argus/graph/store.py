@@ -346,6 +346,14 @@ class GraphStore:
             CREATE INDEX IF NOT EXISTS idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
 
             CREATE INDEX IF NOT EXISTS idx_evidence_type_ts ON evidence(evidence_type, timestamp);
+            -- 2026-09-23 (live profiling on .94): get_evidence_for_device()'s capped
+            -- per-type query (device_id + evidence_type + timestamp range, newest
+            -- first, LIMIT) had no index covering both equality columns, so SQLite
+            -- picked idx_evidence_type_ts and walked EVERY device's rows of that
+            -- type in the 24h window (143k zeek_notice_weak rows), per device, per
+            -- cycle: 135-275 ms per device, ~17% of the main loop. This index makes
+            -- it a direct seek (1.6 s -> 0.18 s for a full pass over 20 devices).
+            CREATE INDEX IF NOT EXISTS idx_evidence_device_type_ts ON evidence(device_id, evidence_type, timestamp);
 
             CREATE INDEX IF NOT EXISTS idx_decisions_timestamp ON decisions(timestamp);
 
@@ -1328,19 +1336,30 @@ class GraphStore:
             type_params.append(since)
         types = [r["evidence_type"] for r in self._conn.execute(type_query, type_params).fetchall()]
 
+        # One query per (device_id, type) with device_id as an equality, never an
+        # IN list: with IN (a, b) -- any device that has merged identities --
+        # SQLite's planner falls back to idx_evidence_type_ts and scans every
+        # device's rows of that type again (verified with EXPLAIN QUERY PLAN on
+        # .94's graph). Each id's newest cap_per_type rows are merged and the
+        # newest cap_per_type overall kept -- identical to the single IN query.
+        per_type_query = "SELECT * FROM evidence WHERE device_id = ? AND evidence_type = ?"
+        if since is not None:
+            per_type_query += " AND timestamp >= ?"
+        per_type_query += " ORDER BY timestamp DESC LIMIT ?"
+
         out: List[Evidence] = []
         for evidence_type in types:
-            per_type_query = (
-                f"SELECT * FROM evidence WHERE device_id IN ({placeholders}) AND evidence_type = ?"
-            )
-            per_type_params: List[Any] = list(device_ids) + [evidence_type]
-            if since is not None:
-                per_type_query += " AND timestamp >= ?"
-                per_type_params.append(since)
-            per_type_query += " ORDER BY timestamp DESC LIMIT ?"
-            per_type_params.append(cap_per_type)
-            rows = self._conn.execute(per_type_query, per_type_params).fetchall()
-            out.extend(Evidence.from_row(dict(r)) for r in rows)
+            rows: List[dict] = []
+            for dev in device_ids:
+                params: List[Any] = [dev, evidence_type]
+                if since is not None:
+                    params.append(since)
+                params.append(cap_per_type)
+                rows.extend(dict(r) for r in self._conn.execute(per_type_query, params).fetchall())
+            if len(device_ids) > 1:
+                rows.sort(key=lambda r: r["timestamp"], reverse=True)
+                rows = rows[:cap_per_type]
+            out.extend(Evidence.from_row(r) for r in rows)
         out.sort(key=lambda ev: ev.timestamp)
         return out
 
