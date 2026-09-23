@@ -134,6 +134,7 @@ class ZeekCollector:
         self._tailers_lock = threading.Lock()
         self._available = False
         self._last_init_attempt = 0.0
+        self._dropped_event_count = 0
         self._init_tailers()
 
     def update_log_dir(self, new_dir: str) -> None:
@@ -198,7 +199,15 @@ class ZeekCollector:
             if len(self._events) < 100000:
                 self._events.append(event)
             else:
-                LOGGER.warning("Zeek event buffer overflow; dropping event from %s", event.get("id.orig_h", "unknown"))
+                # Logging every dropped event individually (one synchronous
+                # emit() per event, on whatever thread called poll() -- the
+                # main detection loop's own thread) turned a buffer overflow
+                # into a self-reinforcing freeze: tens of thousands of log
+                # lines in under two minutes blew past the heartbeat
+                # deadline and triggered a forced restart, which then let
+                # the next burst overflow the buffer again. Count instead;
+                # poll() logs one summary line per cycle.
+                self._dropped_event_count += 1
 
     def poll(self) -> list[dict]:
         if not self._available:
@@ -215,6 +224,10 @@ class ZeekCollector:
         with self._lock:
             e = self._events
             self._events = deque(maxlen=100000)
+            dropped = self._dropped_event_count
+            self._dropped_event_count = 0
+        if dropped:
+            LOGGER.warning("Zeek event buffer overflow; dropped %d events since last poll", dropped)
         return e
 
     @property
