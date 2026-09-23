@@ -17,6 +17,7 @@ from sklearn.ensemble import IsolationForest
 from collections import OrderedDict, deque
 from pathlib import Path
 import logging
+import os
 import joblib
 import threading
 from typing import Optional, Any
@@ -466,6 +467,19 @@ class MultiDeviceMLEngine:
             device_profile_discards_total.labels(reason=reason).inc()
         return had_engine or removed_file
 
+    @staticmethod
+    def _atomic_dump(model, path: Path) -> None:
+        """BUGFIX (live, 2026-09-23): joblib.dump() used to write straight into the
+        final file. A process killed mid-write -- the SIGKILL shutdown fallback, or
+        interpreter exit while an abandoned _bounded_io save thread was still writing --
+        left a truncated .pkl ("EOF: reading array data"). On .94 one such file
+        (written 2026-09-22 21:00) then made load_models() fail on every restart.
+        Write a sibling temp file, then os.replace(): a kill at any instant leaves
+        either the previous complete model or the new complete model, never a partial."""
+        tmp = path.with_name(path.name + ".tmp")
+        joblib.dump(model, tmp)
+        os.replace(tmp, path)
+
     def save_models(self):
         if not self.model_dir:
             return
@@ -473,7 +487,7 @@ class MultiDeviceMLEngine:
         def _do_save():
             saved_devs = 0
             if self.global_model_path and self.global_engine.warmed_up:
-                joblib.dump(self.global_engine.model, self.global_model_path)
+                self._atomic_dump(self.global_engine.model, self.global_model_path)
 
             with self._lock:
                 devices_snapshot = list(self.devices.items())
@@ -481,7 +495,7 @@ class MultiDeviceMLEngine:
             for dev_id, engine in devices_snapshot:
                 if engine.warmed_up:
                     dev_path = self.model_dir / f"{dev_id}.pkl"
-                    joblib.dump(engine.model, dev_path)
+                    self._atomic_dump(engine.model, dev_path)
                     saved_devs += 1
             return saved_devs
 
@@ -509,44 +523,71 @@ class MultiDeviceMLEngine:
             return model.n_features_in_ == expected_features
         return hasattr(model, "decision_function")
 
+    def _discard_unreadable_model(self, path: Path, exc: Exception) -> None:
+        """A model file that can't be read is useless and would fail again on every
+        start -- log exactly which one and why, remove it, count it, carry on. The
+        device simply re-learns (warmup) like a new one."""
+        LOGGER.error("ML model file %s is unreadable (%s) -- removing it; that device re-learns from scratch.",
+                     path.name, exc)
+        try:
+            path.unlink()
+        except OSError as unlink_exc:
+            LOGGER.error("Could not remove unreadable ML model file %s: %s", path.name, unlink_exc)
+        device_profile_discards_total.labels(reason="corrupt").inc()
+
     def load_models(self):
+        """BUGFIX (live, 2026-09-23): one try/except used to wrap the WHOLE load, so a
+        single unreadable file aborted it -- every model after it in directory order
+        was silently dropped too, on every restart, and the bad file was never removed
+        (on .94: 1 truncated file cost 8 of 13 device models). Each file is now loaded
+        independently."""
         if not self.model_dir:
             return
-        try:
-            if self.global_model_path and self.global_model_path.exists():
+        # Leftovers of a save interrupted before its atomic rename -- never valid models.
+        for stray in self.model_dir.glob("*.pkl.tmp"):
+            try:
+                stray.unlink()
+            except OSError:
+                pass
+
+        if self.global_model_path and self.global_model_path.exists():
+            try:
                 loaded = joblib.load(self.global_model_path)
                 target_model = loaded[0] if isinstance(loaded, tuple) else loaded
-                
                 if self._verify_model_shape(target_model, expected_features=11):
                     self.global_engine.model = target_model
                     self.global_engine.warmed_up = True
                     LOGGER.info("Loaded Global ML Model from disk.")
                 else:
                     LOGGER.warning("Legacy global ML model found. Discarding and resetting to current 11-feature schema.")
-                    if self.global_model_path.exists():
-                        self.global_model_path.unlink()
+                    self.global_model_path.unlink()
+            except Exception as exc:
+                self._discard_unreadable_model(self.global_model_path, exc)
 
-            loaded_devs = 0
-            for dev_path in self.model_dir.glob("*.pkl"):
-                if dev_path == self.global_model_path:
-                    continue
-                dev_id = dev_path.stem
-                engine = self._get_or_create_device(dev_id)
-                
+        loaded_devs = 0
+        discarded = 0
+        for dev_path in self.model_dir.glob("*.pkl"):
+            if dev_path == self.global_model_path:
+                continue
+            dev_id = dev_path.stem
+            try:
                 loaded = joblib.load(dev_path)
-                target_model = loaded[0] if isinstance(loaded, tuple) else loaded
-                
-                if self._verify_model_shape(target_model, expected_features=11):
-                    engine.model = target_model
-                    engine.warmed_up = True
-                    loaded_devs += 1
-                else:
-                    LOGGER.warning("Legacy device ML model for %s found with incompatible feature shape. Discarding.", dev_id)
-                    dev_path.unlink()
+            except Exception as exc:
+                self._discard_unreadable_model(dev_path, exc)
+                discarded += 1
+                continue
+            target_model = loaded[0] if isinstance(loaded, tuple) else loaded
+            engine = self._get_or_create_device(dev_id)
+            if self._verify_model_shape(target_model, expected_features=11):
+                engine.model = target_model
+                engine.warmed_up = True
+                loaded_devs += 1
+            else:
+                LOGGER.warning("Legacy device ML model for %s found with incompatible feature shape. Discarding.", dev_id)
+                dev_path.unlink()
 
-            LOGGER.info("Successfully loaded %d compatible 11-feature Device ML models from disk.", loaded_devs)
-        except Exception as exc:
-            LOGGER.error("Failed to load ML models (likely corrupted). Starting fresh: %s", exc)
+        LOGGER.info("Loaded %d compatible 11-feature Device ML models from disk (%d unreadable file(s) removed).",
+                    loaded_devs, discarded)
 
 
 # Backwards-compatibility alias for main.py / pipeline.py imports
