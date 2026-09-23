@@ -1,5 +1,24 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
+**Status (2026-09-22/23, latest): Root Cause #4 found and fixed — the same class
+of bug as Root Cause #3 below (a synchronous operation blocking the main loop's
+own heartbeat thread), but in `ml_engine.py`'s `save_models()`, not evidence-volume
+flooding. Confirmed via `py-spy` live: `soc.service` had self-restarted 25 times in
+one day, 84% needing a hard SIGKILL (the shutdown handler calls the same blocking
+`save_models()` call), heartbeat stale up to 1819s (30+ min of zero detection
+coverage) — worse than any of the incidents originally documented in this file.
+Fixed with the same bounded-IO pattern `state_guard.py`'s `flush_to_disk()` already
+used (a throwaway daemon thread + timeout, abandon-and-retry-next-cycle instead of
+blocking forever). Verified live: restarts dropped to 1 in the following 8 hours,
+with clean recovery. Full write-up: `Documentation/ARGUS_DECISIONS.md`'s "Periodic
+disk I/O on the main detection loop's own thread must always be bounded" entry.
+This restart-chasing saga is NOT necessarily fully closed — a `freeze-watcher.service`
+diagnostic tool was left running on `.94` (`/home/user/freeze_diagnostics/`) to
+catch and fully root-cause any further whole-process stall live, since the one
+post-fix incident observed also stalled an unrelated thread (`pihole_poll`)
+simultaneously, suggesting a possible broader disk-I/O contention pattern beyond
+just this one now-fixed call site.**
+
 **Status (2026-09-21, latest): Phase 4's benchmark sweep actually RUN (real
 data below, not the earlier "not yet run" placeholder), Phase 5's capacity
 question ANSWERED, `soc.service`'s `MemoryMax` raised again (2G -> 3.5G, this

@@ -33,6 +33,59 @@ Argus/pipeline work specifically:
 Genuinely load-bearing design calls with lasting "why" value. Routine bugfix history
 lives in `CHANGELOG.md`, not here.
 
+**Alerts became real graph nodes instead of a side JSON log — without ever widening
+`edges`' CHECK constraint (2026-09-22).** The original plan assumed adding new
+`edges.relation`/`kind` CHECK values to link alerts into the graph; discovered mid-
+design that SQLite requires a full table rebuild to change a CHECK constraint, and
+`.94`'s live `edges` table already held 500K+ rows at the time — a risky rebuild for a
+feature that didn't need it. Redesigned around the constraint instead of forcing it:
+reused the existing, unused `corroborates` relation for hypothesis→decision edges, and
+gave `alert_events`/`incidents`/`operator_actions` their own direct FK columns
+(matching `containment_actions`' own precedent) rather than routing them through the
+generic polymorphic `edges` table. Every alert-worthy cycle now writes a durable
+`alert_event` row (FIRED/SUPPRESSED_AUTONOMOUS/LOGGED_ONLY) alongside its decision,
+with a plain-English narrative (`mitigation/plain_explanation.py`, reusing
+`middleware/humanize.py`'s device/destination-resolution functions so the SAME
+humanized text — hostname not device_id, ASN/country not raw IP — appears identically
+in Telegram, the graph's own `explanation` node, and the console's Alerts table) and a
+bounded semantic-search embedding generated once at write time (FastEmbed, hard
+candidate cap, honest 422 over silent truncation). `src/argus/graph/store.py`,
+`src/argus/ops/live_engine.py`, `src/mitigation/plain_explanation.py`,
+`src/middleware/humanize.py`. Full design record: `Documentation/ALERT_TRACE_GRAPH_PLAN.md`.
+
+**Periodic disk I/O on the main detection loop's own thread must always be bounded —
+found twice, fixed the same way twice (2026-09-21, 2026-09-22).** `state_guard.py`'s
+`flush_to_disk()` and `ml_engine.py`'s `save_models()` sit in the SAME 60-second
+periodic-flush block inside `pipeline.py`'s per-cycle `_step()` — both run
+synchronously on the thread whose own timely completion IS the
+`pipeline_main_loop` heartbeat health_manager watches. `flush_to_disk()` was found
+hanging and bounded to a 20s hard cap on 2026-09-21. `save_models()`, right next to
+it, was never given the same treatment — found live 2026-09-22 via `py-spy` catching
+`pipeline_main_loop`'s own thread mid-`joblib.dump()`, after `soc.service` had
+self-restarted 25 times in one day (84% needing a hard SIGKILL, since the SAME call
+also runs in the shutdown handler), heartbeat stale up to 1819s at once. Bounded with
+the identical pattern (a throwaway daemon thread + `.join(timeout)`, abandon-and-retry-
+next-cycle over block-forever) rather than inventing a new approach. Verified live:
+restarts dropped from 25/day to 1 in 8 hours, with clean recovery (no SIGKILL) on that
+one. **Standing rule this establishes**: any new periodic call added to that same
+60s flush block must be bounded the same way from the start, not discovered the hard
+way a second time. `src/core/state_guard.py`, `src/intelligence/ml_engine.py`.
+
+**A decision path that deliberately skips the graph write must still set what
+downstream code needs, or the alert silently vanishes from the console (2026-09-22).**
+`pipeline.py`'s geofencing hard-stop re-evaluation calls `evaluate()` WITHOUT
+`device_id` (a 2026-08-27 decision, to avoid re-inserting the cycle's already-written
+evidence as duplicates) — which also means it never sets
+`decision["_graph_decision_id"]`, so every downstream alert_event/plain-explanation
+write silently no-op'd for every geofencing alert, even though it fired correctly to
+Telegram. Found via a real user-reported missing alert. Fixing this was NOT "just add
+`device_id` back" — that would re-run `evaluate()`'s baseline-injection side effects
+(`BaselineEngine.score_metric()` mutates persistent Bayesian/BOCPD posteriors on every
+call) a second time in the same cycle, double-counting the observation. Fixed with a
+narrower `write_supplementary_decision()` that does only the plain graph write,
+reusing the existing per-cycle evidence content-key dedup instead of the full
+evaluation pipeline. `src/argus/ops/live_engine.py`, `src/core/pipeline.py`.
+
 **Local-network false positives must resolve autonomously without hardcoding this
 household's own protocols — three real gaps closed 2026-09-15.** Two real HIGH alerts
 (Fire TV + Echo Show `COORDINATED_TARGETING`) fired from ordinary mDNS discovery
@@ -64,6 +117,36 @@ offline: alerted on occurrences 1–4, auto-resolved via Stage 1b on occurrence 
 via the normal trust-cache fast path from occurrence 6 on — no human input anywhere
 in the sequence. `src/argus/cl_afpe/engine.py`, `src/argus/graph/store.py`,
 `src/intelligence/reputation/classifier.py`, `src/argus/hypotheses/engine.py`.
+
+**Per-device/per-category autotuning: category before device, and a real bug the
+tests themselves caught (2026-09-16).** Extending the autotuner beyond global-only
+scope deliberately shipped category-level tuning first, not per-device — a device
+category (e.g. every `dns_server`) pools more samples than any single device, matching
+the same precedent the baseline peer-cohort system already established, with
+per-device tuning falling naturally out of the same code path once category-level
+proved out on real data. Also deliberately left `bocpd_hazard_rate` untouched (zero
+live consumer confirmed) and didn't invent a new device-category-aware synthetic-
+attack generator — the existing per-device `sweep()` already runs meaningfully per
+device, this only changed how its results get aggregated/gated. Writing the test
+coverage for this itself caught a real bug in `propose_change()`'s scope validation
+before it ever reached `.94`. Full mechanism (3-tier `get_active_value()`, Wilson-bound
+safe-threshold gate, trust-radius failsafe, retroactive circuit-breaker) is documented
+in `Documentation/ARGUS_ARCHITECTURE.md` §5. `src/argus/autotune/engine.py`.
+
+**IPv6 dual-stack mitigation gap: shipped a targeted interim fix, not the full
+router-agnostic adapter (2026-09-16).** Enabling IPv6 surfaced a real gap:
+`fritzbox_api.py`'s router-side WAN isolation only blocks a device's IPv4 address
+(`NewIPv4Address` is the only TR-064 parameter AVM's `DisallowWANAccessByIP` action
+takes) — once a device is dual-stack, "isolating" it over IPv4 leaves its IPv6 path
+open. The doc-stage proposal considered building `SHIPPABILITY_AND_SCALE_PLAN.md`
+§1's still-unbuilt `RouterAdapter` abstraction as the "real" fix (IPv6 as the forcing
+function to finally stop hand-coding one vendor's firmware), but what actually shipped
+was narrower and immediate: `mitigation/ips.py`'s `_arm_tarpit_for_dual_stack_
+coverage()` now auto-arms the already-existing local Scapy NDP tarpit (which needs no
+router cooperation at all) on every router isolation, closing the IPv6 leak without
+waiting on the larger adapter rewrite. `RouterAdapter` itself remains unbuilt — see
+`Documentation/SHIPPABILITY_AND_SCALE_PLAN.md`. Live-verified against real Fritz!Box
+device metadata after the user enabled IPv6. `src/mitigation/ips.py`.
 
 **Reputation tier 5 requires a curated-feed match, not just an aggregate score.**
 Escalating a destination to reputation tier 5 (CRITICAL-eligible on its own, with no

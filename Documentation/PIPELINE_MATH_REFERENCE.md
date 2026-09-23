@@ -53,7 +53,7 @@ signals) that are easy to mix up in an incident writeup.
 ### 1a. The EWMA z-scores — live on `.94` today, feeds real evidence
 
 **File:** `src/core/state.py` (`class EWMABaseline`, lines 53-108), consumed by
-`src/core/pipeline.py`'s `calc_z()` (lines 1274-1286). **This is the mechanism actually
+`src/core/pipeline.py`'s `calc_z()` (lines 1277-1289). **This is the mechanism actually
 producing the `query_rate_z`/`entropy_z`/`nxdomain_ratio_z`/`outbound_bytes_z`/etc.
 values seen in every real `.94` alert's `features` dict** — confirmed both by direct
 code read and by the fact these exact keys appear with nonzero values in `.94`'s live
@@ -85,7 +85,7 @@ memory window). Adjacent-hour values are linearly interpolated by the current mi
 (`get_stats_interpolated()`) so the diurnal baseline doesn't step-jump at each hour
 boundary.
 
-**The z-score itself** (`calc_z()`, `core/pipeline.py:1274-1277`):
+**The z-score itself** (`calc_z()`, `core/pipeline.py:1277-1280`):
 
 ```python
 def calc_z(val, baseline_obj):
@@ -834,7 +834,7 @@ combined < 0.55                -> CONFIRMED_THREAT, sigma tune-up (tighten sensi
 
 The legacy engine (`src/intelligence/fp_engine.py`) implements the exact same weights
 and thresholds independently (`_DEFAULT_LGBM_FP_THRESHOLD`/`_DEFAULT_COMBINED_*`,
-`fp_engine.py:125-134`) — a deliberately mirrored, not shared, implementation (see
+`fp_engine.py:131-140`) — a deliberately mirrored, not shared, implementation (see
 `ARGUS_ARCHITECTURE.md` §8's Layer 2 description for why the two engines don't share
 code).
 
@@ -947,7 +947,7 @@ exactly this — it answers "given `hits` successes out of `n` trials, what's a
 conservative (95%-confidence) *lower bound* on the true success rate?", automatically
 discounting small samples more heavily than large ones.
 
-**File:** `src/argus/autotune/engine.py:91-107`:
+**File:** `src/argus/autotune/engine.py:115-130`:
 
 ```python
 _WILSON_Z_95 = 1.959963984540054   # standard normal quantile for a 95% two-sided CI
@@ -994,7 +994,7 @@ record (0.8389) still reads as "probably good, not yet certain enough" — the c
 `_MIN_TRIALS_FOR_LOOSENING = 20` pre-filter is a cheap early exit, not itself the real
 bar; the Wilson bound is the actual statistical gate applied on top of it.
 
-**The full gate, both directions** (`backtest_job.py:212-261`):
+**The full gate, both directions** (`backtest_job.py:263-282`):
 
 ```python
 if worst_rate < 0.70:                                    # _TUNE_TIGHTEN_FLOOR
@@ -1030,7 +1030,7 @@ Only enforced in the less-sensitive direction — tightening past the parent tie
 never capped, matching the same fail-safe asymmetry as the Wilson gate itself.
 
 **Retroactive circuit-breaker** (`check_retroactive_misses_and_rollback()`,
-`backtest_job.py:422-536`) — the failsafe that runs *between* backtest cycles, not at
+`backtest_job.py:501-593`) — the failsafe that runs *between* backtest cycles, not at
 proposal time: scans the last 7 days of real `suricata_signature_match` evidence for
 any hit whose confidence falls in the band between a loosened scope's own value and its
 parent's stricter value (i.e. a real signature match that *would* have cleared the
@@ -1079,7 +1079,7 @@ if persisted_for >= 600:
 ```
 
 **But this promoted state is downgraded again before it can authorize containment or a
-Telegram send** (`core/pipeline.py:2689-2700`):
+Telegram send** (`core/pipeline.py:2719-2721`):
 
 ```python
 containment_decision_state = decision["state"]

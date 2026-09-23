@@ -47,8 +47,8 @@ than on every use:
 
 | Key | Read once at | File |
 |---|---|---|
-| `lateral_movement_ports` | `ZeekFeatureExtractor.__init__` | `src/core/pipeline.py:477` |
-| `local_confirmed_intel_ttl_seconds` | `AutonomousFPEngine.__init__` (`LocalConfirmedIntel(...)`) | `src/intelligence/fp_engine.py:262` |
+| `lateral_movement_ports` | `ZeekFeatureExtractor.__init__` | `src/core/pipeline.py:774` |
+| `local_confirmed_intel_ttl_seconds` | `AutonomousFPEngine.__init__` (`LocalConfirmedIntel(...)`) | `src/intelligence/fp_engine.py:284-286` |
 
 These two are `config_schema.RUNTIME_RESTART_KEYS`. `config_schema.is_restart_required(key)`
 is `key in _STATIC_KEYS or key in RUNTIME_RESTART_KEYS` — the API's PATCH/DELETE
@@ -95,7 +95,9 @@ override against every known device (`core/pipeline.py`'s
 `_reapply_device_type_overrides()`). See `ARGUS_ARCHITECTURE.md` §6 for the full
 mechanism.
 
-`scheduler.ollama_soc.enabled` and its five siblings are genuinely nested
+`scheduler.live_llm_review.enabled` and its siblings (one entry per scheduled job —
+`ollama_soc` was retired in v16, replaced by `live_llm_review`, feature-parity
+confirmed in `Documentation/ARGUS_DECISIONS.md`) are genuinely nested
 (`config.yaml`'s `scheduled_jobs.scheduler` is itself a dict of dicts, so
 `CONFIG.get("scheduler")` returns the whole nested structure — there's no flat
 `"scheduler.ollama_soc.enabled"` key in `LiveConfig._config` to read or override
@@ -136,8 +138,7 @@ the first place — this feature doesn't change that, it rides on it. Open
 
 ## Scope
 
-Only the **Config** tab is wired to this API. Devices / Threat Hunt / Evidence Graph
-keep sample data (now visibly labeled "SAMPLE DATA" in the UI) — building real backends
-for those means exposing `src/v13/ops/threat_hunt.py` and `decision_replay.py` over
-HTTP and querying the actual device/evidence-graph state, which is a separate, larger
-piece of work.
+This doc covers only the **Config** tab's write-back API. Devices / Threat Hunt /
+Evidence Graph / Alerts are real, live-data-backed (not sample data — that was true
+only when this doc was first written) via a separate set of read-only endpoints; see
+`Documentation/CONSOLE_DATA_API.md` for those.

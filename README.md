@@ -77,6 +77,8 @@ The self-tuning described in the next section sends its own plain-English notifi
 
 Every claim above is backed by a live dashboard, not a promise. Home-IDS ships with six pre-built dashboards and well over a hundred live metrics covering exactly what it's doing right now: what it's learned about your devices, what it's suppressed as noise and why, how its own settings have shifted from the defaults, and the live health of every piece it depends on. There's a dashboard built around one question specifically — *what did it learn, how did it tune itself, what did it quiet down, and what couldn't it do* — because a security tool you can't audit isn't one you should trust with your network.
 
+Every alert is also fully traceable, end to end: the built-in console has an Evidence Graph you can click through — device, the specific evidence that fired, the hypothesis it supported, the decision it produced, the alert it sent, and a plain-English paragraph explaining all of it in one place — plus a search box so you can just ask "dns tunneling" or "peer deviation" and find every matching alert, without writing a query.
+
 ---
 
 ## Why not just buy a commercial box?

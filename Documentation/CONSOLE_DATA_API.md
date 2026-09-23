@@ -1,8 +1,15 @@
-# Devices / Threat Hunt / Evidence Graph API
+# Devices / Threat Hunt / Evidence Graph / Alerts API
 
 Companion to `Documentation/CONFIG_API.md` (the Config tab's write-back API). This
-covers the three read-only endpoints that replaced the console's remaining sample
-data: `GET /api/devices[/{id}]`, `GET /api/hunt/*`, `GET /api/graph`.
+covers the console's read-only data endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/devices`, `GET /api/devices/{id}`, `GET /api/devices/{id}/top_domains` | Device identity + latest verdict |
+| `GET /api/hunt/devices_touching`, `GET /api/hunt/decision_timeline/{id}`, `GET /api/hunt/device_history/{id}`, `POST /api/hunt/replay/{id}` | Threat Hunt tab |
+| `GET /api/graph` | Evidence Graph canvas — most recent decisions and everything connected to them. Takes `limit` (1-200) and an optional `device_id` to scope to one device's own most recent decisions instead of the whole network's (added 2026-09-22 — see "Evidence Graph device filter" below). |
+| `GET /api/graph/alerts` | The fired/suppressed/logged-only alert list under the Evidence Graph tab's "Alerts" sub-view. Takes `limit`, `offset`, optional `status`/`device_id` filters. |
+| `GET /api/graph/alerts/search` | Bounded natural-language semantic search over alert explanations. Takes `q` (required), optional `device_id`/`since`/`until` scope, `limit` (1-100). |
 
 ## Why device state/risk isn't in ids_state.json
 
@@ -32,14 +39,33 @@ retention may not cover a device's whole history either.
 
 `GraphStore.__init__` is a plain `sqlite3.connect()`, no `check_same_thread=False`.
 FastAPI's sync `def` handlers run across a threadpool, so a shared instance risks
-"SQLite objects created in a thread can only be used in that same thread." Every new
-router (`devices_api.py`, `hunt_api.py`, `graph_api.py`) goes through
-`middleware/graph_client.py`'s `open_store()` context manager — opens, yields, closes,
-every call. Confirmed safe against the real deployment's `state/v13_graph.db` (WAL
-mode, baked into `schema.sql` at file creation — any number of concurrent readers
-against the one writer, no lock contention) — this is also exactly the pattern
-`src/v13/ops/threat_hunt.py`'s own CLI already used for a second connection to the
-same file.
+"SQLite objects created in a thread can only be used in that same thread." Every
+router (`devices_api.py`, `hunt_api.py`, `graph_api.py`, `overview_api.py`,
+`autonomy_api.py`) goes through `middleware/graph_client.py`'s `open_store()` context
+manager — opens, yields, closes, every call. Confirmed safe against the real
+deployment's `state/v13_graph.db` (WAL mode, baked into `schema.sql` at file
+creation — any number of concurrent readers against the one writer, no lock
+contention) — this is also exactly the pattern `src/argus/ops/threat_hunt.py`'s own
+CLI already used for a second connection to the same file.
+
+**BUGFIX (found live 2026-09-22, chronic console latency):** "opened fresh per
+request" used to also mean `_migrate_existing_db()` — a ~40-statement schema
+migration `executescript()` plus several `ALTER TABLE` attempts — re-ran on EVERY
+single request, since it's part of `GraphStore.__init__`. Confirmed via `py-spy`
+live: 6+ uvicorn worker threads simultaneously stuck acquiring the write-intent lock
+that migration needs, colliding with the constantly-writing main pipeline process —
+`/api/graph` taking 40+ seconds to answer even `limit=1`. `GraphStore.
+_migrated_db_paths` (class-level, `argus/graph/store.py`) now caches "already
+migrated" per db_path for the life of the process, so only the first `GraphStore`
+built after a restart pays the migration cost; every connection after that is the
+plain, uncontended `sqlite3.connect()` this section's title always assumed. A second,
+related fix the same night: `StateManager` (used by every router above to resolve
+hostnames) was being freshly re-constructed and re-parsed from a 5.7MB
+`state/ids_state.json` on every single request across 14 call sites —
+`middleware/state_client.py`'s `get_cached_state_manager()` now caches it with
+mtime-based invalidation, scoped to these read-only routers only (never the
+containment/mitigation-action endpoints in `pihole_api.py`/`fritzbox_api.py`, which
+keep their own fresh, unshared instance deliberately).
 
 ## Real-data findings from verifying this against `.94`'s live database, not synthetic data
 
@@ -100,10 +126,59 @@ effective-value-changed event as a PATCH is.
 Checked directly while scoping this work, not assumed: Suricata's batch-scan findings
 (`intelligence/detectors/suricata_scan.py`) are still built as the OLD, pre-Argus
 `Evidence` shape (`type=`, `device=`, `independence_group=`, `domain=`), not the Argus
-`Evidence` dataclass this graph stores. `src/v13/ingest/sources.py`'s own module
+`Evidence` dataclass this graph stores. `src/argus/ingest/sources.py`'s own module
 docstring already says why: Suricata only runs in short batch invocations against
 reactively-captured pcap bursts, not a continuous log stream, and wiring that into Argus
 "needs the whole reactive-capture trigger/dispatch subsystem, not a log tailer... NOT
 attempted here." So Suricata alerts don't appear in the Threat Hunt or Evidence Graph
 tabs — not a limitation of this console work, a pre-existing, already-acknowledged
 scope cut one layer down.
+
+## Alerts are real graph nodes, not a side table (added 2026-09-22)
+
+`alert_events`/`incidents`/`operator_actions` (schema in `argus/graph/schema.sql`) sit
+alongside `decisions`/`evidence`/`destinations` — every cycle that crosses SUSPICIOUS+
+gets a durable `alert_event` row (status FIRED/SUPPRESSED_AUTONOMOUS/LOGGED_ONLY),
+written from `core/pipeline.py` via `GraphStore.insert_alert_event()` right after the
+decision itself is written. `GET /api/graph` renders each one as its own `alert_event`
+node connected to its decision, plus a companion `explanation` node carrying the
+plain-English narrative (see below) so the graph canvas shows a full, readable
+story — device → evidence → decision → alert → explanation — not just raw scores.
+
+**Plain-English narrative, everywhere an alert shows up.** `mitigation/
+plain_explanation.py`'s `build_plain_explanation()` generates one short paragraph per
+alert — device, what was noticed, the destination (resolved to a hostname/ASN/country,
+never a raw IP), the winning hypothesis, the honest counter-argument (the losing
+hypothesis's own score, not hidden), and what happened as a result. The SAME text
+appears in three places: the Telegram alert (leads the message), the graph's
+`explanation` node, and `alert_event.plain_explanation` in both `/api/graph` and
+`/api/graph/alerts`.
+
+**Destinations are humanized everywhere**, not just in this narrative:
+`middleware/humanize.py`'s `resolve_destination_info()` resolves a destination_id to a
+local peer device's own hostname, a known domain, or an external IP's reverse-DNS
+hostname + GeoIP ASN owner/country — `kind` in the response (`local_device`/`domain`/
+`external_ip`) lets the console style/link it appropriately. Every `destination` node
+in `/api/graph` and every `device_hostname` field in `/api/graph/alerts*` goes through
+this, never a bare device_id or raw IP.
+
+**Bounded semantic search**, not unbounded background indexing: each alert's
+explanation text is embedded once, at write time, via `fp_engine.py`'s `embed_text()`
+(FastEmbed `BAAI/bge-small-en-v1.5`, the SAME already-resident model Stage 3 CL-AFPE
+uses — no second model load). `GET /api/graph/alerts/search` requires a scope (a time
+window, optionally narrowed to one device) and enforces a hard candidate cap
+(`GraphStore.ALERT_SEARCH_CANDIDATE_CAP = 5000`) — a search whose scope would exceed it
+gets an honest 422 error instead of a silently truncated result. The console API
+process embeds the SEARCH QUERY text itself via its own lazily-loaded, process-local
+FastEmbed instance (`graph_api.py`'s `_get_query_embed_model()`) — a separate OS
+process from the main pipeline, so it can't share that instance directly, but reads
+from the same already-downloaded `models/fastembed_cache/` rather than re-downloading.
+
+**Evidence Graph device filter** (found live 2026-09-22, "I still don't see the alert
+in graph"): `/api/graph` used to show only the most recent `limit` (25-200) decisions
+ACROSS THE WHOLE NETWORK, with no way to look up an older or single-device alert — on
+a busy network that's a matter of minutes, regardless of how old the target actually
+is. `device_id` (optional query param, `GraphStore.get_recent_decisions()`) scopes the
+same query to one device via `idx_decisions_device_ts`. The console's Graph tab has a
+matching device-filter input box, and every Alerts-tab row has a "View in graph"
+button that jumps straight there.

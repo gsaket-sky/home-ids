@@ -86,13 +86,17 @@ lingering system pressure, but NEVER bypasses the mutex itself.
 | `live_decision_archive` | 5 | true | 30 | Per-statement auto-commit deletes; export-then-delete ordering already safe; export write now atomic. |
 | `top_domains_report` | 5 | true | 20 | Read-only Pi-hole query + one (now atomic) file write; least urgent of all 7. |
 
-**Not yet audited / not live on `.94` today** (config.yaml.example only --
-`pausable: false` until individually reviewed the same way the 7 above were):
-`live_prune_weak_notices`, `cl_afpe_flip_monitor` (retired), `zeek_log_prune`,
-`backtest_job`. **`backtest_job` is the highest-priority one to review first** --
-it's the exact job implicated in the historical overlap-OOM incident this whole
-feature exists to prevent; review its DB usage pattern before ever flipping it to
-`pausable: true`.
+**Not yet audited for transaction-wrapping** (`pausable: false` until individually
+reviewed the same way the 7 above were): `live_prune_weak_notices`,
+`cl_afpe_flip_monitor` (retired, no longer scheduled), `zeek_log_prune`, and
+`backtest_job`. **`backtest_job` IS live on `.94` today** (confirmed via direct SSH
+read, 2026-09-23 — `priority: 2, pausable: false, max_runtime_minutes: 60`, correctly
+still unaudited) despite this repo's own checked-in `config.yaml` lacking a
+`backtest_job:` entry entirely (`config.yaml.example` has one; the deployed file
+doesn't match — see `Documentation/ARGUS_ARCHITECTURE.md` §3's "Known repo/deployment
+config drift" note). It's the highest-priority one to review first — it's the exact
+job implicated in the historical overlap-OOM incident this whole feature exists to
+prevent; review its DB usage pattern before ever flipping it to `pausable: true`.
 
 ## Config keys
 

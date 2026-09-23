@@ -2,6 +2,82 @@
 
 All notable changes to the Home IDS project will be documented in this file.
 
+> **Gap note**: entries between `v12.14.0` and `v16.0.0` were never backfilled here —
+> that period covers the v13→Argus architecture rewrite and several weeks of rapid
+> iteration. `git tag --sort=-creatordate` plus each tag's own annotated message is
+> the authoritative record for that window; `Documentation/ARGUS_ARCHITECTURE.md` and
+> `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
+> from `v16.1.0` onward.
+
+## [v16.5.0] - 2026-09-23
+
+Chronic console latency + pipeline-freeze root cause. Investigated a user report that
+the console felt slow, confirmed live via `py-spy`: `GraphStore` re-ran its
+~40-statement schema migration on EVERY console API request (not just the graph tab —
+overview/autonomy/hunt/devices/graph all go through it), colliding with the
+constantly-writing main pipeline for SQLite locks — 6+ worker threads caught
+simultaneously stuck at this exact call, 40+ second responses even for the smallest
+query. Now cached once per process (`GraphStore._migrated_db_paths`). Also cached
+`StateManager` (a 5.7MB JSON reparse on every read-only request across 14 call sites)
+with mtime-based invalidation (`middleware/state_client.py`).
+
+That investigation led to a bigger finding: `soc.service` had self-restarted 25 times
+in one day, 84% needing a hard SIGKILL, heartbeat stale up to 30+ minutes at a time.
+Root cause: `ml_engine.py`'s `save_models()` is a fully synchronous, unbounded disk
+write called every 60s from the main detection loop's own thread (and again from the
+shutdown handler, explaining the SIGKILLs) — bounded to 20s the same way
+`state_guard.py`'s `flush_to_disk()` already was. Verified live: restarts dropped from
+25/day to 1 in 8 hours, with clean recovery on that one.
+
+## [v16.4.0] - 2026-09-22
+
+Geofencing alert graph gap + Evidence Graph device filter. A real user-reported
+missing alert traced to the geofencing hard-stop path deliberately skipping the graph
+write (to avoid duplicating evidence) without setting what downstream alert_event code
+needed — fixed with a targeted write that reuses the existing per-cycle dedup instead
+of re-running the full evaluation (which would have double-counted the observation
+into the live baseline models). The specific missing alert was backfilled from real
+data. Also added a `device_id` filter to the graph API/console and a "View in graph"
+link on every Alerts-tab row, closing a separate gap the investigation surfaced: the
+graph canvas only ever showed the most recent ~25-200 decisions network-wide, with no
+way to look up an older or single-device alert.
+
+## [v16.3.0] - 2026-09-22
+
+Plain-English alert narratives + console-wide humanization. Every alert now gets a
+short, non-technical paragraph — device, what was noticed, where, why the system
+leaned toward a threat, the honest counter argument, what happened as a result —
+generated from the same evidence graph the decision engine used, shown identically in
+Telegram, the graph's own explanation node, and the console's alert table.
+Destination IPs are humanized everywhere (local peer hostname, known domain, or
+external IP + ASN/country) instead of raw IPs; the graph canvas got family-based color
+coding and end-to-end multi-hop click highlighting. Also fixed: Overview's
+`fp_evaluations` count silently dropped a real third verdict bucket (UNCERTAIN), and
+global-scoped autotuner promotions were invisible in the console entirely. Console no
+longer scrolls back to the top on every click.
+
+## [v16.2.0] - 2026-09-22
+
+Alert-trace graph: alerts now live in the evidence graph, not just `alerts.json`. New
+`alert_events`/`incidents`/`operator_actions` schema, wired into the live pipeline so
+every fired/suppressed/logged-only alert is durably written to `GraphStore` alongside
+its winning hypothesis and supporting evidence, with a bounded semantic-search
+embedding generated at write time (mandatory scope filter, hard candidate cap, honest
+error instead of silent truncation). Console: a new fired/suppressed alert list under
+the Evidence Graph tab with bounded natural-language search, and alerts now render as
+real graph nodes connected to their decision/evidence/destination nodes.
+
+## [v16.1.0] - 2026-09-22
+
+Dead-code cleanup + resource-aware job scheduling. Retired `scripts/retro_hunter.py`
+and `scripts/shadow_backtest.py` (dead since the Argus cutover), kept
+`cl_afpe_flip_monitor.py`'s file (its one-time job may be needed again for a future
+engine flip, though it's no longer scheduled). `fp_engine.py`'s weekly model retrain
+now runs as a subprocess instead of in-process, closing a real OOM crash-loop. New
+`core/resource_gate.py` + `core/job_coordinator.py`: hard mutex/priority/SIGSTOP-
+pause-resume/orphan-reclaim scheduling for every scheduled job, not just the retrain.
+Fixed `/hosts` freezing the entire console FastAPI event loop.
+
 ## [v12.14.0] - 2026-09-04
 
 Triggered by a third-party architecture review of a live SOC digest, which found the

@@ -37,11 +37,11 @@ dashboards.
 ## 🧬 The Argus Evidence Graph & Decision Engine (Primary)
 
 This section describes what actually decides a threat verdict today — `.94`'s
-`config.yaml` runs `engine: v13`, which means Argus is the primary path, not a
+`config.yaml` runs `engine: argus`, which means Argus is the primary path, not a
 parallel experiment. The older "Brain 1" description in the next section
 (`src/core/decision_engine.py` + `src/intelligence/hypotheses/`) still exists in
 the codebase and is still wired in, but only as a **fallback** — `pipeline.py`
-calls `v13_live_engine.evaluate(..., fallback_evaluate=self.decision_engine.evaluate)`,
+calls `argus_live_engine.evaluate(..., fallback_evaluate=self.decision_engine.evaluate)`,
 so the old engine only ever runs if Argus's own evaluation raises an exception.
 
 ### The central rule
@@ -57,7 +57,7 @@ different underlying sensors, not the same signal counted twice — agree.
 ### What "the Evidence Graph" actually is
 
 It's a SQLite database (`state/v13_graph.db`) with a small, fixed schema
-(`src/v13/graph/schema.sql`):
+(`src/argus/graph/schema.sql`):
 
 | Table | What it holds |
 |---|---|
@@ -68,6 +68,8 @@ It's a SQLite database (`state/v13_graph.db`) with a small, fixed schema
 | `hypotheses` | The named hypothesis catalog (`NETWORK_INTRUSION`, `DGA_BOTNET_C2`, etc.). |
 | `decisions` | The actual verdict history — one row per published/changed decision, the durable audit trail. |
 | `containment_actions` | Block/isolate/tarpit/release actions taken, linked back to the decision that authorized them. |
+| `alert_events` | One row per cycle that crossed SUSPICIOUS+ — fired to Telegram, autonomously suppressed, or logged-only — including the same plain-English explanation shown in the console and Telegram. Added 2026-09-22. |
+| `incidents` / `operator_actions` | Groups repeated alert_events into one ongoing incident, and records human actions (approve/release/immunize/block) taken on an alert. Added 2026-09-22. |
 | `edges` | A generic polymorphic table connecting the above (`observed`, `targets`, `supports`, `merged_into`, `corroborates`, `trusts`). |
 
 **Identity tables vs. the event log** is the key distinction worth internalizing:
@@ -79,7 +81,7 @@ registry of *things*.
 ### How evidence is created
 
 Every detector in the pipeline (`intelligence/detectors/*.py`,
-`intelligence/threat_intel.py`, `v13/ops/live_engine.py`'s own synthetic
+`intelligence/threat_intel.py`, `argus/ops/live_engine.py`'s own synthetic
 evidence) produces the same shape:
 
 ```python
@@ -94,7 +96,7 @@ Evidence(
 ```
 
 `independence_family` is the load-bearing field — it's what
-`v13/hypotheses/independence.py`'s `INDEPENDENCE_FAMILY_MAP` uses to answer "is
+`argus/hypotheses/independence.py`'s `INDEPENDENCE_FAMILY_MAP` uses to answer "is
 this a genuinely different vantage point, or just another observation of the
 same underlying phenomenon?" Two `dns_rate`/`dns_entropy` hits both come from
 `dns_behavior` — seeing both is not two independent sources, it's one family
@@ -127,13 +129,13 @@ so unbounded growth is a real, not theoretical, concern:
 | `decisions` | 1 year (180 days on `pi_8gb`), then archived (exported, not deleted) | The durable record of what the system actually concluded. |
 | `devices` / `destinations` | Indefinitely | Small row count, high identity value — these are the graph's "nouns", not its event log. |
 
-All of this runs as a scheduled job (`v13/ops/live_prune.py`, config.yaml's
+All of this runs as a scheduled job (`argus/ops/live_prune.py`, config.yaml's
 `scheduled_jobs.scheduler.live_prune`, daily by default) — never inline in the
 2-second detection loop.
 
 ### How a decision is actually made
 
-`v13/decision/engine.py::DecisionEngine.evaluate()`, in this exact order:
+`argus/decision/engine.py::DecisionEngine.evaluate()`, in this exact order:
 
 **1. Hard-stops** (checked first, first match wins — `DEFAULT_HARD_STOP_REGISTRY`):
 
@@ -174,13 +176,13 @@ evidence families (or a deterministic hard-stop downgraded rather than
 escalated), and CRITICAL only ever comes from a deterministic hard-stop, a
 verified IOC, or a fully corroborated reputation signal — never a bare numeric
 score threshold in isolation. This is enforced by an actual regression test
-suite (`tests/test_v13_decision_engine.py`'s "INVARIANT" battery), not just
+suite (`tests/test_argus_decision_engine.py`'s "INVARIANT" battery), not just
 documented intent.
 
 ### The 24-hour correlation window (and why it isn't "24h stale")
 
 Every live decision queries up to 24 hours of history from the graph
-(`v13/ops/live_engine.py`'s `_GRAPH_QUERY_WINDOW_SECONDS`) to gather
+(`argus/ops/live_engine.py`'s `_GRAPH_QUERY_WINDOW_SECONDS`) to gather
 corroboration — but this is **not** a delay. Every pipeline cycle (~2 second
 poll) evaluates fresh, incoming evidence immediately; the 24h figure is only how
 far back the engine is *allowed to look* for supporting history, not how long it
@@ -244,6 +246,16 @@ Evidence(
 6. Reputation tier 4 (one unconfirmed signal, e.g. a moderate AbuseIPDB score with clean VT/TI) → `SUSPICIOUS` / monitor only, confidence 0.45. **Never auto-blocks on this alone.**
 7. ML anomaly only, score > 0.90 → `ANOMALOUS` / log only, confidence 0.10.
 8. Otherwise → `BENIGN`, suppressed.
+
+**Every Telegram alert now leads with a 🗣 plain-English paragraph** (added
+2026-09-22, `mitigation/plain_explanation.py`'s `build_plain_explanation()`) — no
+jargon, no evidence-type codes, no confidence percentages: the device, what was
+noticed, the destination (resolved to a hostname/ASN/country, never a raw IP), the
+winning hypothesis, the honest counter-argument (the losing hypothesis's own score,
+not hidden), and what happened as a result. It sits above the existing technical
+sections below, not in place of them — the SAME text also appears in the console's
+Evidence Graph (both the Alerts table and as its own `explanation` node connected to
+the alert).
 
 Every evaluation also produces a `reasoning_trail` — a plain-language, ordered list of what was checked and why the verdict landed where it did (hard-stop results, reputation context including IP ownership, hypothesis scores, final verdict). This is what Telegram alerts display under **🧭 REASONING** instead of a bare confidence number.
 
@@ -760,7 +772,16 @@ Two retrain paths exist for the LightGBM classifier specifically, and both now a
 
 ## 🧪 Test Suite & Validation Scripts
 
-`tests/` contains 30 self-contained phase test files (no live network, no running Pi-hole, no real malware required) plus two broader tools.
+`tests/` has grown to 129 files as of this writing: 52 `test_phase*.py` (the original
+per-implementation-phase suite this section documents), 42 `test_argus_*.py` (the
+Argus-era suite — decision engine, hypotheses, baseline/BOCPD, autotune, graph store,
+live engine, and more), and the rest covering the console API and other areas. All
+are self-contained (no live network, no running Pi-hole, no real malware required).
+The table below covers the original `test_phase0`-`test_phase38` files in detail —
+useful as a map of what the CORE engine's test coverage looks like, but not an
+exhaustive list of every test file that exists today. Run `ls tests/test_*.py` for
+the current authoritative list, and see `Documentation/ARGUS_ARCHITECTURE.md`/
+`Documentation/ARGUS_DECISIONS.md` for what the newer `test_argus_*.py` files cover.
 
 ```bash
 source venv/bin/activate
@@ -921,7 +942,7 @@ The whole point of this family: turn "the system is healing/tuning itself" from 
 
 This is the plain-language version of [`Documentation/ARGUS_ARCHITECTURE.md` §8](ARGUS_ARCHITECTURE.md#8-threat-categorization--decision-logic)
 — that section has the exhaustive score ladder and exact evidence-type list per
-hypothesis (`v13/hypotheses/engine.py`), sourced directly from the live code;
+hypothesis (`argus/hypotheses/engine.py`), sourced directly from the live code;
 this section is "what does this alert NAME actually mean and what real-world
 behavior creates it," organized by category. Every one of these is an **attack
 hypothesis** competing against the **benign hypotheses** below it (see the
@@ -1064,8 +1085,16 @@ file, or in `.env`). It's stored in that browser's `localStorage` only —
 nothing is sent anywhere else, and you can change it later from the small
 link at the bottom of the sidebar ("API token set — click to change").
 
-**The six sections** (left sidebar):
+**The nine sections** (left sidebar):
 
+- **Overview** — the front page: alert volume (day-clickable), Pi-hole
+  blocks/router isolations/tarpit activations this period, and two
+  self-explaining panels — "Self-healing (autonomous FP engine)" (Evaluations
+  = Confirmed threats + Suppressed false positives + **Uncertain**, the
+  three-way split the CL-AFPE verdict actually produces, not a two-bucket
+  simplification) and "Autonomous tuning (global & per-device)" (both
+  network-wide threshold changes and per-device/per-category scoped ones,
+  linking through to the Autonomy tab below for the full history).
 - **Devices** — the device roster: every known device, its current containment
   state (tarpitted / router-isolated / neither, shown as pills), and a detail
   view per device (click through from the roster) for investigating one
@@ -1078,15 +1107,34 @@ link at the bottom of the sidebar ("API token set — click to change").
   questions without SSHing in and querying the graph db by hand. Includes a
   "replay decision" tool for re-running the decision engine against different
   evidence to sanity-check a verdict.
-- **Evidence Graph** — a visual view into the graph described in the section
-  above: devices, destinations, and the evidence connecting them, browsable
-  directly rather than only through SQL.
+- **Evidence Graph** — two sub-views, toggled at the top of the tab. The
+  **graph canvas**: devices, destinations, evidence, decisions, alerts, and
+  each alert's own plain-English explanation (see §2's "Alert delivery"
+  below) rendered as connected, color-coded nodes — click a node to see its
+  full detail and highlight everything connected to it end-to-end (not just
+  its direct neighbors), and filter to one device's own recent activity
+  instead of the whole network's (a "View in graph" link on any Alerts-tab
+  row jumps straight there, pre-filtered). The **Alerts** sub-view: every
+  fired/suppressed/logged-only alert as a sortable, filterable table, with
+  natural-language search over alert explanations ("dns tunneling", "peer
+  deviation") scoped to a bounded recent window.
 - **Blocking** — the Pi-hole side: which domains are currently blocked and why,
   with the ability to unblock directly from the console (the same
   `IPSMitigator.unblock_by_base_domain()` path the "🛡️ Mark False Positive"
   Telegram button uses).
 - **Suricata** — signature-match status and health for the Suricata IDS
   subsystem.
+- **Health** — live watchdog status from `core/health_manager.py`: per-component
+  heartbeat pills (main detection loop, identity reconcile worker, threat-intel
+  refresh, Suricata/Pi-hole scan recency, nightly backtest job, and others),
+  overall resource-pressure level, and auto-recovery state — the console's
+  window into whether the pipeline itself is healthy, not just what it's found.
+- **Autonomy** — "what Argus has changed on its own": the autotuner's
+  threshold-history table (global-scope changes, with per-device and
+  per-category ones broken out into their own panels below it), the
+  composite-trust grant history, and a "building trust" view showing how close
+  each device/hypothesis/destination-class/evidence-family combination is to
+  earning trust through repeated, independently-corroborated safe behavior.
 - **Config** — a live editor for `config.yaml`'s tunable parameters, writing
   through the same config-write-back API the autonomous self-calibration layer
   itself uses (§3) — a change here takes effect immediately, no restart, the

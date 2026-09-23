@@ -91,8 +91,10 @@ Each stage, briefly:
   rename, see the note above) holding devices, destinations, evidence, hypotheses,
   decisions, containment actions, and a generic polymorphic `edges` table
   (`observed`/`targets`/`supports`/`contradicts`/`merged_into`/`corroborates`/`trusts`).
-  `.94`'s live copy and `.19`'s shadow copy are two separate files.
-- **Hypothesis engine** — scores 16 `Hypothesis` subclasses (network intrusion, DGA,
+  `.94`'s live copy and `.19`'s shadow copy are two separate files. Three more tables
+  sit alongside these (added 2026-09-22, `src/argus/graph/store.py`'s `alert_events`/
+  `incidents`/`operator_actions`) — see "Alert-trace graph" below for what they add.
+- **Hypothesis engine** — scores 14 `Hypothesis` subclasses (network intrusion, DGA,
   exfiltration, beaconing, coordinated targeting, peer deviation, benign-profile, etc.)
   against the accumulated evidence, and counts how many *independent* evidence families
   corroborate each hypothesis (`src/argus/hypotheses/independence.py`).
@@ -118,21 +120,42 @@ integer — no lists/ranges), and `subprocess.Popen`s each due, enabled job. Con
 | Job | Script | Cron | Frequency |
 |---|---|---|---|
 | Legacy autotuner retrain | `scripts/train_fp_classifier.py` | `0 3 * * *` | Daily, 03:00 |
-| Ollama SOC triage | `scripts/ollama_soc.py` | `30 */4 * * *` | Every 4h at :30 |
 | Argus LLM review | `src/argus/ops/live_llm_review.py` | `45 */4 * * *` | Every 4h at :45 |
-| Retro hunter (legacy) | `scripts/retro_hunter.py` | `0 2 * * *` | Daily, 02:00 |
 | Top domains report | `scripts/top_domains_report.py` | `0 6 * * *` | Daily, 06:00 |
 | Argus graph prune | `src/argus/ops/live_prune.py` | `15 3 * * *` | Daily, 03:15 |
 | Argus retro hunter | `src/argus/ops/live_retro_hunter.py` | `45 2 * * *` | Daily, 02:45 |
 | Decision archive | `src/argus/ops/live_decision_archive.py` | `0 4 1 * *` | Monthly, 1st @ 04:00 |
-| CL-AFPE flip monitor | `src/argus/ops/cl_afpe_flip_monitor.py` | `*/15 * * * *` | Every 15 minutes |
+| Population prior builder | `src/argus/ops/population_prior_builder.py` | `45 3 * * *` | Daily, 03:45 |
+| Backtest job | `src/argus/ops/backtest_job.py` | `30 3 * * *` | Daily, 03:30 (on `.94` — see drift note below) |
 
-**Known gap**: `backtest_job.py` (the nightly regression/synthetic-attack sweep the
-closed-loop autotuner's `promote_change()` requires before promoting any parameter change)
-is defined in `config.yaml.example` (`30 3 * * *`, daily 03:30) but **absent from the live
-`config.yaml`** — as of this writing it is not actually scheduled to run. Confirm against
-the live host before relying on it; the autotuner's promotion gate has no automatic input
-until this is fixed.
+**v16 cleanup (2026-09-22)**: `scripts/ollama_soc.py` and `scripts/retro_hunter.py`
+(the two rows above once named) are fully retired — `live_llm_review.py` and
+`live_retro_hunter.py` reached feature parity and replaced them, per
+`Documentation/ARGUS_DECISIONS.md`. `cl_afpe_flip_monitor.py`'s **file** was
+deliberately kept (its one-time job — watching the `v_current`→`argus` CL-AFPE
+cutover — may be needed again for a future engine flip), but its scheduler entry was
+removed from `.94`'s live config the same cleanup, since a stale-but-still-firing
+15-minute cron would silently re-flip a deliberate future manual rollback back to
+`argus` on its next tick. It is not currently in the schedule table above.
+
+**Known repo/deployment config drift**: this repo's own `config.yaml` does not have a
+`backtest_job:` entry under `scheduled_jobs.scheduler` (only `config.yaml.example`
+does) — but `.94`'s real, deployed `config.yaml` DOES have one (confirmed via direct
+SSH read, 2026-09-23), scheduled daily at 03:30. This repo's checked-in `config.yaml`
+is personal/deployment-specific and gitignored-adjacent — don't assume it matches
+`.94`'s live file for anything schedule-related; always verify via SSH before relying
+on a claim about what's actually running.
+
+**Resource-aware scheduling (2026-09-22, `Documentation/RESOURCE_AWARE_SCHEDULING.md`)**:
+`core/job_coordinator.py` + `core/resource_gate.py` sit on top of all the jobs above —
+a hard, system-wide mutex (at most one of these subprocess jobs runs at a time), with
+each job declaring a `priority` (lower = more urgent, decides who gets the slot when
+two are due at once and who may preempt/pause whom) and `pausable` (whether
+SIGSTOP-pausing it mid-run is safe — `live_prune` is the one job that isn't, since it
+runs uncommitted bulk deletes; every other job uses per-statement/explicit commits).
+`job_admission_max_pressure_tier`/`job_max_defer_minutes` (config.yaml) gate new job
+starts against the current resource-pressure tier, with a starvation backstop that
+force-runs a denied job past a max defer window regardless.
 
 **B. `.19`'s ingest daemon internal loop** — not cron-based. A plain sleep loop,
 `poll_interval_seconds` (default 2.0s) for detection, plus its own separate
@@ -162,8 +185,9 @@ behavior worth knowing about):
 literal string comparison — this is deliberate, not incidental:
 
 - **`engine: argus`** — the current, default engine (the code's comparison target as of
-  the v13->argus rename; the deployed `.94` config still literally says `engine: v13`
-  until the separately-gated cutover lands, see the note at the top of this doc). Read in
+  the v13->argus rename; the deployed `.94` config now also literally says `engine:
+  argus`, confirmed live — the transitional `engine: v13` cutover window this section
+  used to describe has landed). Read in
   `src/core/pipeline.py` (3 call sites) as `self.config.get("engine", "argus") == "argus"`.
   When true, `LiveIdentityManager` and the Argus decision path (§8) are used.
 - **`engine: v_current`** — the original, unmodified legacy engine
@@ -279,7 +303,8 @@ incident writeup — it changes continuously.
 
 ### Per-device and per-category tuning (2026-09-16, on top of the global tier above)
 
-**File:** `src/argus/autotune/engine.py`, `Documentation/PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md`.
+**File:** `src/argus/autotune/engine.py`. Design rationale (category-before-device
+sequencing, the scope-validation bug found via tests): `Documentation/ARGUS_DECISIONS.md`.
 Every tunable parameter now resolves through 3 tiers, most-specific first
 (`get_active_value()`, lines 149-173):
 
@@ -920,3 +945,5 @@ Where content from the 13 merged documents now lives. Safe to remove this sectio
 | `HEE_ROADMAP.md` | `ARGUS_DECISIONS.md` ("Considered and Not Built") |
 | `V13_REMAINING_WORK.md` | Retired (95%+ closed-out TODO ledger); a few durable rationale items -> `ARGUS_DECISIONS.md` |
 | `V13_SESSION_HANDOFF_2026-09-06.md` | "Standing Rules" -> `ARGUS_DECISIONS.md`; rest retired (self-described as point-in-time session notes) |
+| `PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md` | Retired 2026-09-23 (fully IMPLEMENTED, content duplicated §5 above at comparable depth) — mechanism -> §5, design rationale -> `ARGUS_DECISIONS.md` |
+| `IPV6_DEVICE_IDENTITY_PLAN.md` | Retired 2026-09-23 (fully IMPLEMENTED, IPv6 already enabled+verified live) — design rationale + what shipped -> `ARGUS_DECISIONS.md` |

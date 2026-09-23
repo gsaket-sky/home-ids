@@ -1,12 +1,23 @@
 # Alert Trace Graph Plan
 
-Status: **PHASES 1-6 SHIPPED + LIVE-VERIFIED ON .94 (2026-09-22)** — schema,
-pipeline wiring (hypothesis edges, alert_events, autotune-state capture,
-operator_actions for immunize), bounded-search embeddings, retention/pruning, the
-two new API endpoints, and the console's new Alerts sub-view are all deployed and
-confirmed working against real production data (see "Live verification" section
-near the end). Phase 8 (backfilling `alerts.json`'s existing history) is NOT yet
-done. Written in response to: "if we ignore alerts.json's history and consider the
+Status: **PHASES 1-6 SHIPPED + LIVE-VERIFIED ON .94, PLUS SUBSTANTIAL FOLLOW-ON WORK
+(2026-09-22/23)** — schema, pipeline wiring (hypothesis edges, alert_events,
+autotune-state capture, operator_actions for immunize), bounded-search embeddings,
+retention/pruning, the two new API endpoints, and the console's new Alerts sub-view
+are all deployed and confirmed working against real production data (see "Live
+verification" section near the end). Since the original phases shipped, the SAME
+feature area grew further: plain-English narratives (`mitigation/plain_explanation.py`)
+reused this graph's own evidence/hypotheses; the graph canvas gained an `explanation`
+node type, family-based color coding, end-to-end multi-hop highlighting, humanized
+destinations, and a `device_id` filter (the network-wide-only view was a real,
+separately-found usability gap); a geofencing-specific graph-write bypass was found
+and fixed (`Documentation/ARGUS_DECISIONS.md` has the full story); and two chronic
+console-latency bugs surfaced by using this feature under real load got fixed
+(`GraphStore`'s per-request schema migration, `StateManager`'s per-request reparse —
+also in `ARGUS_DECISIONS.md`/`CONSOLE_DATA_API.md`). **Phase 8 (bulk-backfilling
+`alerts.json`'s full historical log into this shape) is still NOT done** — only the
+one specific alert the geofencing-gap investigation surfaced was individually
+backfilled, as a targeted fix, not a general backfill pass. Written in response to: "if we ignore alerts.json's history and consider the
 new architecture, if we would have implemented it afresh how will it look like...
 end to end trace in evidence graph for every entry from now on:
 device-evidence-hypothesis-decision-alerts-suppressed... the graph db should follow
@@ -225,8 +236,8 @@ itself a latent unbounded-growth gap this design does not repeat).
 ## Autonomous-behavior traceability (2026-09-22, explicit requirement)
 
 Global and per-device autonomous tuning (`AutotuneEngine`, `threshold_history` —
-already device_id/device_type-scoped per
-[PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md](PER_DEVICE_CATEGORY_AUTOTUNE_PLAN.md) — and
+already device_id/device_type-scoped, see `ARGUS_ARCHITECTURE.md` §5 and
+`ARGUS_DECISIONS.md`'s "Per-device/per-category autotuning" entry — and
 CL-AFPE's `cl_afpe_trust`) already has its own console visibility (the Autonomy tab,
 [project_health_visibility_and_autonomy_console]). What's currently missing is the
 **link between an individual alert and the autonomous state that shaped it** — today
