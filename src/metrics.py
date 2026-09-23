@@ -457,8 +457,11 @@ argus_alert_events_24h = Gauge("home_ids_argus_alert_events_24h", "Alert events 
 argus_alert_events_retained = Gauge("home_ids_argus_alert_events_retained", "Alert events currently retained in the evidence graph by outcome (survives restarts)", ["status"])
 argus_decisions_24h = Gauge("home_ids_argus_decisions_24h", "Argus decisions in the last 24h by state", ["state"])
 argus_incidents_active_24h = Gauge("home_ids_argus_incidents_active_24h", "Incidents with activity in the last 24h")
-autotune_value = Gauge("home_ids_autotune_value", "Currently promoted autotuned value, by parameter and scope (global / category = device type / device)", ["parameter", "scope", "target", "hostname"])
-autotune_canary_value = Gauge("home_ids_autotune_canary_value", "Proposed autotune value still in its canary window (not yet promoted)", ["parameter", "scope", "target", "hostname"])
+# The evidence graph stores no device names (only ids) -- per-device series below carry
+# the device id only; dashboards attach the live hostname from the engine's own
+# per-device metrics (e.g. `* on(device) group_left(hostname) home_ids_decision_state`).
+autotune_value = Gauge("home_ids_autotune_value", "Currently promoted autotuned value, by parameter and scope (global / category = device type / device). target = device type for category scope, device id for device scope", ["parameter", "scope", "target"])
+autotune_canary_value = Gauge("home_ids_autotune_canary_value", "Proposed autotune value still in its canary window (not yet promoted)", ["parameter", "scope", "target"])
 autotune_config_value = Gauge("home_ids_autotune_config_value", "Hand-set config.yaml value an autotuned parameter falls back to", ["parameter"])
 autotune_changes = Gauge("home_ids_autotune_changes", "Autotune changes retained in threshold_history by parameter, scope and status (canary / promoted / rolled_back / superseded)", ["parameter", "scope", "status"])
 autotune_last_change_timestamp = Gauge("home_ids_autotune_last_change_timestamp", "Unix time of the most recent autotune event of each kind", ["status"])
@@ -473,8 +476,8 @@ operator_actions = Gauge("home_ids_operator_actions", "Operator actions retained
 argus_exporter_last_success_timestamp = Gauge("home_ids_argus_exporter_last_success_timestamp", "Unix time the evidence-graph exporter last completed a full pass")
 argus_exporter_duration_seconds = Gauge("home_ids_argus_exporter_duration_seconds", "Wall time of the evidence-graph exporter's last pass")
 # Per device (Master Threat Ledger), keyed by the graph's canonical device id.
-device_alerts_fired_24h = Gauge("home_ids_device_alerts_fired_24h", "Alerts published for this device in the last 24h", ["device", "hostname"])
-device_alerts_suppressed_24h = Gauge("home_ids_device_alerts_suppressed_24h", "Alerts the false-positive filter suppressed for this device in the last 24h", ["device", "hostname"])
-device_learned_trust = Gauge("home_ids_device_learned_trust", "Mean CL-AFPE learned trust (0..1) for this device's own behaviour", ["device", "hostname"])
-device_baseline_regime_shifts = Gauge("home_ids_device_baseline_regime_shifts", "Behaviour regime changes (BOCPD changepoints) detected in this device's baselines", ["device", "hostname"])
-device_sigma_shift = Gauge("home_ids_device_sigma_shift", "Argus CL-AFPE sensitivity shift for this device (positive = more lenient after confirmed false positives)", ["device", "hostname"])
+device_alerts_fired_24h = Gauge("home_ids_device_alerts_fired_24h", "Alerts published for this device in the last 24h", ["device"])
+device_alerts_suppressed_24h = Gauge("home_ids_device_alerts_suppressed_24h", "Alerts the false-positive filter suppressed for this device in the last 24h", ["device"])
+device_learned_trust = Gauge("home_ids_device_learned_trust", "Mean CL-AFPE learned trust (0..1) for this device's own behaviour", ["device"])
+device_baseline_regime_shifts = Gauge("home_ids_device_baseline_regime_shifts", "Behaviour regime changes (BOCPD changepoints) detected in this device's baselines", ["device"])
+device_sigma_shift = Gauge("home_ids_device_sigma_shift", "Argus CL-AFPE sensitivity shift for this device (positive = more lenient after confirmed false positives)", ["device"])

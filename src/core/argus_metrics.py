@@ -49,8 +49,8 @@ _GAUGE_LABELS = {
     argus_alert_events_24h: ("status",),
     argus_alert_events_retained: ("status",),
     argus_decisions_24h: ("state",),
-    autotune_value: ("parameter", "scope", "target", "hostname"),
-    autotune_canary_value: ("parameter", "scope", "target", "hostname"),
+    autotune_value: ("parameter", "scope", "target"),
+    autotune_canary_value: ("parameter", "scope", "target"),
     autotune_config_value: ("parameter",),
     autotune_changes: ("parameter", "scope", "status"),
     autotune_last_change_timestamp: ("status",),
@@ -60,11 +60,11 @@ _GAUGE_LABELS = {
     population_priors: ("device_type",),
     containment_actions: ("action_type", "status"),
     operator_actions: ("action",),
-    device_alerts_fired_24h: ("device", "hostname"),
-    device_alerts_suppressed_24h: ("device", "hostname"),
-    device_learned_trust: ("device", "hostname"),
-    device_baseline_regime_shifts: ("device", "hostname"),
-    device_sigma_shift: ("device", "hostname"),
+    device_alerts_fired_24h: ("device",),
+    device_alerts_suppressed_24h: ("device",),
+    device_learned_trust: ("device",),
+    device_baseline_regime_shifts: ("device",),
+    device_sigma_shift: ("device",),
 }
 
 
@@ -231,13 +231,12 @@ class ArgusMetricsExporter:
         out: dict = {g: {} for g in _GAUGE_LABELS}
 
         # Devices: canonical ids (merges), display labels, Argus sensitivity shift.
-        dev_rows = q("SELECT device_id, merged_into_device_id, display_label, metadata_json FROM devices")
+        # The graph stores no device names -- series are keyed by canonical device id only.
+        dev_rows = q("SELECT device_id, merged_into_device_id, metadata_json FROM devices")
         canonical = canonical_device_map((r["device_id"], r["merged_into_device_id"]) for r in dev_rows)
-        label = {r["device_id"]: (r["display_label"] or r["device_id"]) for r in dev_rows}
 
         def dev_key(device_id):
-            canon = canonical.get(device_id, device_id)
-            return canon, str(label.get(canon, canon))
+            return (canonical.get(device_id, device_id),)
 
         for r in dev_rows:
             if r["merged_into_device_id"]:
@@ -274,14 +273,10 @@ class ArgusMetricsExporter:
                                       "canary_until, promoted_at, rolled_back_at FROM threshold_history")]
         active, canary, changes, last = summarize_autotune(th_rows, canonical, now)
 
-        def scope_labels(key):
-            parameter, scope, target = key
-            host = str(label.get(target, target)) if scope == "device" else ""
-            return parameter, scope, target, host
         for key, value in active.items():
-            out[autotune_value][scope_labels(key)] = value
+            out[autotune_value][key] = value
         for key, value in canary.items():
-            out[autotune_canary_value][scope_labels(key)] = value
+            out[autotune_canary_value][key] = value
         for key, n in changes.items():
             out[autotune_changes][key] = float(n)
         for status, ts in last.items():

@@ -5,12 +5,6 @@
     "name": "home_ids_v3_mitigation",
     "namespace": "default",
     "uid": "a258bbcb-61a1-4829-8251-edc0f3b07407",
-    "resourceVersion": "1786732620769004",
-    "generation": 1,
-    "creationTimestamp": "2026-08-14T18:37:00Z",
-    "labels": {
-      "grafana.app/deprecatedInternalID": "3167461197160448"
-    },
     "annotations": {
       "grafana.app/createdBy": "user:afm28i0ltxcsga",
       "grafana.app/folder": "",
@@ -42,16 +36,15 @@
         }
       }
     ],
-    "cursorSync": "Off",
-    "description": "IPS, Trust Cache, and AI Decisions Now also includes Layer-1 process health (CPU, memory, uptime) alongside the existing IPS mitigation, Continuous-Learning False-Positive Engine, and Ollama SOC transparency panels.",
+    "cursorSync": "Tooltip",
+    "description": "Is the machinery healthy: internal components, scheduled jobs, disk budget, containment, sensors and the engine process.",
     "editable": true,
     "elements": {
       "panel-1": {
         "kind": "Panel",
         "spec": {
-          "id": 1,
-          "title": "🛡️ IPS Mitigations & Tarpitting",
-          "description": "Section header. The three tiles below show what's ACTIVELY isolated right now, in real time.",
+          "title": "",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -64,133 +57,58 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Real-time state of the Intrusion Prevention System.",
-                "mode": "markdown"
+                "mode": "markdown",
+                "content": "Everything that keeps detection running. If something on the Overview looks wrong, the cause is usually here."
               },
               "fieldConfig": {
                 "defaults": {},
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 1
         }
       },
-      "panel-10": {
+      "panel-2": {
         "kind": "Panel",
         "spec": {
-          "id": 10,
-          "title": "Hard-Stopped Alerts (never suppressible, per hour)",
-          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: How many alerts were stopped at Stage 1 — the deterministic hard-stop security filter that runs BEFORE any ML model, on signals like a confirmed honeypot hit or a Tier-5 threat-intel match. These bypass the false-positive engine entirely and always fire as confirmed threats (see fp_engine.py: 'hard-stop signals fired → CONFIRMED THREAT despite trust cache hit').",
+          "title": "🩺 Components",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
             "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | fp_verdict_stage=~\"STAGE_1_HARD_STOP|TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "hard-stopped / hour"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
+              "queries": [],
               "transformations": [],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
+            "group": "text",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
+                "mode": "markdown",
+                "content": "The health manager checks every part and repairs what it can on its own."
               },
               "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
+                "defaults": {},
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 2
         }
       },
-      "panel-11": {
+      "panel-3": {
         "kind": "Panel",
         "spec": {
-          "id": 11,
-          "title": "LGBM Model Status",
-          "description": "Is the LightGBM ONNX false-positive classifier model currently loaded and serving Stage 2 of the CL-AFPE pipeline? Red means Stage 2 scoring is unavailable and the engine is relying only on Stage 1 hard-stops and Stage 3 FastEmbed similarity.",
+          "title": "Component health",
+          "description": "Every internal component the health manager watches, with its state and self-repair attempts.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -207,9 +125,1314 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_lgbm_model_status",
-                        "format": "time_series",
-                        "instant": true
+                        "expr": "max by (component) (home_ids_health_component_state)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (component) (home_ids_health_recovery_attempts)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "component",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true,
+                        "Time 3": true
+                      },
+                      "indexByName": {
+                        "component": 0,
+                        "Value #A": 1,
+                        "Value #B": 2
+                      },
+                      "renameByName": {}
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
+                },
+                "sortBy": [
+                  {
+                    "displayName": "State",
+                    "desc": true
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "component"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Component"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "State"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Healthy, Degraded, Unhealthy, Safe mode (running reduced), Recovery failed, or Retired."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-background"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "-1": {
+                                "text": "Retired",
+                                "color": "text",
+                                "index": 0
+                              },
+                              "0": {
+                                "text": "🟢 Healthy",
+                                "color": "green",
+                                "index": 1
+                              },
+                              "1": {
+                                "text": "🟡 Degraded",
+                                "color": "yellow",
+                                "index": 2
+                              },
+                              "2": {
+                                "text": "🔴 Unhealthy",
+                                "color": "red",
+                                "index": 3
+                              },
+                              "3": {
+                                "text": "🟣 Safe mode",
+                                "color": "purple",
+                                "index": 4
+                              },
+                              "4": {
+                                "text": "⛔ Recovery failed",
+                                "color": "dark-red",
+                                "index": 5
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Repair attempts"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Self-repair attempts in the current back-off window."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "text"
+                            },
+                            {
+                              "value": 1,
+                              "color": "orange"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "id": 3
+        }
+      },
+      "panel-4": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Host load over time",
+          "description": "0 Normal · 1 Resource pressure · 2 Conserving · 3 Critical.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_health_pressure_level",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "host load"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "state-timeline",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showValue": "never",
+                "mergeValues": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🟢 Normal",
+                          "color": "green",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟡 Resource pressure",
+                          "color": "yellow",
+                          "index": 1
+                        },
+                        "2": {
+                          "text": "🟠 Conserving",
+                          "color": "orange",
+                          "index": 2
+                        },
+                        "3": {
+                          "text": "🔴 Critical",
+                          "color": "red",
+                          "index": 3
+                        }
+                      }
+                    }
+                  ],
+                  "color": {
+                    "mode": "thresholds"
+                  },
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "yellow"
+                      },
+                      {
+                        "value": 2,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 3,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 4
+        }
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "title": "📅 Scheduled jobs",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": "Every enabled background job, as seen by the scheduler. Retired jobs drop out on their own."
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 5
+        }
+      },
+      "panel-6": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Scheduled jobs",
+          "description": "State, last success, runtime, time budget and trouble counts per job. Kills mean the job overran its budget and was stopped.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (task) (home_ids_scheduler_task_state)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (task) (time() - home_ids_scheduler_task_last_success_timestamp)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (task) (home_ids_scheduler_task_last_duration_seconds)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (task) (home_ids_scheduler_task_budget_minutes)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "D",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (task) (home_ids_scheduler_task_runs_total{outcome=\"success\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "E",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (task) (home_ids_scheduler_task_runs_total{outcome=~\"error|failed\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "F",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (task) (home_ids_scheduler_task_kills_total)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "G",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (task) (home_ids_scheduler_task_preemptions_total)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "H",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (task) (home_ids_scheduler_task_deferrals_total{reason=\"pressure\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "I",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (task) (home_ids_scheduler_task_enabled)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "J",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "task",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true,
+                        "Time 3": true,
+                        "Time 4": true,
+                        "Time 5": true,
+                        "Time 6": true,
+                        "Time 7": true,
+                        "Time 8": true,
+                        "Time 9": true,
+                        "Time 10": true,
+                        "Time 11": true
+                      },
+                      "indexByName": {
+                        "task": 0,
+                        "Value #A": 1,
+                        "Value #B": 2,
+                        "Value #C": 3,
+                        "Value #D": 4,
+                        "Value #E": 5,
+                        "Value #F": 6,
+                        "Value #G": 7,
+                        "Value #H": 8,
+                        "Value #I": 9,
+                        "Value #J": 10
+                      },
+                      "renameByName": {}
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
+                },
+                "sortBy": [
+                  {
+                    "displayName": "Since last success",
+                    "desc": true
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "task"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Job"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "State"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Idle, Running, Paused (a more urgent job is running), or Waiting (due but held back)."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "0": {
+                                "text": "Idle",
+                                "color": "text",
+                                "index": 0
+                              },
+                              "1": {
+                                "text": "▶ Running",
+                                "color": "green",
+                                "index": 1
+                              },
+                              "2": {
+                                "text": "⏸ Paused",
+                                "color": "yellow",
+                                "index": 2
+                              },
+                              "3": {
+                                "text": "⏳ Waiting",
+                                "color": "orange",
+                                "index": 3
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Since last success"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Time since its last successful run (since the scheduler last started)."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "text"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "not since restart"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #C"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Last runtime"
+                      },
+                      {
+                        "id": "description",
+                        "value": "How long the last run took."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "—"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #D"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Time budget"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Longest it may actively run before being stopped."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "m"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #E"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Successful runs"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Since the scheduler started."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #F"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Failed runs"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Reported an error or exited abnormally."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "text"
+                            },
+                            {
+                              "value": 1,
+                              "color": "red"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #G"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Stopped for overrunning"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Times it hit its time budget and was stopped."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "text"
+                            },
+                            {
+                              "value": 1,
+                              "color": "red"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #H"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Paused for others"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Times it was paused so a more urgent job could run."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #I"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Held back (host load)"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Scheduler ticks it waited because the host was under pressure."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "0"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #J"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Enabled"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Currently enabled in config."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "mappings",
+                        "value": [
+                          {
+                            "type": "value",
+                            "options": {
+                              "1": {
+                                "text": "Yes",
+                                "color": "green",
+                                "index": 0
+                              }
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "id": 6
+        }
+      },
+      "panel-7": {
+        "kind": "Panel",
+        "spec": {
+          "title": "💾 Disk budget",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": "The disk governor keeps the whole stack under a fixed size, trimming the oldest data first."
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 7
+        }
+      },
+      "panel-8": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Used vs budget (GB)",
+          "description": "Size of each stored data set against its budget, from the governor's last run.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "label_replace(home_ids_scheduler_task_result{task=\"disk_budget_governor\", field=~\"graph_db.final_size_gb|zeek_logs.final_size_gb|state_files.state_files_gb\"}, \"part\", \"$1\", \"field\", \"([a-z_]+)\\\\..*\")",
+                        "instant": true,
+                        "range": false,
+                        "legendFormat": "{{part}} used"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "orientation": "horizontal",
+                "displayMode": "basic",
+                "showUnfilled": true,
+                "valueMode": "color",
+                "namePlacement": "left",
+                "sizing": "auto"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "decgbytes",
+                  "noValue": "0",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "blue"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 8
+        }
+      },
+      "panel-9": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Budgets (GB)",
+          "description": "The limits those data sets are held to.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "label_replace(home_ids_scheduler_task_result{task=\"disk_budget_governor\", field=~\"budget_gb.(graph_db|zeek_logs|state_files|total)\"}, \"part\", \"$1\", \"field\", \"budget_gb.(.*)\")",
+                        "instant": true,
+                        "range": false,
+                        "legendFormat": "{{part}} budget"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "bargauge",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "orientation": "horizontal",
+                "displayMode": "basic",
+                "showUnfilled": true,
+                "valueMode": "color",
+                "namePlacement": "left",
+                "sizing": "auto"
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "decgbytes",
+                  "noValue": "0",
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "blue"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 9
+        }
+      },
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Governor last success",
+          "description": "The governor runs on a schedule; this is how long ago it last succeeded.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "time() - home_ids_scheduler_task_last_success_timestamp{task=\"disk_budget_governor\"}",
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -224,13 +1447,9 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -238,222 +1457,79 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
-                  "unit": "none",
+                  "unit": "s",
+                  "noValue": "not since restart",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
-                        "color": "red"
+                        "color": "green"
                       },
                       {
-                        "value": 1,
-                        "color": "green"
+                        "value": 93600,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 172800,
+                        "color": "red"
                       }
                     ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "🔴 UNAVAILABLE",
-                          "color": "red",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🟢 LOADED",
-                          "color": "green",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 10
         }
       },
-      "panel-12": {
+      "panel-11": {
         "kind": "Panel",
         "spec": {
-          "id": 12,
-          "title": "📜 Suppressed Alerts Log (what the false-positive filter hid, and why)",
-          "description": "Every alert the false-positive filter suppressed, with the stage that did it (fp_stage), its confidence and the first reason. Nothing is silently discarded. The previous version read state/autonomous_muted.jsonl, a file retired in v16 that no longer exists; suppressions are now flagged inside alerts.json itself.",
+          "title": "🛡️ Containment",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
             "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\", reason=\"fp_verdict.reasons[0]\"",
-                        "queryType": "range",
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
+              "queries": [],
               "transformations": [],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "table",
-            "version": "",
+            "group": "text",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
+                "mode": "markdown",
+                "content": "What is being blocked or isolated right now, and whether blocking actions work."
               },
               "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
+                "defaults": {},
                 "overrides": []
               }
-            }
-          }
-        }
-      },
-      "panel-13": {
-        "kind": "Panel",
-        "spec": {
-          "id": 13,
-          "title": "🤖 AI Reasoning Transparency (historical — see description)",
-          "description": "⚠️ Mostly historical. This shows 'ollama_transparency' entries from the retired scripts/ollama_soc.py (last entry around 09-12). Its replacement, argus/ops/live_llm_review.py, writes state/ollama_analysis_v13.jsonl, which isn't shipped to Loki yet (it needs a promtail scrape job).\n\nOriginal meaning: Two things happen here: (1) 'ollama_transparency' entries are Brain 3's full LLM reasoning for every alert it batch-analyzed — model used, its classification, confidence, reasoning, recommended action, and whether the deterministic threat-intel guardrail (validator_passed) approved or overrode it. (2) 'afpe_tuning' entries, if present, would represent autonomous threshold retuning — this event type was not found in the reviewed engine source during the Version 7.0 audit, so treat rows of that type as unverified/legacy until confirmed against your actual deployed code.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} |= \"ollama_transparency\" or \"afpe_tuning\" | json ts=\"timestamp\", device_ip=\"device.ip\", risk=\"risk\", model=\"model\", classification=\"response.classification\", ai_confidence=\"response.confidence\", reason=\"response.reason\", action=\"response.recommended_action\", validator_passed=\"validator_passed\"",
-                        "format": "table",
-                        "instant": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "renameByName": {
-                        "ts": "When",
-                        "device_ip": "Device IP",
-                        "risk": "Original Risk",
-                        "model": "AI Model",
-                        "classification": "AI Verdict",
-                        "ai_confidence": "AI Confidence",
-                        "reason": "AI Reasoning",
-                        "action": "Recommended Action",
-                        "validator_passed": "Guardrail Passed"
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
             }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 11
         }
       },
-      "panel-2": {
+      "panel-12": {
         "kind": "Panel",
         "spec": {
-          "id": 2,
-          "title": "Active L2 ARP Tarpits",
-          "description": "Devices currently trapped by the Layer-2 Scapy ARP/NDP tarpit. This is usually the FASTEST mitigation to take effect since it needs no external API — a device can be tarpitted even if your router or Pi-hole integration is down.",
+          "title": "Devices tarpitted",
+          "description": "Devices trapped on the LAN by the ARP/NDP tarpit right now.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -471,8 +1547,8 @@
                       },
                       "spec": {
                         "expr": "count(home_ids_ips_tarpit_active == 1) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -487,13 +1563,9 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -501,11 +1573,17 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
@@ -518,42 +1596,20 @@
                         "color": "red"
                       }
                     ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null+nan",
-                        "result": {
-                          "text": "N/A",
-                          "index": 1
-                        }
-                      }
-                    },
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "✅ Clear",
-                          "color": "green",
-                          "index": 0
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 12
         }
       },
-      "panel-3": {
+      "panel-13": {
         "kind": "Panel",
         "spec": {
-          "id": 3,
-          "title": "Active WAN Isolations",
-          "description": "Devices currently cut off from WAN access via the Fritz!Box TR-064 integration (Layer 3). Local LAN access is deliberately left intact so you can still SSH in and remediate the machine.",
+          "title": "Devices router-isolated",
+          "description": "Devices cut off from the internet at the router right now.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -571,8 +1627,8 @@
                       },
                       "spec": {
                         "expr": "count(home_ids_ips_router_isolated_active == 1) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -587,13 +1643,9 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -601,11 +1653,17 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
@@ -618,42 +1676,20 @@
                         "color": "red"
                       }
                     ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null+nan",
-                        "result": {
-                          "text": "N/A",
-                          "index": 1
-                        }
-                      }
-                    },
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "✅ Clear",
-                          "color": "green",
-                          "index": 0
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 13
         }
       },
-      "panel-4": {
+      "panel-14": {
         "kind": "Panel",
         "spec": {
-          "id": 4,
-          "title": "Active Pi-Hole Blocks",
-          "description": "How many domains are under an active Pi-hole DNS block right now (Layer 7). This is a live count of what's enforced now. 'Domains Sinkholed' on the Overview counts new blocks within the selected time range.",
+          "title": "Domains blocked",
+          "description": "Domains currently blocked in Pi-hole.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -671,8 +1707,8 @@
                       },
                       "spec": {
                         "expr": "count(home_ids_ips_active_blocks == 1) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -687,13 +1723,9 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -701,782 +1733,22 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 1,
-                        "color": "red"
-                      }
-                    ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null+nan",
-                        "result": {
-                          "text": "N/A",
-                          "index": 1
-                        }
-                      }
-                    },
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "✅ Clear",
-                          "color": "green",
-                          "index": 0
-                        }
-                      }
-                    }
-                  ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5,
-          "title": "🧠 Autonomous False-Positive Elimination (AFPE)",
-          "description": "Section header for the Continuous-Learning False-Positive Engine (CL-AFPE) metrics below — the system that keeps Home-IDS from crying wolf over your smart TV's firmware checks.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Metrics tracking the dynamic Trust Cache and AI overrides.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6,
-          "title": "False-Positive Filter: Alerts Evaluated (per hour)",
-          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: Total alerts that crossed alert_threshold and were routed into the false-positive engine for a suppress/confirm decision — the denominator for everything below (Stage 1 Hardstops, Suppressed, Confidence Score).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "evaluated / hour"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-7": {
-        "kind": "Panel",
-        "spec": {
-          "id": 7,
-          "title": "False-Positive Filter: Alerts Suppressed (per hour)",
-          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: How many of those evaluations were autonomously suppressed as false positives (Stage 2/3 combined confidence >= fp_combined_suppress_threshold = 0.8, from config.yaml). The gap between 'Total Evaluations' and this number is how many alerts actually reached you as real threats.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "suppressed / hour"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-8": {
-        "kind": "Panel",
-        "spec": {
-          "id": 8,
-          "title": "Trust Cache Size",
-          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: How many unique domains are currently held in the 14-day trust cache (fp_revoke_action_ttl_seconds-adjacent TTL logic). Queries matching this cache skip the ML pipeline entirely for near-zero-latency suppression — this is Brain 2's short-term memory.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_trust_cache_size"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  },
-                  "noValue": "Not reported"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9,
-          "title": "False-Positive Confidence (15-min average, 0 = real threat … 1 = false positive)",
-          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: The combined Stage 2 (LightGBM) + Stage 3 (FastEmbed) confidence that an alert is a false positive. Thresholds now reflect the real config.yaml values: below 0.55 (fp_combined_uncertain_threshold) is treated as still-a-real-threat territory (🔴), 0.55-0.79 is the 'uncertain, tagged low-confidence' band (🟡), and 0.8+ (fp_combined_suppress_threshold) is confidently auto-suppressed (🟢).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "avg(avg_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | unwrap fp_verdict_confidence | __error__=\"\" [15m]))",
-                        "queryType": "range",
-                        "legendFormat": "avg false-positive confidence"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "red"
-                      },
-                      {
-                        "value": 0.55,
-                        "color": "yellow"
-                      },
-                      {
-                        "value": 0.8,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5001": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5001,
-          "title": "🔌 About the Loki streams these panels use",
-          "description": "The exact promtail config needed to make the AFPE Suppressed/Muted Log panel actually receive data.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "**Loki streams this dashboard reads.** Every alert-log and false-positive panel here reads `state/alerts.json` (promtail job `home_ids_alerts`). Suppressed alerts are marked `\"suppressed\": true` inside that same file, so no second stream is needed.\n\nThe old `home_ids_muted` stream (`state/autonomous_muted.jsonl`) was retired in v16 and can be removed from `/etc/promtail/config.yml`.\n\nOptional: to see the LLM reviewer's reasoning, add a promtail job for `state/ollama_analysis_v13.jsonl`.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5002": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5002,
-          "title": "⚙️ Engine CPU Usage (100% = one full CPU core)",
-          "description": "CPU time consumed by the Home-IDS process itself (process_cpu_seconds_total, a standard metric automatically exposed by the prometheus_client library — confirmed in requirements.txt). Sustained high usage can slow down the 5-phase detection loop and delay alerting; compare against Alert Queue on the Overview dashboard if you suspect the engine is falling behind.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "rate(process_cpu_seconds_total{job=\"home_ids\"}[5m]) * 100",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "engine CPU"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percent",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5003": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5003,
-          "title": "💾 Engine Memory (RSS)",
-          "description": "Resident memory used by the Home-IDS process (process_resident_memory_bytes). Grows with max_device_states and the size of your ML models — a slow, steady climb over days/weeks with no plateau can indicate a memory leak worth investigating.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "process_resident_memory_bytes{job=\"home_ids\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
                 "colorMode": "value",
-                "graphMode": "area",
+                "graphMode": "none",
+                "textMode": "value",
                 "justifyMode": "auto",
                 "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
-                  "unit": "bytes",
+                  "unit": "none",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5004": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5004,
-          "title": "⏱️ Engine Uptime",
-          "description": "How long the current Home-IDS process has been running without a restart (time() - process_start_time_seconds). Drops to zero unexpectedly = the service crashed and systemd restarted it — worth checking journalctl if this doesn't match your last intentional deploy/restart.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "time() - process_start_time_seconds{job=\"home_ids\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "textMode": "auto"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
+                        "value": null,
                         "color": "blue"
                       }
                     ]
@@ -1485,15 +1757,15 @@
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 14
         }
       },
-      "panel-5005": {
+      "panel-15": {
         "kind": "Panel",
         "spec": {
-          "id": 5005,
-          "title": "🧪 False-Positive Filter Funnel (alerts per hour)",
-          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: Three CL-AFPE counters plotted together as a funnel: Total Evaluations (everything that crossed alert_threshold), Stage 1 Hardstops (bypassed straight to CONFIRMED THREAT on a honeypot/reputation hit — never even gets an FP chance), and Suppressed (autonomously resolved as false positives). The gap between Evaluations and (Hardstops + Suppressed) is what actually reached you as a real, unresolved alert — the smaller that gap relative to Evaluations, the quieter and more trustworthy your SOC feed is.",
+          "title": "Blocks waiting to retry",
+          "description": "Blocking commands that failed and are being retried. Anything here is not actually blocked yet.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1504,58 +1776,18 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "loki",
+                      "group": "prometheus",
                       "version": "v0",
                       "datasource": {
-                        "name": "${LOKI_DS}"
+                        "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "Evaluated"
+                        "expr": "count(home_ids_ips_queue_status) or vector(0)",
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | fp_verdict_stage=~\"STAGE_1_HARD_STOP|TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "Hard-stopped (never suppressible)"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [1h]))",
-                        "queryType": "range",
-                        "legendFormat": "Suppressed as false positive"
-                      }
-                    },
-                    "refId": "C",
                     "hidden": false
                   }
                 }
@@ -1566,182 +1798,38 @@
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
+            "group": "stat",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
                 },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6001": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6001,
-          "title": "🩺 Subsystem Health",
-          "description": "Section header.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "**What couldn't the system do, right now?** PHASE 30: this dashboard is titled \"System Tuning, Healing & Health\" but had zero general subsystem up/down visibility until this row -- Pi-hole/Zeek status lived on the Overview dashboard, and Suricata/Pi-hole-gravity had none anywhere. Consolidated here so every subsystem's health is in one glanceable place.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6002": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6002,
-          "title": "🦈 Suricata Health",
-          "description": "home_ids_suricata_scan_total's live success/error ratio over the last 30m -- see the Overview dashboard's identical panel for full description.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_suricata_scan_total{outcome=\"success\"}[30m])) / sum(increase(home_ids_suricata_scan_total[30m]))",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percentunit",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "red"
                       },
                       {
-                        "value": 0.5,
+                        "value": 1,
                         "color": "orange"
-                      },
-                      {
-                        "value": 0.9,
-                        "color": "green"
                       }
                     ]
                   }
@@ -1749,15 +1837,15 @@
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 15
         }
       },
-      "panel-6003": {
+      "panel-16": {
         "kind": "Panel",
         "spec": {
-          "id": 6003,
-          "title": "🌐 Pi-hole Gravity-List API Health",
-          "description": "Time since the last successful home_ids_pihole_gravity_last_success_timestamp -- see the Overview dashboard's identical panel for full description.",
+          "title": "Blocks given up on",
+          "description": "Blocking commands that failed every retry. These domains are NOT blocked; check the Pi-hole connection.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1774,9 +1862,9 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "time() - home_ids_pihole_gravity_last_success_timestamp",
-                        "format": "time_series",
-                        "instant": true
+                        "expr": "count(home_ids_ips_dead_letter) or vector(0)",
+                        "instant": true,
+                        "range": false
                       }
                     },
                     "refId": "A",
@@ -1794,11 +1882,6 @@
             "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -1806,758 +1889,43 @@
                   "fields": "",
                   "values": false
                 },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      },
-                      {
-                        "value": 3600,
-                        "color": "orange"
-                      },
-                      {
-                        "value": 21600,
-                        "color": "red"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6004": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6004,
-          "title": "Zeek Network Monitor",
-          "description": "home_ids_zeek_status -- reference copy of the Overview dashboard's identical panel, so Zeek's status is visible here alongside every other subsystem too.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zeek_status",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
                 "colorMode": "value",
-                "graphMode": "area",
+                "graphMode": "none",
+                "textMode": "value",
                 "justifyMode": "auto",
                 "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
                 "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "🔴 OFFLINE",
-                          "color": "red",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🟢 ONLINE",
-                          "color": "green",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6005": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6005,
-          "title": "Pi-hole IPS",
-          "description": "home_ids_ips_pihole_status -- reference copy of the Overview dashboard's identical panel, so Pi-hole's status is visible here alongside every other subsystem too.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_pihole_status",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "🔴 BYPASS",
-                          "color": "red",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🟢 ONLINE",
-                          "color": "green",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6006": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6006,
-          "title": "",
-          "description": "Caption for the subsystem status tiles below.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "🟢/ONLINE/ARMED = working right now. 🔴/OFFLINE/UNAVAILABLE = that specific layer is down -- the other containment layers keep working independently, hover any tile for exactly what to check.",
-                "mode": "markdown"
-              }
-            }
-          }
-        }
-      },
-      "panel-6007": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6007,
-          "title": "",
-          "description": "Caption for LGBM Model Status.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "🟢/LOADED = the LightGBM Stage-2 false-positive classifier is active. 🔴/UNAVAILABLE = FP suppression falls back to Stage 1 rules only -- more alerts, not fewer, so this failing is safe but noisier.",
-                "mode": "markdown"
-              }
-            }
-          }
-        }
-      },
-      "panel-6008": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6008,
-          "title": "",
-          "description": "Caption for the active-mitigation-count tiles below.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "✅ Clear = nothing of that kind is active right now (good). A number = that many devices currently under that containment.",
-                "mode": "markdown"
-              }
-            }
-          }
-        }
-      },
-      "panel-9200": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9200,
-          "title": "⚙️ Pipeline Throughput & Automated-Mitigation Reliability",
-          "description": "",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Is the engine keeping up with live traffic, and did any automated block/isolate/tarpit action ever fail silently? These panels exist so a failure in the mitigation pipeline itself is never invisible.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9201": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9201,
-          "title": "Pipeline Collector Lag",
-          "description": "Seconds between an event happening and the engine finishing processing it. Should stay near 0 -- a climbing value means the engine is falling behind live traffic and detections are delayed.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_collector_lag_seconds",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      },
-                      {
-                        "value": 5,
-                        "color": "orange"
-                      },
-                      {
-                        "value": 30,
-                        "color": "red"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9202": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9202,
-          "title": "Threat Intel Engine Ready",
-          "description": "1 once ThreatIntel has completed at least one successful feed refresh. While this is 0, every TI lookup fails open (reads as 'clean') simply because no feed data has loaded yet -- distinguishing that cold-start state from 'genuinely checked, nothing found' is the entire point of this metric.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ti_engine_ready",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "🔴 NOT READY",
-                          "color": "red",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🟢 READY",
-                          "color": "green",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9203": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9203,
-          "title": "FP Embedding Model Status",
-          "description": "Is the FastEmbed ONNX vector-similarity model (CL-AFPE Stage 3) loaded? If not, the false-positive engine falls back to Stages 1-2 only for every alert.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_embed_model_status",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "red"
-                      },
-                      {
-                        "value": 1,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "🔴 UNAVAILABLE",
-                          "color": "red",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🟢 LOADED",
-                          "color": "green",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9204": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9204,
-          "title": "Events Processed Rate",
-          "description": "DNS/network events per second flowing through the pipeline. A sudden drop to zero while devices are still active on the network usually means the collector (Pi-hole log tail or Zeek) has stalled, not that traffic actually stopped.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "rate(home_ids_events_processed_total[5m])",
-                        "format": "time_series",
-                        "instant": false
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "ops",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "red"
                       }
                     ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
                   }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 16
         }
       },
-      "panel-9205": {
+      "panel-17": {
         "kind": "Panel",
         "spec": {
-          "id": 9205,
-          "title": "IPS Mitigation Errors (per minute, by integration)",
-          "description": "Failures encountered while trying to actually execute a block/isolate/unblock action, broken down by which integration failed (Pi-hole API, router webhook, etc). This should normally stay at zero -- any sustained rate here means automatic protection is not actually being applied even though the engine decided it should be.",
+          "title": "Blocking errors (per minute)",
+          "description": "Failures while executing a block, isolation or release, by integration. Should stay at 0.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2575,8 +1943,8 @@
                       },
                       "spec": {
                         "expr": "sum by (target_type) (rate(home_ids_ips_errors_total[5m])) * 60 or vector(0)",
-                        "format": "time_series",
                         "instant": false,
+                        "range": true,
                         "legendFormat": "{{target_type}}"
                       }
                     },
@@ -2592,447 +1960,153 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
-                  "sort": "none"
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 17
+        }
+      },
+      "panel-18": {
+        "kind": "Panel",
+        "spec": {
+          "title": "📡 Sensors and data flow",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": ""
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 18
+        }
+      },
+      "panel-19": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Processing delay",
+          "description": "Seconds between an event happening and the engine finishing it. A climbing value means it is falling behind.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_collector_lag_seconds",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "area",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "noValue": "?",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9206": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9206,
-          "title": "Domains Stuck In Retry Queue",
-          "description": "Pi-hole block commands that failed and are being retried. Anything sitting here for a long time (check the Pi-hole IPS health stat on the Main Overview dashboard too) means that specific domain is currently NOT actually blocked despite the engine deciding it should be.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_queue_status",
-                        "format": "table",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "hostname": "Device",
-                        "domain": "Domain",
-                        "Value": "Retry Attempts"
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "✅ Nothing stuck"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9207": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9207,
-          "title": "Domains Permanently Failed (Dead Letter)",
-          "description": "Domains that exhausted all retry attempts and were given up on -- these are NOT blocked and nothing will retry them automatically. If this list grows, the underlying Pi-hole connectivity problem needs a human to look at it.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ips_dead_letter",
-                        "format": "table",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "hostname": "Device",
-                        "domain": "Domain",
-                        "Value": "Failed"
-                      }
-                    }
-                  }
-                }
-              ],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "noValue": "✅ Nothing failed"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9208": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9208,
-          "title": "Router Isolations (selected range)",
-          "description": "Total number of times the router (Layer-3 WAN kill-switch) has been triggered to fully isolate a device. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_ips_router_isolations_total[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9209": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9209,
-          "title": "Tarpit Activations (selected range)",
-          "description": "Total number of times the Layer-2 ARP/NDP tarpit has been triggered to trap a device. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_ips_tarpit_activations_total[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9210": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9210,
-          "title": "Suricata: Time Since Last Success",
-          "description": "Suricata only runs during a reactive-capture burst, so gaps of hours between successes are normal (unlike the always-on jobs elsewhere on this dashboard) -- this is here so a burst that keeps triggering Suricata scans that keep failing doesn't go unnoticed.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "time() - home_ids_suricata_last_success_timestamp",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
                       },
                       {
-                        "value": 86400,
+                        "value": 15,
                         "color": "orange"
                       },
                       {
-                        "value": 604800,
+                        "value": 60,
                         "color": "red"
                       }
                     ]
@@ -3041,15 +2115,15 @@
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 19
         }
       },
-      "panel-9211": {
+      "panel-20": {
         "kind": "Panel",
         "spec": {
-          "id": 9211,
-          "title": "Pi-hole Gravity-List Lookup Volume",
-          "description": "How often threat_signals.py asks Pi-hole's gravity list whether a domain is a known CDN/telemetry domain, and whether those lookups are succeeding. A rate stuck at zero while devices are active suggests the gravity-list integration itself has stopped being consulted.",
+          "title": "Events processed (per second)",
+          "description": "DNS and network events flowing through the engine. A drop to zero while devices are active means a sensor stalled.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3066,9 +2140,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "rate(home_ids_pihole_gravity_queries_total[5m])",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "rate(home_ids_events_processed_total[5m])",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "events / s"
                       }
                     },
                     "refId": "A",
@@ -3083,67 +2158,588 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
-                  "sort": "none"
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 20
+        }
+      },
+      "panel-21": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Threat intel loaded",
+          "description": "Have the threat-intel feeds loaded at least once? Until then every lookup reads as clean.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ti_engine_ready",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "?",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      },
+                      {
+                        "value": 1,
+                        "color": "green"
+                      }
+                    ]
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "🔴 Not yet",
+                          "color": "red",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "🟢 Ready",
+                          "color": "green",
+                          "index": 1
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 21
+        }
+      },
+      "panel-22": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Suricata scans OK (30 min)",
+          "description": "Share of Suricata scans that succeeded in the last 30 minutes (Suricata only runs during capture bursts).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum(increase(home_ids_suricata_scan_total{outcome=\"success\"}[30m])) / sum(increase(home_ids_suricata_scan_total[30m]))",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percentunit",
+                  "noValue": "no scans",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "red"
+                      },
+                      {
+                        "value": 0.5,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 0.9,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 22
+        }
+      },
+      "panel-23": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Evidence-graph export",
+          "description": "When the evidence graph was last published to Prometheus (every ~2 min). Stale means graph-based panels are stale.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "time() - home_ids_argus_exporter_last_success_timestamp",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "noValue": "never",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
+                      },
+                      {
+                        "value": 600,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 1800,
+                        "color": "red"
                       }
                     ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
                   }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 23
+        }
+      },
+      "panel-24": {
+        "kind": "Panel",
+        "spec": {
+          "title": "⚙️ Engine process",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": ""
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 24
+        }
+      },
+      "panel-25": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Engine CPU (100% = one full core)",
+          "description": "CPU used by the engine process.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "rate(process_cpu_seconds_total{job=\"home_ids\"}[5m]) * 100",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "engine"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percent",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 25
+        }
+      },
+      "panel-26": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Engine memory",
+          "description": "Resident memory of the engine process. A steady climb with no plateau over days suggests a leak.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "process_resident_memory_bytes{job=\"home_ids\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "engine"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "bytes",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 26
+        }
+      },
+      "panel-27": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Engine uptime",
+          "description": "Time since the engine last (re)started. Unexpected drops mean it crashed and was restarted.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "time() - process_start_time_seconds{job=\"home_ids\"}",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "s",
+                  "noValue": "0",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 3600,
+                        "color": "green"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 27
         }
       }
     },
@@ -3157,7 +2753,7 @@
               "x": 0,
               "y": 0,
               "width": 24,
-              "height": 4,
+              "height": 2,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-1"
@@ -3168,9 +2764,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 6,
-              "width": 8,
-              "height": 6,
+              "y": 2,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-2"
@@ -3180,10 +2776,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 6,
-              "width": 8,
-              "height": 6,
+              "x": 0,
+              "y": 5,
+              "width": 12,
+              "height": 9,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-3"
@@ -3193,10 +2789,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 6,
-              "width": 8,
-              "height": 6,
+              "x": 12,
+              "y": 5,
+              "width": 12,
+              "height": 9,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-4"
@@ -3207,9 +2803,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 12,
+              "y": 14,
               "width": 24,
-              "height": 4,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-5"
@@ -3220,9 +2816,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 16,
-              "width": 8,
-              "height": 8,
+              "y": 17,
+              "width": 24,
+              "height": 10,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-6"
@@ -3232,10 +2828,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 16,
-              "width": 8,
-              "height": 8,
+              "x": 0,
+              "y": 27,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-7"
@@ -3245,10 +2841,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 16,
-              "width": 8,
-              "height": 8,
+              "x": 0,
+              "y": 30,
+              "width": 10,
+              "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-8"
@@ -3258,10 +2854,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 26,
-              "width": 8,
-              "height": 8,
+              "x": 10,
+              "y": 30,
+              "width": 10,
+              "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-9"
@@ -3271,10 +2867,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 26,
-              "width": 8,
-              "height": 8,
+              "x": 20,
+              "y": 30,
+              "width": 4,
+              "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-10"
@@ -3284,10 +2880,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 26,
-              "width": 8,
-              "height": 8,
+              "x": 0,
+              "y": 37,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-11"
@@ -3298,9 +2894,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 34,
-              "width": 24,
-              "height": 12,
+              "y": 40,
+              "width": 3,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-12"
@@ -3310,10 +2906,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 46,
-              "width": 24,
-              "height": 16,
+              "x": 3,
+              "y": 40,
+              "width": 3,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-13"
@@ -3323,13 +2919,52 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 62,
-              "width": 24,
-              "height": 7,
+              "x": 6,
+              "y": 40,
+              "width": 3,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-5001"
+                "name": "panel-14"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 9,
+              "y": 40,
+              "width": 3,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-15"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 12,
+              "y": 40,
+              "width": 3,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-16"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 15,
+              "y": 40,
+              "width": 9,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-17"
               }
             }
           },
@@ -3337,64 +2972,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 69,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5002"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 69,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5003"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 16,
-              "y": 69,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5004"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 76,
-              "width": 24,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-5005"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 84,
+              "y": 46,
               "width": 24,
               "height": 3,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6001"
+                "name": "panel-18"
               }
             }
           },
@@ -3402,25 +2985,25 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 89,
-              "width": 6,
-              "height": 7,
+              "y": 49,
+              "width": 4,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6002"
+                "name": "panel-19"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 6,
-              "y": 89,
-              "width": 6,
-              "height": 7,
+              "x": 4,
+              "y": 49,
+              "width": 8,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6003"
+                "name": "panel-20"
               }
             }
           },
@@ -3428,103 +3011,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 12,
-              "y": 89,
-              "width": 6,
-              "height": 7,
+              "y": 49,
+              "width": 4,
+              "height": 6,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-6004"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 18,
-              "y": 89,
-              "width": 6,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-6005"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 87,
-              "width": 24,
-              "height": 2,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-6006"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 24,
-              "width": 24,
-              "height": 2,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-6007"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 4,
-              "width": 24,
-              "height": 2,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-6008"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 96,
-              "width": 24,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9200"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 100,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9201"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 100,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9202"
+                "name": "panel-21"
               }
             }
           },
@@ -3532,116 +3024,77 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 16,
-              "y": 100,
-              "width": 8,
+              "y": 49,
+              "width": 4,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-22"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 20,
+              "y": 49,
+              "width": 4,
+              "height": 6,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-23"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 55,
+              "width": 24,
+              "height": 3,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-24"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 58,
+              "width": 10,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-9203"
+                "name": "panel-25"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 107,
-              "width": 12,
-              "height": 8,
+              "x": 10,
+              "y": 58,
+              "width": 10,
+              "height": 7,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-9204"
+                "name": "panel-26"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 12,
-              "y": 107,
-              "width": 12,
-              "height": 8,
+              "x": 20,
+              "y": 58,
+              "width": 4,
+              "height": 7,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-9205"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 115,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9206"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 115,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9207"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 123,
-              "width": 8,
-              "height": 6,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9208"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 123,
-              "width": 8,
-              "height": 6,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9209"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 16,
-              "y": 123,
-              "width": 8,
-              "height": 6,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9210"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 129,
-              "width": 24,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-9211"
+                "name": "panel-27"
               }
             }
           }
@@ -3650,23 +3103,10 @@
     },
     "links": [
       {
-        "title": "Navigation",
-        "type": "dashboards",
-        "icon": "apps",
-        "tooltip": "Switch Dashboards",
-        "tags": [
-          "home-ids-v2"
-        ],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🏠 Go to Overview",
+        "title": "🏠 Overview",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🏠 Go to Overview",
+        "icon": "dashboard",
+        "tooltip": "🏠 Overview",
         "url": "/d/home_ids_v3_main",
         "tags": [],
         "asDropdown": false,
@@ -3675,10 +3115,10 @@
         "keepTime": true
       },
       {
-        "title": "🌐 Go to Threat Landscape",
+        "title": "🌐 Threat Landscape",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🌐 Go to Threat Landscape",
+        "icon": "dashboard",
+        "tooltip": "🌐 Threat Landscape",
         "url": "/d/home_ids_v3_landscape",
         "tags": [],
         "asDropdown": false,
@@ -3687,10 +3127,10 @@
         "keepTime": true
       },
       {
-        "title": "🔍 Go to Device Deep Dive",
+        "title": "🔍 Device Deep Dive",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Device Deep Dive",
+        "icon": "dashboard",
+        "tooltip": "🔍 Device Deep Dive",
         "url": "/d/home_ids_v3_device",
         "tags": [],
         "asDropdown": false,
@@ -3699,10 +3139,10 @@
         "keepTime": true
       },
       {
-        "title": "🤖 Go to Autonomous Behavior",
+        "title": "🤖 Autonomy & Learning",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🤖 Go to Autonomous Behavior",
+        "icon": "dashboard",
+        "tooltip": "🤖 Autonomy & Learning",
         "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
@@ -3711,31 +3151,25 @@
         "keepTime": true
       }
     ],
-    "liveNow": true,
+    "liveNow": false,
     "preload": false,
     "tags": [
       "home-ids-v2"
     ],
     "timeSettings": {
-      "from": "now-1h",
+      "from": "now-24h",
       "to": "now",
-      "autoRefresh": "5s",
+      "autoRefresh": "1m",
       "autoRefreshIntervals": [
-        "5s",
-        "10s",
         "30s",
         "1m",
         "5m",
-        "15m",
-        "30m",
-        "1h",
-        "2h",
-        "1d"
+        "15m"
       ],
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
     },
-    "title": "5. 🛡️ System Tuning, Healing & Health",
+    "title": "5. 🛡️ System Health & Operations",
     "variables": [
       {
         "kind": "DatasourceVariable",
@@ -3779,11 +3213,12 @@
         "kind": "QueryVariable",
         "spec": {
           "name": "device",
+          "label": "device",
           "current": {
             "text": "All",
             "value": "$__all"
           },
-          "hide": "dontHide",
+          "hide": "hideVariable",
           "refresh": "onDashboardLoad",
           "skipUrlSync": false,
           "query": {
@@ -3794,16 +3229,18 @@
               "name": "${PROMETHEUS_DS}"
             },
             "spec": {
-              "query": "label_values(home_ids_threat_confidence, hostname)",
+              "query": "label_values(home_ids_decision_state, hostname)",
               "refId": "StandardVariableQuery"
             }
           },
           "regex": "",
+          "regexApplyTo": "value",
           "sort": "alphabeticalAsc",
-          "definition": "label_values(home_ids_threat_confidence, hostname)",
+          "definition": "label_values(home_ids_decision_state, hostname)",
           "options": [],
           "multi": true,
           "includeAll": true,
+          "allValue": ".*",
           "allowCustomValue": true
         }
       }

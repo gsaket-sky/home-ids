@@ -1,5 +1,9 @@
 # Grafana Dashboard Audit: 2026-09-23 (after v16.5.0)
 
+> **Superseded the same day** by the Argus-architecture redesign: see
+> [ARGUS_OBSERVABILITY_PLAN.md](ARGUS_OBSERVABILITY_PLAN.md). The findings below remain the record of what was wrong;
+> the Loki work-arounds and "not reported" flags described here are replaced by native Prometheus metrics.
+
 **Scope:** every panel on all 5 dashboards (173 panels, 197 queries) in `grafana_dashboard/`.
 **Method:** I didn't read the JSON and assume it was right. Every query ran against .94's live Prometheus and
 Loki (commit `022b89c`, the v16.5.0 code), and every metric was traced back to the code that writes it.

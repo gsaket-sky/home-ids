@@ -5,12 +5,6 @@
     "name": "home_ids_v3_device",
     "namespace": "default",
     "uid": "f7bae534-afaa-4f37-ad66-83d8e61abd67",
-    "resourceVersion": "1786732604949014",
-    "generation": 1,
-    "creationTimestamp": "2026-08-14T18:36:44Z",
-    "labels": {
-      "grafana.app/deprecatedInternalID": "3167394830688256"
-    },
     "annotations": {
       "grafana.app/createdBy": "user:afm28i0ltxcsga",
       "grafana.app/folder": "",
@@ -42,16 +36,15 @@
         }
       }
     ],
-    "cursorSync": "Off",
-    "description": "Investigate a specific device",
+    "cursorSync": "Tooltip",
+    "description": "Everything about one device: its verdict history, signals, baseline and its own tuning.",
     "editable": true,
     "elements": {
       "panel-1": {
         "kind": "Panel",
         "spec": {
-          "id": 1,
-          "title": "🔍 Select a Device to Investigate",
-          "description": "Pick a device (or several) from the 'device' dropdown at the top of this dashboard to filter every panel below to just that hostname.",
+          "title": "",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -64,206 +57,58 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Use the **device** dropdown at the top to filter these metrics.",
-                "mode": "markdown"
+                "mode": "markdown",
+                "content": "Pick a device in the **device** box at the top. Every panel follows it."
               },
               "fieldConfig": {
                 "defaults": {},
                 "overrides": []
               }
             }
-          }
-        }
-      },
-      "panel-10": {
-        "kind": "Panel",
-        "spec": {
-          "id": 10,
-          "title": "📜 Device Specific Alert Log",
-          "description": "Every candidate alert for the device(s) picked in the 'device' box, newest first, published or not. 'decision' = the Argus engine's reasoning path; 'fp_verdict' = only the false-positive filter's opinion (CONFIRMED_THREAT there means 'not judged a false positive', not 'confirmed attack'). Previously a text search for the device name, which broke when 'All' or several devices were selected.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | device_hostname=~\"$device\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\"",
-                        "queryType": "range",
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 1
         }
       },
       "panel-2": {
         "kind": "Panel",
         "spec": {
-          "id": 2,
-          "title": "AI Anomaly Confidence",
-          "description": "The IsolationForest ML model's structural outlier score for this device's own bespoke baseline (activates once the device has generated detection_engine.ml_warmup_samples = 5000 events). 0 = looks exactly like this device's normal behavior. Rising toward 1 = increasingly unusual for THIS specific device, even if the traffic would look normal for a different device type.",
+          "title": "🎯 Verdict",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
             "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
+              "queries": [],
               "transformations": [],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
+            "group": "text",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
+                "mode": "markdown",
+                "content": ""
               },
               "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
+                "defaults": {},
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 2
         }
       },
       "panel-3": {
         "kind": "Panel",
         "spec": {
-          "id": 3,
-          "title": "Markov State Transition Anomaly",
-          "description": "How unlikely this device's current behavioral state is, given its own historical state-transition history (the MarkovStateTracker, see ENGINEERING_MANUAL.md §2.3). A device that has been BENIGN for months has a transition probability to CRITICAL approaching zero — so a sudden jump here is one of the most statistically significant single signals in the whole engine.",
+          "title": "Verdict over time",
+          "description": "0 Benign · 1 Anomalous · 2 Suspicious · 3 High · 4 Critical.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -280,7 +125,9 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
+                        "expr": "home_ids_decision_state{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
                         "legendFormat": "{{hostname}}"
                       }
                     },
@@ -296,681 +143,74 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
+                  "mode": "multi",
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
+                      },
+                      {
+                        "value": 2,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 3,
+                        "color": "red"
                       }
                     ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
                   }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 3
         }
       },
       "panel-4": {
         "kind": "Panel",
         "spec": {
-          "id": 4,
-          "title": "DNS Query Rate",
-          "description": "Raw DNS queries per minute from this device. Not inherently good or bad on its own — read it together with DNS Avg Entropy and DNS Z-Score Spikes to the right; a volume spike alongside high entropy is a much stronger DGA signal than volume alone.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_query_rate{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5,
-          "title": "DNS Avg Entropy",
-          "description": "Shannon entropy of this device's queried domain names. Per ENGINEERING_MANUAL.md, values above ~4.5 mathematically indicate algorithmically-generated (DGA) domain strings rather than human-typed or CDN-style domains.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_entropy_avg{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6,
-          "title": "DNS Z-Score Spikes",
-          "description": "Standard-deviation (Z-Score) spikes in this device's query rate relative to its own EWMA baseline (baseline_alpha in config.yaml). A Z-Score above 3.0 is a 3-sigma anomaly — statistically, only ~0.3% of normal traffic should ever reach this level.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zscore_query_rate{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-7": {
-        "kind": "Panel",
-        "spec": {
-          "id": 7,
-          "title": "Beaconing Volume Score",
-          "description": "How closely this device's outbound connection VOLUME matches a periodic beaconing pattern, independent of timing regularity (see Jitter Uniformity Score, next panel). High values here plus low jitter together are the two components of C2 beaconing detection.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_beaconing_volume_score{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-8": {
-        "kind": "Panel",
-        "spec": {
-          "id": 8,
-          "title": "Jitter Uniformity Score",
-          "description": "How UNIFORM (low-jitter) this device's connection timing is, measured via Coefficient of Variation. Human/application traffic is naturally irregular; malware C2 check-ins are often suspiciously metronomic. Low jitter + high beaconing volume (left) = classic C2 heartbeat.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9,
-          "title": "Cyber Kill-Chain Phase",
-          "description": "This device's current position in the Cyber Kill Chain: 🟢 Normal → 🟡 Recon → 🟠 Lateral Movement → 🔴 C2 → 🟪 Exfiltration. This is the single fastest way to understand how far an attack has progressed on this specific device.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4001": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4001,
-          "title": "🎯 Verdict Confidence Over Time",
-          "description": "This device's live Verdict Confidence (0.0-1.0) -- how certain the engine is in whatever decision-engine verdict it currently holds for this device, set alongside the Verdict itself in the Argus decision engine (argus/decision/engine.py) (e.g. a hard-stop match is both severe AND near-certain, ~0.95-1.0; an unconfirmed reputation hit is moderate on both, ~0.40-0.45). The colored bands (shown in blue, not the traffic-light colors Verdict uses) mirror the Verdict Confidence column on the Main Overview ledger: ○ 0-0.39 Low / ◔ 0.4-0.59 Moderate / ◑ 0.6-0.79 High / ● 0.8-1.0 Very High. This is NOT the same as the engine's alert_threshold=6.0, which gates a separate 0-10 aggregate risk score used internally to decide whether to evaluate an alert at all -- containment is driven by the device's Verdict/decision path, not by this confidence value crossing any fixed line.",
+          "title": "Confidence and backing",
+          "description": "Verdict confidence (0-1), with the independent sources and evidence families behind it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -988,127 +228,9 @@
                       },
                       "spec": {
                         "expr": "home_ids_threat_confidence{hostname=~\"$device\"}",
-                        "format": "time_series",
                         "instant": false,
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "light-blue"
-                      },
-                      {
-                        "value": 0.4,
-                        "color": "blue"
-                      },
-                      {
-                        "value": 0.6,
-                        "color": "semi-dark-blue"
-                      },
-                      {
-                        "value": 0.8,
-                        "color": "dark-blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    },
-                    "thresholdsStyle": {
-                      "mode": "line"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4002": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4002,
-          "title": "🌍 Combined External Reputation (TI + AbuseIPDB + VirusTotal)",
-          "description": "All three independent reputation feeds for this device's contacted IPs plotted together. Because these are independent data sources (verified separately from your own behavioral detections), agreement across two or more of them is very strong corroborating evidence — a device flagged by all three is essentially confirmed-malicious regardless of what your own ML models say.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "TI · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "confidence · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1126,10 +248,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
-                        "format": "time_series",
+                        "expr": "home_ids_decision_independent_sources{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "AbuseIPDB · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "independent sources · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -1147,10 +269,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
-                        "format": "time_series",
+                        "expr": "home_ids_decision_evidence_families{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "VirusTotal · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "evidence families · {{hostname}}"
                       }
                     },
                     "refId": "C",
@@ -1165,75 +287,555 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
-                  "sort": "none"
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 4
+        }
+      },
+      "panel-5": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Alerts sent (24h)",
+          "description": "Alerts about this device that reached you.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "(home_ids_device_alerts_fired_24h) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1) or vector(0)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "0",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
                         "value": null,
                         "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "red"
                       }
                     ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
                   }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 5
         }
       },
-      "panel-4003": {
+      "panel-6": {
         "kind": "Panel",
         "spec": {
-          "id": 4003,
-          "title": "🛠️ What To Do If This Device Turns Red",
-          "description": "Step-by-step mitigation guidance tailored to what the panels above are telling you.",
+          "title": "Hidden as false positive (24h)",
+          "description": "Alerts about this device the filter hid.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "(home_ids_device_alerts_suppressed_24h) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1) or vector(0)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "0",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "blue"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 6
+        }
+      },
+      "panel-7": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Learned trust",
+          "description": "How much the false-positive filter trusts this device's usual behaviour.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "(home_ids_device_learned_trust) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "percentunit",
+                  "noValue": "not learned yet",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 7
+        }
+      },
+      "panel-8": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Sensitivity shift",
+          "description": "Below 0: stricter after confirmed threats. Above 0: more lenient after corrected false positives.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "(home_ids_device_sigma_shift) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "0 (default)",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "orange"
+                      },
+                      {
+                        "value": 0,
+                        "color": "text"
+                      },
+                      {
+                        "value": 0.01,
+                        "color": "blue"
+                      }
+                    ]
+                  },
+                  "decimals": 2
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 8
+        }
+      },
+      "panel-9": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Behaviour changes learned",
+          "description": "Lasting behaviour changes its baseline detected and re-learned.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "(home_ids_device_baseline_regime_shifts) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1) or vector(0)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "0",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 9
+        }
+      },
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Kill-chain stage",
+          "description": "Which attack stage its traffic most resembles (suspected).",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max(home_ids_killchain_phase{hostname=~\"$device\"})",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "?",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "text"
+                      }
+                    ]
+                  },
+                  "mappings": [
+                    {
+                      "type": "value",
+                      "options": {
+                        "0": {
+                          "text": "Normal",
+                          "color": "green",
+                          "index": 0
+                        },
+                        "1": {
+                          "text": "Suspected recon",
+                          "color": "yellow",
+                          "index": 1
+                        },
+                        "2": {
+                          "text": "Suspected C2",
+                          "color": "red",
+                          "index": 2
+                        },
+                        "3": {
+                          "text": "Suspected lateral movement",
+                          "color": "orange",
+                          "index": 3
+                        },
+                        "4": {
+                          "text": "Suspected exfiltration",
+                          "color": "purple",
+                          "index": 4
+                        }
+                      }
+                    }
+                  ]
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 10
+        }
+      },
+      "panel-11": {
+        "kind": "Panel",
+        "spec": {
+          "title": "⚙️ How autotune has tuned this device",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1246,64 +848,26 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "**This device is showing 🟠 Suspicious or 🔴 Critical activity — what now?**\n\n1. **Check the Kill-Chain Phase panel above.** RECON/LATERAL means it's probing other devices on your LAN — the highest-priority signal to act on, since it can spread. C2/EXFIL means it's likely already compromised and talking to an attacker or leaking data.\n2. **DNS sinkholing has already happened automatically** for any confirmed malicious domain (Pi-hole Layer 7 is never gated behind approval). Check the Alert Log below for which domains were involved.\n3. **Hardware isolation** (Layer 2 ARP tarpit / Layer 3 router WAN cut) either fired automatically, or — if `interactive_blocking_enabled` is `true` — is waiting for your approval via a Telegram inline button. You can also isolate or release this device directly from the Hostname column's action links on the Overview dashboard's Master Threat Ledger.\n4. **After remediating** (running AV, resetting credentials, or simply confirming it was a false positive), release the device. Releasing starts a 1-hour cooldown (`operator_release_cooldown_seconds`) before it can be auto-isolated again — unless it resumes lateral-movement scanning, which bypasses the cooldown immediately.\n5. **If this turns out to be a false positive** (e.g. a smart TV doing a firmware check), the CL-AFPE false-positive engine should catch it automatically going forward — see the System Tuning, Healing & Health dashboard to see exactly why it was or wasn't suppressed.",
-                "mode": "markdown"
+                "mode": "markdown",
+                "content": "Autotune picks a value per device when it has enough evidence, otherwise per device type, otherwise the global value."
               },
               "fieldConfig": {
                 "defaults": {},
                 "overrides": []
               }
             }
-          }
-        }
-      },
-      "panel-4004": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4004,
-          "title": "🧠 How This Device Has Been Tuned",
-          "description": "Section header.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Everything below is specific to the device(s) selected above ($device). Self-learning/self-healing panels that could NOT be filtered per-device (the underlying Prometheus metric has no hostname label, only a bare device_id or none at all) are noted as fleet-wide in their own description rather than silently showing the wrong thing.",
-                "mode": "markdown"
-              }
-            }
-          }
+          "id": 11
         }
       },
-      "panel-4005": {
+      "panel-12": {
         "kind": "Panel",
         "spec": {
-          "id": 4005,
-          "title": "Suppress Threshold (Effective)",
-          "description": "home_ids_autotune_device_threshold_effective for this device -- only set if it has earned its own calibrated profile (>=3 pooled corrections); otherwise the global effective threshold applies instead.",
+          "title": "This device's own tuned thresholds",
+          "description": "Thresholds autotune calibrated specifically for the selected device(s), and proposals still in their trial (canary) period.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1320,73 +884,16 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_autotune_device_threshold_effective{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
+                        "expr": "max by (key) (label_join((label_replace(home_ids_autotune_value{scope=\"device\"}, \"device\", \"$1\", \"target\", \"(.*)\")) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1), \"key\", \" · \", \"hostname\", \"parameter\"))",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "A",
                     "hidden": false
                   }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
                 },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "noValue": "Uses global value"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4006": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4006,
-          "title": "ARP-Sweep Threshold (Effective)",
-          "description": "home_ids_autotune_arp_sweep_threshold_effective for this device.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
                 {
                   "kind": "PanelQuery",
                   "spec": {
@@ -1398,244 +905,13 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_autotune_arp_sweep_threshold_effective{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
+                        "expr": "max by (key) (label_join((label_replace(home_ids_autotune_canary_value{scope=\"device\"}, \"device\", \"$1\", \"target\", \"(.*)\")) * on(device) group_left(hostname) (max by (device, hostname) (home_ids_decision_state{hostname=~\"$device\"}) * 0 + 1), \"key\", \" · \", \"hostname\", \"parameter\"))",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4007": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4007,
-          "title": "Conn-Abuse Threshold (Effective)",
-          "description": "home_ids_autotune_conn_abuse_threshold_effective for this device.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_autotune_conn_abuse_threshold_effective{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4008": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4008,
-          "title": "Long-Conn Threshold (Effective)",
-          "description": "home_ids_autotune_long_conn_threshold_effective for this device.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_autotune_long_conn_threshold_effective{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "noValue": "Uses global default"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4009": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4009,
-          "title": "Device-Profile Corrections by Threshold Key & Source",
-          "description": "home_ids_autotune_device_profile_correction_total for this device -- filterable by $device now that the metric carries a hostname label (fixed this session; it was already available at the write site in metrics_sync.py, just not threaded through).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_autotune_device_profile_correction_total{hostname=~\"$device\"}",
-                        "format": "table",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
+                    "refId": "B",
                     "hidden": false
                   }
                 }
@@ -1646,7 +922,7 @@
                   "group": "joinByField",
                   "spec": {
                     "options": {
-                      "byField": "device",
+                      "byField": "key",
                       "mode": "outer"
                     }
                   }
@@ -1660,11 +936,17 @@
                         "Time": true,
                         "__name__": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true,
+                        "Time 3": true
                       },
-                      "renameByName": {
-                        "Value": "Correction Count"
-                      }
+                      "indexByName": {
+                        "key": 0,
+                        "Value #A": 1,
+                        "Value #B": 2
+                      },
+                      "renameByName": {}
                     }
                   }
                 }
@@ -1678,23 +960,116 @@
             "version": "13.1.1",
             "spec": {
               "options": {
+                "showHeader": true,
                 "cellHeight": "sm",
-                "showHeader": true
+                "footer": {
+                  "show": false
+                },
+                "sortBy": []
               },
               "fieldConfig": {
-                "defaults": {},
-                "overrides": []
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "key"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Device · Threshold"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Active value"
+                      },
+                      {
+                        "id": "description",
+                        "value": "The value in force for this device."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "On trial"
+                      },
+                      {
+                        "id": "description",
+                        "value": "A proposed new value still being tested before promotion."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      },
+                      {
+                        "id": "noValue",
+                        "value": "—"
+                      }
+                    ]
+                  }
+                ]
               }
             }
-          }
+          },
+          "id": 12
         }
       },
-      "panel-4010": {
+      "panel-13": {
         "kind": "Panel",
         "spec": {
-          "id": 4010,
-          "title": "Sigma-Shift History (Widen vs Tighten)",
-          "description": "home_ids_fp_sigma_shifts_total for this device, split by direction -- widen (a confirmed false positive made it more lenient) vs tighten (a confirmed threat made it stricter).",
+          "title": "Its device type's values",
+          "description": "What the selected device(s) fall back to where they have no value of their own.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1711,10 +1086,375 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum by (direction) (increase(home_ids_fp_sigma_shifts_total{hostname=~\"$device\"}[1h]))",
-                        "format": "time_series",
+                        "expr": "max by (key) (label_join(home_ids_autotune_value{scope=\"category\"} and on(target) label_replace(max by (device_type) (home_ids_decision_state{hostname=~\"$device\"}), \"target\", \"$1\", \"device_type\", \"(.*)\"), \"key\", \" · \", \"target\", \"parameter\"))",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true
+                      },
+                      "indexByName": {
+                        "key": 0,
+                        "Value #A": 1
+                      },
+                      "renameByName": {}
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
+                },
+                "sortBy": []
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "key"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Device type · Threshold"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Device-type value"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Calibrated for all devices of this type."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "id": 13
+        }
+      },
+      "panel-14": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Global values",
+          "description": "Used by every device without a more specific value.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (parameter) (home_ids_autotune_value{scope=\"global\"})",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "max by (parameter) (home_ids_autotune_config_value)",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "joinByField",
+                  "spec": {
+                    "options": {
+                      "byField": "parameter",
+                      "mode": "outer"
+                    }
+                  }
+                },
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true,
+                        "Time 3": true
+                      },
+                      "indexByName": {
+                        "parameter": 0,
+                        "Value #A": 1,
+                        "Value #B": 2
+                      },
+                      "renameByName": {}
+                    }
+                  }
+                }
+              ],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
+                },
+                "sortBy": []
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "parameter"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Threshold"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Global value"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Network-wide calibrated value."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Configured default"
+                      },
+                      {
+                        "id": "description",
+                        "value": "The hand-set config.yaml value it started from."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 3
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "id": 14
+        }
+      },
+      "panel-15": {
+        "kind": "Panel",
+        "spec": {
+          "title": "📊 Behaviour signals",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": "The raw inputs behind the anomaly score. Several moving together matters more than one spike."
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 15
+        }
+      },
+      "panel-16": {
+        "kind": "Panel",
+        "spec": {
+          "title": "DNS queries per minute",
+          "description": "Raw lookup rate. Read together with randomness and z-score.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_query_rate{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "{{direction}}"
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1733,9 +1473,13 @@
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
@@ -1745,62 +1489,34 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
                   },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "thresholdsStyle": {
-                      "mode": "off"
-                    },
-                    "stacking": {
-                      "mode": "normal",
-                      "group": "A"
-                    }
-                  }
+                  "min": 0
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 16
         }
       },
-      "panel-4011": {
+      "panel-17": {
         "kind": "Panel",
         "spec": {
-          "id": 4011,
-          "title": "DNS Query-Rate Baseline vs Live Threshold",
-          "description": "home_ids_query_rate_baseline_mean (the learned moving average) vs home_ids_query_rate_threshold_limit (the live dynamic alert threshold derived from it) for this device -- never plotted anywhere before.",
+          "title": "Query rate vs its learned limit",
+          "description": "The learned normal rate and the live alert threshold derived from it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1818,9 +1534,9 @@
                       },
                       "spec": {
                         "expr": "home_ids_query_rate_baseline_mean{hostname=~\"$device\"}",
-                        "format": "time_series",
                         "instant": false,
-                        "legendFormat": "baseline mean · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "normal · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1839,9 +1555,9 @@
                       },
                       "spec": {
                         "expr": "home_ids_query_rate_threshold_limit{hostname=~\"$device\"}",
-                        "format": "time_series",
                         "instant": false,
-                        "legendFormat": "live threshold · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "alert threshold · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -1860,9 +1576,13 @@
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
@@ -1872,135 +1592,34 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
                   },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "thresholdsStyle": {
-                      "mode": "off"
-                    }
-                  }
+                  "min": 0
                 },
                 "overrides": []
               }
-            }
-          }
-        }
-      },
-      "panel-4012": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4012,
-          "title": "Identity Merges (selected range)",
-          "description": "home_ids_identity_merges_total -- how many times this device's fragmented identity has self-healed (an orphan device_id folded back into this canonical one). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_identity_merges_total{hostname=~\"$device\"}[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
             }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 17
         }
       },
-      "panel-4013": {
+      "panel-18": {
         "kind": "Panel",
         "spec": {
-          "id": 4013,
-          "title": "Re-ID Migrations (selected range)",
-          "description": "home_ids_identity_reidentify_migrations_total -- MAC-rotation re-identifications this device has been through. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
+          "title": "Unusualness vs its own history (z-score)",
+          "description": "Above ~3 is a statistical outlier for this device.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2017,241 +1636,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(increase(home_ids_identity_reidentify_migrations_total{hostname=~\"$device\"}[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4014": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4014,
-          "title": "Re-ID Ambiguous (selected range)",
-          "description": "home_ids_identity_reidentify_ambiguous_total for this device -- unresolved re-identify candidates needing a reactive capture to resolve. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_identity_reidentify_ambiguous_total{hostname=~\"$device\"}[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4015": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4015,
-          "title": "Behavioral Fingerprint Size",
-          "description": "home_ids_baseline_familiarity_entries_total for this device -- size of its learned port/ASN/domain 'known-normal' fingerprint.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_baseline_familiarity_entries_total{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4016": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4016,
-          "title": "Baseline Poisoning & Probation Transitions",
-          "description": "home_ids_baseline_poisoning_transitions_total and home_ids_probation_transitions_total for this device -- the learning lifecycle over time, not just a point-in-time flag.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum by (direction) (increase(home_ids_baseline_poisoning_transitions_total{hostname=~\"$device\"}[1h]))",
-                        "format": "time_series",
+                        "expr": "home_ids_zscore_query_rate{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "poisoning: {{direction}}"
+                        "range": true,
+                        "legendFormat": "query rate · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -2269,133 +1657,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum by (direction) (increase(home_ids_probation_transitions_total{hostname=~\"$device\"}[1h]))",
-                        "format": "time_series",
+                        "expr": "home_ids_zscore_nxdomain_ratio{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "probation: {{direction}}"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "desc"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "thresholdsStyle": {
-                      "mode": "off"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4017": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4017,
-          "title": "ML Model Lifecycle (ALL devices, not filtered by the device box)",
-          "description": "home_ids_ml_warmup_completions_total / _retrain_events_total / _poisoning_rejections_total / _model_invalidations_total -- NOT filterable by hostname (these only carry a bare device_id label); each series here is grouped by device_id instead, so this device's own device_id (visible in the Master Threat Ledger) picks it out of the legend.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum by (device) (increase(home_ids_ml_warmup_completions_total[1h]))",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "warmup: {{device}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum by (device) (increase(home_ids_ml_retrain_events_total[1h]))",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "retrain: {{device}}"
+                        "range": true,
+                        "legendFormat": "failed lookups · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -2413,36 +1678,15 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum by (device) (increase(home_ids_ml_poisoning_rejections_total[1h]))",
-                        "format": "time_series",
+                        "expr": "home_ids_zscore_unique_domains{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "reject: {{device}}"
+                        "range": true,
+                        "legendFormat": "unique domains · {{hostname}}"
                       }
                     },
                     "refId": "C",
                     "hidden": false
                   }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum by (device) (increase(home_ids_ml_model_invalidations_total[1h]))",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "invalidate: {{device}}"
-                      }
-                    },
-                    "refId": "D",
-                    "hidden": false
-                  }
                 }
               ],
               "transformations": [],
@@ -2456,9 +1700,13 @@
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
@@ -2468,119 +1716,33 @@
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
                   },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "thresholdsStyle": {
-                      "mode": "off"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4018": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4018,
-          "title": "Transfer-Learning Seeds, all device types (selected range)",
-          "description": "home_ids_transfer_learning_seeds_total -- this is device_type-level, NOT this exact device: it only fires once, at a NEW device's creation, keyed by device_type rather than device_id. Shown here as the fleet-wide total across all device types for reference; check the boot log for this specific device's own seeding event.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_transfer_learning_seeds_total[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": 0,
+                        "value": null,
                         "color": "green"
+                      },
+                      {
+                        "value": 3,
+                        "color": "red"
                       }
                     ]
                   }
@@ -2588,206 +1750,15 @@
                 "overrides": []
               }
             }
-          }
-        }
-      },
-      "panel-4019": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4019,
-          "title": "Device-Type Reclassifications (selected range)",
-          "description": "home_ids_device_type_reclassifications_total for this device -- how many times its inferred type has changed (e.g. the cold-start 'laptop' fallback replaced once a real hostname resolved). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_device_type_reclassifications_total{hostname=~\"$device\"}[$__range])) or vector(0)",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 18
         }
       },
-      "panel-4020": {
+      "panel-19": {
         "kind": "Panel",
         "spec": {
-          "id": 4020,
-          "title": "Retro-Hunt Findings (Lifetime)",
-          "description": "⚠️ FROZEN since 09-21: this number is left over from the retired retro_hunter job. Its replacement (live_retro_hunter) records its own findings, but those aren't exported to Prometheus yet. It needs a small code change in core/metrics_sync.py.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_retro_hunt_findings_by_device{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "green"
-                      }
-                    ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4101": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4101,
-          "title": "📊 More DNS Behavior Signals For This Device",
-          "description": "",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "These are the remaining raw building blocks behind this device's anomaly score -- the ones not already charted above. Read them together, not in isolation: a single spike rarely matters, but several of these moving at once is exactly the pattern the ML model is trained to catch.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4102": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4102,
-          "title": "Blocked & NXDOMAIN Ratios",
-          "description": "Fraction of this device's DNS queries that were blocked (Pi-hole) or came back NXDOMAIN. A rising NXDOMAIN ratio with no matching rise in blocked ratio can indicate a domain-generation-algorithm (DGA) probing for a live C2 domain that isn't on any blocklist yet.",
+          "title": "Blocked and failed lookups",
+          "description": "Share of lookups Pi-hole blocked, and share that returned 'no such domain'. Rising failures without blocks can mean a DGA probing for its C2.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2805,8 +1776,8 @@
                       },
                       "spec": {
                         "expr": "home_ids_blocked_ratio{hostname=~\"$device\"}",
-                        "format": "time_series",
                         "instant": false,
+                        "range": true,
                         "legendFormat": "blocked · {{hostname}}"
                       }
                     },
@@ -2826,9 +1797,9 @@
                       },
                       "spec": {
                         "expr": "home_ids_nxdomain_ratio{hostname=~\"$device\"}",
-                        "format": "time_series",
                         "instant": false,
-                        "legendFormat": "NXDOMAIN · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "no such domain · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -2843,75 +1814,54 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
                 "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi",
-                  "sort": "none"
+                  "sort": "desc"
                 }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "percentunit",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
                   },
                   "color": {
                     "mode": "palette-classic"
                   },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
+                  "min": 0
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 19
         }
       },
-      "panel-4103": {
+      "panel-20": {
         "kind": "Panel",
         "spec": {
-          "id": 4103,
-          "title": "Unique / New / Deep Domain Counts",
-          "description": "Unique domains queried, domains never seen before this window, and domains with unusually deep subdomain structure (>5 labels). A burst of new + deep domains together is a common DNS-tunneling or DGA fingerprint.",
+          "title": "Domain-name randomness",
+          "description": "Above ~4.5 suggests machine-generated names.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2928,55 +1878,13 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_unique_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
+                        "expr": "home_ids_entropy_avg{hostname=~\"$device\"}",
                         "instant": false,
-                        "legendFormat": "unique · {{hostname}}"
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_new_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "new · {{hostname}}"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_deep_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "deep · {{hostname}}"
-                      }
-                    },
-                    "refId": "C",
                     "hidden": false
                   }
                 }
@@ -2988,455 +1896,551 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4104": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4104,
-          "title": "Suspicious Domains & NXDOMAIN-TLD Concentration",
-          "description": "Count of domains flagged as suspicious/DGA-like, and what fraction of this device's NXDOMAIN responses concentrate under a single top-level domain (a sign of one script hammering random subdomains of the same TLD).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_suspicious_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "suspicious · {{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_nxdomain_tld_concentration{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "NXDOMAIN-TLD conc. · {{hostname}}"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4105": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4105,
-          "title": "Other Z-Score Spikes (Blocked / NXDOMAIN / Suspicious / Unique)",
-          "description": "Same z-score-vs-this-device's-own-baseline treatment as the DNS Z-Score Spikes panel above, for the four signals not already covered there. A z-score above roughly 2-3 means this window is a genuine statistical outlier for this specific device, not just generically high.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zscore_blocked_ratio{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "blocked z · {{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zscore_nxdomain_ratio{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "NXDOMAIN z · {{hostname}}"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zscore_suspicious_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "suspicious z · {{hostname}}"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zscore_unique_domains{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "unique z · {{hostname}}"
-                      }
-                    },
-                    "refId": "D",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4106": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4106,
-          "title": "Threat Intel Match (This Device)",
-          "description": "Did this device's most recent traffic hit a known-bad IOC on any loaded threat-intel feed? This is the raw yes/no behind the Combined External Reputation score above -- 1 means a real match happened, 0 means clean (or TI not yet ready -- check the fleet-wide TI Engine Ready stat on System Health).",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ti_match{hostname=~\"$device\"}",
-                        "format": "time_series",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
             "version": "13.1.1",
             "spec": {
               "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "auto",
-                "orientation": "auto",
-                "percentChangeColorMode": "standard",
-                "reduceOptions": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
                   "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
+                    "lastNotNull",
+                    "max"
+                  ]
                 },
-                "showPercentChange": false,
-                "textMode": "auto",
-                "wideLayout": true
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
               },
               "fieldConfig": {
                 "defaults": {
                   "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": 0,
+                        "value": null,
                         "color": "green"
                       },
                       {
-                        "value": 1,
+                        "value": 4.5,
                         "color": "red"
                       }
                     ]
-                  },
-                  "mappings": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "⚪ No Match",
-                          "color": "green",
-                          "index": 0
-                        },
-                        "1": {
-                          "text": "🎯 IOC Match",
-                          "color": "red",
-                          "index": 1
-                        }
-                      }
-                    }
-                  ]
+                  }
                 },
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 20
+        }
+      },
+      "panel-21": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Beaconing: volume and regularity",
+          "description": "Regular timing (low jitter) plus steady volume is the C2 check-in pattern.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_beaconing_volume_score{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "volume · {{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "timing regularity · {{hostname}}"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 21
+        }
+      },
+      "panel-22": {
+        "kind": "Panel",
+        "spec": {
+          "title": "ML outlier score",
+          "description": "How unusual the device looks to its own anomaly model.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
+                  "decimals": 3
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 22
+        }
+      },
+      "panel-23": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Unusual behaviour sequence (Markov)",
+          "description": "How unlikely its current behaviour sequence is, given its history.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 23
+        }
+      },
+      "panel-24": {
+        "kind": "Panel",
+        "spec": {
+          "title": "External reputation",
+          "description": "Threat-intel, AbuseIPDB and VirusTotal scores for its destinations.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "threat intel · {{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "AbuseIPDB · {{hostname}}"
+                      }
+                    },
+                    "refId": "B",
+                    "hidden": false
+                  }
+                },
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "VirusTotal · {{hostname}}"
+                      }
+                    },
+                    "refId": "C",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 24
+        }
+      },
+      "panel-25": {
+        "kind": "Panel",
+        "spec": {
+          "title": "📜 Alert log",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": "Raw alert records for this device from the log stream (Loki)."
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 25
+        }
+      },
+      "panel-26": {
+        "kind": "Panel",
+        "spec": {
+          "title": "This device's alerts",
+          "description": "Every candidate alert for the selected device, published or not.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "loki",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${LOKI_DS}"
+                      },
+                      "spec": {
+                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | device_hostname=~\"$device\" | json signature=\"signature\", risk=\"risk\", why=\"hee_decision_path\", fp_verdict=\"fp_verdict.verdict\", suppressed=\"suppressed\"",
+                        "queryType": "range",
+                        "format": "table"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 26
         }
       }
     },
@@ -3450,7 +2454,7 @@
               "x": 0,
               "y": 0,
               "width": 24,
-              "height": 5,
+              "height": 2,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-1"
@@ -3461,9 +2465,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 5,
-              "width": 12,
-              "height": 8,
+              "y": 2,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-2"
@@ -3473,7 +2477,7 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 12,
+              "x": 0,
               "y": 5,
               "width": 12,
               "height": 8,
@@ -3486,9 +2490,9 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 13,
-              "width": 8,
+              "x": 12,
+              "y": 5,
+              "width": 12,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
@@ -3499,10 +2503,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
+              "x": 0,
               "y": 13,
-              "width": 8,
-              "height": 8,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-5"
@@ -3512,10 +2516,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
+              "x": 4,
               "y": 13,
-              "width": 8,
-              "height": 8,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-6"
@@ -3525,10 +2529,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 21,
-              "width": 8,
-              "height": 8,
+              "x": 8,
+              "y": 13,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-7"
@@ -3538,10 +2542,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 21,
-              "width": 8,
-              "height": 8,
+              "x": 12,
+              "y": 13,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-8"
@@ -3552,9 +2556,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 16,
-              "y": 21,
-              "width": 8,
-              "height": 8,
+              "y": 13,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-9"
@@ -3564,10 +2568,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 29,
-              "width": 24,
-              "height": 12,
+              "x": 20,
+              "y": 13,
+              "width": 4,
+              "height": 4,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-10"
@@ -3578,25 +2582,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 41,
-              "width": 12,
-              "height": 9,
+              "y": 17,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-4001"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 41,
-              "width": 12,
-              "height": 9,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4002"
+                "name": "panel-11"
               }
             }
           },
@@ -3604,12 +2595,181 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 50,
-              "width": 24,
-              "height": 6,
+              "y": 20,
+              "width": 10,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-4003"
+                "name": "panel-12"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 10,
+              "y": 20,
+              "width": 7,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-13"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 17,
+              "y": 20,
+              "width": 7,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-14"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 28,
+              "width": 24,
+              "height": 3,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-15"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 31,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-16"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 8,
+              "y": 31,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-17"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 16,
+              "y": 31,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-18"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 39,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-19"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 8,
+              "y": 39,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-20"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 16,
+              "y": 39,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-21"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 47,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-22"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 8,
+              "y": 47,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-23"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 16,
+              "y": 47,
+              "width": 8,
+              "height": 8,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-24"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 0,
+              "y": 55,
+              "width": 24,
+              "height": 3,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-25"
               }
             }
           },
@@ -3619,296 +2779,10 @@
               "x": 0,
               "y": 58,
               "width": 24,
-              "height": 2,
+              "height": 9,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-4004"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 60,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4005"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 6,
-              "y": 60,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4006"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 60,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4007"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 18,
-              "y": 60,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4008"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 64,
-              "width": 24,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4009"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 72,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4010"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 72,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4011"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 80,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4012"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 6,
-              "y": 80,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4013"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 80,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4014"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 18,
-              "y": 80,
-              "width": 6,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4015"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 84,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4016"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 84,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4017"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 92,
-              "width": 8,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4018"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 92,
-              "width": 8,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4019"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 16,
-              "y": 92,
-              "width": 8,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4020"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 96,
-              "width": 24,
-              "height": 4,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4101"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 100,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4102"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 100,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4103"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 108,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4104"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 12,
-              "y": 108,
-              "width": 12,
-              "height": 8,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4105"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 116,
-              "width": 6,
-              "height": 6,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-4106"
+                "name": "panel-26"
               }
             }
           }
@@ -3917,23 +2791,10 @@
     },
     "links": [
       {
-        "title": "Navigation",
-        "type": "dashboards",
-        "icon": "apps",
-        "tooltip": "Switch Dashboards",
-        "tags": [
-          "home-ids-v2"
-        ],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🏠 Go to Overview",
+        "title": "🏠 Overview",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🏠 Go to Overview",
+        "icon": "dashboard",
+        "tooltip": "🏠 Overview",
         "url": "/d/home_ids_v3_main",
         "tags": [],
         "asDropdown": false,
@@ -3942,10 +2803,10 @@
         "keepTime": true
       },
       {
-        "title": "🌐 Go to Threat Landscape",
+        "title": "🌐 Threat Landscape",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🌐 Go to Threat Landscape",
+        "icon": "dashboard",
+        "tooltip": "🌐 Threat Landscape",
         "url": "/d/home_ids_v3_landscape",
         "tags": [],
         "asDropdown": false,
@@ -3954,11 +2815,11 @@
         "keepTime": true
       },
       {
-        "title": "🛡️ Go to System Tuning, Healing & Health",
+        "title": "🤖 Autonomy & Learning",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
-        "url": "/d/home_ids_v3_mitigation",
+        "icon": "dashboard",
+        "tooltip": "🤖 Autonomy & Learning",
+        "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -3966,11 +2827,11 @@
         "keepTime": true
       },
       {
-        "title": "🤖 Go to Autonomous Behavior",
+        "title": "🛡️ System Health",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🤖 Go to Autonomous Behavior",
-        "url": "/d/home_ids_v3_autonomous",
+        "icon": "dashboard",
+        "tooltip": "🛡️ System Health",
+        "url": "/d/home_ids_v3_mitigation",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -3978,26 +2839,20 @@
         "keepTime": true
       }
     ],
-    "liveNow": true,
+    "liveNow": false,
     "preload": false,
     "tags": [
       "home-ids-v2"
     ],
     "timeSettings": {
-      "from": "now-1h",
+      "from": "now-24h",
       "to": "now",
-      "autoRefresh": "5s",
+      "autoRefresh": "1m",
       "autoRefreshIntervals": [
-        "5s",
-        "10s",
         "30s",
         "1m",
         "5m",
-        "15m",
-        "30m",
-        "1h",
-        "2h",
-        "1d"
+        "15m"
       ],
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
@@ -4046,6 +2901,7 @@
         "kind": "QueryVariable",
         "spec": {
           "name": "device",
+          "label": "device",
           "current": {
             "text": "All",
             "value": "$__all"
@@ -4061,16 +2917,18 @@
               "name": "${PROMETHEUS_DS}"
             },
             "spec": {
-              "query": "label_values(home_ids_threat_confidence, hostname)",
+              "query": "label_values(home_ids_decision_state, hostname)",
               "refId": "StandardVariableQuery"
             }
           },
           "regex": "",
+          "regexApplyTo": "value",
           "sort": "alphabeticalAsc",
-          "definition": "label_values(home_ids_threat_confidence, hostname)",
+          "definition": "label_values(home_ids_decision_state, hostname)",
           "options": [],
           "multi": true,
           "includeAll": true,
+          "allValue": ".*",
           "allowCustomValue": true
         }
       }

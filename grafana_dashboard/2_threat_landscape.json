@@ -5,12 +5,6 @@
     "name": "home_ids_v3_landscape",
     "namespace": "default",
     "uid": "6879f305-539b-45d6-9fdf-9cc26a1d782f",
-    "resourceVersion": "1786732592889011",
-    "generation": 1,
-    "creationTimestamp": "2026-08-14T18:36:32Z",
-    "labels": {
-      "grafana.app/deprecatedInternalID": "3167344247382016"
-    },
     "annotations": {
       "grafana.app/createdBy": "user:afm28i0ltxcsga",
       "grafana.app/folder": "",
@@ -42,16 +36,15 @@
         }
       }
     ],
-    "cursorSync": "Off",
-    "description": "Global Network Analysis",
+    "cursorSync": "Tooltip",
+    "description": "Where your network talks to, and which outside threats it meets.",
     "editable": true,
     "elements": {
       "panel-1": {
         "kind": "Panel",
         "spec": {
-          "id": 1,
-          "title": "🌍 Global OSINT Map",
-          "description": "Section header for the geographic map below.",
+          "title": "",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -64,206 +57,58 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "text",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "**Where is your network talking to?**",
-                "mode": "markdown"
+                "mode": "markdown",
+                "content": "Where traffic goes (countries, networks) and which outside threats show up: threat-intel hits, beaconing, malicious TLS, DNS tricks. Country data needs the GeoIP database to be installed."
               },
               "fieldConfig": {
                 "defaults": {},
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 1
         }
       },
-      "panel-10": {
+      "panel-2": {
         "kind": "Panel",
         "spec": {
-          "id": 10,
-          "title": "Malicious JA4 Hits",
-          "description": "Number of network connections whose TLS Client Hello fingerprint (JA4+) matched a known-malicious signature database (e.g. known RAT/C2 frameworks like AsyncRAT or Cobalt Strike). Any non-zero value here is high-confidence — JA4+ collisions with legitimate software are rare, so treat spikes as urgent.",
+          "title": "🌍 Geography",
+          "description": "",
           "links": [],
           "data": {
             "kind": "QueryGroup",
             "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zeek_ja4_malicious",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
+              "queries": [],
               "transformations": [],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
+            "group": "text",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
+                "mode": "markdown",
+                "content": ""
               },
               "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
+                "defaults": {},
                 "overrides": []
               }
-            }
-          }
-        }
-      },
-      "panel-11": {
-        "kind": "Panel",
-        "spec": {
-          "id": 11,
-          "title": "📜 All Evaluated Alerts (Live Stream, whole network)",
-          "description": "Every candidate alert across the whole network, published or not, with the decision and the false-positive engine's call. Use it to spot patterns across devices, e.g. several devices hitting the same domain. Read the columns like this: 'decision' is the Argus engine's reasoning path (hypothesis_high, hard_stop and similar mean it reached HIGH/CRITICAL). 'fp_verdict' is only the false-positive filter's opinion: CONFIRMED_THREAT there means 'not judged a false positive', NOT 'confirmed attack'. The previous version filtered on a removed 'verdict' field, so it had been empty.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "loki",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${LOKI_DS}"
-                      },
-                      "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\"",
-                        "queryType": "range",
-                        "format": "table"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
             }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "footer": {
-                  "show": false
-                },
-                "frameIndex": 0,
-                "showHeader": true,
-                "sortBy": [
-                  {
-                    "desc": true,
-                    "displayName": "Time"
-                  }
-                ]
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 2
         }
       },
-      "panel-14": {
+      "panel-3": {
         "kind": "Panel",
         "spec": {
-          "id": 14,
-          "title": "Network Geographic Footprint",
-          "description": "Plots every external IP Home-IDS has seen, colored/sized by home_ids_geo_country_marker (same risk value as home_ids_geo_risk, paired with a static per-country centroid so the map has coordinates to plot -- see core/country_centroids.py). This metric is ONLY EVER SET once a connection's risk crosses alert_threshold=6.0 (metrics_sync.py) -- a country either doesn't appear on this map at all (benign), or already scores at least ~6 the moment it does. 6-8.99 = orange (crossed the alert line), 9+ = red (matches a blocked country in geofencing.geofenced_countries in config.yaml).",
+          "title": "Countries your network talks to",
+          "description": "Each marker is a country contacted recently, coloured by risk (0-10).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -281,8 +126,9 @@
                       },
                       "spec": {
                         "expr": "home_ids_geo_country_marker",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -297,56 +143,42 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "geomap",
-            "version": "",
+            "version": "13.1.1",
             "spec": {
               "options": {
-                "basemap": {
-                  "config": {},
-                  "name": "Layer 0",
-                  "type": "default"
+                "view": {
+                  "id": "zero",
+                  "zoom": 1
                 },
                 "controls": {
-                  "mouseWheelZoom": true,
-                  "showAttribution": true,
-                  "showDebug": false,
-                  "showMeasure": false,
-                  "showScale": true,
                   "showZoom": true
                 },
                 "layers": [
                   {
-                    "color": {
-                      "field": "Value",
-                      "fixed": "dark-red"
+                    "type": "markers",
+                    "name": "Countries",
+                    "location": {
+                      "mode": "coords",
+                      "latitude": "latitude",
+                      "longitude": "longitude"
                     },
                     "config": {
-                      "showLegend": true
-                    },
-                    "location": {
-                      "mode": "auto"
-                    },
-                    "name": "Layer 1",
-                    "size": {
-                      "field": "Value",
-                      "fixed": 5,
-                      "max": 15,
-                      "min": 2
-                    },
-                    "type": "markers"
+                      "showLegend": true,
+                      "style": {
+                        "color": {
+                          "field": "Value"
+                        },
+                        "size": {
+                          "fixed": 6
+                        }
+                      }
+                    }
                   }
-                ],
-                "tooltip": {
-                  "mode": "details"
-                },
-                "view": {
-                  "id": "zero",
-                  "lat": 0,
-                  "lon": 0,
-                  "zoom": 1
-                }
+                ]
               },
               "fieldConfig": {
                 "defaults": {
+                  "unit": "none",
                   "thresholds": {
                     "mode": "absolute",
                     "steps": [
@@ -368,153 +200,15 @@
                 "overrides": []
               }
             }
-          }
-        }
-      },
-      "panel-2": {
-        "kind": "Panel",
-        "spec": {
-          "id": 2,
-          "title": "🦠 Command & Control (C2) & Intel",
-          "description": "Section header for the two C2/threat-intel panels below.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
           },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Metrics tracking external C2 and known threat intel hits.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3,
-          "title": "Threat Intel IOC Hits (per hour, by feed)",
-          "description": "Connections that matched a known-bad IP/domain on a threat-intel feed, counted per rolling hour and split by which feed matched. Reputation-based: it catches known-bad infrastructure before Home-IDS's own behavior models would. (Previously plotted the raw counter, which drops to 0 on every restart.)",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum by (source) (increase(home_ids_ti_ioc_hits_total[1h]))",
-                        "legendFormat": "{{source}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
+          "id": 3
         }
       },
       "panel-4": {
         "kind": "Panel",
         "spec": {
-          "id": 4,
-          "title": "C2 Beacons",
-          "description": "Count of connections exhibiting Command & Control 'beaconing' — highly uniform, periodic outbound traffic with low jitter (measured via Coefficient of Variation). This is one of the strongest behavioral signals for an active malware infection phoning home, independent of whether the destination has a known-bad reputation yet.",
+          "title": "Riskiest countries",
+          "description": "The 10 highest-risk countries by the engine's GeoIP risk score.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -531,8 +225,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_beaconing_c2_count",
-                        "legendFormat": "{{hostname}}"
+                        "expr": "topk(10, max by (country, org, asn) (home_ids_geo_risk))",
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -540,735 +236,143 @@
                   }
                 }
               ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
+              "transformations": [
+                {
+                  "kind": "Transformation",
+                  "group": "organize",
+                  "spec": {
+                    "options": {
+                      "excludeByName": {
+                        "Time": true,
+                        "__name__": true,
+                        "instance": true,
+                        "job": true,
+                        "Time 1": true,
+                        "Time 2": true
+                      },
+                      "indexByName": {
+                        "country": 0,
+                        "org": 1,
+                        "asn": 2,
+                        "Value #A": 3
+                      },
+                      "renameByName": {}
                     }
                   }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-5": {
-        "kind": "Panel",
-        "spec": {
-          "id": 5,
-          "title": "📡 Internal Network Scanning & Probes",
-          "description": "Section header for the internal recon/scanning panels below.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Lateral movement, honeypots, and port scans.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-6": {
-        "kind": "Panel",
-        "spec": {
-          "id": 6,
-          "title": "Lateral Movement Events (per hour)",
-          "description": "Zeek-detected S0 (unanswered) / REJ (rejected) TCP connection attempts against multiple internal hosts — the classic signature of a device scanning your LAN for other vulnerable machines. This is almost always a sign a device is already compromised and looking for its next target.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_zeek_lateral_events_total[1h])) or vector(0)",
-                        "legendFormat": "lateral-movement events / hour"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
                 }
               ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  },
-                  "noValue": "0"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-7": {
-        "kind": "Panel",
-        "spec": {
-          "id": 7,
-          "title": "Honeypot Probes (per hour)",
-          "description": "Connection attempts to your configured honeypot IP(s) (network_and_devices.honeypot_ips in config.yaml). Only meaningful if you've actually deployed a decoy listener there (see INSTALL.md Step 3.6) — but if you have, ANY hit here is a near-certain compromise signal, since nothing legitimate on your network should ever contact a honeypot.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "sum(increase(home_ids_honeypot_probes_total[1h])) or vector(0)",
-                        "legendFormat": "honeypot probes / hour"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  },
-                  "noValue": "0"
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-8": {
-        "kind": "Panel",
-        "spec": {
-          "id": 8,
-          "title": "🔒 Encryption & TLS Anomalies",
-          "description": "Section header for TLS fingerprinting panels below.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "Tracking malicious JA3/JA4 fingerprints.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-9": {
-        "kind": "Panel",
-        "spec": {
-          "id": 9,
-          "title": "Malicious JA3 Hits",
-          "description": "Same concept as JA4+ (panel to the right) but for the older JA3 fingerprint format — some malware families and older C2 frameworks are only catalogued under JA3.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_zeek_ja3_malicious",
-                        "legendFormat": "{{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "single",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3002": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3002,
-          "title": "🌍 How Geofencing Works Here",
-          "description": "Explains the geofencing_countries default, how to tune it live, and the #1 reason this map can appear empty even when it shouldn't.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
-            "version": "",
-            "spec": {
-              "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
-                },
-                "content": "**How geofencing works.** `geofencing.geofencing_countries` in `config.yaml` currently defaults to blocking `RU`, `KP`, `IR` — any connection whose GeoIP-resolved country matches this list gets an instant CRITICAL verdict, same severity as a confirmed malicious IOC. This is **blocklist-only** (there's no allowlist mode) and it's a `[LIVE]` setting — edit the list in `config.yaml` and it takes effect within seconds, no restart.\n\n**Why the map might look empty:** geofencing (and this whole map) depends entirely on `paths.geoip_db` loading successfully at startup. If it fails to load, the engine logs one line and silently disables GeoIP features — geofencing will never fire and this map will show nothing, even with real traffic. Check your startup logs first before assuming your network is quiet.",
-                "mode": "markdown"
-              },
-              "fieldConfig": {
-                "defaults": {},
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3001": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3001,
-          "title": "🗺️ Top Risky Countries (GeoIP)",
-          "description": "The same home_ids_geo_risk data as the map above, as a sortable table — useful when you want exact numbers rather than reading map marker sizes. topk(10, ...) shows your 10 highest-risk countries by connection volume/severity. Same gating as the map: every row here already crossed alert_threshold=6.0 to have a value at all -- there's no 'low risk' row, only 'not on this list yet'.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "topk(10, home_ids_geo_risk)",
-                        "format": "table",
-                        "instant": true
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
               "queryOptions": {}
             }
           },
           "vizConfig": {
             "kind": "VizConfig",
             "group": "table",
-            "version": "",
-            "spec": {
-              "options": {
-                "cellHeight": "sm",
-                "showHeader": true,
-                "footer": {
-                  "show": false
-                },
-                "sortBy": []
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": []
-                  },
-                  "custom": {
-                    "align": "auto",
-                    "cellOptions": {
-                      "type": "auto"
-                    },
-                    "footer": {
-                      "reducers": []
-                    },
-                    "inspect": false
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3003": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3003,
-          "title": "🧬 DGA Signature Combo: Entropy + C2 Beaconing",
-          "description": "Two independent DGA/botnet signals plotted together so you can see them correlate: Shannon entropy of queried domain names (home_ids_entropy_avg — per ENGINEERING_MANUAL.md, values above ~4.5 mathematically indicate algorithmically-generated, non-human-typed domain names) and C2 beaconing count (home_ids_beaconing_c2_count — periodic, uniform outbound connections). When BOTH lines spike together, that's a strong Domain Generation Algorithm / botnet C2 pattern, much stronger evidence than either signal alone — this is exactly the combination the Hypothesis & Evidence Engine's DGA_BEACONING hypothesis looks for.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_entropy_avg",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "entropy · {{hostname}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_beaconing_c2_count",
-                        "format": "time_series",
-                        "instant": false,
-                        "legendFormat": "C2 beacons · {{hostname}}"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "timeseries",
-            "version": "",
-            "spec": {
-              "options": {
-                "legend": {
-                  "calcs": [],
-                  "displayMode": "list",
-                  "placement": "bottom"
-                },
-                "tooltip": {
-                  "mode": "multi",
-                  "sort": "none"
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 4.5,
-                        "color": "red"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  },
-                  "custom": {
-                    "axisCenteredZero": false,
-                    "axisColorMode": "text",
-                    "axisLabel": "",
-                    "axisPlacement": "auto",
-                    "barAlignment": 0,
-                    "drawStyle": "line",
-                    "fillOpacity": 1,
-                    "gradientMode": "none",
-                    "hideFrom": {
-                      "legend": false,
-                      "tooltip": false,
-                      "viz": false
-                    },
-                    "insertNulls": false,
-                    "lineInterpolation": "linear",
-                    "lineWidth": 1,
-                    "pointSize": 5,
-                    "scaleDistribution": {
-                      "type": "linear"
-                    },
-                    "showPoints": "auto",
-                    "spanNulls": false,
-                    "stacking": {
-                      "group": "A",
-                      "mode": "none"
-                    }
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3100": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3100,
-          "title": "🌍 Full Geographic Traffic Context (All Countries, Not Just Risky Ones)",
-          "description": "",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "text",
             "version": "13.1.1",
             "spec": {
               "options": {
-                "code": {
-                  "language": "plaintext",
-                  "showLineNumbers": false,
-                  "showMiniMap": false
+                "showHeader": true,
+                "cellHeight": "sm",
+                "footer": {
+                  "show": false
                 },
-                "content": "",
-                "mode": "markdown"
+                "sortBy": [
+                  {
+                    "displayName": "Risk (0-10)",
+                    "desc": true
+                  }
+                ]
               },
               "fieldConfig": {
-                "defaults": {},
-                "overrides": []
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "country"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Country"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Risk (0-10)"
+                      },
+                      {
+                        "id": "description",
+                        "value": "GeoIP-based risk for traffic to this country/network."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "green"
+                            },
+                            {
+                              "value": 5,
+                              "color": "orange"
+                            },
+                            {
+                              "value": 9,
+                              "color": "red"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  }
+                ]
               }
             }
-          }
+          },
+          "id": 4
         }
       },
-      "panel-3101": {
+      "panel-5": {
         "kind": "Panel",
         "spec": {
-          "id": 3101,
-          "title": "Geographic Traffic Context (All Countries, Not Just Risky Ones)",
-          "description": "The panels above only surface countries that crossed a risk threshold. This is the full picture -- how much traffic, how many devices, and how much DNS activity your network sends to every country it talks to, risky or not. Useful for spotting 'why does any of my traffic go there at all' even when nothing has been flagged.",
+          "title": "All countries (traffic context)",
+          "description": "Every country your network talks to, risky or not: traffic, devices, DNS activity.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1286,8 +390,9 @@
                       },
                       "spec": {
                         "expr": "sum by (country) (home_ids_geo_traffic_total)",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -1306,8 +411,9 @@
                       },
                       "spec": {
                         "expr": "sum by (country) (home_ids_geo_device_count)",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "B",
@@ -1326,8 +432,9 @@
                       },
                       "spec": {
                         "expr": "sum by (country) (home_ids_geo_queries_per_minute)",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "C",
@@ -1346,8 +453,9 @@
                       },
                       "spec": {
                         "expr": "sum by (country) (home_ids_geo_unique_domains)",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "D",
@@ -1366,8 +474,9 @@
                       },
                       "spec": {
                         "expr": "avg by (country) (home_ids_geo_entropy)",
-                        "format": "table",
-                        "instant": true
+                        "instant": true,
+                        "range": false,
+                        "format": "table"
                       }
                     },
                     "refId": "E",
@@ -1381,8 +490,8 @@
                   "group": "joinByField",
                   "spec": {
                     "options": {
-                      "mode": "outer",
-                      "byField": "country"
+                      "byField": "country",
+                      "mode": "outer"
                     }
                   }
                 },
@@ -1396,16 +505,22 @@
                         "__name__": true,
                         "instance": true,
                         "job": true,
-                        "continent": true
+                        "Time 1": true,
+                        "Time 2": true,
+                        "Time 3": true,
+                        "Time 4": true,
+                        "Time 5": true,
+                        "Time 6": true
                       },
-                      "renameByName": {
-                        "country": "Country",
-                        "Value #A": "Total Traffic Events",
-                        "Value #B": "Devices",
-                        "Value #C": "Queries/Min",
-                        "Value #D": "Unique Domains",
-                        "Value #E": "Entropy"
-                      }
+                      "indexByName": {
+                        "country": 0,
+                        "Value #A": 1,
+                        "Value #B": 2,
+                        "Value #C": 3,
+                        "Value #D": 4,
+                        "Value #E": 5
+                      },
+                      "renameByName": {}
                     }
                   }
                 }
@@ -1419,15 +534,978 @@
             "version": "13.1.1",
             "spec": {
               "options": {
+                "showHeader": true,
                 "cellHeight": "sm",
-                "showHeader": true
+                "footer": {
+                  "show": false
+                },
+                "sortBy": [
+                  {
+                    "displayName": "Connections",
+                    "desc": true
+                  }
+                ]
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "custom": {
+                    "align": "auto",
+                    "filterable": true,
+                    "cellOptions": {
+                      "type": "auto"
+                    }
+                  }
+                },
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "country"
+                    },
+                    "properties": [
+                      {
+                        "id": "custom.align",
+                        "value": "left"
+                      },
+                      {
+                        "id": "displayName",
+                        "value": "Country"
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #A"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Connections"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Connections seen to this country."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #B"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Devices"
+                      },
+                      {
+                        "id": "description",
+                        "value": "How many of your devices talked to it."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #C"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "DNS queries / min"
+                      },
+                      {
+                        "id": "description",
+                        "value": "DNS lookups per minute resolving there."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 1
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #D"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Unique domains"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Distinct domains resolving there."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Value #E"
+                    },
+                    "properties": [
+                      {
+                        "id": "displayName",
+                        "value": "Name randomness"
+                      },
+                      {
+                        "id": "description",
+                        "value": "Average randomness of the domain names (above ~4.5 looks machine-generated)."
+                      },
+                      {
+                        "id": "unit",
+                        "value": "none"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "color",
+                        "value": {
+                          "mode": "thresholds"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "text"
+                            },
+                            {
+                              "value": 4.5,
+                              "color": "red"
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "id": "decimals",
+                        "value": 2
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          },
+          "id": 5
+        }
+      },
+      "panel-6": {
+        "kind": "Panel",
+        "spec": {
+          "title": "🦠 Outside threats",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": ""
               },
               "fieldConfig": {
                 "defaults": {},
                 "overrides": []
               }
             }
-          }
+          },
+          "id": 6
+        }
+      },
+      "panel-7": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Threat-intel matches (per hour, by feed)",
+          "description": "Connections to destinations listed on a threat-intel feed, per rolling hour.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum by (source) (increase(home_ids_ti_ioc_hits_total[1h]))",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{source}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 7
+        }
+      },
+      "panel-8": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Beaconing (per device)",
+          "description": "Regular, clock-like outbound connections, a classic sign of malware checking in.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_beaconing_c2_count",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 8
+        }
+      },
+      "panel-9": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Malicious TLS fingerprints (JA4)",
+          "description": "Connections whose TLS handshake matches known malware tooling. Any non-zero value is serious.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_ja4_malicious",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 9
+        }
+      },
+      "panel-10": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Malicious TLS fingerprints (JA3, older format)",
+          "description": "Same idea as JA4, for families only catalogued under the older format.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_ja3_malicious",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 10
+        }
+      },
+      "panel-11": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Domain-name randomness (per device)",
+          "description": "Average randomness of looked-up names. Machine-generated domains (DGA) sit above ~4.5.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_entropy_avg",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "dashed"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0,
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 4.5,
+                        "color": "red"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 11
+        }
+      },
+      "panel-12": {
+        "kind": "Panel",
+        "spec": {
+          "title": "📡 Inside your network",
+          "description": "",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "text",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "mode": "markdown",
+                "content": ""
+              },
+              "fieldConfig": {
+                "defaults": {},
+                "overrides": []
+              }
+            }
+          },
+          "id": 12
+        }
+      },
+      "panel-13": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Lateral movement events (per hour)",
+          "description": "A device probing several of your other devices. Almost always worth investigating.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum(increase(home_ids_zeek_lateral_events_total[1h])) or vector(0)",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "events / hour"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 13
+        }
+      },
+      "panel-14": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Honeypot probes (per hour)",
+          "description": "Contacts to a decoy address you configured. Only meaningful if you set one up.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum(increase(home_ids_honeypot_probes_total[1h])) or vector(0)",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "probes / hour"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 14
+        }
+      },
+      "panel-15": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Encrypted-DNS bypass (per device)",
+          "description": "Connections to DNS-over-HTTPS resolvers that go around your Pi-hole.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "home_ids_zeek_doh_bypass",
+                        "instant": false,
+                        "range": true,
+                        "legendFormat": "{{hostname}}"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "timeseries",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "legend": {
+                  "displayMode": "table",
+                  "placement": "right",
+                  "showLegend": true,
+                  "calcs": [
+                    "lastNotNull",
+                    "max"
+                  ]
+                },
+                "tooltip": {
+                  "mode": "multi",
+                  "sort": "desc"
+                }
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "custom": {
+                    "drawStyle": "line",
+                    "lineWidth": 2,
+                    "fillOpacity": 12,
+                    "showPoints": "never",
+                    "spanNulls": true,
+                    "stacking": {
+                      "mode": "none",
+                      "group": "A"
+                    }
+                  },
+                  "color": {
+                    "mode": "palette-classic"
+                  },
+                  "min": 0
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 15
         }
       }
     },
@@ -1441,7 +1519,7 @@
               "x": 0,
               "y": 0,
               "width": 24,
-              "height": 6,
+              "height": 2,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-1"
@@ -1452,22 +1530,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 6,
+              "y": 2,
               "width": 24,
-              "height": 18,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-14"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 24,
-              "width": 8,
-              "height": 6,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-2"
@@ -1477,10 +1542,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 24,
-              "width": 8,
-              "height": 6,
+              "x": 0,
+              "y": 5,
+              "width": 14,
+              "height": 10,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-3"
@@ -1490,10 +1555,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 24,
-              "width": 8,
-              "height": 6,
+              "x": 14,
+              "y": 5,
+              "width": 10,
+              "height": 10,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-4"
@@ -1504,9 +1569,9 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 30,
-              "width": 8,
-              "height": 6,
+              "y": 15,
+              "width": 24,
+              "height": 9,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-5"
@@ -1516,10 +1581,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 30,
-              "width": 8,
-              "height": 6,
+              "x": 0,
+              "y": 24,
+              "width": 24,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-6"
@@ -1529,10 +1594,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 30,
-              "width": 8,
-              "height": 6,
+              "x": 0,
+              "y": 27,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-7"
@@ -1542,10 +1607,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 36,
-              "width": 8,
-              "height": 6,
+              "x": 12,
+              "y": 27,
+              "width": 12,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-8"
@@ -1555,10 +1620,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 8,
-              "y": 36,
+              "x": 0,
+              "y": 35,
               "width": 8,
-              "height": 6,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-9"
@@ -1568,10 +1633,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 16,
-              "y": 36,
+              "x": 8,
+              "y": 35,
               "width": 8,
-              "height": 6,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-10"
@@ -1581,10 +1646,10 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 42,
-              "width": 24,
-              "height": 12,
+              "x": 16,
+              "y": 35,
+              "width": 8,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-11"
@@ -1595,12 +1660,12 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 54,
+              "y": 43,
               "width": 24,
-              "height": 5,
+              "height": 3,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-3002"
+                "name": "panel-12"
               }
             }
           },
@@ -1608,51 +1673,38 @@
             "kind": "GridLayoutItem",
             "spec": {
               "x": 0,
-              "y": 59,
-              "width": 12,
+              "y": 46,
+              "width": 8,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-3001"
+                "name": "panel-13"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 12,
-              "y": 59,
-              "width": 12,
+              "x": 8,
+              "y": 46,
+              "width": 8,
               "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-3003"
+                "name": "panel-14"
               }
             }
           },
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 0,
-              "y": 67,
-              "width": 24,
-              "height": 4,
+              "x": 16,
+              "y": 46,
+              "width": 8,
+              "height": 8,
               "element": {
                 "kind": "ElementReference",
-                "name": "panel-3100"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 0,
-              "y": 71,
-              "width": 24,
-              "height": 12,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-3101"
+                "name": "panel-15"
               }
             }
           }
@@ -1661,23 +1713,10 @@
     },
     "links": [
       {
-        "title": "Navigation",
-        "type": "dashboards",
-        "icon": "apps",
-        "tooltip": "Switch Dashboards",
-        "tags": [
-          "home-ids-v2"
-        ],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🏠 Go to Overview",
+        "title": "🏠 Overview",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🏠 Go to Overview",
+        "icon": "dashboard",
+        "tooltip": "🏠 Overview",
         "url": "/d/home_ids_v3_main",
         "tags": [],
         "asDropdown": false,
@@ -1686,10 +1725,10 @@
         "keepTime": true
       },
       {
-        "title": "🔍 Go to Device Deep Dive",
+        "title": "🔍 Device Deep Dive",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Device Deep Dive",
+        "icon": "dashboard",
+        "tooltip": "🔍 Device Deep Dive",
         "url": "/d/home_ids_v3_device",
         "tags": [],
         "asDropdown": false,
@@ -1698,11 +1737,11 @@
         "keepTime": true
       },
       {
-        "title": "🛡️ Go to System Tuning, Healing & Health",
+        "title": "🤖 Autonomy & Learning",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🛡️ Go to System Tuning, Healing & Health",
-        "url": "/d/home_ids_v3_mitigation",
+        "icon": "dashboard",
+        "tooltip": "🤖 Autonomy & Learning",
+        "url": "/d/home_ids_v3_autonomous",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1710,11 +1749,11 @@
         "keepTime": true
       },
       {
-        "title": "🤖 Go to Autonomous Behavior",
+        "title": "🛡️ System Health",
         "type": "link",
-        "icon": "external link",
-        "tooltip": "🤖 Go to Autonomous Behavior",
-        "url": "/d/home_ids_v3_autonomous",
+        "icon": "dashboard",
+        "tooltip": "🛡️ System Health",
+        "url": "/d/home_ids_v3_mitigation",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
@@ -1722,26 +1761,20 @@
         "keepTime": true
       }
     ],
-    "liveNow": true,
+    "liveNow": false,
     "preload": false,
     "tags": [
       "home-ids-v2"
     ],
     "timeSettings": {
-      "from": "now-1h",
+      "from": "now-24h",
       "to": "now",
-      "autoRefresh": "5s",
+      "autoRefresh": "1m",
       "autoRefreshIntervals": [
-        "5s",
-        "10s",
         "30s",
         "1m",
         "5m",
-        "15m",
-        "30m",
-        "1h",
-        "2h",
-        "1d"
+        "15m"
       ],
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
@@ -1790,11 +1823,12 @@
         "kind": "QueryVariable",
         "spec": {
           "name": "device",
+          "label": "device",
           "current": {
             "text": "All",
             "value": "$__all"
           },
-          "hide": "dontHide",
+          "hide": "hideVariable",
           "refresh": "onDashboardLoad",
           "skipUrlSync": false,
           "query": {
@@ -1805,16 +1839,18 @@
               "name": "${PROMETHEUS_DS}"
             },
             "spec": {
-              "query": "label_values(home_ids_threat_confidence, hostname)",
+              "query": "label_values(home_ids_decision_state, hostname)",
               "refId": "StandardVariableQuery"
             }
           },
           "regex": "",
+          "regexApplyTo": "value",
           "sort": "alphabeticalAsc",
-          "definition": "label_values(home_ids_threat_confidence, hostname)",
+          "definition": "label_values(home_ids_decision_state, hostname)",
           "options": [],
           "multi": true,
           "includeAll": true,
+          "allValue": ".*",
           "allowCustomValue": true
         }
       }

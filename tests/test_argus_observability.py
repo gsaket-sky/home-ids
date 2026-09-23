@@ -100,12 +100,12 @@ def test_exported_autotune_values_match_the_engines_own_lookup(graph):
     assert exp.run_once(now=NOW) is True
     engine = AutotuneEngine(store)
     p = "fp_combined_suppress_threshold"
-    cases = [("global", "", "", engine._promoted_value_at_scope(p, None, None)),
-             ("category", "smart_tv", "", engine._promoted_value_at_scope(p, None, "smart_tv")),
-             ("device", "devA", "laptop-a", engine._promoted_value_at_scope(p, "devA", None))]
-    for scope, target, host, engine_value in cases:
+    cases = [("global", "", engine._promoted_value_at_scope(p, None, None)),
+             ("category", "smart_tv", engine._promoted_value_at_scope(p, None, "smart_tv")),
+             ("device", "devA", engine._promoted_value_at_scope(p, "devA", None))]
+    for scope, target, engine_value in cases:
         assert engine_value is not None
-        assert _value(metrics.autotune_value, parameter=p, scope=scope, target=target, hostname=host) == pytest.approx(engine_value)
+        assert _value(metrics.autotune_value, parameter=p, scope=scope, target=target) == pytest.approx(engine_value)
     # devB's only promotion was rolled back -> the engine has nothing at device scope, nor may the exporter
     assert engine._promoted_value_at_scope(p, "devB", None) is None
     assert _value(metrics.autotune_value, parameter=p, scope="device", target="devB") is None
@@ -120,13 +120,13 @@ def test_alert_outcomes_trust_regimes_and_sigma_per_canonical_device(graph):
     argus_metrics.ArgusMetricsExporter(db, {}).run_once(now=NOW)
     assert _value(metrics.argus_alert_events_24h, status="FIRED") == 2
     assert _value(metrics.argus_alert_events_retained, status="FIRED") == 3
-    assert _value(metrics.device_alerts_fired_24h, device="devA", hostname="laptop-a") == 2
-    assert _value(metrics.device_alerts_suppressed_24h, device="devA", hostname="laptop-a") == 1
+    assert _value(metrics.device_alerts_fired_24h, device="devA") == 2
+    assert _value(metrics.device_alerts_suppressed_24h, device="devA") == 1
     # orphan's trust row is folded into its canonical device: mean(0.2, 0.6)
-    assert _value(metrics.device_learned_trust, device="devA", hostname="laptop-a") == pytest.approx(0.4)
+    assert _value(metrics.device_learned_trust, device="devA") == pytest.approx(0.4)
     assert _value(metrics.device_learned_trust, device="orphan") is None
-    assert _value(metrics.device_baseline_regime_shifts, device="devA", hostname="laptop-a") == 2
-    assert _value(metrics.device_sigma_shift, device="devB", hostname="tv-b") == pytest.approx(0.75)
+    assert _value(metrics.device_baseline_regime_shifts, device="devA") == 2
+    assert _value(metrics.device_sigma_shift, device="devB") == pytest.approx(0.75)
     assert _value(metrics.cl_afpe_trust_entries, destination_class="cdn") == 3
 
 
@@ -134,9 +134,9 @@ def test_vanished_label_sets_are_removed_not_left_stale(graph):
     store, db = graph
     exp = argus_metrics.ArgusMetricsExporter(db, {})
     exp.run_once(now=NOW)
-    assert _value(metrics.device_alerts_suppressed_24h, device="devA", hostname="laptop-a") == 1
+    assert _value(metrics.device_alerts_suppressed_24h, device="devA") == 1
     exp.run_once(now=NOW + 2 * 86400)  # a day later nothing is inside the 24h window any more
-    assert _value(metrics.device_alerts_suppressed_24h, device="devA", hostname="laptop-a") is None
+    assert _value(metrics.device_alerts_suppressed_24h, device="devA") is None
 
 
 def test_pass_timeout_abandons_cleanly_and_keeps_previous_values(graph):
