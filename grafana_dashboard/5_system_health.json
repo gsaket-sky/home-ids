@@ -2741,6 +2741,86 @@
           },
           "id": 27
         }
+      },
+      "panel-28": {
+        "kind": "Panel",
+        "spec": {
+          "title": "Unreadable model files removed",
+          "description": "Per-device ML model files found damaged at startup and removed (since the engine started). Each such device re-learns from scratch. Should stay 0; saves are atomic, so a non-zero value points at a disk problem.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "prometheus",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${PROMETHEUS_DS}"
+                      },
+                      "spec": {
+                        "expr": "sum(home_ids_device_profile_discards_total{reason=\"corrupt\"}) or vector(0)",
+                        "instant": true,
+                        "range": false
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "stat",
+            "version": "13.1.1",
+            "spec": {
+              "options": {
+                "reduceOptions": {
+                  "calcs": [
+                    "lastNotNull"
+                  ],
+                  "fields": "",
+                  "values": false
+                },
+                "colorMode": "value",
+                "graphMode": "none",
+                "textMode": "value",
+                "justifyMode": "auto",
+                "orientation": "auto",
+                "wideLayout": true
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "unit": "none",
+                  "noValue": "0",
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": null,
+                        "color": "green"
+                      },
+                      {
+                        "value": 1,
+                        "color": "orange"
+                      }
+                    ]
+                  }
+                },
+                "overrides": []
+              }
+            }
+          },
+          "id": 28
+        }
       }
     },
     "layout": {
@@ -3064,7 +3144,7 @@
             "spec": {
               "x": 0,
               "y": 58,
-              "width": 10,
+              "width": 9,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
@@ -3075,9 +3155,9 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 10,
+              "x": 9,
               "y": 58,
-              "width": 10,
+              "width": 9,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
@@ -3088,13 +3168,26 @@
           {
             "kind": "GridLayoutItem",
             "spec": {
-              "x": 20,
+              "x": 18,
               "y": 58,
-              "width": 4,
+              "width": 3,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-27"
+              }
+            }
+          },
+          {
+            "kind": "GridLayoutItem",
+            "spec": {
+              "x": 21,
+              "y": 58,
+              "width": 3,
+              "height": 7,
+              "element": {
+                "kind": "ElementReference",
+                "name": "panel-28"
               }
             }
           }

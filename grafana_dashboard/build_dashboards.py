@@ -771,7 +771,10 @@ def health():
                    [('process_resident_memory_bytes{job="home_ids"}', "engine")], unit="bytes"),
         stat("Engine uptime", "Time since the engine last (re)started. Unexpected drops mean it crashed and was restarted.",
              'time() - process_start_time_seconds{job="home_ids"}', unit="s", steps=[(None, "orange"), (3600, "green")]),
-    ], height=7, widths=[10, 10, 4])
+        stat("Unreadable model files removed", "Per-device ML model files found damaged at startup and removed (since the engine started). "
+             "Each such device re-learns from scratch. Should stay 0; saves are atomic, so a non-zero value points at a disk problem.",
+             'sum(home_ids_device_profile_discards_total{reason="corrupt"}) or vector(0)', steps=[(None, "green"), (1, "orange")]),
+    ], height=7, widths=[9, 9, 3, 3])
     return b
 
 
