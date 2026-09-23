@@ -431,3 +431,50 @@ suricata_last_success_timestamp = Gauge("home_ids_suricata_last_success_timestam
 # above rather than a synthetic health ping.
 pihole_gravity_queries_total = Counter("home_ids_pihole_gravity_queries_total", "Cumulative Pi-hole gravity-list API lookups by outcome", ["outcome"])
 pihole_gravity_last_success_timestamp = Gauge("home_ids_pihole_gravity_last_success_timestamp", "Unix timestamp of the last successful (non-cached) Pi-hole gravity-list API response")
+# ===========================================================================
+# 2026-09-23: Argus-architecture observability (Documentation/ARGUS_OBSERVABILITY_PLAN.md)
+# Every value below is set directly in this process from its real source -- no relay file.
+# ===========================================================================
+# CL-AFPE (false-positive filter) under cl_afpe_engine=argus. The home_ids_fp_* counters
+# above were only ever written inside the legacy intelligence/fp_engine.py, which never
+# runs once Argus CL-AFPE is live -- pipeline.py now sets them from the Argus verdict too.
+cl_afpe_verdicts_total = Counter("home_ids_cl_afpe_verdicts_total", "Argus CL-AFPE verdicts by the stage that decided and the verdict it reached", ["stage", "verdict"])
+
+# Per-device decision detail from the live Argus decision (same device labels as the
+# other per-device gauges, purged with them).
+decision_independent_sources_metric = Gauge("home_ids_decision_independent_sources", "Independent evidence sources behind this device's current Argus decision", _DEV_LABELS)
+decision_evidence_families_metric = Gauge("home_ids_decision_evidence_families", "Distinct evidence families behind this device's current Argus decision", _DEV_LABELS)
+decision_path_code_metric = Gauge("home_ids_decision_path_code", "Which Argus decision path produced this device's current verdict (stable code; see core/metrics_sync.py DECISION_PATH_CODES)", _DEV_LABELS)
+reputation_tier_metric = Gauge("home_ids_reputation_tier", "Reputation tier of this device's current destination (intelligence/reputation/classifier.py): 0 local/own network, 1 trusted list, 2 known infrastructure (CDN/cloud), 3 unknown (neutral default), 4 weak/unconfirmed bad signal, 5 confirmed IOC", _DEV_LABELS)
+
+# Health manager -- set in-process by core/health_manager.py every check cycle.
+health_component_state = Gauge("home_ids_health_component_state", "Health-manager component state: 0 healthy, 1 degraded, 2 unhealthy, 3 safe mode, 4 recovery failed, -1 retired", ["component"])
+health_recovery_attempts = Gauge("home_ids_health_recovery_attempts", "Self-heal attempts in the component's current back-off window", ["component"])
+health_pressure_level = Gauge("home_ids_health_pressure_level", "Host resource pressure as classified by the health manager: 0 normal, 1 resource pressure, 2 conservation, 3 critical")
+
+# Argus evidence graph -- set by core/argus_metrics.py's read-only background exporter.
+argus_alert_events_24h = Gauge("home_ids_argus_alert_events_24h", "Alert events in the last 24h by outcome (FIRED = published to you, SUPPRESSED_AUTONOMOUS = hidden by the false-positive filter, LOGGED_ONLY = recorded below the alert bar)", ["status"])
+argus_alert_events_retained = Gauge("home_ids_argus_alert_events_retained", "Alert events currently retained in the evidence graph by outcome (survives restarts)", ["status"])
+argus_decisions_24h = Gauge("home_ids_argus_decisions_24h", "Argus decisions in the last 24h by state", ["state"])
+argus_incidents_active_24h = Gauge("home_ids_argus_incidents_active_24h", "Incidents with activity in the last 24h")
+autotune_value = Gauge("home_ids_autotune_value", "Currently promoted autotuned value, by parameter and scope (global / category = device type / device)", ["parameter", "scope", "target", "hostname"])
+autotune_canary_value = Gauge("home_ids_autotune_canary_value", "Proposed autotune value still in its canary window (not yet promoted)", ["parameter", "scope", "target", "hostname"])
+autotune_config_value = Gauge("home_ids_autotune_config_value", "Hand-set config.yaml value an autotuned parameter falls back to", ["parameter"])
+autotune_changes = Gauge("home_ids_autotune_changes", "Autotune changes retained in threshold_history by parameter, scope and status (canary / promoted / rolled_back / superseded)", ["parameter", "scope", "status"])
+autotune_last_change_timestamp = Gauge("home_ids_autotune_last_change_timestamp", "Unix time of the most recent autotune event of each kind", ["status"])
+cl_afpe_trust_entries = Gauge("home_ids_cl_afpe_trust_entries", "Learned CL-AFPE trust entries by destination class", ["destination_class"])
+cl_afpe_trust_mean = Gauge("home_ids_cl_afpe_trust_mean", "Mean learned trust value (0..1) by destination class", ["destination_class"])
+baseline_models = Gauge("home_ids_baseline_models", "Per-device Bayesian baseline models by kind", ["model_kind"])
+population_priors = Gauge("home_ids_population_priors", "Population-prior pools by device type (cold-start baselines for new devices)", ["device_type"])
+backtest_last_pass = Gauge("home_ids_backtest_last_pass", "1 if the most recent autotune backtest passed, 0 if it failed")
+backtest_last_run_timestamp = Gauge("home_ids_backtest_last_run_timestamp", "Unix time the most recent autotune backtest finished")
+containment_actions = Gauge("home_ids_containment_actions", "Containment actions retained in the evidence graph by type and status", ["action_type", "status"])
+operator_actions = Gauge("home_ids_operator_actions", "Operator actions retained in the evidence graph by kind", ["action"])
+argus_exporter_last_success_timestamp = Gauge("home_ids_argus_exporter_last_success_timestamp", "Unix time the evidence-graph exporter last completed a full pass")
+argus_exporter_duration_seconds = Gauge("home_ids_argus_exporter_duration_seconds", "Wall time of the evidence-graph exporter's last pass")
+# Per device (Master Threat Ledger), keyed by the graph's canonical device id.
+device_alerts_fired_24h = Gauge("home_ids_device_alerts_fired_24h", "Alerts published for this device in the last 24h", ["device", "hostname"])
+device_alerts_suppressed_24h = Gauge("home_ids_device_alerts_suppressed_24h", "Alerts the false-positive filter suppressed for this device in the last 24h", ["device", "hostname"])
+device_learned_trust = Gauge("home_ids_device_learned_trust", "Mean CL-AFPE learned trust (0..1) for this device's own behaviour", ["device", "hostname"])
+device_baseline_regime_shifts = Gauge("home_ids_device_baseline_regime_shifts", "Behaviour regime changes (BOCPD changepoints) detected in this device's baselines", ["device", "hostname"])
+device_sigma_shift = Gauge("home_ids_device_sigma_shift", "Argus CL-AFPE sensitivity shift for this device (positive = more lenient after confirmed false positives)", ["device", "hostname"])

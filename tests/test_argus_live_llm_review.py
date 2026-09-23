@@ -41,12 +41,14 @@ class _FakeClient:
     tests below: confirming it's never called more than the configured max)."""
     _responses = []
     calls = 0
+    last_timeout = None
 
     def __init__(self, remote_url=None, remote_model=None):
-        pass
+        self.timeout_seconds = 900.0  # mirrors OllamaClient's real public default
 
     def query_full_analysis(self, prompt_text, timeout=None):
         _FakeClient.calls += 1
+        _FakeClient.last_timeout = timeout
         if _FakeClient._responses:
             return _FakeClient._responses.pop(0)
         return {"classification": "malicious", "confidence": 0.9, "reason": "test",
@@ -542,6 +544,47 @@ check("END-TO-END: the written entry carries the representative destination for 
 
 
 print(f"\n{'='*60}")
+# --- 2026-09-23: self-imposed deadline from the job's OWN scheduler budget ---
+# (live: the job was SIGKILLed at its 30-min budget on every run for ~29h, since up to
+# 5 remote calls of up to 900s each can't fit -- and a killed run published nothing.)
+def _one_suspicious_decision(dir_path):
+    st = GraphStore(str(dir_path / "v13_graph.db"))
+    t = time.time()
+    st.insert_evidence(Evidence(device_id="devD", destination_id="evil.example.com",
+                                evidence_type="zeek_lateral_scan", independence_family="network_behavior",
+                                timestamp=t - 100, source="zeek", value=1.0))
+    st.insert_decision(device_id="devD", timestamp=t - 90, state="SUSPICIOUS", decision_path="hypothesis_suspicious",
+                       confidence=0.4, risk_score=2.0, raw_payload={"hypotheses": {"attack": {"name": "NETWORK_INTRUSION"}}})
+    st.close()
+
+
+_tight_dir = TMPDIR / "deadline_tight"
+_tight_dir.mkdir()
+_one_suspicious_decision(_tight_dir)
+cfg = _config_for(_tight_dir)
+cfg["scheduler"] = {"live_llm_review": {"max_runtime_minutes": 1.5}}  # 30s usable, < 120s minimum per call
+live_llm_review.CONFIG = cfg
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient):
+    live_llm_review.main()
+tight = json.loads((_tight_dir / "job_health.json").read_text())["live_llm_review"]
+check("no remote LLM call is started without enough budget left for one", _FakeClient.calls == 0)
+check("the run reports it stopped for its deadline", tight.get("stopped_for_deadline") is True)
+check("the unreviewed decision is deferred to the next run, not lost",
+      tight.get("deferred") == 1 and tight.get("reviewed") == 0)
+
+_cap_dir = TMPDIR / "deadline_cap"
+_cap_dir.mkdir()
+_one_suspicious_decision(_cap_dir)
+cfg = _config_for(_cap_dir)
+cfg["scheduler"] = {"live_llm_review": {"max_runtime_minutes": 10}}
+live_llm_review.CONFIG = cfg
+_reset_fake_client()
+with patch.object(live_llm_review, "OllamaClient", _FakeClient):
+    live_llm_review.main()
+check("a remote call's timeout is capped to the time left in the budget (not the 900s client default)",
+      _FakeClient.calls == 1 and _FakeClient.last_timeout is not None and _FakeClient.last_timeout <= 10 * 60 - 60)
+
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")
     sys.exit(1)

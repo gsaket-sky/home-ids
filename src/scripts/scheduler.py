@@ -13,6 +13,8 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from core.heartbeat import write_component_heartbeat  # noqa: E402 -- needs the sys.path.append above first
 from core import resource_gate  # noqa: E402
 from core import job_coordinator  # noqa: E402
+from core import job_result_channel  # noqa: E402
+from core import scheduler_metrics  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
@@ -90,41 +92,60 @@ def main():
     config = load_config()  # already flat -- merged across every config.yaml category
     state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
 
+    # This daemon owns every job's lifecycle, so it serves those facts to Prometheus
+    # itself (core/scheduler_metrics.py) instead of relaying them through files.
+    scheduler_metrics.start(int(config.get("scheduler_metrics_port", 9106)))
+
     # Resource-aware scheduling (Documentation/RESOURCE_AWARE_SCHEDULING.md): before
     # this process does anything else, reclaim any job left stuck past its own
     # recorded budget by a previous scheduler.py life (a restart/crash of THIS
     # process does not kill its children -- see job_coordinator.reconcile_on_boot()'s
     # own docstring for why that matters).
-    job_coordinator.reconcile_on_boot(state_dir)
+    scheduler_metrics.record_kill(job_coordinator.reconcile_on_boot(state_dir))
 
     # Track when a job was last run to prevent multiple executions within the same minute
     last_run = {}
     # job_name -> timestamp it FIRST became due but was deferred (pressure or mutex) --
     # the starvation backstop's own clock. Cleared once the job actually dispatches.
     pending_since = {}
-    # job_name -> {"proc": Popen, "priority": int, "pausable": bool, "paused": bool} --
-    # every job THIS scheduler.py instance has launched and not yet seen exit.
+    # job_name -> {"proc": Popen, "priority": int, "pausable": bool, "paused": bool,
+    # "result_fd": int|None, "killed": bool} -- every job THIS scheduler.py instance has
+    # launched and not yet seen exit.
     running = {}
+
+    def _record_reclaim(reclaimed):
+        """A coordinator reclaim kills the job; its exit is then seen by
+        _reap_and_resume() and must not be double-counted as a plain failure."""
+        scheduler_metrics.record_kill(reclaimed)
+        if reclaimed:
+            for info in running.values():
+                if info["proc"].pid == reclaimed.get("pid"):
+                    info["killed"] = True
 
     def _reap_and_resume():
         """Every tick: notice any tracked job that has exited (release its slot, or
         promote a paused one back to active), and resume any job THIS process itself
         previously paused once the coordinator says it's safe to."""
         for job_name in list(running.keys()):
-            proc = running[job_name]["proc"]
+            info = running[job_name]
+            proc = info["proc"]
             if proc.poll() is not None:
                 job_coordinator.release(state_dir, job_name, proc.pid)
+                result = job_result_channel.collect(info["result_fd"]) if info.get("result_fd") is not None else None
+                scheduler_metrics.record_exit(job_name, proc.returncode, result, time.time(),
+                                              killed=info.get("killed", False))
                 del running[job_name]
         for job_name, info in list(running.items()):
             if info.get("paused") and job_coordinator.should_resume(state_dir, job_name, info["proc"].pid):
                 job_coordinator.resume_process(info["proc"].pid)
                 job_coordinator.mark_running(state_dir, job_name, info["proc"].pid)
                 info["paused"] = False
+                scheduler_metrics.set_state(job_name, scheduler_metrics.TASK_STATE_RUNNING)
                 LOGGER.info(f"Resumed previously-preempted job '{job_name}' (pid {info['proc'].pid}).")
 
     def _try_dispatch(job_name: str, priority: int, pausable: bool,
                        max_runtime_minutes: float, launch_fn) -> bool:
-        """Runs launch_fn() (a zero-arg callable returning a Popen or None) only if
+        """Runs launch_fn(popen_kwargs) (returning a Popen or None) only if
         admitted by BOTH the system-pressure gate and the job-priority mutex.
         Deferred jobs are retried every subsequent tick (not just their next cron
         match) via pending_since, with a pressure-only starvation backstop -- the
@@ -139,6 +160,7 @@ def main():
 
         if not pressure_force and not resource_gate.may_admit_new_job(config):
             pending_since.setdefault(job_name, time.time())
+            scheduler_metrics.record_deferral(job_name, "pressure")
             LOGGER.info(f"Deferring '{job_name}' -- system under pressure ({deferred_minutes:.1f} min so far).")
             return False
         if pressure_force:
@@ -149,11 +171,30 @@ def main():
 
         if not job_coordinator.peek_admission(state_dir, priority):
             pending_since.setdefault(job_name, time.time())
+            scheduler_metrics.record_deferral(job_name, "slot")
             LOGGER.info(f"Deferring '{job_name}' -- slot held by a higher/equal-priority job ({deferred_minutes:.1f} min so far).")
             return False
 
-        proc = launch_fn()
+        # Result pipe (core/job_result_channel.py): the job's own numbers reach
+        # Prometheus through this process, no state file. POSIX-only (pass_fds);
+        # elsewhere the job simply runs without a channel.
+        read_fd = write_fd = None
+        popen_kwargs = {}
+        if os.name == "posix":
+            try:
+                read_fd, write_fd = job_result_channel.open_channel()
+                popen_kwargs = {"pass_fds": (write_fd,), "env": job_result_channel.child_env(write_fd)}
+            except OSError as exc:
+                LOGGER.warning(f"Result channel unavailable for '{job_name}': {exc}")
+                read_fd = write_fd = None
+        try:
+            proc = launch_fn(popen_kwargs)
+        finally:
+            if write_fd is not None:
+                os.close(write_fd)  # the child holds its own copy; EOF once it exits
         if proc is None:
+            if read_fd is not None:
+                os.close(read_fd)
             return False
 
         outcome = job_coordinator.acquire_or_preempt(
@@ -168,14 +209,24 @@ def main():
                 proc.terminate()
             except Exception:
                 pass
+            if read_fd is not None:
+                os.close(read_fd)
             pending_since.setdefault(job_name, time.time())
+            scheduler_metrics.record_deferral(job_name, "slot")
             return False
         if outcome.startswith(job_coordinator.PREEMPTED_PREFIX):
             old_pid = int(outcome.split(":", 1)[1])
             job_coordinator.pause_process(old_pid)
+            for other_name, other in running.items():
+                if other["proc"].pid == old_pid:
+                    other["paused"] = True
+                    scheduler_metrics.record_preemption(other_name)
+                    scheduler_metrics.set_state(other_name, scheduler_metrics.TASK_STATE_PAUSED)
             LOGGER.info(f"Preempted pid {old_pid} to run higher-priority '{job_name}' (pid {proc.pid}).")
 
-        running[job_name] = {"proc": proc, "priority": priority, "pausable": pausable, "paused": False}
+        running[job_name] = {"proc": proc, "priority": priority, "pausable": pausable, "paused": False,
+                             "result_fd": read_fd, "killed": False}
+        scheduler_metrics.set_state(job_name, scheduler_metrics.TASK_STATE_RUNNING)
         pending_since.pop(job_name, None)
         return True
 
@@ -187,8 +238,20 @@ def main():
         config = load_config()  # already flat -- merged across every config.yaml category
         state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
 
-        job_coordinator.reconcile_on_boot(state_dir)  # general watchdog every tick, not just at boot -- see its own docstring
+        _record_reclaim(job_coordinator.reconcile_on_boot(state_dir))  # general watchdog every tick, not just at boot -- see its own docstring
         _reap_and_resume()
+        scheduler_metrics.scheduler_last_tick.set(time.time())
+
+        # Only tasks enabled RIGHT NOW are exported -- a retired/disabled task drops
+        # out of Prometheus on its own, no dashboard-side name list needed.
+        enabled_tasks = {
+            name: float(cfg.get("max_runtime_minutes", 30))
+            for name, cfg in (config.get("scheduler", {}) or {}).items()
+            if isinstance(cfg, dict) and cfg.get("enabled", False)
+        }
+        if config.get("autotune_enabled", False):
+            enabled_tasks[TRAIN_FP_CLASSIFIER_JOB_NAME] = float(config.get("autotune_max_runtime_minutes", 40))
+        scheduler_metrics.sync_enabled_tasks(enabled_tasks)
 
         # 1. Check legacy autotune
         if config.get("autotune_enabled", False):
@@ -199,9 +262,9 @@ def main():
                 pausable = bool(config.get("autotune_pausable", True))
                 max_runtime = float(config.get("autotune_max_runtime_minutes", 40))
 
-                def _launch(script_path=script_path):
+                def _launch(popen_kwargs, script_path=script_path):
                     LOGGER.info("Triggering legacy autotune (train_fp_classifier.py)...")
-                    return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+                    return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True, **popen_kwargs)
 
                 if _try_dispatch(TRAIN_FP_CLASSIFIER_JOB_NAME, priority, pausable, max_runtime, _launch):
                     last_run["autotune"] = now_str
@@ -239,9 +302,9 @@ def main():
                         last_run[script_name] = now_str
                         continue
 
-                    def _launch(script_name=script_name, script_path=script_path):
+                    def _launch(popen_kwargs, script_name=script_name, script_path=script_path):
                         LOGGER.info(f"Triggering scheduled script: {script_path.name} (job='{script_name}') ...")
-                        return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True)
+                        return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True, **popen_kwargs)
 
                     if _try_dispatch(script_name, priority, pausable, max_runtime, _launch):
                         last_run[script_name] = now_str

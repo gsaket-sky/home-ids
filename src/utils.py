@@ -206,7 +206,27 @@ def register_dynamic_allowlist_domain(domain: str) -> None:
 # process. Read-modify-write against one shared file; last-write-wins is acceptable
 # since scheduled jobs are staggered by design (config.yaml: "Verified: no two enabled
 # jobs fire in the same hour").
+def job_result_status(extra: dict = None) -> str:
+    """A job reports failure by passing extra={"error": ...} and a no-op run by
+    extra={"skipped": ...}; everything else is a real success."""
+    if extra and extra.get("error"):
+        return "error"
+    if extra and extra.get("skipped"):
+        return "skipped"
+    return "success"
+
+
 def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: dict = None) -> None:
+    # Prometheus path (2026-09-23): hand the result to the launching scheduler over its
+    # result pipe, which exports it on the scheduler's own /metrics endpoint -- see
+    # core/job_result_channel.py. The job_health.json write below remains only for its
+    # existing file readers (health_manager's job checks, the console) until those move
+    # to Prometheus too; nothing Prometheus-facing reads the file any more.
+    try:
+        from core import job_result_channel
+        job_result_channel.publish(job_name, duration_seconds, extra, status=job_result_status(extra))
+    except Exception as exc:
+        LOGGER.debug("Failed to publish job result for %s: %s", job_name, exc)
     path = Path(state_dir) / "job_health.json"
     try:
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}

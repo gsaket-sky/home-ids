@@ -132,6 +132,16 @@ _TELEGRAM_MSG_BUDGET = 3800
 # a deferred decision once it ages out of a 4-hour lookback.
 LOOKBACK_SECONDS = 24 * 3600
 
+# Self-imposed run deadline (live, 2026-09-23): this job was reclaimed (SIGKILLed) by
+# core/job_coordinator.py at its budget on every run for ~29h -- up to
+# DEFAULT_MAX_QUERIES_PER_RUN remote calls of up to OllamaClient's 900s each can't fit
+# a 30-min budget, and a killed run published nothing, so the backlog only grew. The job
+# now reads its OWN scheduler budget and stops starting new LLM calls before it would
+# be killed; unreviewed candidates simply stay candidates for the next run (FIFO).
+JOB_NAME = "live_llm_review"
+DEADLINE_MARGIN_SECONDS = 60.0      # finish + write results this long before the budget ends
+DEFAULT_MIN_QUERY_SECONDS = 120.0   # don't start a remote call with less time than this left
+
 # What actually gets reviewed -- matches what v-current's own pipeline surfaces to
 # ollama_soc.py in practice (published alerts), not BENIGN/ANOMALOUS noise.
 _REVIEWABLE_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})
@@ -440,6 +450,11 @@ def main() -> None:
         return
 
     max_queries = int(CONFIG.get("ollama_v13_max_queries_per_run", DEFAULT_MAX_QUERIES_PER_RUN))
+    own_schedule = (CONFIG.get("scheduler") or {}).get(JOB_NAME) or {}
+    budget_minutes = float(own_schedule.get("max_runtime_minutes", 30))
+    deadline = run_start + budget_minutes * 60.0 - DEADLINE_MARGIN_SECONDS
+    min_query_seconds = float(CONFIG.get("llm_review_min_query_seconds", DEFAULT_MIN_QUERY_SECONDS))
+    stopped_for_deadline = False
 
     try:
         store = GraphStore(str(db_path))
@@ -473,6 +488,9 @@ def main() -> None:
         new_entries: List[Dict[str, Any]] = []
         with open(output_path, "a", encoding="utf-8") as out_f:
             for decision in candidates:
+                if time.time() >= deadline:
+                    stopped_for_deadline = True
+                    break  # even cache hits cost graph reads -- stop cleanly, report below
                 device_id = decision["device_id"]
                 evidence_list = window.evidence_in_window(
                     device_id, RollingWindowView.LONG_WINDOW_SECONDS, now=decision["timestamp"],
@@ -515,6 +533,10 @@ def main() -> None:
                     entry["validator_accepted"] = cached.get("validator_accepted")
                     entry["served_from_persistent_cache"] = True
                     cache_hits += 1
+                elif deadline - time.time() < min_query_seconds:
+                    # Not enough budget left for a remote call -- deferred, not lost.
+                    stopped_for_deadline = True
+                    continue
                 elif queries_made >= max_queries:
                     # Query budget exhausted this run and no cache hit available --
                     # deferred to next run, matching v1's own FIFO-fairness
@@ -528,7 +550,10 @@ def main() -> None:
                         device_id, evidence_list,
                         candidate_hypotheses=ground_truth.get("candidate_hypotheses"),
                     )
-                    recommendation = client.query_full_analysis(prompt_text)
+                    recommendation = client.query_full_analysis(
+                        prompt_text,
+                        timeout=max(1.0, min(client.timeout_seconds, deadline - time.time() - 15.0)),
+                    )
                     queries_made += 1
                     if recommendation is None:
                         entry["llm_error"] = "no_response_or_unparseable"
@@ -546,6 +571,7 @@ def main() -> None:
                         persistent_cache[cache_key] = entry
 
                 out_f.write(json.dumps(entry) + "\n")
+                out_f.flush()  # a kill mid-run must never lose already-finished reviews
                 reviewed += 1
                 new_entries.append(entry)
 
@@ -558,6 +584,8 @@ def main() -> None:
         write_job_health(state_dir, "live_llm_review", time.time() - run_start, extra={
             "reviewed": reviewed, "cache_hits": cache_hits, "queries_made": queries_made,
             "errors": errors, "deferred": max(0, len(candidates) - reviewed),
+            "candidates": len(candidates), "budget_minutes": budget_minutes,
+            "stopped_for_deadline": stopped_for_deadline,
         })
 
         digest = build_llm_review_digest_message(new_entries, geoip_engine=geoip_engine)

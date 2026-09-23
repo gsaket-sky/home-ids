@@ -78,6 +78,44 @@ def _ip_family(ip: str) -> str:
     return "ipv6-global"
 
 from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_router_status, ips_tarpit_status, integration_status_metric, honeypot_probes_total, ti_engine_ready_status, decision_path_total, persistence_escalation_total
+from metrics import (
+    fp_engine_evaluations_total, fp_engine_suppressed_total, fp_engine_confirmed_threats_total,
+    fp_engine_confidence_score, fp_engine_domains_immunized_total, cl_afpe_verdicts_total,
+)
+
+# Argus CL-AFPE stages that mean "hard-stopped: strong evidence, never suppressible".
+CL_AFPE_HARD_STOP_STAGES = frozenset({"STAGE_1_HARD_STOP", "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP"})
+
+
+def record_cl_afpe_verdict(fp_verdict: dict, alert_payload: dict) -> None:
+    """Prometheus accounting for one Argus CL-AFPE verdict (2026-09-23).
+
+    The home_ids_fp_* counters were only ever incremented inside the legacy
+    intelligence/fp_engine.py evaluate(), which no longer runs once
+    cl_afpe_engine=argus -- so every false-positive panel read a false 0 while ~330
+    alerts/day were really being suppressed. Kept out of argus/ itself (which stays
+    free of Prometheus); the caller skips this when Argus fell back to the legacy
+    engine, since that path already counts for itself."""
+    try:
+        stage = str(fp_verdict.get("stage") or "UNKNOWN")
+        verdict = str(fp_verdict.get("verdict") or "UNKNOWN")
+        fp_engine_evaluations_total.inc()
+        cl_afpe_verdicts_total.labels(stage=stage, verdict=verdict).inc()
+        if fp_verdict.get("suppress"):
+            fp_engine_suppressed_total.inc()
+        if stage in CL_AFPE_HARD_STOP_STAGES:
+            fp_engine_confirmed_threats_total.inc()
+        confidence = fp_verdict.get("confidence")
+        device = alert_payload.get("device") or {}
+        if isinstance(confidence, (int, float)):
+            fp_engine_confidence_score.labels(
+                device=str(device.get("id", "unknown")), hostname=str(device.get("hostname", "unknown")),
+            ).set(float(confidence))
+        action = fp_verdict.get("action") or {}
+        if isinstance(action, dict) and action.get("type") == "immunize_domain" and action.get("is_new"):
+            fp_engine_domains_immunized_total.labels(source="autonomous").inc()
+    except Exception as exc:  # metrics must never affect the alert path
+        LOGGER.debug("CL-AFPE metrics accounting failed: %s", exc)
 
 # PHASE 1 (device-sensitivity source): infra device types are only trusted as "verified"
 # (and therefore have certain behavioral evidence dampened) when device_type came from an
@@ -1002,6 +1040,15 @@ class EnginePipeline:
             LOGGER.info("📊 Prometheus metrics server running on port %d", metrics_port)
         except Exception as exc:
             LOGGER.error("Failed to start Prometheus server on port %d: %s", metrics_port, exc)
+
+        # Argus evidence-graph -> Prometheus, read-only, on its own thread (never this loop).
+        if bool(self.config.get("argus_metrics_enabled", True)):
+            try:
+                from core.argus_metrics import ArgusMetricsExporter
+                self.argus_metrics_exporter = ArgusMetricsExporter(self.state_dir / "v13_graph.db", self.config)
+                self.argus_metrics_exporter.start()
+            except Exception as exc:
+                LOGGER.error("Argus metrics exporter failed to start: %s", exc)
 
         if self.config.get("telegram_enabled", False):
             self.alert_manager.send("🚀 *Home IDS Network Security Engine Online*")
@@ -2515,6 +2562,12 @@ class EnginePipeline:
                             # a whole-engine swap, not a per-mechanism flag, matching this
                             # project's own precedent for the main decision engine (A13).
                             if self.config.get("cl_afpe_engine", "v_current") == "argus":
+                                legacy_fallback_used = []
+
+                                def _legacy_fallback(**kwargs):
+                                    legacy_fallback_used.append(True)
+                                    return self.fp_engine.evaluate(**kwargs)
+
                                 fp_verdict = argus_live_engine.evaluate_cl_afpe_live(
                                     alert_payload=alert_payload,
                                     features=features,
@@ -2522,9 +2575,11 @@ class EnginePipeline:
                                     ti_engine=self.ti_engine,
                                     decision=decision,
                                     asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                    fallback_evaluate=self.fp_engine.evaluate,
+                                    fallback_evaluate=_legacy_fallback,
                                     now=now,
                                 )
+                                if not legacy_fallback_used:
+                                    record_cl_afpe_verdict(fp_verdict, alert_payload)
                             else:
                                 fp_verdict = self.fp_engine.evaluate(
                                     alert_payload=alert_payload,
@@ -3690,7 +3745,7 @@ class EnginePipeline:
                         state=state, features=features, risk_score=risk, ml_score=ml_score, ti_risk=ti_risk,
                         ti_match=ti_match, abuse_risk=abuse_risk, vt_risk=vt_risk, is_safe=is_safe,
                         is_poisoned=is_poisoned, current_threshold_limit=threshold_limit, decision=decision,
-                        fp_engine=self.fp_engine,
+                        fp_engine=self.fp_engine, reputation_tier=getattr(rep_vector, "tier", None),
                     )
 
                     for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):

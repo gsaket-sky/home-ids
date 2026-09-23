@@ -50,7 +50,7 @@ _ENV_OVERRIDES = {
 }
 
 _STATIC_KEYS = {
-    "metrics_port", "state_path", "model_path", "geoip_db", "geoip_asn_db", 
+    "metrics_port", "scheduler_metrics_port", "state_path", "model_path", "geoip_db", "geoip_asn_db", 
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
     "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
@@ -122,6 +122,7 @@ DEFAULT_CONFIG = {
     # have more than one home subnet to track.
     "home_subnets": [],
     "metrics_port": 9105,
+    "scheduler_metrics_port": 9106,
     "geoip_db": "models/GeoLite2-City.mmdb",
     "geoip_asn_db": "",
     "ti_refresh_interval": 3600,

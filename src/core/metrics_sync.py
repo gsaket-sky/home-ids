@@ -16,6 +16,8 @@ import math
 from typing import Dict, Any
 
 from metrics import (
+    decision_independent_sources_metric, decision_evidence_families_metric,
+    decision_path_code_metric, reputation_tier_metric,
     top_domain_risk_metric, threat_confidence_metric, anomaly_confidence_metric, decision_state_metric, query_rate_metric, unique_domains_metric, entropy_metric,
     blocked_ratio_metric, nxdomain_ratio_metric, suspicious_domains_metric,
     markov_anomaly_metric, zscore_query_metric, zscore_entropy_metric,
@@ -93,7 +95,27 @@ _DEVICE_GAUGES = (
     outbound_bytes_1h_metric, beaconing_c2_1h_metric, dns_tunneling_domains_metric,
     max_label_length_metric,
     baseline_familiarity_entries_total,
+    decision_independent_sources_metric, decision_evidence_families_metric,
+    decision_path_code_metric, reputation_tier_metric,
 )
+
+# Stable numeric codes for Argus decision paths (argus/decision/engine.py), so the path
+# can be a Prometheus gauge value; Grafana value-maps each code back to plain words. New
+# paths must be APPENDED (never renumbered) -- the codes are what history is stored as.
+DECISION_PATH_CODES = {
+    "benign": 0,
+    "ml_anomaly": 1,
+    "tier4_unconfirmed": 2,
+    "hypothesis_suspicious": 3,
+    "tier5_uncorroborated": 4,
+    "hypothesis_high": 5,
+    "geofence_uncorroborated": 6,
+    "suricata_uncorroborated": 7,
+    "tier5_corroborated": 8,
+    "tier5_confirmed": 9,
+    "hard_stop": 10,
+}
+DECISION_PATH_UNKNOWN_CODE = -1
 
 
 class MetricsExporter:
@@ -271,6 +293,7 @@ class MetricsExporter:
         current_threshold_limit: float,
         decision: Dict[str, Any] = None,
         fp_engine: Any = None,
+        reputation_tier: Any = None,
     ) -> None:
         try:
             str_dev_id = str(state.device_id)
@@ -320,6 +343,15 @@ class MetricsExporter:
                 state_map = {"BENIGN": 0, "ANOMALOUS": 1, "SUSPICIOUS": 2, "HIGH": 3, "CRITICAL": 4}
                 state_val = state_map.get(decision.get("state", "BENIGN"), 0)
                 decision_state_metric.labels(str_dev_id, str_host, str_type).set(state_val)
+                decision_independent_sources_metric.labels(str_dev_id, str_host, str_type).set(
+                    float(decision.get("independent_sources", 0) or 0))
+                decision_evidence_families_metric.labels(str_dev_id, str_host, str_type).set(
+                    float(len(decision.get("evidence_families") or [])))
+                decision_path_code_metric.labels(str_dev_id, str_host, str_type).set(
+                    DECISION_PATH_CODES.get(decision.get("decision_path") or "benign", DECISION_PATH_UNKNOWN_CODE))
+
+            if isinstance(reputation_tier, (int, float)):
+                reputation_tier_metric.labels(str_dev_id, str_host, str_type).set(float(reputation_tier))
 
             anomaly_confidence_metric.labels(str_dev_id, str_host, str_type).set(ml_score)
             markov_anomaly_metric.labels(str_dev_id, str_host, str_type).set(features.get("markov_anomaly", 0.0))

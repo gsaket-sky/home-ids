@@ -32,6 +32,19 @@ service_ports:
   # [RESTART]
   metrics_port: 9105
 
+  # The scheduler daemon's own Prometheus /metrics port: scheduled-job runs, kills,
+  # pauses, deferrals and each job's reported results (add it as a second scrape
+  # target -- see INSTALL.md 4.2). [RESTART]
+  scheduler_metrics_port: 9106
+
+  # Read-only exporter that publishes the Argus evidence graph (alert outcomes,
+  # autotune global/per-type/per-device, learned trust, baselines, ...) to
+  # Prometheus on its own thread. interval = seconds between passes; pass timeout =
+  # hard cap per pass (abandoned cleanly, previous values kept). [RESTART]
+  argus_metrics_enabled: true
+  argus_metrics_interval_seconds: 120
+  argus_metrics_pass_timeout_seconds: 10
+
   # Local-only IPC/webhook port: receives Telegram bot webhooks and serves the
   # Fritz!Box isolate/hosts endpoints used by mitigation/ips.py. Not meant to
   # be internet-exposed. [RESTART]
@@ -278,6 +291,12 @@ detection_engine:
   # from doing anything (main() no-ops and exits) without removing its
   # scheduler entry.
   llm_review_enabled: true
+
+  # The LLM review job stops STARTING new remote LLM calls once less than this many
+  # seconds remain in its own scheduler budget (scheduler.live_llm_review.
+  # max_runtime_minutes); unreviewed decisions are simply reviewed next run. Keeps a
+  # slow LLM host from getting the job killed at its budget with nothing saved. [LIVE]
+  llm_review_min_query_seconds: 120
 
   # Decay factor for domain-count baselines — 0.995 gives a ~4.6 minute
   # half-life. [LIVE]

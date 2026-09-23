@@ -285,7 +285,14 @@ def main() -> None:
     LOGGER.info("Disk budget governor: graph_db=%s zeek_logs=%s state_files=%.2fGB",
                 graph_result, zeek_result, state_result["state_files_gb"])
     write_job_health(state_dir, "disk_budget_governor", time.time() - run_start,
-                      extra={"graph_db": graph_result, "zeek_logs": zeek_result, "state_files": state_result})
+                      extra={"graph_db": graph_result, "zeek_logs": zeek_result, "state_files": state_result,
+                             # the limits the sizes above are measured against -- exported with them
+                             # (scheduler /metrics) so "used vs budget" is graphable, not just "used"
+                             "budget_gb": {
+                                 "graph_db": graph_db_budget_gb, "zeek_logs": zeek_logs_budget_gb,
+                                 "state_files": state_files_budget_gb,
+                                 "total": DEFAULT_TOTAL_BUDGET_GB,
+                             }})
 
 
 if __name__ == "__main__":

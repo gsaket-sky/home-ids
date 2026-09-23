@@ -507,6 +507,11 @@ Because the LLM-validated path requires zero human action, this loop can run and
 | Key | Default | Reload | Description |
 |---|---|---|---|
 | `metrics_port` | `9105` | `[RESTART]` | Prometheus `/metrics` scrape port. |
+| `scheduler_metrics_port` | `9106` | `[RESTART]` | The scheduler daemon's own Prometheus `/metrics` port (scheduled-job runs, kills, pauses, results). Add as a second scrape target. |
+| `argus_metrics_enabled` | `true` | `[RESTART]` | Publish the Argus evidence graph (alert outcomes, autotune per scope, learned trust, baselines, priors, backtests) to Prometheus from a read-only background thread. |
+| `argus_metrics_interval_seconds` | `120` | `[RESTART]` | Seconds between evidence-graph exporter passes. |
+| `argus_metrics_pass_timeout_seconds` | `10` | `[RESTART]` | Hard time cap per exporter pass; an over-running pass is abandoned and the previous values are kept. |
+| `llm_review_min_query_seconds` | `120` | `[LIVE]` | The LLM review job won't start a new remote LLM call with less than this much of its own budget left; the rest waits for the next run. |
 | `fastapi_port` | `8010` | `[RESTART]` | Local-only IPC/webhook port — Telegram bot webhooks, Fritz!Box isolate/hosts endpoints. Not meant to be internet-exposed. |
 
 ### 2. `paths`

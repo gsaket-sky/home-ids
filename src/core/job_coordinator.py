@@ -35,6 +35,11 @@ LOGGER = logging.getLogger("job_coordinator")
 
 LOCK_FILENAME = "scheduled_job_slot.json"
 CLAIM_FILENAME = "scheduled_job_slot.claim"
+# A job's budget counts ACTIVE time only (paused time excluded), so a job parked
+# forever -- e.g. its owner died while it was SIGSTOPped, leaving nothing to SIGCONT it
+# -- would never be reclaimed and would hold the slot forever. This wall-clock cap
+# (multiple of its own budget) is the backstop for exactly that case.
+WALL_CLOCK_BUDGET_MULTIPLIER = 3.0
 _CLAIM_STALE_SECONDS = 10.0  # claiming should be near-instant; anything older is orphaned
 
 GRANTED = "granted"
@@ -113,14 +118,21 @@ def _promote_or_clear(path: Path, dead_slot: dict) -> Optional[dict]:
     it (preempted), promote that job back to the top-level slot, marked 'paused', so
     its own owner notices via should_resume() and resumes it. Otherwise clear the
     file entirely. Best-effort: a lost race here just means one of two equivalent
-    writes wins, both converge to the same correct state."""
+    writes wins, both converge to the same correct state.
+
+    BUGFIX (live, 2026-09-23): the promoted job used to inherit the DEAD PREEMPTOR's
+    started_at, so its budget clock restarted from the wrong origin; it now keeps its
+    own started_at/paused_seconds (recorded at preemption time) and stays 'paused'
+    since the moment it was actually SIGSTOPped."""
     preempted = dead_slot.get("preempted")
     if preempted and is_pid_alive(preempted.get("pid")):
         promoted = {
             "job": preempted.get("job"), "pid": preempted.get("pid"),
             "priority": preempted.get("priority", 0),
             "pausable": preempted.get("pausable", False), "state": "paused",
-            "started_at": dead_slot.get("started_at"), "paused_at": time.time(),
+            "started_at": preempted.get("started_at") or dead_slot.get("started_at"),
+            "paused_at": preempted.get("paused_at") or time.time(),
+            "paused_seconds": float(preempted.get("paused_seconds", 0.0) or 0.0),
             "max_runtime_minutes": preempted.get("max_runtime_minutes", 60.0),
         }
         try:
@@ -197,15 +209,21 @@ def acquire_or_preempt(state_dir, job_name: str, pid: int, priority: int, pausab
         if not current.get("pausable", False):
             return DENIED  # occupant is less urgent but not safe to pause (e.g. live_prune)
         old_pid = current["pid"]
+        now = time.time()
         _atomic_write_json(_lock_path(state_dir), {
             "job": job_name, "pid": pid, "priority": priority, "pausable": pausable,
-            "state": "running", "started_at": time.time(), "paused_at": None,
+            "state": "running", "started_at": now, "paused_at": None,
             "max_runtime_minutes": max_runtime_minutes,
             "preempted": {
                 "job": current.get("job"), "pid": old_pid,
                 "priority": current.get("priority", 0),
                 "pausable": current.get("pausable", False),
                 "max_runtime_minutes": current.get("max_runtime_minutes", 60.0),
+                # its OWN clock, carried through the park/promote cycle -- see
+                # _promote_or_clear()'s docstring
+                "started_at": current.get("started_at"),
+                "paused_seconds": float(current.get("paused_seconds", 0.0) or 0.0),
+                "paused_at": current.get("paused_at") or now,
             },
         })
         return f"{PREEMPTED_PREFIX}{old_pid}"
@@ -268,6 +286,9 @@ def mark_running(state_dir, job_name: str, pid: int) -> None:
         except Exception:
             return
         if slot.get("pid") == pid and slot.get("job") == job_name:
+            if slot.get("paused_at"):
+                slot["paused_seconds"] = float(slot.get("paused_seconds", 0.0) or 0.0) + max(
+                    0.0, time.time() - float(slot["paused_at"]))
             slot["state"] = "running"
             slot["paused_at"] = None
             _atomic_write_json(path, slot)
@@ -291,7 +312,7 @@ def mark_paused(state_dir, job_name: str, pid: int) -> None:
             slot = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return
-        if slot.get("pid") == pid and slot.get("job") == job_name:
+        if slot.get("pid") == pid and slot.get("job") == job_name and slot.get("state") != "paused":
             slot["state"] = "paused"
             slot["paused_at"] = time.time()
             _atomic_write_json(path, slot)
@@ -313,7 +334,21 @@ def resume_process(pid: int) -> None:
         LOGGER.warning("job_coordinator: failed to SIGCONT pid %s: %s", pid, exc)
 
 
-def reconcile_on_boot(state_dir) -> None:
+def active_minutes(slot: dict, now: Optional[float] = None) -> float:
+    """Minutes this occupant has actually been RUNNING -- wall time since started_at
+    minus every paused interval (closed ones in paused_seconds, plus the currently
+    open one if it's paused right now). A preempted/self-throttled job must not burn
+    its own budget while SIGSTOPped (live, 2026-09-23: live_llm_review was paused
+    twice by higher-priority jobs and still charged for that time)."""
+    now = time.time() if now is None else now
+    started_at = float(slot.get("started_at") or now)
+    paused = float(slot.get("paused_seconds", 0.0) or 0.0)
+    if slot.get("state") == "paused" and slot.get("paused_at"):
+        paused += max(0.0, now - float(slot["paused_at"]))
+    return max(0.0, now - started_at - paused) / 60.0
+
+
+def reconcile_on_boot(state_dir) -> Optional[dict]:
     """Call once at the very top of every coordinator participant's startup
     (scripts/scheduler.py's main(), and fp_engine.py's retrain-thread startup) BEFORE
     doing anything else -- AND ALSO call every scheduler tick / retrain poll
@@ -327,22 +362,30 @@ def reconcile_on_boot(state_dir) -> None:
     genuinely hung, or because it survived a restart of whichever process originally
     launched it and has nothing left enforcing its budget. Kills the whole process
     group (not just the tracked pid) so anything it spawned internally is cleaned up
-    too."""
+    too.
+
+    Returns a description of the reclaim ({job, pid, active_minutes, wall_minutes,
+    budget_minutes}) or None -- the CALLER records it as a Prometheus metric in its own
+    process (live, 2026-09-23: live_llm_review was reclaimed on every run for ~29h and
+    that was only ever a log line)."""
     slot = _read_slot(state_dir)
     if slot is None:
-        return
+        return None
     started_at = slot.get("started_at")
     if started_at is None:
-        return
+        return None
+    now = time.time()
     max_runtime = float(slot.get("max_runtime_minutes", 60.0))
-    age_minutes = (time.time() - float(started_at)) / 60.0
-    if age_minutes <= max_runtime:
-        return  # legitimately still running within its own budget -- leave it alone
+    active = active_minutes(slot, now)
+    wall = (now - float(started_at)) / 60.0
+    wall_cap = max_runtime * WALL_CLOCK_BUDGET_MULTIPLIER
+    if active <= max_runtime and wall <= wall_cap:
+        return None  # legitimately still running (or parked) within its own budget -- leave it alone
     pid = slot.get("pid")
     LOGGER.error(
-        "job_coordinator: reclaiming stuck orphan job=%r pid=%s (running %.1f min, "
-        "budget was %.1f min) -- killing its process group.",
-        slot.get("job"), pid, age_minutes, max_runtime,
+        "job_coordinator: reclaiming stuck orphan job=%r pid=%s (active %.1f min, wall %.1f min, "
+        "budget was %.1f min active / %.1f min wall) -- killing its process group.",
+        slot.get("job"), pid, active, wall, max_runtime, wall_cap,
     )
     try:
         os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -351,7 +394,17 @@ def reconcile_on_boot(state_dir) -> None:
             os.kill(pid, signal.SIGKILL)
         except Exception:
             pass
+    reclaimed = {"job": slot.get("job") or "unknown", "pid": pid, "active_minutes": active,
+                 "wall_minutes": wall, "budget_minutes": max_runtime}
+    # BUGFIX (2026-09-23): this used to unlink the slot outright, silently dropping any
+    # job parked (SIGSTOPped) underneath the reclaimed one -- nothing would ever SIGCONT
+    # it again. Promote it instead, exactly like a naturally-dead occupant.
+    path = _lock_path(state_dir)
+    if slot.get("preempted"):
+        _promote_or_clear(path, slot)
+        return reclaimed
     try:
-        _lock_path(state_dir).unlink()
+        path.unlink()
     except FileNotFoundError:
         pass
+    return reclaimed

@@ -29,8 +29,14 @@ from core import job_coordinator  # noqa: E402
 POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="SIGSTOP/SIGCONT/killpg are POSIX-only; .94 (the real deployment target) is Linux")
 
 
-def _spawn_sleeper(seconds=30):
-    return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"])
+def _spawn_sleeper(seconds=30, own_session=False):
+    """own_session=True mirrors how scheduler.py really launches jobs
+    (start_new_session=True). REQUIRED for anything reconcile_on_boot() may reclaim:
+    it kills the victim's whole process group, which -- without a session of its own --
+    is the test runner's group (found running this suite on Linux for the first time:
+    pytest itself was SIGKILLed)."""
+    return subprocess.Popen([sys.executable, "-c", f"import time; time.sleep({seconds})"],
+                            start_new_session=own_session)
 
 
 def test_empty_slot_grants_immediately(tmp_path):
@@ -228,7 +234,7 @@ def test_reconcile_reclaims_orphan_past_its_own_budget(tmp_path):
     max_runtime_minutes (a genuinely stuck orphan, or one that survived a restart of
     whichever process launched it) must be killed and the slot cleared -- the actual
     starvation backstop, safe because it never requires bypassing the mutex."""
-    proc = _spawn_sleeper(seconds=60)
+    proc = _spawn_sleeper(seconds=60, own_session=True)
     try:
         job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
             "job": "stuck_job", "pid": proc.pid, "priority": 1, "pausable": False,
@@ -236,8 +242,9 @@ def test_reconcile_reclaims_orphan_past_its_own_budget(tmp_path):
             "max_runtime_minutes": 5,
         })
         job_coordinator.reconcile_on_boot(tmp_path)
-        time.sleep(0.3)
-        assert job_coordinator.is_pid_alive(proc.pid) is False
+        # wait() (reap) rather than sleep + is_pid_alive(): on Linux a killed child stays
+        # a zombie until its parent reaps it, and os.kill(pid, 0) succeeds on a zombie.
+        assert proc.wait(timeout=5) == -9
         assert not (tmp_path / job_coordinator.LOCK_FILENAME).exists()
     finally:
         try:
@@ -262,3 +269,121 @@ def test_reconcile_leaves_job_within_budget_alone(tmp_path):
     finally:
         proc.terminate()
         proc.wait()
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-23 (live incident): live_llm_review/train_fp_classifier were reclaimed on
+# every run -- paused time was charged against the budget, a promoted job inherited its
+# preemptor's clock, and a reclaim silently dropped the job parked underneath.
+# ---------------------------------------------------------------------------
+
+def test_active_minutes_excludes_closed_and_open_paused_intervals():
+    now = 10_000.0
+    running = {"started_at": now - 600, "paused_seconds": 120.0, "state": "running"}
+    assert job_coordinator.active_minutes(running, now) == pytest.approx(8.0)
+    paused = {"started_at": now - 600, "paused_seconds": 120.0, "state": "paused", "paused_at": now - 180}
+    assert job_coordinator.active_minutes(paused, now) == pytest.approx(5.0)
+
+
+def test_mark_running_accumulates_paused_interval(tmp_path):
+    proc = _spawn_sleeper()
+    try:
+        job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
+            "job": "jobA", "pid": proc.pid, "priority": 3, "pausable": True,
+            "state": "paused", "started_at": time.time() - 600, "paused_at": time.time() - 300,
+            "paused_seconds": 60.0, "max_runtime_minutes": 30,
+        })
+        job_coordinator.mark_running(tmp_path, "jobA", proc.pid)
+        slot = json.loads((tmp_path / job_coordinator.LOCK_FILENAME).read_text())
+        assert slot["state"] == "running" and slot["paused_at"] is None
+        assert slot["paused_seconds"] == pytest.approx(360.0, abs=5)
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+def test_paused_time_does_not_burn_the_budget(tmp_path):
+    """40 min wall, 35 of them paused, 30 min budget: only 5 active minutes -- must not be reclaimed."""
+    proc = _spawn_sleeper()
+    try:
+        now = time.time()
+        job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
+            "job": "jobA", "pid": proc.pid, "priority": 4, "pausable": True,
+            "state": "paused", "started_at": now - 40 * 60, "paused_at": now - 35 * 60,
+            "paused_seconds": 0.0, "max_runtime_minutes": 30,
+        })
+        job_coordinator.reconcile_on_boot(tmp_path)
+        assert job_coordinator.is_pid_alive(proc.pid) is True
+        assert json.loads((tmp_path / job_coordinator.LOCK_FILENAME).read_text())["job"] == "jobA"
+    finally:
+        proc.terminate()
+        proc.wait()
+
+
+@POSIX_ONLY
+def test_preempted_job_keeps_its_own_clock_when_promoted(tmp_path):
+    proc_a = _spawn_sleeper()
+    proc_b = _spawn_sleeper(seconds=1)
+    try:
+        own_start = time.time() - 900
+        job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
+            "job": "low", "pid": proc_a.pid, "priority": 4, "pausable": True,
+            "state": "running", "started_at": own_start, "paused_at": None,
+            "paused_seconds": 30.0, "max_runtime_minutes": 30,
+        })
+        outcome = job_coordinator.acquire_or_preempt(tmp_path, "high", proc_b.pid, 1, False, 30)
+        assert outcome.startswith(job_coordinator.PREEMPTED_PREFIX)
+        proc_b.wait()  # preemptor finishes -> the parked job is promoted on next read
+        slot = job_coordinator._read_slot(tmp_path)
+        assert slot["job"] == "low" and slot["state"] == "paused"
+        assert slot["started_at"] == pytest.approx(own_start)
+        assert slot["paused_seconds"] == pytest.approx(30.0)
+    finally:
+        proc_a.terminate()
+        proc_a.wait()
+
+
+@POSIX_ONLY
+def test_wall_clock_cap_reclaims_a_job_parked_forever(tmp_path):
+    proc = _spawn_sleeper(seconds=60, own_session=True)
+    try:
+        now = time.time()
+        job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
+            "job": "parked", "pid": proc.pid, "priority": 4, "pausable": True,
+            "state": "paused", "started_at": now - 100 * 60, "paused_at": now - 99 * 60,
+            "paused_seconds": 0.0, "max_runtime_minutes": 30,
+        })
+        job_coordinator.reconcile_on_boot(tmp_path)
+        proc.wait(timeout=5)
+        assert not (tmp_path / job_coordinator.LOCK_FILENAME).exists()
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            proc.wait()
+
+
+@POSIX_ONLY
+def test_reclaim_promotes_parked_job_and_reports_the_kill(tmp_path):
+    stuck = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    parked = _spawn_sleeper()
+    try:
+        now = time.time()
+        job_coordinator._atomic_write_json(tmp_path / job_coordinator.LOCK_FILENAME, {
+            "job": "stuck", "pid": stuck.pid, "priority": 1, "pausable": False,
+            "state": "running", "started_at": now - 3600, "paused_at": None,
+            "max_runtime_minutes": 5,
+            "preempted": {"job": "parked", "pid": parked.pid, "priority": 4, "pausable": True,
+                          "max_runtime_minutes": 30, "started_at": now - 4000,
+                          "paused_seconds": 0.0, "paused_at": now - 3600},
+        })
+        reclaimed = job_coordinator.reconcile_on_boot(tmp_path)
+        stuck.wait(timeout=5)
+        slot = json.loads((tmp_path / job_coordinator.LOCK_FILENAME).read_text())
+        assert slot["job"] == "parked" and slot["state"] == "paused"
+        assert reclaimed["job"] == "stuck" and reclaimed["budget_minutes"] == 5
+        assert reclaimed["active_minutes"] > 5
+    finally:
+        for p in (stuck, parked):
+            if p.poll() is None:
+                p.terminate()
+                p.wait()

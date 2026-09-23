@@ -33,6 +33,7 @@ from typing import Any, Dict, Optional, Tuple
 from core.backoff import RecoveryBackoff
 from core.heartbeat import HEARTBEATS, read_component_heartbeats
 from core.healing_actions import ACTIONS
+from metrics import health_component_state, health_recovery_attempts, health_pressure_level
 
 LOGGER = logging.getLogger("home_ids.health_manager")
 
@@ -1258,6 +1259,23 @@ class HealthManager:
             },
         }
 
+    # Prometheus codes for the state machine / pressure classifier above. Stable -- the
+    # dashboards value-map these numbers back to words.
+    _COMPONENT_STATE_CODES = {HEALTHY: 0, DEGRADED: 1, UNHEALTHY: 2, SAFE_MODE: 3, RECOVERY_FAILED: 4, RETIRED: -1}
+    _PRESSURE_CODES = {NORMAL: 0, RESOURCE_PRESSURE: 1, CONSERVATION: 2, CRITICAL: 3}
+
+    def _publish_prometheus(self, snap: Dict[str, Any]) -> None:
+        """2026-09-23: this process IS the metrics endpoint's process, so its state goes
+        to Prometheus directly -- previously only reachable through the snapshot file."""
+        try:
+            health_pressure_level.set(self._PRESSURE_CODES.get(snap.get("pressure_level"), 0))
+            for name, comp in (snap.get("components") or {}).items():
+                health_component_state.labels(component=name).set(
+                    self._COMPONENT_STATE_CODES.get(comp.get("state"), 1))
+                health_recovery_attempts.labels(component=name).set(float(comp.get("recovery_attempts") or 0))
+        except Exception as exc:
+            LOGGER.debug("Health manager failed to publish Prometheus state: %s", exc)
+
     def _write_snapshot_file(self) -> None:
         """BUGFIX (console heartbeat visibility): the console's /api/health/status
         runs in the SEPARATE API subprocess and can't reach this live instance
@@ -1268,10 +1286,14 @@ class HealthManager:
         Written once per check cycle so the console reflects reality within one
         health_manager_check_interval_seconds, same latency class as every
         other cross-process signal this subsystem already produces."""
+        snap = self.snapshot()
+        self._publish_prometheus(snap)
+        # The file remains only for the console's separate API process (to be retired
+        # once the console reads Prometheus); nothing Prometheus-facing reads it.
         try:
             path = self.state_dir / "health_manager_snapshot.json"
             tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self.snapshot(), indent=2), encoding="utf-8")
+            tmp.write_text(json.dumps(snap, indent=2), encoding="utf-8")
             tmp.replace(path)
         except Exception as exc:
             LOGGER.debug("Health manager failed to write snapshot file: %s", exc)
