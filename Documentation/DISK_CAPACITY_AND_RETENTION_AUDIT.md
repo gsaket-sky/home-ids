@@ -91,6 +91,42 @@ never cleaned up since:
 ssh 192.168.77.94 "sudo rm -v /var/lib/grafana/grafana.db.bak-preisolatefix-20260904T013827"
 ```
 
+### RAM benchmark: `disk_budget_governor.py` (real, measured on `.94`, 2026-09-23)
+
+Like every job this project has added to the scheduler since the OOM crash-loop
+investigations, the new governor runs as its own short-lived subprocess via
+`job_coordinator.py` (same mutex/priority/SIGSTOP-pause-resume mechanism audited
+in `Documentation/RESOURCE_AWARE_SCHEDULING.md`), not inside `soc.service`'s own
+long-lived process — so it does NOT add to that process's steady-state RSS
+footprint at all, only its own separate, brief, bounded footprint while it runs.
+Measured directly against `.94`'s real production database (not synthetic) with
+`/usr/bin/time -v`:
+
+| Metric | Real measured value |
+|---|---|
+| Maximum resident set size (peak RSS) | **65.1 MB** |
+| Wall clock time | 1.96s |
+| User+system CPU time | 1.94s (99% of one core, brief) |
+| Major page faults | 0 |
+
+Run against `.94`'s current real state: 46,994-decision / 0.99GB graph DB,
+2.6GB of Zeek logs, 0.72GB of other `state/` files, 56 real devices — i.e. not
+a toy fixture. Re-run a second time back-to-back to confirm idempotence
+(no further trimming needed either run, `floor_hit: false` both times) and
+that this peak RSS is stable, not a first-run cold-cache artifact.
+
+At 65MB peak, this job is a rounding error against the `~1.6-1.9GB` fixed-floor
+RAM budget `Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md`
+established for `soc.service` itself — it was not a capacity risk, but this
+confirms it rather than assuming it, consistent with this project's standing
+"verify, don't assume" practice for every capacity claim.
+
+For context, `soc.service`'s own live process RSS at the same moment (56 real
+devices, well past the earlier Phase 4 benchmark's N=13/50/100 synthetic sweep):
+**1.30GB** (`ps` RSS on the main PID), cgroup `MemoryCurrent` **1.36GB** total
+across main+fastapi+scheduler — comfortably inside the `1.6-1.9GB` fixed-floor
+estimate and the `3.5G` `MemoryMax` ceiling, with real headroom.
+
 ## Bottom line
 
 - Graph DB (`state/v13_graph.db`) steady-state at 50-100 devices over 10 years:

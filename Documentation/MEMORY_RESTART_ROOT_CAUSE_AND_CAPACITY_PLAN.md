@@ -1,5 +1,17 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
+**Status (2026-09-23, real-data check-in): live `.94` RSS re-measured while
+building the new whole-stack disk budget governor (56 real devices, well past
+Phase 4's N=13/50/100 synthetic sweep below) — `soc.service` main-process RSS
+1.30GB, cgroup `MemoryCurrent` 1.36GB total, comfortably inside the ~1.6-1.9GB
+fixed-floor estimate and the 3.5G `MemoryMax` ceiling. Also measured the new
+`disk_budget_governor.py` job itself (`/usr/bin/time -v`, real production DB,
+not synthetic): 65.1MB peak RSS, 1.96s wall clock — runs as its own short-lived
+subprocess via `job_coordinator.py` like every other scheduled job since the
+OOM crash-loop fixes, so it adds nothing to `soc.service`'s own steady-state
+RSS. Full detail in `Documentation/DISK_CAPACITY_AND_RETENTION_AUDIT.md`'s
+"RAM benchmark: disk_budget_governor.py" section — not duplicated here.**
+
 **Status (2026-09-22/23, latest): Root Cause #4 found and fixed — the same class
 of bug as Root Cause #3 below (a synchronous operation blocking the main loop's
 own heartbeat thread), but in `ml_engine.py`'s `save_models()`, not evidence-volume
