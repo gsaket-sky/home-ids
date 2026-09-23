@@ -63,7 +63,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "**Is the system actually getting smarter, and can I trust what it does while I'm not watching?**\n\nThis dashboard is Prometheus-only by design -- every panel here works even if Loki is never wired up (see System Health's own note on that). It covers four things the other dashboards don't: which reasoning path resolved each decision and whether that mix is improving over time, how much self-healing is autonomous vs a human tap, whether the autotune self-calibration system is adjusting itself safely, and whether every scheduled background job actually ran when it was supposed to.",
+                "content": "**Is the system actually getting smarter, and can I trust what it does while I'm not watching?**\n\nAlmost every panel here is Prometheus-only. The exception is the two false-positive filter panels, which read each alert's own record from Loki, because the Argus filter doesn't export Prometheus counters. It covers four things the other dashboards don't: which reasoning path resolved each decision and whether that mix is improving over time, how much self-healing is autonomous vs a human tap, whether the autotune self-calibration system is adjusting itself safely, and whether every scheduled background job actually ran when it was supposed to.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -78,8 +78,8 @@
         "kind": "Panel",
         "spec": {
           "id": 10,
-          "title": "🧭 Brain 1 / HEE: Decision-Path Mix Over Time",
-          "description": "Which branch of decision_engine.py's decision order actually resolved each evaluation (hard_stop/tier5_confirmed/hypothesis_high/hypothesis_suspicious/tier4_unconfirmed/ml_anomaly/benign). This is the direct 'is the system getting smarter over time' signal: watch the hard_stop/tier5 share shrink and the benign share grow across weeks as autotune calibration, CL-AFPE's trust cache, and the CDN/vendor allowlist absorb more of what used to need a hard corroborated signal to resolve correctly.",
+          "title": "🧭 Decision-Path Mix Over Time (evaluations / min)",
+          "description": "Which branch of the Argus decision engine (argus/decision/engine.py) resolved each evaluation: benign, hypothesis_suspicious (monitor only), hypothesis_high (alert), hard_stop / tier5_* / geofence_uncorroborated / suricata_uncorroborated (HIGH/CRITICAL), tier4_unconfirmed, ml_anomaly. A mix moving away from benign-only toward more corroborated paths over time is the system getting sharper.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -96,7 +96,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum by (path) (rate(home_ids_decision_path_total{hostname=~\"$device\"}[15m]))",
+                        "expr": "sum by (path) (rate(home_ids_decision_path_total{hostname=~\"$device\"}[15m])) * 60",
                         "format": "time_series",
                         "instant": false,
                         "legendFormat": "{{path}}"
@@ -261,7 +261,7 @@
         "spec": {
           "id": 20,
           "title": "🛡️ Self-Healing: Domains Immunized by Source",
-          "description": "fp_engine_domains_immunized_total split by source (autonomous = CL-AFPE's own Stage 2/3 suppress path, operator = a Telegram 'Mark False Positive' tap, llm_validated = Ollama's autonomous 4-hourly validation pass). The whole point of this session's self-calibration work was to make 'autonomous' and 'llm_validated' the dominant sources over time, not 'operator' -- a human shouldn't need to keep pace with every alert for the system to keep healing itself.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: fp_engine_domains_immunized_total split by source (autonomous = CL-AFPE's own Stage 2/3 suppress path, operator = a Telegram 'Mark False Positive' tap, llm_validated = Ollama's autonomous 4-hourly validation pass). The whole point of this session's self-calibration work was to make 'autonomous' and 'llm_validated' the dominant sources over time, not 'operator' -- a human shouldn't need to keep pace with every alert for the system to keep healing itself.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -354,7 +354,8 @@
                       "mode": "normal",
                       "group": "A"
                     }
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -367,7 +368,7 @@
         "spec": {
           "id": 21,
           "title": "🛡️ Self-Healing: Sensitivity Adjustments by Source",
-          "description": "fp_engine_sigma_shifts_total split the same way -- every TUNE_DOWN (a confirmed false positive widening a device's baseline) or TUNE_UP (a confirmed threat tightening it) event, attributed to what triggered it.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: fp_engine_sigma_shifts_total split the same way -- every TUNE_DOWN (a confirmed false positive widening a device's baseline) or TUNE_UP (a confirmed threat tightening it) event, attributed to what triggered it.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -460,7 +461,8 @@
                       "mode": "normal",
                       "group": "A"
                     }
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -830,8 +832,8 @@
         "kind": "Panel",
         "spec": {
           "id": 40,
-          "title": "🕵️ Ollama: Time Since Last Successful Run",
-          "description": "Scheduled every 4 hours by scripts/scheduler.py. Should never exceed roughly 4-5h under normal operation -- a much larger number here means the job silently stopped firing (exactly the class of bug a job-key/filename mismatch caused once already in this project) without anyone noticing until they went looking.",
+          "title": "🕵️ LLM Review: Time Since Last Successful Run",
+          "description": "How long since the Layer-3 LLM review job (argus/ops/live_llm_review.py, which replaced the retired scripts/ollama_soc.py) last finished. It runs every 4 hours (cron '30 2,6,10,14,18,22'), so under ~4.5h is normal. Orange after 5h, red after 12h means it silently stopped. The previous version read the retired ollama_soc job's timestamp, frozen since 09-21.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -848,7 +850,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "time() - home_ids_ollama_last_run_timestamp",
+                        "expr": "time() - home_ids_job_last_success_timestamp{exported_job=\"live_llm_review\"}",
                         "format": "time_series",
                         "instant": true
                       }
@@ -903,202 +905,6 @@
                         "color": "red"
                       }
                     ]
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-41": {
-        "kind": "Panel",
-        "spec": {
-          "id": 41,
-          "title": "🕵️ Ollama: Calls / Cache Hits / Deferred (Last Run)",
-          "description": "A single noisy pattern that fired 50 times only ever costs one Ollama call, reused from the 7-day cache on every subsequent run it keeps recurring -- this is the direct evidence that 'call Ollama sparingly' is actually happening, not just a log claim. Deferred > 0 means the per-run cap was hit; those patterns retry next run, prioritized by which repeated most.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ollama_calls_last_run",
-                        "format": "time_series",
-                        "instant": true,
-                        "legendFormat": "Fresh calls"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ollama_cache_hits_last_run",
-                        "format": "time_series",
-                        "instant": true,
-                        "legendFormat": "Cache hits"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ollama_deferred_last_run",
-                        "format": "time_series",
-                        "instant": true,
-                        "legendFormat": "Deferred"
-                      }
-                    },
-                    "refId": "C",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "bargauge",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "displayMode": "gradient",
-                "orientation": "horizontal",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showUnfilled": true,
-                "valueMode": "color"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
-                  }
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-42": {
-        "kind": "Panel",
-        "spec": {
-          "id": 42,
-          "title": "🕵️ Ollama: Cumulative Validated Verdicts",
-          "description": "Every LLM classification that passed DeterministicValidator's hallucination guardrail, since state/ollama_run_stats.json existed, split benign vs malicious. This is a running total, not a per-run count -- the trend across weeks is what matters.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_ollama_validated_total",
-                        "format": "table",
-                        "instant": true,
-                        "legendFormat": "{{verdict}}"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "bargauge",
-            "version": "13.1.1",
-            "spec": {
-              "options": {
-                "displayMode": "gradient",
-                "orientation": "horizontal",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "fields": "",
-                  "values": false
-                },
-                "showUnfilled": true,
-                "valueMode": "color"
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "none",
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": 0,
-                        "color": "blue"
-                      }
-                    ]
-                  },
-                  "color": {
-                    "mode": "palette-classic"
                   }
                 },
                 "overrides": []
@@ -1324,7 +1130,7 @@
         "spec": {
           "id": 60,
           "title": "📅 Scheduled-Job Health",
-          "description": "Time since each scheduled job's last successful completion, and how long that run took. Directly targets the exact class of bug already found once in this project -- a job-key/filename mismatch that silently never ran, with nothing surfacing the failure beyond a daemon log line nobody was watching. Expected staleness: ollama_soc ~4h, retro_hunter/top_domains_report/train_fp_classifier ~24h.",
+          "description": "Every scheduled job still in service: how long since it last finished successfully, and how long that run took. Retired jobs (ollama_soc, retro_hunter, shadow_watcher, gap_monitor) are hidden. Colours are a rough guide: orange past 26h, red past 48h. Frequent jobs (every 15 min or 4 h) should be far below that, while monthly jobs are expected to look old. The previous version joined on a label Prometheus had renamed (job -> exported_job), so job names never showed.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1341,7 +1147,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "time() - home_ids_job_last_success_timestamp",
+                        "expr": "time() - home_ids_job_last_success_timestamp{exported_job!~\"ollama_soc|retro_hunter|shadow_watcher|gap_monitor\"}",
                         "format": "table",
                         "instant": true
                       }
@@ -1361,7 +1167,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_job_last_duration_seconds",
+                        "expr": "home_ids_job_last_duration_seconds{exported_job!~\"ollama_soc|retro_hunter|shadow_watcher|gap_monitor\"}",
                         "format": "table",
                         "instant": true
                       }
@@ -1377,7 +1183,7 @@
                   "group": "joinByField",
                   "spec": {
                     "options": {
-                      "byField": "job",
+                      "byField": "exported_job",
                       "mode": "outer"
                     }
                   }
@@ -1389,13 +1195,20 @@
                     "options": {
                       "excludeByName": {
                         "Time": true,
+                        "Time 1": true,
+                        "Time 2": true,
                         "__name__": true,
                         "instance": true,
-                        "job": true
+                        "job": true,
+                        "job 1": true,
+                        "job 2": true,
+                        "instance 1": true,
+                        "instance 2": true
                       },
                       "renameByName": {
-                        "Value #A": "Time Since Last Success (s)",
-                        "Value #B": "Last Duration (s)"
+                        "exported_job": "Job",
+                        "Value #A": "Time Since Last Success",
+                        "Value #B": "Last Run Took"
                       }
                     }
                   }
@@ -1415,7 +1228,58 @@
               },
               "fieldConfig": {
                 "defaults": {},
-                "overrides": []
+                "overrides": [
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Time Since Last Success"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      },
+                      {
+                        "id": "custom.cellOptions",
+                        "value": {
+                          "type": "color-text"
+                        }
+                      },
+                      {
+                        "id": "thresholds",
+                        "value": {
+                          "mode": "absolute",
+                          "steps": [
+                            {
+                              "value": null,
+                              "color": "green"
+                            },
+                            {
+                              "value": 93600,
+                              "color": "orange"
+                            },
+                            {
+                              "value": 172800,
+                              "color": "red"
+                            }
+                          ]
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "matcher": {
+                      "id": "byName",
+                      "options": "Last Run Took"
+                    },
+                    "properties": [
+                      {
+                        "id": "unit",
+                        "value": "s"
+                      }
+                    ]
+                  }
+                ]
               }
             }
           }
@@ -1426,7 +1290,7 @@
         "spec": {
           "id": 61,
           "title": "📅 Retro-Hunt Findings (Cumulative)",
-          "description": "Total retroactive threat-intel matches found by retro_hunter.py since state/job_health.json existed -- domains your network talked to that were unknown-clean at the time but have since been classified malicious by fresh OSINT.",
+          "description": "⚠️ FROZEN since 09-21 at the retired retro_hunter job's last value. Its replacement (live_retro_hunter) records its own findings, but they aren't exported to Prometheus yet (small code change needed in core/metrics_sync.py).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1539,8 +1403,8 @@
         "kind": "Panel",
         "spec": {
           "id": 63,
-          "title": "Bursts Dispatched (Total)",
-          "description": "Cumulative reactive-capture bursts that actually ran (passed the hourly budget AND found no other burst already in flight).",
+          "title": "Bursts Dispatched (selected range)",
+          "description": "Cumulative reactive-capture bursts that actually ran (passed the hourly budget AND found no other burst already in flight). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1557,7 +1421,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_reactive_capture_bursts_total{outcome=\"dispatched\"})",
+                        "expr": "sum(increase(home_ids_reactive_capture_bursts_total{outcome=\"dispatched\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -1616,8 +1480,8 @@
         "kind": "Panel",
         "spec": {
           "id": 64,
-          "title": "Bursts Deferred (Total)",
-          "description": "Triggers that fired but had to wait -- either the shared hourly budget (reactive_capture_max_bursts_per_hour) was exhausted, or a different burst was already using the radio. Deferred triggers are reconsidered later, not dropped.",
+          "title": "Bursts Deferred (selected range)",
+          "description": "Triggers that fired but had to wait -- either the shared hourly budget (reactive_capture_max_bursts_per_hour) was exhausted, or a different burst was already using the radio. Deferred triggers are reconsidered later, not dropped. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1634,7 +1498,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_reactive_capture_bursts_total{outcome=~\"deferred.*\"})",
+                        "expr": "sum(increase(home_ids_reactive_capture_bursts_total{outcome=~\"deferred.*\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -1990,7 +1854,7 @@
         "kind": "Panel",
         "spec": {
           "id": 68,
-          "title": "Data Captured per Radio (Cumulative Bytes)",
+          "title": "Data Captured per Radio (bytes per hour)",
           "description": "Raw AVM pcap bytes captured per radio across all bursts -- sanity-check against expected burst size (burst_seconds x typical throughput) if this looks unexpectedly flat or huge.",
           "links": [],
           "data": {
@@ -2008,7 +1872,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_reactive_capture_bytes_total",
+                        "expr": "sum by (radio) (increase(home_ids_reactive_capture_bytes_total[1h]))",
                         "format": "time_series",
                         "instant": false,
                         "legendFormat": "{{radio}}"
@@ -2092,8 +1956,8 @@
         "kind": "Panel",
         "spec": {
           "id": 69,
-          "title": "DNS-Evasion Findings (Cumulative)",
-          "description": "Total dns_evasion_anomaly findings across every device from every burst -- a real connection during a burst window with no DNS explanation and no recognized-safe (CDN/VPN) infrastructure match. See the section below for per-device detail.",
+          "title": "DNS-Evasion Findings (selected range)",
+          "description": "Total dns_evasion_anomaly findings across every device from every burst -- a real connection during a burst window with no DNS explanation and no recognized-safe (CDN/VPN) infrastructure match. See the section below for per-device detail. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2110,7 +1974,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_reactive_capture_dns_evasion_findings_total",
+                        "expr": "sum(increase(home_ids_reactive_capture_dns_evasion_findings_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2169,8 +2033,8 @@
         "kind": "Panel",
         "spec": {
           "id": 70,
-          "title": "Stale Files Auto-Cleaned (Cumulative)",
-          "description": "Orphaned capture files removed by the periodic disk-safety sweep -- catches files left behind if the process crashed mid-burst. Should stay near zero under normal operation (the per-burst cleanup handles the normal path); a rising count means bursts are crashing, not just erroring.",
+          "title": "Stale Files Auto-Cleaned (selected range)",
+          "description": "Orphaned capture files removed by the periodic disk-safety sweep -- catches files left behind if the process crashed mid-burst. Should stay near zero under normal operation (the per-burst cleanup handles the normal path); a rising count means bursts are crashing, not just erroring. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2187,7 +2051,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_reactive_capture_stale_files_removed_total",
+                        "expr": "sum(increase(home_ids_reactive_capture_stale_files_removed_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2288,7 +2152,7 @@
         "spec": {
           "id": 72,
           "title": "Confirmed Malicious IPs Tracked",
-          "description": "Current non-expired IP entries in the local confirmed-threat store.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: Current non-expired IP entries in the local confirmed-threat store.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2352,7 +2216,8 @@
                         "color": "blue"
                       }
                     ]
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -2365,7 +2230,7 @@
         "spec": {
           "id": 73,
           "title": "Confirmed Malicious Domains Tracked",
-          "description": "Current non-expired domain entries in the local confirmed-threat store.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: Current non-expired domain entries in the local confirmed-threat store.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2429,7 +2294,8 @@
                         "color": "blue"
                       }
                     ]
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -2442,7 +2308,7 @@
         "spec": {
           "id": 74,
           "title": "Cross-Device Hard-Stops (network-effect saves)",
-          "description": "Stage-1 hard-stops fired because a DIFFERENT device had already confirmed this exact IOC -- the direct payoff of the store above. Each of these is a threat caught immediately instead of needing to independently re-earn a HIGH/CRITICAL bar.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: Stage-1 hard-stops fired because a DIFFERENT device had already confirmed this exact IOC -- the direct payoff of the store above. Each of these is a threat caught immediately instead of needing to independently re-earn a HIGH/CRITICAL bar.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2506,7 +2372,8 @@
                         "color": "blue"
                       }
                     ]
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -2519,7 +2386,7 @@
         "spec": {
           "id": 75,
           "title": "Local Confirmed-Intel Store Growth Over Time",
-          "description": "The store's size, by kind, over time -- should generally trend up (more confirmed threats known) with occasional drops as TTL-expired entries are pruned. A store that never grows means confirmed threats aren't reaching Stage 1, worth cross-checking against System Health's 'Confirmed Threats' panel.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: The store's size, by kind, over time -- should generally trend up (more confirmed threats known) with occasional drops as TTL-expired entries are pruned. A store that never grows means confirmed threats aren't reaching Stage 1, worth cross-checking against System Health's 'Confirmed Threats' panel.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2629,7 +2496,8 @@
                     "thresholdsStyle": {
                       "mode": "off"
                     }
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -3449,8 +3317,8 @@
         "kind": "Panel",
         "spec": {
           "id": 96,
-          "title": "🧪 CL-AFPE 3-Stage Funnel (Evaluated → Hard-Stopped → Suppressed)",
-          "description": "How many alerts CL-AFPE evaluated, how many were confirmed threats (hard-stop bypass, never eligible for suppression), and how many were actually suppressed as false positives.",
+          "title": "🧪 False-Positive Filter Funnel (alerts per hour)",
+          "description": "Per rolling hour: how many candidate alerts the Argus CL-AFPE false-positive filter looked at, how many were hard-stopped (strong evidence, never allowed to be suppressed), and how many it suppressed as false positives. Read from each alert's own record in Loki. The old Prometheus counters behind this panel stopped counting when .94 switched to Argus CL-AFPE, so they read a false 0.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3461,15 +3329,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_evaluations_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Evaluated"
                       }
                     },
                     "refId": "A",
@@ -3481,15 +3349,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_confirmed_threats_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | fp_verdict_stage=~\"STAGE_1_HARD_STOP|TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Hard-stopped (never suppressible)"
                       }
                     },
                     "refId": "B",
@@ -3501,15 +3369,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_suppressed_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Suppressed as false positive"
                       }
                     },
                     "refId": "C",
@@ -4168,8 +4036,8 @@
         "kind": "Panel",
         "spec": {
           "id": 103,
-          "title": "Lifetime Identity Merges",
-          "description": "Cumulative home_ids_identity_merges_total since the service last restarted.",
+          "title": "Identity Merges (selected range)",
+          "description": "Cumulative home_ids_identity_merges_total since the service last restarted. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -4186,7 +4054,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_merges_total)",
+                        "expr": "sum(increase(home_ids_identity_merges_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -4245,8 +4113,8 @@
         "kind": "Panel",
         "spec": {
           "id": 104,
-          "title": "Lifetime Re-ID Migrations",
-          "description": "Cumulative home_ids_identity_reidentify_migrations_total since the service last restarted.",
+          "title": "Re-ID Migrations (selected range)",
+          "description": "Cumulative home_ids_identity_reidentify_migrations_total since the service last restarted. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -4263,7 +4131,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_reidentify_migrations_total)",
+                        "expr": "sum(increase(home_ids_identity_reidentify_migrations_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -4322,8 +4190,8 @@
         "kind": "Panel",
         "spec": {
           "id": 105,
-          "title": "Lifetime Re-ID Ambiguous",
-          "description": "Cumulative home_ids_identity_reidentify_ambiguous_total since the service last restarted.",
+          "title": "Re-ID Ambiguous (selected range)",
+          "description": "Cumulative home_ids_identity_reidentify_ambiguous_total since the service last restarted. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -4340,7 +4208,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_reidentify_ambiguous_total)",
+                        "expr": "sum(increase(home_ids_identity_reidentify_ambiguous_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -4399,8 +4267,8 @@
         "kind": "Panel",
         "spec": {
           "id": 106,
-          "title": "Lifetime Profile Discards",
-          "description": "Cumulative home_ids_device_profile_discards_total (merge + prune reasons combined) since the service last restarted.",
+          "title": "Profile Discards (selected range)",
+          "description": "Cumulative home_ids_device_profile_discards_total (merge + prune reasons combined) since the service last restarted. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -4417,7 +4285,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_device_profile_discards_total)",
+                        "expr": "sum(increase(home_ids_device_profile_discards_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -5143,7 +5011,7 @@
         "spec": {
           "id": 113,
           "title": "Retro-Hunt Findings by Device",
-          "description": "home_ids_retro_hunt_findings_by_device -- per-device breakdown of retro_hunter.py's local-intel cross-reference matches (a device's OWN past connection now matches an IOC a DIFFERENT device has since confirmed). Scoped to that specific match type only -- the external-ThreatIntel historical-domain re-scan (the other half of home_ids_retro_hunt_findings_total) has no per-device attribution by construction, see retro_hunter.py's _count_findings_by_device() docstring.",
+          "description": "⚠️ FROZEN since 09-21 (same reason as 'Retro-Hunt Findings' above).\n\nhome_ids_retro_hunt_findings_by_device -- per-device breakdown of retro_hunter.py's local-intel cross-reference matches (a device's OWN past connection now matches an IOC a DIFFERENT device has since confirmed). Scoped to that specific match type only -- the external-ThreatIntel historical-domain re-scan (the other half of home_ids_retro_hunt_findings_total) has no per-device attribution by construction, see retro_hunter.py's _count_findings_by_device() docstring.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -5293,8 +5161,8 @@
         "kind": "Panel",
         "spec": {
           "id": 9101,
-          "title": "🧪 CL-AFPE Suppressions by Stage (LightGBM vs Embedding)",
-          "description": "The 3-Stage Funnel panel above shows how many alerts got suppressed in total -- this shows WHICH stage did the resolving: Stage 2 (LightGBM tabular classifier, fast/cheap) vs Stage 3 (FastEmbed vector-similarity, only reached when Stage 2 is unsure). If Stage 3 is doing most of the work, that's a signal Stage 2's feature set may need attention.",
+          "title": "🧪 Suppressions by Filter Stage (selected range)",
+          "description": "Which stage of the Argus CL-AFPE filter made each suppression: TRUST_CACHE (the domain/ destination was already trusted, instant) or STAGE_3_COMBINED (LightGBM plus embedding similarity scored it as a false positive). The old 'LightGBM vs Embedding' split doesn't exist in Argus, and its counters read a false 0.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -5305,69 +5173,23 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_stage2_lgbm_hits_total",
-                        "format": "table",
-                        "instant": true
+                        "expr": "sum by (fp_verdict_stage) (count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [$__range]))",
+                        "queryType": "instant",
+                        "legendFormat": "{{fp_verdict_stage}}"
                       }
                     },
                     "refId": "A",
                     "hidden": false
                   }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${PROMETHEUS_DS}"
-                      },
-                      "spec": {
-                        "expr": "home_ids_fp_stage3_embed_hits_total",
-                        "format": "table",
-                        "instant": true
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
                 }
               ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "merge",
-                  "spec": {
-                    "options": {}
-                  }
-                },
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "excludeByName": {
-                        "Time": true,
-                        "__name__": true,
-                        "instance": true,
-                        "job": true
-                      },
-                      "renameByName": {
-                        "Value #A": "Stage 2 (LightGBM)",
-                        "Value #B": "Stage 3 (Embedding)"
-                      }
-                    }
-                  }
-                }
-              ],
+              "transformations": [],
               "queryOptions": {}
             }
           },
@@ -5538,37 +5360,11 @@
             "spec": {
               "x": 0,
               "y": 35,
-              "width": 8,
+              "width": 24,
               "height": 7,
               "element": {
                 "kind": "ElementReference",
                 "name": "panel-40"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 8,
-              "y": 35,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-41"
-              }
-            }
-          },
-          {
-            "kind": "GridLayoutItem",
-            "spec": {
-              "x": 16,
-              "y": 35,
-              "width": 8,
-              "height": 7,
-              "element": {
-                "kind": "ElementReference",
-                "name": "panel-42"
               }
             }
           },
@@ -6268,18 +6064,6 @@
         "icon": "external link",
         "tooltip": "🛡️ Go to System Tuning, Healing & Health",
         "url": "/d/home_ids_v3_mitigation",
-        "tags": [],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🔍 Go to Transparency",
-        "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,

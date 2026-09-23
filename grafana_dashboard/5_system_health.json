@@ -87,8 +87,8 @@
         "kind": "Panel",
         "spec": {
           "id": 10,
-          "title": "Confirmed Threats (Hard-Stop Bypass)",
-          "description": "How many alerts were stopped at Stage 1 — the deterministic hard-stop security filter that runs BEFORE any ML model, on signals like a confirmed honeypot hit or a Tier-5 threat-intel match. These bypass the false-positive engine entirely and always fire as confirmed threats (see fp_engine.py: 'hard-stop signals fired → CONFIRMED THREAT despite trust cache hit').",
+          "title": "Hard-Stopped Alerts (never suppressible, per hour)",
+          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: How many alerts were stopped at Stage 1 — the deterministic hard-stop security filter that runs BEFORE any ML model, on signals like a confirmed honeypot hit or a Tier-5 threat-intel match. These bypass the false-positive engine entirely and always fire as confirmed threats (see fp_engine.py: 'hard-stop signals fired → CONFIRMED THREAT despite trust cache hit').",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -99,13 +99,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_confirmed_threats_total"
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | fp_verdict_stage=~\"STAGE_1_HARD_STOP|TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "hard-stopped / hour"
                       }
                     },
                     "refId": "A",
@@ -282,8 +284,8 @@
         "kind": "Panel",
         "spec": {
           "id": 12,
-          "title": "📜 AFPE Suppressed/Muted Log",
-          "description": "Every alert the false-positive engine has AUTONOMOUSLY suppressed, with its exact reasoning — this is the transparency guarantee: nothing is ever silently discarded. 'Type' tells you which of the 3 suppression paths fired: TRUST_CACHE_HIT (instant, domain was already immunized), AUTONOMOUS_FP_SUPPRESSED (passed the full Stage 1→2→3 pipeline and cleared fp_combined_suppress_threshold = 0.8), or OPERATOR_MARKED_FALSE_POSITIVE (you corrected it manually). PREREQUISITE: this panel needs a Loki scrape target for state/autonomous_muted.jsonl with job=\"home_ids_muted\" — see the setup panel below if this table is empty.",
+          "title": "📜 Suppressed Alerts Log (what the false-positive filter hid, and why)",
+          "description": "Every alert the false-positive filter suppressed, with the stage that did it (fp_stage), its confidence and the first reason. Nothing is silently discarded. The previous version read state/autonomous_muted.jsonl, a file retired in v16 that no longer exists; suppressions are now flagged inside alerts.json itself.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -300,9 +302,9 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home_ids_muted\"} | json ts=\"ts_human\", type=\"type\", confidence=\"confidence\", reasons=\"reasons\", domain=\"domain\", risk_score=\"risk_score\", device_ip=\"device.ip\"",
-                        "format": "table",
-                        "instant": false
+                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\", reason=\"fp_verdict.reasons[0]\"",
+                        "queryType": "range",
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -310,25 +312,7 @@
                   }
                 }
               ],
-              "transformations": [
-                {
-                  "kind": "Transformation",
-                  "group": "organize",
-                  "spec": {
-                    "options": {
-                      "renameByName": {
-                        "ts": "When",
-                        "type": "Suppression Path",
-                        "confidence": "FP Confidence",
-                        "reasons": "Reasoning",
-                        "domain": "Domain",
-                        "risk_score": "Original Risk",
-                        "device_ip": "Device IP"
-                      }
-                    }
-                  }
-                }
-              ],
+              "transformations": [],
               "queryOptions": {}
             }
           },
@@ -374,8 +358,8 @@
         "kind": "Panel",
         "spec": {
           "id": 13,
-          "title": "🤖 AI Reasoning & Tuning Transparency",
-          "description": "Two things happen here: (1) 'ollama_transparency' entries are Brain 3's full LLM reasoning for every alert it batch-analyzed — model used, its classification, confidence, reasoning, recommended action, and whether the deterministic threat-intel guardrail (validator_passed) approved or overrode it. (2) 'afpe_tuning' entries, if present, would represent autonomous threshold retuning — this event type was not found in the reviewed engine source during the Version 7.0 audit, so treat rows of that type as unverified/legacy until confirmed against your actual deployed code.",
+          "title": "🤖 AI Reasoning Transparency (historical — see description)",
+          "description": "⚠️ Mostly historical. This shows 'ollama_transparency' entries from the retired scripts/ollama_soc.py (last entry around 09-12). Its replacement, argus/ops/live_llm_review.py, writes state/ollama_analysis_v13.jsonl, which isn't shipped to Loki yet (it needs a promtail scrape job).\n\nOriginal meaning: Two things happen here: (1) 'ollama_transparency' entries are Brain 3's full LLM reasoning for every alert it batch-analyzed — model used, its classification, confidence, reasoning, recommended action, and whether the deterministic threat-intel guardrail (validator_passed) approved or overrode it. (2) 'afpe_tuning' entries, if present, would represent autonomous threshold retuning — this event type was not found in the reviewed engine source during the Version 7.0 audit, so treat rows of that type as unverified/legacy until confirmed against your actual deployed code.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -486,7 +470,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ips_tarpit_active",
+                        "expr": "count(home_ids_ips_tarpit_active == 1) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -586,7 +570,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ips_router_isolated_active",
+                        "expr": "count(home_ids_ips_router_isolated_active == 1) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -669,7 +653,7 @@
         "spec": {
           "id": 4,
           "title": "Active Pi-Hole Blocks",
-          "description": "Devices/domains currently under an active Pi-hole DNS block (Layer 7). This is a live gauge of enforcement, not the lifetime counter — compare against the 'Lifetime Threats Blocked' tile on the Overview dashboard to see cumulative vs. currently-active blocks.",
+          "description": "How many domains are under an active Pi-hole DNS block right now (Layer 7). This is a live count of what's enforced now. 'Domains Sinkholed' on the Overview counts new blocks within the selected time range.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -686,7 +670,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ips_active_blocks",
+                        "expr": "count(home_ids_ips_active_blocks == 1) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -805,8 +789,8 @@
         "kind": "Panel",
         "spec": {
           "id": 6,
-          "title": "AFPE Total Evaluations",
-          "description": "Total alerts that crossed alert_threshold and were routed into the false-positive engine for a suppress/confirm decision — the denominator for everything below (Stage 1 Hardstops, Suppressed, Confidence Score).",
+          "title": "False-Positive Filter: Alerts Evaluated (per hour)",
+          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: Total alerts that crossed alert_threshold and were routed into the false-positive engine for a suppress/confirm decision — the denominator for everything below (Stage 1 Hardstops, Suppressed, Confidence Score).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -817,13 +801,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_evaluations_total"
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "evaluated / hour"
                       }
                     },
                     "refId": "A",
@@ -905,8 +891,8 @@
         "kind": "Panel",
         "spec": {
           "id": 7,
-          "title": "AFPE Alerts Suppressed",
-          "description": "How many of those evaluations were autonomously suppressed as false positives (Stage 2/3 combined confidence >= fp_combined_suppress_threshold = 0.8, from config.yaml). The gap between 'Total Evaluations' and this number is how many alerts actually reached you as real threats.",
+          "title": "False-Positive Filter: Alerts Suppressed (per hour)",
+          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: How many of those evaluations were autonomously suppressed as false positives (Stage 2/3 combined confidence >= fp_combined_suppress_threshold = 0.8, from config.yaml). The gap between 'Total Evaluations' and this number is how many alerts actually reached you as real threats.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -917,13 +903,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_suppressed_total"
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "suppressed / hour"
                       }
                     },
                     "refId": "A",
@@ -1006,7 +994,7 @@
         "spec": {
           "id": 8,
           "title": "Trust Cache Size",
-          "description": "How many unique domains are currently held in the 14-day trust cache (fp_revoke_action_ttl_seconds-adjacent TTL logic). Queries matching this cache skip the ML pipeline entirely for near-zero-latency suppression — this is Brain 2's short-term memory.",
+          "description": "⚠️ NOT CURRENTLY REPORTED. This number came from the legacy false-positive engine (intelligence/fp_engine.py). Since .94 switched to the Argus CL-AFPE engine (cl_afpe_engine: argus), that code path no longer runs, so this metric stays at 0 / empty even though suppression is working. It needs a code change to re-wire; until then, read it as 'unknown', not 'zero'.\n\nOriginal meaning: How many unique domains are currently held in the 14-day trust cache (fp_revoke_action_ttl_seconds-adjacent TTL logic). Queries matching this cache skip the ML pipeline entirely for near-zero-latency suppression — this is Brain 2's short-term memory.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1093,7 +1081,8 @@
                       "group": "A",
                       "mode": "none"
                     }
-                  }
+                  },
+                  "noValue": "Not reported"
                 },
                 "overrides": []
               }
@@ -1105,8 +1094,8 @@
         "kind": "Panel",
         "spec": {
           "id": 9,
-          "title": "AFPE Confidence Score",
-          "description": "The combined Stage 2 (LightGBM) + Stage 3 (FastEmbed) confidence that an alert is a false positive. Thresholds now reflect the real config.yaml values: below 0.55 (fp_combined_uncertain_threshold) is treated as still-a-real-threat territory (🔴), 0.55-0.79 is the 'uncertain, tagged low-confidence' band (🟡), and 0.8+ (fp_combined_suppress_threshold) is confidently auto-suppressed (🟢).",
+          "title": "False-Positive Confidence (15-min average, 0 = real threat … 1 = false positive)",
+          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: The combined Stage 2 (LightGBM) + Stage 3 (FastEmbed) confidence that an alert is a false positive. Thresholds now reflect the real config.yaml values: below 0.55 (fp_combined_uncertain_threshold) is treated as still-a-real-threat territory (🔴), 0.55-0.79 is the 'uncertain, tagged low-confidence' band (🟡), and 0.8+ (fp_combined_suppress_threshold) is confidently auto-suppressed (🟢).",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1117,13 +1106,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_confidence_score"
+                        "expr": "avg(avg_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | unwrap fp_verdict_confidence | __error__=\"\" [15m]))",
+                        "queryType": "range",
+                        "legendFormat": "avg false-positive confidence"
                       }
                     },
                     "refId": "A",
@@ -1213,7 +1204,7 @@
         "kind": "Panel",
         "spec": {
           "id": 5001,
-          "title": "🔌 Prerequisite: Wire Up the Missing Loki Stream",
+          "title": "🔌 About the Loki streams these panels use",
           "description": "The exact promtail config needed to make the AFPE Suppressed/Muted Log panel actually receive data.",
           "links": [],
           "data": {
@@ -1235,7 +1226,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "**Why the AFPE Suppressed/Muted Log panel above might be empty.** Home-IDS writes suppressed-alert audit entries to `state/autonomous_muted.jsonl` — a SEPARATE file from `alerts.json`. The Promtail scrape config in INSTALL.md only ships `alerts.json` (job=`home_ids_alerts`) to Loki by default; `autonomous_muted.jsonl` isn't wired up unless you add a second scrape target. Add this to `/etc/promtail/config.yml` under `scrape_configs`, then `sudo systemctl restart promtail`:\n\n```yaml\n  - job_name: home_ids_muted\n    static_configs:\n      - targets: [localhost]\n        labels:\n          job: home_ids_muted\n          __path__: /home/user/home_ids/state/autonomous_muted.jsonl\n```\n\n(Path assumes the standard project layout from INSTALL.md — adjust if yours differs.) Once wired up, the panel above will show every alert the false-positive engine silently resolved, with its exact reasoning — nothing is ever discarded without a trace.",
+                "content": "**Loki streams this dashboard reads.** Every alert-log and false-positive panel here reads `state/alerts.json` (promtail job `home_ids_alerts`). Suppressed alerts are marked `\"suppressed\": true` inside that same file, so no second stream is needed.\n\nThe old `home_ids_muted` stream (`state/autonomous_muted.jsonl`) was retired in v16 and can be removed from `/etc/promtail/config.yml`.\n\nOptional: to see the LLM reviewer's reasoning, add a promtail job for `state/ollama_analysis_v13.jsonl`.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -1250,7 +1241,7 @@
         "kind": "Panel",
         "spec": {
           "id": 5002,
-          "title": "⚙️ Engine CPU Usage",
+          "title": "⚙️ Engine CPU Usage (100% = one full CPU core)",
           "description": "CPU time consumed by the Home-IDS process itself (process_cpu_seconds_total, a standard metric automatically exposed by the prometheus_client library — confirmed in requirements.txt). Sustained high usage can slow down the 5-phase detection loop and delay alerting; compare against Alert Queue on the Overview dashboard if you suspect the engine is falling behind.",
           "links": [],
           "data": {
@@ -1270,7 +1261,8 @@
                       "spec": {
                         "expr": "rate(process_cpu_seconds_total{job=\"home_ids\"}[5m]) * 100",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "engine CPU"
                       }
                     },
                     "refId": "A",
@@ -1500,8 +1492,8 @@
         "kind": "Panel",
         "spec": {
           "id": 5005,
-          "title": "🧪 CL-AFPE 3-Stage Funnel (Evaluated → Hard-Stopped → Suppressed)",
-          "description": "Three CL-AFPE counters plotted together as a funnel: Total Evaluations (everything that crossed alert_threshold), Stage 1 Hardstops (bypassed straight to CONFIRMED THREAT on a honeypot/reputation hit — never even gets an FP chance), and Suppressed (autonomously resolved as false positives). The gap between Evaluations and (Hardstops + Suppressed) is what actually reached you as a real, unresolved alert — the smaller that gap relative to Evaluations, the quieter and more trustworthy your SOC feed is.",
+          "title": "🧪 False-Positive Filter Funnel (alerts per hour)",
+          "description": "Read from each alert's own record in Loki (alerts.json). The Prometheus counters this panel used before stopped counting when .94 switched to the Argus CL-AFPE engine, so they read a false 0.\n\nMeaning: Three CL-AFPE counters plotted together as a funnel: Total Evaluations (everything that crossed alert_threshold), Stage 1 Hardstops (bypassed straight to CONFIRMED THREAT on a honeypot/reputation hit — never even gets an FP chance), and Suppressed (autonomously resolved as false positives). The gap between Evaluations and (Hardstops + Suppressed) is what actually reached you as a real, unresolved alert — the smaller that gap relative to Evaluations, the quieter and more trustworthy your SOC feed is.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1512,15 +1504,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_evaluations_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Evaluated"
                       }
                     },
                     "refId": "A",
@@ -1532,15 +1524,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_confirmed_threats_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | fp_verdict_stage=~\"STAGE_1_HARD_STOP|TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Hard-stopped (never suppressible)"
                       }
                     },
                     "refId": "B",
@@ -1552,15 +1544,15 @@
                   "spec": {
                     "query": {
                       "kind": "DataQuery",
-                      "group": "prometheus",
+                      "group": "loki",
                       "version": "v0",
                       "datasource": {
-                        "name": "${PROMETHEUS_DS}"
+                        "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_fp_suppressed_total",
-                        "format": "time_series",
-                        "instant": false
+                        "expr": "sum(count_over_time({job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed=\"true\" [1h]))",
+                        "queryType": "range",
+                        "legendFormat": "Suppressed as false positive"
                       }
                     },
                     "refId": "C",
@@ -2564,7 +2556,7 @@
         "kind": "Panel",
         "spec": {
           "id": 9205,
-          "title": "IPS Mitigation Errors by Stage",
+          "title": "IPS Mitigation Errors (per minute, by integration)",
           "description": "Failures encountered while trying to actually execute a block/isolate/unblock action, broken down by which integration failed (Pi-hole API, router webhook, etc). This should normally stay at zero -- any sustained rate here means automatic protection is not actually being applied even though the engine decided it should be.",
           "links": [],
           "data": {
@@ -2582,9 +2574,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "rate(home_ids_ips_errors_total[5m])",
+                        "expr": "sum by (target_type) (rate(home_ids_ips_errors_total[5m])) * 60 or vector(0)",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "{{target_type}}"
                       }
                     },
                     "refId": "A",
@@ -2728,7 +2721,9 @@
                 "showHeader": true
               },
               "fieldConfig": {
-                "defaults": {},
+                "defaults": {
+                  "noValue": "✅ Nothing stuck"
+                },
                 "overrides": []
               }
             }
@@ -2801,7 +2796,9 @@
                 "showHeader": true
               },
               "fieldConfig": {
-                "defaults": {},
+                "defaults": {
+                  "noValue": "✅ Nothing failed"
+                },
                 "overrides": []
               }
             }
@@ -2812,8 +2809,8 @@
         "kind": "Panel",
         "spec": {
           "id": 9208,
-          "title": "Lifetime Router Isolations",
-          "description": "Total number of times the router (Layer-3 WAN kill-switch) has been triggered to fully isolate a device, ever.",
+          "title": "Router Isolations (selected range)",
+          "description": "Total number of times the router (Layer-3 WAN kill-switch) has been triggered to fully isolate a device. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2830,7 +2827,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_ips_router_isolations_total) OR vector(0)",
+                        "expr": "sum(increase(home_ids_ips_router_isolations_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2889,8 +2886,8 @@
         "kind": "Panel",
         "spec": {
           "id": 9209,
-          "title": "Lifetime Tarpit Activations",
-          "description": "Total number of times the Layer-2 ARP/NDP tarpit has been triggered to trap a device, ever.",
+          "title": "Tarpit Activations (selected range)",
+          "description": "Total number of times the Layer-2 ARP/NDP tarpit has been triggered to trap a device. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2907,7 +2904,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_ips_tarpit_activations_total) OR vector(0)",
+                        "expr": "sum(increase(home_ids_ips_tarpit_activations_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -3712,18 +3709,6 @@
         "targetBlank": false,
         "includeVars": true,
         "keepTime": true
-      },
-      {
-        "title": "🔍 Go to Transparency",
-        "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
-        "tags": [],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
       }
     ],
     "liveNow": true,
@@ -3750,7 +3735,7 @@
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
     },
-    "title": "4. 🛡️ System Tuning, Healing & Health",
+    "title": "5. 🛡️ System Tuning, Healing & Health",
     "variables": [
       {
         "kind": "DatasourceVariable",

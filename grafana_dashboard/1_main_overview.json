@@ -87,7 +87,7 @@
         "spec": {
           "id": 10,
           "title": "Total Active Isolations",
-          "description": "How many devices are RIGHT NOW under active hardware containment (Layer-2 ARP tarpit and/or Layer-3 router isolation combined). 0 is the normal, healthy state. Any non-zero value means a device is currently isolated — check the Master Threat Ledger below to see which one and why.",
+          "description": "How many devices are cut off RIGHT NOW by Layer-2 (ARP/NDP tarpit) and/or Layer-3 (router) isolation. A device under both counts once. 0 is the normal, healthy state. Anything above 0 means a device is isolated right now; the Master Threat Ledger below shows which one. (Before this fix the tile read Pi-hole's per-domain block gauge by mistake, so it showed DNS blocks, not isolations.)",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -104,7 +104,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ips_active_blocks",
+                        "expr": "count(max by (device) (home_ids_ips_tarpit_active == 1 or home_ids_ips_router_isolated_active == 1)) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -167,8 +167,8 @@
         "kind": "Panel",
         "spec": {
           "id": 1001,
-          "title": "📜 High-Priority Security Alerts (Live Timeline)",
-          "description": "A live, scrolling feed of every alert the engine has classified as verdict = CONFIRMED_THREAT (i.e. NOT suppressed by the false-positive engine). This is your primary 'what just happened' feed. Each row is one evaluated alert with its full evidence JSON. Sourced from alerts.json via Loki job=\"home_ids_alerts\".",
+          "title": "📜 Alerts That Reached You (HIGH / CRITICAL, not suppressed)",
+          "description": "Live feed of the alerts that actually passed every gate and were published to you: the Argus decision engine rated them HIGH or CRITICAL and the false-positive engine did NOT suppress them. Expand a row for the full evidence. A quiet feed is the normal, healthy state. The previous version filtered on a 'verdict' field that no longer exists, so it had been empty.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -185,9 +185,9 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} | json | verdict=\"CONFIRMED_THREAT\"",
-                        "format": "table",
-                        "instant": false
+                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | suppressed!=\"true\" | hee_decision_path=~\"hard_stop|hypothesis_high|tier5_confirmed|tier5_corroborated|geofence_uncorroborated|suricata_uncorroborated\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\"",
+                        "queryType": "range",
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -242,8 +242,8 @@
         "kind": "Panel",
         "spec": {
           "id": 11,
-          "title": "Lifetime Threats Blocked",
-          "description": "Lifetime running total of domains Pi-hole has sinkholed on Home-IDS's instruction (Layer 7 / DNS containment, metric sum(home_ids_ips_pihole_blocks_total) -- the old aggregate counter this used to read was declared but never actually incremented anywhere in the codebase, so this panel always silently showed zero regardless of real activity; summing the real per-device counter is the first time this number has ever been accurate). This mitigation layer fires immediately and autonomously the moment a threat is confirmed, regardless of the interactive_blocking_enabled setting — DNS blocking is never gated behind Telegram approval. See the new 'Pi-hole Sinkhole Rate' panel further down for the trend.",
+          "title": "Domains Sinkholed (selected range)",
+          "description": "How many new domain blocks Home-IDS sent to Pi-hole (DNS sinkholing, Layer 7) during the time range picked at the top of the dashboard. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total. For what is blocked right now, see 'Active Pi-Hole Blocks' on the System Tuning, Healing & Health dashboard.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -260,7 +260,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_ips_pihole_blocks_total)",
+                        "expr": "sum(increase(home_ids_ips_pihole_blocks_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -319,8 +319,8 @@
         "kind": "Panel",
         "spec": {
           "id": 12,
-          "title": "Total Alerts Triaged",
-          "description": "Lifetime count of alerts that crossed detection_engine.alert_threshold (6.0) and were sent through the full evaluation pipeline, whether they ended up confirmed or suppressed as false positives.",
+          "title": "Alerts Evaluated (selected range)",
+          "description": "How many candidate alerts the engine wrote to alerts.json during the selected time range. This covers every candidate, including low-risk 'monitor'-level ones, so it is much larger than the number of alerts that actually reach you on Telegram (see 'Alerts That Reached You' below). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -337,7 +337,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_alerts_total",
+                        "expr": "sum(increase(home_ids_alerts_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -1087,7 +1087,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way.\n\n⚠️ **One-time setup for the Isolate/Release buttons on the `hostname` column:** these links point at `192.168.1.94:8010` (the IDS server's IPC port) — edit them once if your server's LAN IP is different. They also need a real API token: open this panel → Edit → Overrides → the `hostname` field → Data links, and replace `PASTE_YOUR_API_SECRET_TOKEN_HERE` in both URLs with the value of `API_SECRET_TOKEN` from your server's `.env` file. Without a real token they'll fail with `403 Invalid or missing API Token` — the server only skips this check for requests from its own loopback address, and a browser tab open on another machine (like this one) never counts as loopback.",
+                "content": "**The bird's-eye view of your entire home.**\n\nEach row is a device. The columns are different AI and heuristic checks. If a column turns **red**, that device is acting suspiciously in that specific way.\n\n⚠️ **One-time setup for the Isolate/Release buttons on the `hostname` column:** these links use the **ids_api** box at the top of this dashboard (the IDS server's IPC address, e.g. `http://<server-ip>:8010`) — change it there if your server's LAN IP is different. They also need a real API token: open this panel → Edit → Overrides → the `hostname` field → Data links, and replace `PASTE_YOUR_API_SECRET_TOKEN_HERE` in both URLs with the value of `API_SECRET_TOKEN` from your server's `.env` file. Without a real token they'll fail with `403 Invalid or missing API Token` — the server only skips this check for requests from its own loopback address, and a browser tab open on another machine (like this one) never counts as loopback.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -1124,7 +1124,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "Check the counters below to see how many threats were neutralized today.",
+                "content": "How much has Home-IDS actively stopped? The counters below cover the **time range selected at the top-right**, not just today.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -3232,12 +3232,12 @@
                           {
                             "targetBlank": true,
                             "title": "🛡️ Isolate Device (Router & Tarpit)",
-                            "url": "http://192.168.1.94:8010/api/ipc/block_get?target=${__data.fields.hostname}&token=PASTE_YOUR_API_SECRET_TOKEN_HERE"
+                            "url": "${ids_api}/api/ipc/block_get?target=${__data.fields.Hostname}&token=PASTE_YOUR_API_SECRET_TOKEN_HERE"
                           },
                           {
                             "targetBlank": true,
                             "title": "✅ Release Device (Un-Block)",
-                            "url": "http://192.168.1.94:8010/api/ipc/release_get?target=${__data.fields.hostname}&token=PASTE_YOUR_API_SECRET_TOKEN_HERE"
+                            "url": "${ids_api}/api/ipc/release_get?target=${__data.fields.Hostname}&token=PASTE_YOUR_API_SECRET_TOKEN_HERE"
                           }
                         ]
                       }
@@ -3275,7 +3275,7 @@
                   "showLineNumbers": false,
                   "showMiniMap": false
                 },
-                "content": "### Welcome — start here\n\nThis is one of **4 linked dashboards**. Use the links at the top-right of every dashboard (or the corner **Navigation** menu) to jump between them:\n\n1. **Overview** (this page) — is the system healthy, and what's the current threat picture across your whole network?\n2. **Threat Landscape** — where is the threat coming from (countries, C2, DNS tunneling, scanning)?\n3. **Device Deep Dive** — pick one device and see its full history.\n4. **System Tuning, Healing & Health** — how the AI is tuning itself, what it's silently suppressed, and whether the engine process itself is healthy.\n\n**What the colors mean:** Look at the **Verdict** column first — that's the engine's actual decision: 🟢 BENIGN → 🟡 ANOMALOUS → 🟠 SUSPICIOUS → 🔴 HIGH → ⚫ CRITICAL. HIGH and CRITICAL are the states that can trigger automatic mitigation. **Verdict Confidence** next to it is a separate signal, shown in blue (○ Low → ◔ Moderate → ◑ High → ● Very High) so it's never mistaken for a second danger score — it tells you how certain the engine is in that Verdict, not how dangerous the device is. A HIGH or CRITICAL Verdict paired with only Low Confidence is unusual and worth a second look, not a contradiction: they measure different things.\n\n**If you see a 🔴 HIGH or ⚫ CRITICAL device:** open its row link to go to Device Deep Dive, read the Kill-Chain Phase and which specific signals fired (TI/AbuseIPDB/VirusTotal flags = reputation, Port Scans/Lateral Moves = it's attacking other devices, Outbound Bytes spike = possible data exfiltration). If `interactive_blocking_enabled` is on, you'll get a Telegram prompt to approve isolation; DNS sinkholing (Pi-hole) has already happened automatically regardless. Use the Isolate/Release links on the Hostname column to act immediately without waiting for Telegram.",
+                "content": "### Welcome — start here\n\nThis is one of **5 linked dashboards**. Use the links at the top-right of every dashboard (or the corner **Navigation** menu) to jump between them:\n\n1. **Overview** (this page) — is the system healthy, and what's the current threat picture across your whole network?\n2. **Threat Landscape** — where is the threat coming from (countries, C2, DNS tunneling, scanning)?\n3. **Device Deep Dive** — pick one device and see its full history.\n4. **Autonomous Behavior & Self-Learning** — how the system tunes and heals itself, and whether you can trust what it does unattended.\n5. **System Tuning, Healing & Health** — what's isolated right now, what the false-positive engine suppressed, and whether the engine process itself is healthy.\n\n**What the colors mean:** Look at the **Verdict** column first — that's the engine's actual decision: 🟢 BENIGN → 🟡 ANOMALOUS → 🟠 SUSPICIOUS → 🔴 HIGH → ⚫ CRITICAL. HIGH and CRITICAL are the states that can trigger automatic mitigation. **Verdict Confidence** next to it is a separate signal, shown in blue (○ Low → ◔ Moderate → ◑ High → ● Very High) so it's never mistaken for a second danger score — it tells you how certain the engine is in that Verdict, not how dangerous the device is. A HIGH or CRITICAL Verdict paired with only Low Confidence is unusual and worth a second look, not a contradiction: they measure different things.\n\n**If you see a 🔴 HIGH or ⚫ CRITICAL device:** open its row link to go to Device Deep Dive, read the Kill-Chain Phase and which specific signals fired (TI/AbuseIPDB/VirusTotal flags = reputation, Port Scans/Lateral Moves = it's attacking other devices, Outbound Bytes spike = possible data exfiltration). If `interactive_blocking_enabled` is on, you'll get a Telegram prompt to approve isolation; DNS sinkholing (Pi-hole) has already happened automatically regardless. Use the Isolate/Release links on the Hostname column to act immediately without waiting for Telegram.",
                 "mode": "markdown"
               },
               "fieldConfig": {
@@ -3291,7 +3291,7 @@
         "spec": {
           "id": 2002,
           "title": "📈 Alerts Triaged Over Time",
-          "description": "Trend view of home_ids_alerts_total (same counter as the 'Total Alerts Triaged' tile above, shown as a rate so you can see whether alert volume is rising, falling, or spiking — a sudden spike is worth investigating even if each individual alert looks minor).",
+          "description": "Trend of the counter behind 'Alerts Evaluated' above, as alerts per minute across the whole network. A sudden spike is worth a look even if each alert looks harmless on its own.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -3308,9 +3308,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "rate(home_ids_alerts_total[5m]) * 60",
+                        "expr": "sum(rate(home_ids_alerts_total[5m])) * 60",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "candidate alerts / min"
                       }
                     },
                     "refId": "A",
@@ -3410,9 +3411,10 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(rate(home_ids_ips_pihole_blocks_total[5m])) * 60",
+                        "expr": "sum(rate(home_ids_ips_pihole_blocks_total[5m])) * 60 or vector(0)",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "domain blocks / min"
                       }
                     },
                     "refId": "A",
@@ -4035,18 +4037,6 @@
         "targetBlank": false,
         "includeVars": true,
         "keepTime": true
-      },
-      {
-        "title": "🔍 Go to Transparency",
-        "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
-        "tags": [],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
       }
     ],
     "liveNow": true,
@@ -4145,6 +4135,21 @@
           "multi": true,
           "includeAll": true,
           "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "TextVariable",
+        "spec": {
+          "name": "ids_api",
+          "label": "IDS API",
+          "description": "Base URL of the Home-IDS IPC API used by the Isolate/Release links, e.g. http://<server-ip>:8010",
+          "current": {
+            "text": "http://192.168.77.94:8010",
+            "value": "http://192.168.77.94:8010"
+          },
+          "query": "http://192.168.77.94:8010",
+          "hide": "dontHide",
+          "skipUrlSync": false
         }
       }
     ]

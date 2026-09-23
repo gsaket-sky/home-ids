@@ -88,7 +88,7 @@
         "spec": {
           "id": 10,
           "title": "📜 Device Specific Alert Log",
-          "description": "Every alert Loki has logged that mentions this device (matched on hostname substring against the alerts.json stream). This is your full forensic timeline for the device selected above — read top-to-bottom (newest first) to reconstruct exactly what happened and when.",
+          "description": "Every candidate alert for the device(s) picked in the 'device' box, newest first, published or not. 'decision' = the Argus engine's reasoning path; 'fp_verdict' = only the false-positive filter's opinion (CONFIRMED_THREAT there means 'not judged a false positive', not 'confirmed attack'). Previously a text search for the device name, which broke when 'All' or several devices were selected.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -105,9 +105,9 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} |= \"$device\" | json",
-                        "format": "table",
-                        "instant": false
+                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | device_hostname=~\"$device\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\"",
+                        "queryType": "range",
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -179,7 +179,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}"
+                        "expr": "home_ids_anomaly_confidence{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -279,7 +280,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}"
+                        "expr": "home_ids_markov_anomaly_score{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -379,7 +381,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_query_rate{hostname=~\"$device\"}"
+                        "expr": "home_ids_query_rate{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -479,7 +482,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_entropy_avg{hostname=~\"$device\"}"
+                        "expr": "home_ids_entropy_avg{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -579,7 +583,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_zscore_query_rate{hostname=~\"$device\"}"
+                        "expr": "home_ids_zscore_query_rate{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -679,7 +684,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_beaconing_volume_score{hostname=~\"$device\"}"
+                        "expr": "home_ids_beaconing_volume_score{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -779,7 +785,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}"
+                        "expr": "home_ids_jitter_cv_score{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -879,7 +886,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_killchain_phase{hostname=~\"$device\"}"
+                        "expr": "home_ids_killchain_phase{hostname=~\"$device\"}",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -962,7 +970,7 @@
         "spec": {
           "id": 4001,
           "title": "🎯 Verdict Confidence Over Time",
-          "description": "This device's live Verdict Confidence (0.0-1.0) -- how certain the engine is in whatever decision-engine verdict it currently holds for this device, set alongside the Verdict itself in decision_engine.py (e.g. a hard-stop match is both severe AND near-certain, ~0.95-1.0; an unconfirmed reputation hit is moderate on both, ~0.40-0.45). The colored bands (shown in blue, not the traffic-light colors Verdict uses) mirror the Verdict Confidence column on the Main Overview ledger: ○ 0-0.39 Low / ◔ 0.4-0.59 Moderate / ◑ 0.6-0.79 High / ● 0.8-1.0 Very High. This is NOT the same as the engine's alert_threshold=6.0, which gates a separate 0-10 aggregate risk score used internally to decide whether to evaluate an alert at all -- containment is driven by the device's Verdict/decision path, not by this confidence value crossing any fixed line.",
+          "description": "This device's live Verdict Confidence (0.0-1.0) -- how certain the engine is in whatever decision-engine verdict it currently holds for this device, set alongside the Verdict itself in the Argus decision engine (argus/decision/engine.py) (e.g. a hard-stop match is both severe AND near-certain, ~0.95-1.0; an unconfirmed reputation hit is moderate on both, ~0.40-0.45). The colored bands (shown in blue, not the traffic-light colors Verdict uses) mirror the Verdict Confidence column on the Main Overview ledger: ○ 0-0.39 Low / ◔ 0.4-0.59 Moderate / ◑ 0.6-0.79 High / ● 0.8-1.0 Very High. This is NOT the same as the engine's alert_threshold=6.0, which gates a separate 0-10 aggregate risk score used internally to decide whether to evaluate an alert at all -- containment is driven by the device's Verdict/decision path, not by this confidence value crossing any fixed line.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -981,7 +989,8 @@
                       "spec": {
                         "expr": "home_ids_threat_confidence{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1098,7 +1107,8 @@
                       "spec": {
                         "expr": "home_ids_ti_risk{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "TI · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1118,7 +1128,8 @@
                       "spec": {
                         "expr": "home_ids_abuseipdb_risk{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "AbuseIPDB · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -1138,7 +1149,8 @@
                       "spec": {
                         "expr": "home_ids_virustotal_risk{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "VirusTotal · {{hostname}}"
                       }
                     },
                     "refId": "C",
@@ -1355,7 +1367,8 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "noValue": "Uses global value"
                 },
                 "overrides": []
               }
@@ -1586,7 +1599,8 @@
                         "color": "green"
                       }
                     ]
-                  }
+                  },
+                  "noValue": "Uses global default"
                 },
                 "overrides": []
               }
@@ -1806,7 +1820,7 @@
                         "expr": "home_ids_query_rate_baseline_mean{hostname=~\"$device\"}",
                         "format": "time_series",
                         "instant": false,
-                        "legendFormat": "baseline mean"
+                        "legendFormat": "baseline mean · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1827,7 +1841,7 @@
                         "expr": "home_ids_query_rate_threshold_limit{hostname=~\"$device\"}",
                         "format": "time_series",
                         "instant": false,
-                        "legendFormat": "live threshold"
+                        "legendFormat": "live threshold · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -1908,8 +1922,8 @@
         "kind": "Panel",
         "spec": {
           "id": 4012,
-          "title": "Identity Merges (Lifetime)",
-          "description": "home_ids_identity_merges_total -- how many times this device's fragmented identity has self-healed (an orphan device_id folded back into this canonical one).",
+          "title": "Identity Merges (selected range)",
+          "description": "home_ids_identity_merges_total -- how many times this device's fragmented identity has self-healed (an orphan device_id folded back into this canonical one). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1926,7 +1940,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_merges_total{hostname=~\"$device\"})",
+                        "expr": "sum(increase(home_ids_identity_merges_total{hostname=~\"$device\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -1985,8 +1999,8 @@
         "kind": "Panel",
         "spec": {
           "id": 4013,
-          "title": "Re-ID Migrations (Lifetime)",
-          "description": "home_ids_identity_reidentify_migrations_total -- MAC-rotation re-identifications this device has been through.",
+          "title": "Re-ID Migrations (selected range)",
+          "description": "home_ids_identity_reidentify_migrations_total -- MAC-rotation re-identifications this device has been through. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2003,7 +2017,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_reidentify_migrations_total{hostname=~\"$device\"})",
+                        "expr": "sum(increase(home_ids_identity_reidentify_migrations_total{hostname=~\"$device\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2062,8 +2076,8 @@
         "kind": "Panel",
         "spec": {
           "id": 4014,
-          "title": "Re-ID Ambiguous (Lifetime)",
-          "description": "home_ids_identity_reidentify_ambiguous_total for this device -- unresolved re-identify candidates needing a reactive capture to resolve.",
+          "title": "Re-ID Ambiguous (selected range)",
+          "description": "home_ids_identity_reidentify_ambiguous_total for this device -- unresolved re-identify candidates needing a reactive capture to resolve. Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2080,7 +2094,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_identity_reidentify_ambiguous_total{hostname=~\"$device\"})",
+                        "expr": "sum(increase(home_ids_identity_reidentify_ambiguous_total{hostname=~\"$device\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2339,7 +2353,7 @@
         "kind": "Panel",
         "spec": {
           "id": 4017,
-          "title": "This Device's ML Model Lifecycle",
+          "title": "ML Model Lifecycle (ALL devices, not filtered by the device box)",
           "description": "home_ids_ml_warmup_completions_total / _retrain_events_total / _poisoning_rejections_total / _model_invalidations_total -- NOT filterable by hostname (these only carry a bare device_id label); each series here is grouped by device_id instead, so this device's own device_id (visible in the Master Threat Ledger) picks it out of the legend.",
           "links": [],
           "data": {
@@ -2504,7 +2518,7 @@
         "kind": "Panel",
         "spec": {
           "id": 4018,
-          "title": "Transfer-Learning Peer-Seed Count (by Device Type)",
+          "title": "Transfer-Learning Seeds, all device types (selected range)",
           "description": "home_ids_transfer_learning_seeds_total -- this is device_type-level, NOT this exact device: it only fires once, at a NEW device's creation, keyed by device_type rather than device_id. Shown here as the fleet-wide total across all device types for reference; check the boot log for this specific device's own seeding event.",
           "links": [],
           "data": {
@@ -2522,7 +2536,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_transfer_learning_seeds_total)",
+                        "expr": "sum(increase(home_ids_transfer_learning_seeds_total[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2581,8 +2595,8 @@
         "kind": "Panel",
         "spec": {
           "id": 4019,
-          "title": "Device-Type Reclassifications (Lifetime)",
-          "description": "home_ids_device_type_reclassifications_total for this device -- how many times its inferred type has changed (e.g. the cold-start 'laptop' fallback replaced once a real hostname resolved).",
+          "title": "Device-Type Reclassifications (selected range)",
+          "description": "home_ids_device_type_reclassifications_total for this device -- how many times its inferred type has changed (e.g. the cold-start 'laptop' fallback replaced once a real hostname resolved). Counts come from a Prometheus counter that restarts at 0 whenever the engine restarts, so this shows the change within the dashboard's selected time range rather than an all-time total.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2599,7 +2613,7 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "sum(home_ids_device_type_reclassifications_total{hostname=~\"$device\"})",
+                        "expr": "sum(increase(home_ids_device_type_reclassifications_total{hostname=~\"$device\"}[$__range])) or vector(0)",
                         "format": "time_series",
                         "instant": true
                       }
@@ -2659,7 +2673,7 @@
         "spec": {
           "id": 4020,
           "title": "Retro-Hunt Findings (Lifetime)",
-          "description": "home_ids_retro_hunt_findings_by_device for this device.",
+          "description": "⚠️ FROZEN since 09-21: this number is left over from the retired retro_hunter job. Its replacement (live_retro_hunter) records its own findings, but those aren't exported to Prometheus yet. It needs a small code change in core/metrics_sync.py.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -2792,7 +2806,8 @@
                       "spec": {
                         "expr": "home_ids_blocked_ratio{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "blocked · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -2812,7 +2827,8 @@
                       "spec": {
                         "expr": "home_ids_nxdomain_ratio{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "NXDOMAIN · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -2914,7 +2930,8 @@
                       "spec": {
                         "expr": "home_ids_unique_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "unique · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -2934,7 +2951,8 @@
                       "spec": {
                         "expr": "home_ids_new_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "new · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -2954,7 +2972,8 @@
                       "spec": {
                         "expr": "home_ids_deep_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "deep · {{hostname}}"
                       }
                     },
                     "refId": "C",
@@ -3056,7 +3075,8 @@
                       "spec": {
                         "expr": "home_ids_suspicious_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "suspicious · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -3076,7 +3096,8 @@
                       "spec": {
                         "expr": "home_ids_nxdomain_tld_concentration{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "NXDOMAIN-TLD conc. · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -3178,7 +3199,8 @@
                       "spec": {
                         "expr": "home_ids_zscore_blocked_ratio{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "blocked z · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -3198,7 +3220,8 @@
                       "spec": {
                         "expr": "home_ids_zscore_nxdomain_ratio{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "NXDOMAIN z · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -3218,7 +3241,8 @@
                       "spec": {
                         "expr": "home_ids_zscore_suspicious_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "suspicious z · {{hostname}}"
                       }
                     },
                     "refId": "C",
@@ -3238,7 +3262,8 @@
                       "spec": {
                         "expr": "home_ids_zscore_unique_domains{hostname=~\"$device\"}",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "unique z · {{hostname}}"
                       }
                     },
                     "refId": "D",
@@ -3946,18 +3971,6 @@
         "icon": "external link",
         "tooltip": "🤖 Go to Autonomous Behavior",
         "url": "/d/home_ids_v3_autonomous",
-        "tags": [],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🔍 Go to Transparency",
-        "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,

@@ -105,7 +105,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_zeek_ja4_malicious"
+                        "expr": "home_ids_zeek_ja4_malicious",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -187,8 +188,8 @@
         "kind": "Panel",
         "spec": {
           "id": 11,
-          "title": "📜 Global Threat Events (Live Stream)",
-          "description": "Live feed of confirmed-threat and false-positive verdicts across your whole network (not filtered to one device). Use this to spot patterns across multiple devices at once — e.g. several devices suddenly hitting the same malicious domain usually means a compromised router, a malicious ad network, or a supply-chain issue in a shared app, not several independent infections.",
+          "title": "📜 All Evaluated Alerts (Live Stream, whole network)",
+          "description": "Every candidate alert across the whole network, published or not, with the decision and the false-positive engine's call. Use it to spot patterns across devices, e.g. several devices hitting the same domain. Read the columns like this: 'decision' is the Argus engine's reasoning path (hypothesis_high, hard_stop and similar mean it reached HIGH/CRITICAL). 'fp_verdict' is only the false-positive filter's opinion: CONFIRMED_THREAT there means 'not judged a false positive', NOT 'confirmed attack'. The previous version filtered on a removed 'verdict' field, so it had been empty.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -205,9 +206,9 @@
                         "name": "${LOKI_DS}"
                       },
                       "spec": {
-                        "expr": "{job=\"home_ids_alerts\"} | json | verdict=~\"CONFIRMED_THREAT|FALSE_POSITIVE\"",
-                        "format": "table",
-                        "instant": false
+                        "expr": "{job=\"home_ids_alerts\"} | json | type=\"ids_alert\" | json host=\"device.hostname\", ip=\"device.ip\", signature=\"signature\", risk=\"risk\", decision=\"hee_decision_path\", fp_stage=\"fp_verdict.stage\", fp_verdict=\"fp_verdict.verdict\", fp_confidence=\"fp_verdict.confidence\", domain=\"network_context.queried_domain\", dest_ip=\"network_context.destination_ip\"",
+                        "queryType": "range",
+                        "format": "table"
                       }
                     },
                     "refId": "A",
@@ -411,8 +412,8 @@
         "kind": "Panel",
         "spec": {
           "id": 3,
-          "title": "Threat Intel IOC Hits",
-          "description": "Cumulative count of connections that matched a known Indicator of Compromise (malicious IP/domain) from OTX, AbuseIPDB, or VirusTotal. This is reputation-based detection — it catches known-bad infrastructure even before Home-IDS's own behavioral models would flag it.",
+          "title": "Threat Intel IOC Hits (per hour, by feed)",
+          "description": "Connections that matched a known-bad IP/domain on a threat-intel feed, counted per rolling hour and split by which feed matched. Reputation-based: it catches known-bad infrastructure before Home-IDS's own behavior models would. (Previously plotted the raw counter, which drops to 0 on every restart.)",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -429,7 +430,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_ti_ioc_hits_total"
+                        "expr": "sum by (source) (increase(home_ids_ti_ioc_hits_total[1h]))",
+                        "legendFormat": "{{source}}"
                       }
                     },
                     "refId": "A",
@@ -529,7 +531,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_beaconing_c2_count"
+                        "expr": "home_ids_beaconing_c2_count",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -648,7 +651,7 @@
         "kind": "Panel",
         "spec": {
           "id": 6,
-          "title": "Lateral Movement Events",
+          "title": "Lateral Movement Events (per hour)",
           "description": "Zeek-detected S0 (unanswered) / REJ (rejected) TCP connection attempts against multiple internal hosts — the classic signature of a device scanning your LAN for other vulnerable machines. This is almost always a sign a device is already compromised and looking for its next target.",
           "links": [],
           "data": {
@@ -666,7 +669,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_zeek_lateral_events_total"
+                        "expr": "sum(increase(home_ids_zeek_lateral_events_total[1h])) or vector(0)",
+                        "legendFormat": "lateral-movement events / hour"
                       }
                     },
                     "refId": "A",
@@ -736,7 +740,8 @@
                       "group": "A",
                       "mode": "none"
                     }
-                  }
+                  },
+                  "noValue": "0"
                 },
                 "overrides": []
               }
@@ -748,7 +753,7 @@
         "kind": "Panel",
         "spec": {
           "id": 7,
-          "title": "Honeypot Probes",
+          "title": "Honeypot Probes (per hour)",
           "description": "Connection attempts to your configured honeypot IP(s) (network_and_devices.honeypot_ips in config.yaml). Only meaningful if you've actually deployed a decoy listener there (see INSTALL.md Step 3.6) — but if you have, ANY hit here is a near-certain compromise signal, since nothing legitimate on your network should ever contact a honeypot.",
           "links": [],
           "data": {
@@ -766,7 +771,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_honeypot_probes_total"
+                        "expr": "sum(increase(home_ids_honeypot_probes_total[1h])) or vector(0)",
+                        "legendFormat": "honeypot probes / hour"
                       }
                     },
                     "refId": "A",
@@ -836,7 +842,8 @@
                       "group": "A",
                       "mode": "none"
                     }
-                  }
+                  },
+                  "noValue": "0"
                 },
                 "overrides": []
               }
@@ -903,7 +910,8 @@
                         "name": "${PROMETHEUS_DS}"
                       },
                       "spec": {
-                        "expr": "home_ids_zeek_ja3_malicious"
+                        "expr": "home_ids_zeek_ja3_malicious",
+                        "legendFormat": "{{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1114,7 +1122,8 @@
                       "spec": {
                         "expr": "home_ids_entropy_avg",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "entropy · {{hostname}}"
                       }
                     },
                     "refId": "A",
@@ -1134,7 +1143,8 @@
                       "spec": {
                         "expr": "home_ids_beaconing_c2_count",
                         "format": "time_series",
-                        "instant": false
+                        "instant": false,
+                        "legendFormat": "C2 beacons · {{hostname}}"
                       }
                     },
                     "refId": "B",
@@ -1705,18 +1715,6 @@
         "icon": "external link",
         "tooltip": "🤖 Go to Autonomous Behavior",
         "url": "/d/home_ids_v3_autonomous",
-        "tags": [],
-        "asDropdown": false,
-        "targetBlank": false,
-        "includeVars": true,
-        "keepTime": true
-      },
-      {
-        "title": "🔍 Go to Transparency",
-        "type": "link",
-        "icon": "external link",
-        "tooltip": "🔍 Go to Transparency",
-        "url": "/d/home_ids_v3_transparency",
         "tags": [],
         "asDropdown": false,
         "targetBlank": false,
