@@ -491,6 +491,30 @@ archive_network_activity_backup: false
 # (src/argus/ops/zeek_log_prune.py) for the full incident this closes.
 zeek_log_retention_days: 14
 
+# disk_budget_* -- explicit user decision (2026-09-23, extended same day to
+# cover the whole stack, not just this project's own writes): total disk usage
+# across EVERY subsystem on the box -- this project's own graph DB/state files,
+# Zeek, Suricata, Prometheus, Loki/Promtail, Grafana, the Cowrie honeypot, and
+# fritzbox capture data -- must never exceed a hard 20GB ceiling, regardless of
+# device count or traffic pattern. The keys below only cover the two pieces
+# that had no retention mechanism of their own (this project's graph DB, and
+# Zeek's raw logs -- both enforced by the disk_budget_governor scheduled job,
+# src/argus/ops/disk_budget_governor.py, see its own module docstring for the
+# full whole-stack budget table and the design reasoning). Every other
+# subsystem now has its OWN native retention/size cap instead of a duplicate
+# Python mechanism here: Prometheus (--storage.tsdb.retention.size=2GB, in
+# /etc/default/prometheus), Loki (compactor + retention_period=336h, in
+# /etc/loki/config.yml), Suricata (pre-existing logrotate, 14 rotations),
+# Cowrie (docker-compose.yml logging.options max-size=10m/max-file=3). The two
+# sub-budgets below don't need to sum to disk_budget_total_gb -- see the
+# governor's own docstring for the full allocation across every subsystem and
+# the intentional unallocated buffer.
+disk_budget_enabled: true
+disk_budget_total_gb: 20.0
+disk_budget_graph_db_gb: 9.0
+disk_budget_zeek_logs_gb: 3.0
+disk_budget_state_files_gb: 1.5
+
 
 # -----------------------------------------------------------------------------
 # geofencing — block traffic to specific countries by GeoIP
@@ -947,6 +971,21 @@ scheduled_jobs:
       priority: 1  # highest urgency -- unbounded evidence-table growth is a real, already-seen failure mode without it
       pausable: false  # wraps its whole ~120s SELECT+chunked-DELETE in ONE transaction -- SIGSTOP risks holding the write lock past the live engine's own 10s busy_timeout
       max_runtime_minutes: 30
+
+    # Disk-budget governor (2026-09-23, explicit user requirement: total disk usage
+    # must never exceed a hard ceiling -- see disk_budget_governor.py's own module
+    # docstring for the full design). Runs 15 minutes after live_prune above so it
+    # always measures the POST-prune size before deciding whether extra trimming
+    # is needed -- age-based retention is still the primary mechanism; this is
+    # only a backstop for installations whose real traffic doesn't fit the
+    # configured budget at the default retention windows.
+    disk_budget_governor:
+      enabled: true
+      cron: "30 3 * * *"
+      script: "../argus/ops/disk_budget_governor.py"
+      priority: 1
+      pausable: false  # same reasoning as live_prune -- SIGSTOP mid-trim risks holding the write lock
+      max_runtime_minutes: 20
 
     # Data-lifecycle retuning (2026-09-20) -- split out of live_prune above onto
     # its own tight cadence: zeek_notice_weak's documented 12h retention was only

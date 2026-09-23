@@ -13,6 +13,84 @@ Standing requirement this audit is scored against (explicit user instruction):
 space always clean."** Anything that only exports-then-keeps-forever is flagged as
 still-unbounded, same as anything with no cleanup at all.
 
+## Addendum (2026-09-23, same day): hard 20GB whole-stack budget
+
+Explicit user requirement, superseding the "budget your own headroom" framing
+above: **total disk usage across the ENTIRE security/monitoring stack — not
+just this project's own writes — must never exceed 20GB**, regardless of
+device count or traffic pattern ("trim everything, delete everything around
+this max capacity... this also goes for all subsystems included: Suricata,
+Zeek, Grafana, Prometheus, Loki/Promtail, fritzbox capture data").
+
+**Real measured data corrected the earlier capacity estimate significantly.**
+Direct measurement of `.94`'s live graph DB (`dbstat`, 46,994 decisions/37.1
+days, 962,435 edges, 180,382 evidence rows) found real per-row costs far below
+what the original Phase-4-style projection assumed:
+
+| | Old doc's assumption | Real measured (.94, 2026-09-23) |
+|---|---|---|
+| decisions | ~41KB/row | **14.3KB/row** (2.9x smaller) |
+| evidence (+indexes) | ~1KB/row | **390 bytes/row** (2.6x smaller) |
+| edges (+indexes) | ~240 bytes/row | **254 bytes/row** (confirmed accurate) |
+| edges/decision | up to 2×cap+2 (worst case) | **~12.8 average** (most decisions don't hit the cap) |
+
+At 100 devices, 365d/90d retention now projects to **~16GB** for the graph DB
+alone (not 35-71GB) — a much more favorable picture. Still, a fixed
+day-count can't *guarantee* a hard ceiling for every installation (heavier
+traffic, more devices, algorithmic changes), so a **size-driven backstop**
+was built on top of the existing age-based retention rather than just
+re-tuning the day-counts (which would only be correct for this one
+household's current traffic).
+
+### Design: age-based retention (primary) + size-driven governor (backstop)
+
+`src/argus/ops/disk_budget_governor.py` (new scheduled job, runs 15 min after
+`live_prune.py`) measures REAL on-disk size and, only if still over its
+budget after the normal daily prune, trims further:
+- Targets the oldest rows first (`GraphStore.get_decisions_batch_cutoff()` /
+  `get_evidence_batch_cutoff()`), reusing the existing, already-tested
+  cascade-delete methods rather than duplicating that logic.
+- **Absolute safety floors, never violated regardless of budget pressure**:
+  decisions ≥30 days, evidence ≥7 days, Zeek logs ≥3 days. If still over
+  budget once every floor is hit, it logs an ERROR (raise the budget or add
+  storage) rather than silently exceeding the ceiling OR silently deleting
+  below a safe minimum audit window.
+- **Real space reclamation, not just row deletion**: SQLite's `DELETE` alone
+  never shrinks a file on disk — freed pages just become reusable within the
+  same file. `GraphStore.enable_incremental_vacuum()` (one-time conversion to
+  `auto_vacuum=INCREMENTAL`) + `incremental_vacuum_step()` (small, bounded
+  ~16MB/step reclaims) actually shrink the file, without the freeze risk a
+  full `VACUUM` carries (this project has fought multiple severe pipeline-
+  freeze incidents this same month from exactly that class of blocking I/O).
+- **WAL truncation**: `.94`'s real WAL was measured at 805MB (almost as large
+  as the 1.06GB main file) — `checkpoint_wal_truncate()` (`PRAGMA
+  wal_checkpoint(TRUNCATE)`, a short-lived-connection-only operation, not run
+  by the long-lived `live_engine.py` singleton) now runs every governor pass.
+- Same logic, filesystem-only, for Zeek's dated log directories (oldest day
+  deleted first, `current` symlink never touched, 3-day floor).
+
+### Whole-stack budget table (as implemented)
+
+| Component | Budget | Mechanism |
+|---|---|---|
+| Graph DB (main+WAL) | 9.0GB | `disk_budget_governor.py` (new) |
+| Zeek raw logs | 3.0GB | `zeek_log_prune.py` (14d) + governor backstop |
+| Prometheus TSDB | 2.0GB | native `--storage.tsdb.retention.size=2GB` flag (added; was time-only, 7d) |
+| Loki | ~14 days | native `compactor` + `retention_period=336h` (added; had **zero** retention before — compactor wasn't even configured) |
+| Grafana | ~1.0GB | mostly static plugin code (~798MB) + its own small sqlite db (~27MB); no ongoing growth risk found |
+| Suricata | 0.5GB | pre-existing logrotate (14 rotations) — already adequate |
+| Cowrie honeypot | 0.03GB | docker-compose `logging.options` (`max-size=10m`, `max-file=3`) — was **completely unbounded** (`json-file` driver, no options set) before this |
+| Everything else in `state/` (incl. fritzbox capture) | 1.5GB | already capped per-file by this same day's earlier retention-audit fixes |
+| *(unallocated buffer)* | ~1.9GB | — |
+
+**One-time cleanup found but not yet done** (blocked by the platform's
+safety classifier on a live host — needs to be run directly): a stale 27MB
+`grafana.db.bak-preisolatefix-20260904T013827` backup from a 2026-09-04 fix,
+never cleaned up since:
+```
+ssh 192.168.77.94 "sudo rm -v /var/lib/grafana/grafana.db.bak-preisolatefix-20260904T013827"
+```
+
 ## Bottom line
 
 - Graph DB (`state/v13_graph.db`) steady-state at 50-100 devices over 10 years:

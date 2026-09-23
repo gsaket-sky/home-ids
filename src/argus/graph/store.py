@@ -2292,6 +2292,118 @@ class GraphStore:
         self._maybe_commit()
         return cur.rowcount
 
+    # --- disk-budget governor (2026-09-23): a size-driven backstop on top of the -----
+    # age-based retention above. Age-based windows (prune_evidence/
+    # prune_decisions_and_alerts) are the PRIMARY mechanism and stay unchanged --
+    # they're what keeps this running forever at a roughly steady size. But "roughly
+    # steady" still scales with device count and traffic pattern, which a single
+    # fixed day-count can't guarantee stays under an explicit hard disk ceiling for
+    # every installation (50 devices vs 100, light vs heavy traffic) -- exactly the
+    # "network/installation agnostic" concern this project treats as a standing
+    # design requirement. These methods let disk_budget_governor.py measure the
+    # REAL on-disk size and, only if it's still over budget after the normal daily
+    # prune already ran, shrink further by directly targeting "the oldest N rows
+    # still past an absolute safety floor" rather than guessing a day-count that
+    # happens to fit -- self-correcting against reality instead of an estimate.
+
+    def get_disk_usage_bytes(self) -> Dict[str, int]:
+        """Real on-disk bytes for the main db file + its WAL (self.db_path is the
+        main file's path; the WAL sits alongside it as db_path + "-wal"). This is
+        what disk_budget_governor.py measures against a configured ceiling --
+        row-count-based estimates can't account for SQLite's own overhead, index
+        size, or (critically) the fact that DELETE alone never shrinks the file,
+        only VACUUM/incremental_vacuum does."""
+        main_path = Path(self.db_path)
+        wal_path = main_path.with_name(main_path.name + "-wal")
+        main_bytes = main_path.stat().st_size if main_path.exists() else 0
+        wal_bytes = wal_path.stat().st_size if wal_path.exists() else 0
+        return {"main_bytes": main_bytes, "wal_bytes": wal_bytes, "total_bytes": main_bytes + wal_bytes}
+
+    def enable_incremental_vacuum(self) -> bool:
+        """One-time conversion to auto_vacuum=INCREMENTAL (mode 2). SQLite requires
+        a full VACUUM to actually change an existing database's auto_vacuum mode --
+        a no-op (returns False immediately) if already incremental, so this is safe
+        to call every governor run without repeating the conversion. Deliberately
+        NOT called automatically by anything in this codebase yet -- see
+        disk_budget_governor.py's own module docstring for why a human decides
+        when to run this the first time on an existing, populated database (the
+        one-time conversion VACUUM briefly locks the whole file, unlike the small
+        bounded incremental_vacuum_step() calls this unlocks going forward)."""
+        current_mode = self._conn.execute("PRAGMA auto_vacuum").fetchone()[0]
+        if current_mode == 2:
+            return False
+        self._conn.execute("PRAGMA auto_vacuum = INCREMENTAL")
+        self._conn.execute("VACUUM")
+        return True
+
+    def checkpoint_wal_truncate(self) -> bool:
+        """TRUNCATE-mode checkpoint: unlike checkpoint_wal()'s own PASSIVE mode
+        (safe for the long-lived live_engine.py singleton to call every cycle),
+        TRUNCATE actually shrinks the WAL file back down after moving its
+        content into the main db file -- real disk-usage reduction, not just
+        page reuse within the WAL. Found genuinely necessary, not speculative:
+        .94's real WAL was measured at 805MB (almost as large as the 1.06GB main
+        file) during this same audit -- PASSIVE checkpoints alone don't bound
+        WAL growth under sustained write load. Needs no conflicting reader/
+        writer holding the WAL to fully truncate; degrades to a partial/no-op
+        checkpoint (never raises, never blocks past this connection's own
+        busy_timeout) if one is -- meant for a short-lived connection
+        (disk_budget_governor.py's own), not the long-lived singleton, which
+        stays on the cheaper PASSIVE mode. Returns True if it completed without
+        a busy/locked result."""
+        try:
+            row = self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            # row is (busy, log_pages, checkpointed_pages) -- busy=0 means it fully succeeded
+            return bool(row) and row[0] == 0
+        except Exception as e:
+            LOGGER.warning("WAL truncate-checkpoint failed for %r (non-fatal): %s", self.db_path, e)
+            return False
+
+    def incremental_vacuum_step(self, pages: int = 2000) -> int:
+        """Reclaims up to `pages` freed pages back to the OS (shrinking the file
+        on disk), one small bounded step at a time -- unlike a full VACUUM, this
+        never rewrites the whole database, so it can run every governor cycle
+        without the freeze risk a full VACUUM carries on a live singleton
+        connection. No-op (returns 0) if auto_vacuum isn't INCREMENTAL yet, or if
+        there's nothing left to reclaim. Returns the free-list page count
+        remaining AFTER this step (0 means fully reclaimed for now)."""
+        if self._conn.execute("PRAGMA auto_vacuum").fetchone()[0] != 2:
+            return 0
+        # PRAGMA statements don't support "?" parameter binding -- `pages` is an
+        # internal int (never user/network input), safe to inline directly.
+        self._conn.execute(f"PRAGMA incremental_vacuum({int(pages)})")
+        self._maybe_commit()
+        remaining = self._conn.execute("PRAGMA freelist_count").fetchone()[0]
+        return remaining
+
+    def get_decisions_batch_cutoff(self, batch_size: int, min_age_days: float,
+                                     now: Optional[float] = None) -> Optional[float]:
+        """Returns the timestamp of the batch_size-th oldest decision that's still
+        older than min_age_days (the absolute safety floor -- never eligible for
+        budget-driven trimming regardless of how far over budget the db is), or
+        None if fewer than batch_size such rows exist. Feed the result into
+        prune_decisions_and_alerts(older_than_days=(now-result)/86400) to actually
+        delete that batch, reusing its existing, already-tested FK-safe cascade
+        rather than duplicating it here."""
+        floor_cutoff = (now if now is not None else time.time()) - min_age_days * 86400
+        row = self._conn.execute(
+            "SELECT timestamp FROM decisions WHERE timestamp < ? ORDER BY timestamp ASC LIMIT 1 OFFSET ?",
+            (floor_cutoff, max(0, batch_size - 1)),
+        ).fetchone()
+        return row["timestamp"] if row else None
+
+    def get_evidence_batch_cutoff(self, batch_size: int, min_age_days: float,
+                                    now: Optional[float] = None) -> Optional[float]:
+        """Same shape as get_decisions_batch_cutoff(), for evidence -- feed the
+        result into prune_evidence(older_than_days=...) to actually delete,
+        reusing its existing "still referenced by a recent decision" carve-out."""
+        floor_cutoff = (now if now is not None else time.time()) - min_age_days * 86400
+        row = self._conn.execute(
+            "SELECT timestamp FROM evidence WHERE timestamp < ? ORDER BY timestamp ASC LIMIT 1 OFFSET ?",
+            (floor_cutoff, max(0, batch_size - 1)),
+        ).fetchone()
+        return row["timestamp"] if row else None
+
     def prune_decisions_and_alerts(self, older_than_days: float = DEFAULT_DECISION_RETENTION_DAYS,
                                      now: Optional[float] = None) -> Dict[str, int]:
         """Deletes decisions (and everything the alert-trace graph hangs off
