@@ -2350,7 +2350,32 @@ class AutonomousFPEngine:
             self._save_device_fp_profiles()
             LOGGER.info("🔧 [FP ENGINE » DEVICE PROFILE] Discarded profile for %s.", device_id)
             device_profile_discards_total.labels(reason=reason).inc()
+        # BUGFIX (disk-retention audit): confirmed_threat_counts.json and
+        # fp_sigma_shifts.json are sibling per-device stores in this same class, but
+        # had no equivalent discard-on-merge/-prune hook -- they kept every device's
+        # entry forever, including devices merged away or aged out years ago.
+        self._discard_confirmed_counts(device_id)
+        self._discard_sigma_shift(device_id)
         return had_profile
+
+    def _discard_confirmed_counts(self, device_id: str) -> None:
+        with self._lock:
+            # Both the plain device_id key AND any "device_id||signature" scoped
+            # keys (see record_confirmed_threat()) belong to this device.
+            removed = self._confirmed_counts.pop(device_id, None) is not None
+            scoped_prefix = f"{device_id}||"
+            scoped_keys = [k for k in self._confirmed_counts if k.startswith(scoped_prefix)]
+            for k in scoped_keys:
+                del self._confirmed_counts[k]
+                removed = True
+        if removed:
+            self._save_confirmed_counts()
+
+    def _discard_sigma_shift(self, device_id: str) -> None:
+        with self._lock:
+            removed = self._sigma_shifts.pop(device_id, None) is not None
+        if removed:
+            self._save_sigma_shifts()
 
     def _load_device_fp_profiles(self):
         path = self._state_dir / "device_fp_profiles.json"

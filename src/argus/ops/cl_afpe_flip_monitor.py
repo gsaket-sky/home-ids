@@ -47,6 +47,7 @@ A veto or a failing regression test is notified once (a persisted bookmark stops
 "asked directly, declined" precedent already used throughout this project.
 """
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -61,6 +62,7 @@ from utils import write_job_health  # noqa: E402
 from argus.ops.telegram import send_telegram  # noqa: E402
 
 LOGGER_NAME = "cl_afpe_flip_monitor"
+LOGGER = logging.getLogger(LOGGER_NAME)
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 CONFIG_YAML_PATH = REPO_ROOT / "config.yaml"
 
@@ -208,6 +210,22 @@ def run_once(config: dict = None, monitor_state: dict = None) -> dict:
     summary = {"action": outcome["action"]}
 
     if outcome["action"] == "already_live":
+        # BUGFIX (disk-retention audit): check_bar() itself short-circuits on
+        # _current_engine_value() == "argus" WITHOUT ever reading the divergence
+        # log again -- once flipped, this file is permanently dead weight (it can
+        # never gate anything again), but nothing ever deleted the already-
+        # accumulated history. Safe to remove only here, gated on the SAME
+        # already_live check this job's own decision logic uses, and only once
+        # (monitor_state flag) so this doesn't re-attempt every run forever.
+        if not monitor_state.get("divergence_log_cleaned_up"):
+            try:
+                log_path = state_dir / DIVERGENCE_LOG_FILENAME
+                if log_path.exists():
+                    log_path.unlink()
+                    LOGGER.info("CL-AFPE already live -- removed the now-unused %s.", log_path)
+            except Exception as exc:
+                LOGGER.debug("Failed to remove %s after flip: %s", DIVERGENCE_LOG_FILENAME, exc)
+            monitor_state["divergence_log_cleaned_up"] = True
         _save_monitor_state(state_dir, monitor_state)
         return summary
 

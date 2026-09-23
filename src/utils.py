@@ -221,6 +221,52 @@ def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: d
     except Exception as exc:
         LOGGER.debug("Failed to write job_health.json for %s: %s", job_name, exc)
 
+
+# Disk-retention audit (2026-09-23): several append-only state/*.jsonl files had NO
+# cap of any kind -- unlike mitigation/alerts.py's own AlertJSONWriter (size-capped,
+# rename-to-.bak rotation), these grew forever across a 10-year unattended run. This
+# is that same rotation shape as a small, reusable helper, meant to be polled
+# periodically (a scheduled job's own run, or the main loop's hourly prune tick) --
+# NOT called on every append, since checking file size is cheap but doing so on a
+# hot per-write path isn't necessary for files this low-frequency.
+def rotate_jsonl_if_oversized(path, max_bytes: int = 20 * 1024 * 1024) -> bool:
+    """Same rename-to-.bak-then-fresh-file rotation as AlertJSONWriter, generalized
+    for any plain-append .jsonl state file. Returns True if a rotation happened."""
+    p = Path(path)
+    try:
+        if not p.exists() or p.stat().st_size < max_bytes:
+            return False
+        backup_path = p.with_suffix(p.suffix + ".bak")
+        if backup_path.exists():
+            backup_path.unlink()
+        p.rename(backup_path)
+        LOGGER.warning("%s reached %d bytes; rotated to %s.", p, max_bytes, backup_path)
+        return True
+    except Exception as exc:
+        LOGGER.error("Failed to rotate %s: %s", p, exc)
+        return False
+
+
+def prune_dated_files(directory, pattern: str, max_age_days: float) -> int:
+    """Deletes files in `directory` matching a glob `pattern` (e.g. "top_domains_*.md")
+    whose mtime is older than max_age_days. Used for scheduled jobs that write one new
+    dated file per run with no other retention mechanism (e.g. top_domains_report.py).
+    Returns the count deleted. Best-effort per-file: one failure doesn't block the rest."""
+    d = Path(directory)
+    if not d.exists():
+        return 0
+    cutoff = time.time() - max_age_days * 86400.0
+    deleted = 0
+    for f in d.glob(pattern):
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+                deleted += 1
+        except Exception as exc:
+            LOGGER.debug("Failed to prune %s: %s", f, exc)
+    return deleted
+
+
 def is_telemetry_domain(domain: str) -> bool:
     """True if domain matches known high-volume telemetry SDKs, reverse DNS (.arpa), local network boundaries, cloud telemetry infrastructure, or CL-AFPE dynamic trust cache."""
     if not domain:

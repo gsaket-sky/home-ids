@@ -52,7 +52,7 @@ import requests
 
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
 from intelligence.detectors.suricata_scan import run_and_attribute as run_suricata_and_attribute
-from utils import memory_limited_preexec_fn
+from utils import memory_limited_preexec_fn, rotate_jsonl_if_oversized
 from core.heartbeat import write_component_heartbeat
 from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
@@ -477,15 +477,24 @@ def _cleanup_burst_files(avm_path: Path, std_path: Path, scratch: Optional[Path]
 
 
 def _append_burst_history(out_dir: Path, record: dict) -> None:
-    """Compact, permanent record of one burst. The raw pcaps/Zeek scratch logs
+    """Compact record of one burst. The raw pcaps/Zeek scratch logs
     _cleanup_burst_files() just deleted are gone, but a KB-scale JSONL line
     (timestamp, trigger, radios, bytes captured, zeek event counts, dns-evasion
-    findings, errors) is kept indefinitely in reactive_capture_history.jsonl for
+    findings, errors) is kept in reactive_capture_history.jsonl for
     historical/audit reference -- the "more compact form for future reference"
-    alternative to keeping multi-hundred-MB pcaps around."""
+    alternative to keeping multi-hundred-MB pcaps around.
+
+    BUGFIX (disk-retention audit): this was originally "kept indefinitely" by
+    design (a KB-scale summary felt negligible next to the multi-hundred-MB pcaps
+    it replaces) -- but a real, continuously-running box measured 1.5MB/2,190
+    lines already, and the explicit standing requirement is that nothing
+    accumulates forever, archive-only isn't sufficient on its own. Now rotated
+    (rename-to-.bak) past 20MB, same shape as every other size-capped JSONL in
+    this codebase."""
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         history_path = out_dir / "reactive_capture_history.jsonl"
+        rotate_jsonl_if_oversized(history_path)
         with open(history_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
     except OSError as e:
@@ -506,8 +515,8 @@ def cleanup_stale_scratch_files(out_dir: Path, max_age_seconds: float = 3600.0) 
     now = time.time()
     removed = 0
     for entry in out_dir.iterdir():
-        if entry.name == "reactive_capture_history.jsonl":
-            continue  # the one thing in here meant to last forever
+        if entry.name in ("reactive_capture_history.jsonl", "reactive_capture_history.jsonl.bak"):
+            continue  # size-rotated by _append_burst_history(), not age-swept here
         try:
             age = now - entry.stat().st_mtime
             if age < max_age_seconds:

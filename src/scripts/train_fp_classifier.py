@@ -724,6 +724,22 @@ def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcom
         dev_entry["arp_sweep_evidence_counts"] = {"corrected": corrected, "confirmed": confirmed}
         dev_entry.setdefault("hostname", "unknown")
 
+    # BUGFIX (disk-retention audit): `devices` is a read-modify-write cumulative dict
+    # with NO equivalent of device_fp_profiles.json's discard_device_profile() --
+    # an entry for a device merged away or gone idle far longer than any retention
+    # window stayed here forever. Prune against the graph's own live population
+    # (30d floor matches the shortest real evidence-retention window in this
+    # codebase, pi_8gb's) whenever a store is available; degrades to "no pruning
+    # this run" rather than guessing when it isn't (store=None is a real, existing
+    # code path -- see this function's own docstring).
+    if store is not None and devices:
+        try:
+            still_active = store.get_active_device_ids(seen_since=time.time() - 30 * 86400.0)
+            for stale_id in [d for d in devices if d not in still_active]:
+                del devices[stale_id]
+        except Exception:
+            pass
+
     corrected, uncorrected = global_evidence
     stats = {
         "global": {

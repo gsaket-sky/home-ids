@@ -181,6 +181,24 @@ _DECISION_RETENTION_DAYS_BY_PROFILE: Dict[str, float] = {
     "custom": DEFAULT_DECISION_RETENTION_DAYS,
 }
 
+# Disk-retention audit (2026-09-23): backtest_runs is one row/night forever with a
+# row size that scales with device count -- the single largest unbounded contributor
+# found in the whole schema. 90 days is generous (a golden-set/synthetic pass/fail
+# summary's audit value is about recent trend, not a permanent record) while still
+# comfortably covering the autotuner's own lookback needs.
+DEFAULT_BACKTEST_RUNS_RETENTION_DAYS = 90.0
+
+# threshold_history rows are small (no JSON blob) so this is a low-severity fix on
+# raw bytes, but it's the autotuner's own change-history audit trail, so this gets a
+# year-scale window matching decisions' own x86_16gb/custom default, not evidence's
+# much shorter one.
+DEFAULT_THRESHOLD_HISTORY_RETENTION_DAYS = 365.0
+
+# device_baselines/cl_afpe_trust regime_id drift (disk-retention audit): year-scale,
+# matching threshold_history's own window -- these are undo/reset traceability
+# records, not routine per-cycle output, so this is deliberately conservative.
+DEFAULT_STALE_REGIME_RETENTION_DAYS = 365.0
+
 # Bounded semantic search (plan doc's "Semantic search (bounded add-on)" section):
 # every query MUST supply a scope filter (time window and/or device_id) BEFORE
 # embeddings are touched, and the scoped candidate set is hard-capped -- an honest
@@ -621,6 +639,25 @@ class GraphStore:
             return json.loads(row["metadata_json"])
         except (TypeError, ValueError):
             return {}
+
+    def get_active_device_ids(self, seen_since: Optional[float] = None) -> set:
+        """device_ids NOT merged away (merged_into_device_id IS NULL). `seen_since`
+        (a unix timestamp), when given, also requires last_seen >= that cutoff --
+        `devices` rows are otherwise permanent by design (tombstoned on merge, never
+        deleted), so a device idle far longer than any real retention window would
+        still count as "active" without this filter. Used by callers that persist a
+        device-keyed dict OUTSIDE this store (e.g. train_fp_classifier.py's
+        autotune_stats.json) to know which keys are still real, so entries for
+        devices merged away or long gone can be pruned instead of accumulating
+        forever (disk-retention audit)."""
+        if seen_since is None:
+            cur = self._conn.execute("SELECT device_id FROM devices WHERE merged_into_device_id IS NULL")
+        else:
+            cur = self._conn.execute(
+                "SELECT device_id FROM devices WHERE merged_into_device_id IS NULL AND last_seen >= ?",
+                (seen_since,),
+            )
+        return {row["device_id"] for row in cur.fetchall()}
 
     def resolve_canonical_device_id(self, device_id: str) -> str:
         """Walks the merged_into_device_id chain to the ultimate canonical id.
@@ -2170,6 +2207,88 @@ class GraphStore:
         number of rows deleted."""
         cutoff = (now if now is not None else time.time()) - older_than_days * 86400
         cur = self._conn.execute("DELETE FROM device_destinations WHERE last_seen < ?", (cutoff,))
+        self._maybe_commit()
+        return cur.rowcount
+
+    def prune_backtest_runs(self, older_than_days: float = DEFAULT_BACKTEST_RUNS_RETENTION_DAYS,
+                              now: Optional[float] = None) -> int:
+        """Deletes backtest_runs rows older than the cutoff (disk-retention audit
+        finding: this table had ZERO deletion of any kind -- one row every night,
+        forever, and unlike every other table in this schema its row size ALSO
+        scales with device count via synthetic_result_json's per-device breakdown,
+        making it the single largest unbounded contributor found). Pure delete, no
+        archive -- these are point-in-time pass/fail snapshots, not an audit trail
+        of an autonomous decision (unlike decisions/containment_actions), so
+        nothing downstream needs the old rows once they've aged out.
+        threshold_history.backtest_run_id references run_id "by convention" only
+        (schema.sql's own comment -- no real FK), so a dangling reference after
+        this prune is expected and harmless, same as every other soft-reference in
+        this schema. Returns the number of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute("DELETE FROM backtest_runs WHERE started_at < ?", (cutoff,))
+        self._maybe_commit()
+        return cur.rowcount
+
+    def prune_threshold_history(self, older_than_days: float = DEFAULT_THRESHOLD_HISTORY_RETENTION_DAYS,
+                                  now: Optional[float] = None) -> int:
+        """Deletes threshold_history rows older than the cutoff (disk-retention
+        audit finding: pure append via propose_change(), zero deletion of any
+        kind). Rows are small (no JSON blob), so this is a low-severity fix on
+        raw bytes, but still a genuine "runs forever without bound" gap. A
+        rolled-back-or-superseded proposal's audit value fades the same way an
+        old decision's does -- same reasoning as prune_decisions_and_alerts(),
+        just a much longer default window since this is the autotuner's own
+        change-history record, not routine per-cycle output. Returns the number
+        of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute("DELETE FROM threshold_history WHERE proposed_at < ?", (cutoff,))
+        self._maybe_commit()
+        return cur.rowcount
+
+    def prune_stale_regime_baselines(self, older_than_days: float = DEFAULT_STALE_REGIME_RETENTION_DAYS,
+                                       now: Optional[float] = None) -> int:
+        """Disk-retention audit finding: device_baselines' regime_id column
+        increments on every BOCPD changepoint, and schema.sql's own comment
+        documents prior-regime rows as deliberately retained ("not overwritten...
+        not deleted on promotion") for reset/undo traceability -- a real design
+        choice, not an oversight, same category as containment_actions' own
+        permanent-by-design retention. Blindly deleting every non-current regime
+        would break that stated undo capability for a REGIME CHANGE THAT JUST
+        HAPPENED. This only removes a (device, metric, hour) bucket's old-regime
+        rows once they're BOTH superseded (not this bucket's current max
+        regime_id) AND old (updated_at before the cutoff) -- recent undo history
+        survives regardless of regime, and the current regime is never touched.
+        Returns the number of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM device_baselines WHERE updated_at < ? AND regime_id < ("
+            "  SELECT MAX(regime_id) FROM device_baselines db2 WHERE "
+            "  db2.device_id = device_baselines.device_id AND db2.metric = device_baselines.metric "
+            "  AND db2.hour = device_baselines.hour"
+            ")",
+            (cutoff,),
+        )
+        self._maybe_commit()
+        return cur.rowcount
+
+    def prune_stale_regime_trust(self, older_than_days: float = DEFAULT_STALE_REGIME_RETENTION_DAYS,
+                                   now: Optional[float] = None) -> int:
+        """Same shape and same reasoning as prune_stale_regime_baselines(), for
+        cl_afpe_trust's own regime_id-keyed rows -- only removes a tuple's
+        old-regime rows once BOTH superseded and old; the current regime and any
+        recent history survive untouched, preserving reset_tuple()'s undo
+        capability for anything not already this stale. Returns the number of
+        rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM cl_afpe_trust WHERE last_updated < ? AND regime_id < ("
+            "  SELECT MAX(regime_id) FROM cl_afpe_trust t2 WHERE "
+            "  t2.device_id = cl_afpe_trust.device_id AND t2.behavior_fingerprint = cl_afpe_trust.behavior_fingerprint "
+            "  AND t2.destination_class = cl_afpe_trust.destination_class AND t2.hypothesis_id = cl_afpe_trust.hypothesis_id "
+            "  AND t2.evidence_family = cl_afpe_trust.evidence_family"
+            ")",
+            (cutoff,),
+        )
         self._maybe_commit()
         return cur.rowcount
 

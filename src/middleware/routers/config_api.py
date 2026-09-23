@@ -35,6 +35,7 @@ from middleware.auth import verify_token, CONFIG, LOGGER
 from middleware.config_schema import CONFIG_SCHEMA, is_restart_required
 
 from config import CONFIG_FILE
+from utils import rotate_jsonl_if_oversized
 
 router = APIRouter()
 
@@ -95,6 +96,11 @@ def _write_overrides(data: dict) -> None:
 
 def _append_audit(entry: dict) -> None:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    # BUGFIX (disk-retention audit): human-paced (one entry per operator config
+    # edit), so this was low priority, but still genuinely uncapped -- a generous
+    # 5MB ceiling (tens of thousands of entries) is effectively invisible in normal
+    # use while still bounding a 10-year unattended run.
+    rotate_jsonl_if_oversized(_AUDIT_LOG_PATH, max_bytes=5 * 1024 * 1024)
     entry = {"ts": time.time(), **entry}
     with _AUDIT_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")

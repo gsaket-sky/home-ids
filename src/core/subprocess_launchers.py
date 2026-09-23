@@ -18,6 +18,42 @@ from typing import IO, Optional, Tuple
 
 LOGGER = logging.getLogger("home_ids.subprocess_launchers")
 
+DEFAULT_SUBPROCESS_LOG_MAX_BYTES = 50 * 1024 * 1024  # 50MB per log, matches this repo's other size-capped writers' order of magnitude
+
+
+def rotate_subprocess_log_if_oversized(path: Path, max_bytes: int = DEFAULT_SUBPROCESS_LOG_MAX_BYTES) -> bool:
+    """Disk-retention audit fix: fritz_webhook.log/scheduler.log are raw
+    `subprocess.Popen(stdout=open(path, "a"))` redirects held open for the life of
+    the child process -- not Python logging, so RotatingFileHandler doesn't apply,
+    and a simple rename-based rotation (this repo's AlertJSONWriter pattern) would
+    leave the long-lived child still writing into the renamed-away file forever.
+    Uses copytruncate instead: back up the current contents, then truncate the file
+    to 0 bytes IN PLACE (not rename). This is safe specifically because Python's "a"
+    mode sets O_APPEND, so the child's next write() atomically seeks to the kernel's
+    current end-of-file (now 0) rather than its own cached pre-truncate offset --
+    the same reasoning logrotate's own copytruncate strategy relies on. Returns True
+    if a rotation happened. Meant to be polled periodically (e.g. the main loop's
+    existing hourly prune tick), not on every subprocess spawn -- these processes
+    can run for the box's entire uptime between restarts.
+    """
+    try:
+        if not path.exists() or path.stat().st_size < max_bytes:
+            return False
+        backup_path = path.with_suffix(path.suffix + ".bak")
+        try:
+            if backup_path.exists():
+                backup_path.unlink()
+            backup_path.write_bytes(path.read_bytes())
+        except Exception:
+            pass  # backup is best-effort; truncating on time is what actually bounds disk usage
+        with path.open("r+b") as f:
+            f.truncate(0)
+        LOGGER.warning("Subprocess log %s reached %d bytes; rotated (copytruncate).", path, max_bytes)
+        return True
+    except Exception as exc:
+        LOGGER.error("Failed to rotate subprocess log %s: %s", path, exc)
+        return False
+
 
 def start_fastapi_subprocess(config) -> Tuple[Optional[subprocess.Popen], Optional[IO]]:
     """Starts middleware.main_api:app via uvicorn. Returns (proc, log_file) --

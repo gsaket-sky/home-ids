@@ -40,7 +40,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
-from utils import write_job_health  # noqa: E402
+from utils import write_job_health, prune_dated_files  # noqa: E402
 from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 
@@ -55,6 +55,15 @@ _RETENTION_DAYS_BY_PROFILE = {
     "x86_16gb": DEFAULT_RETENTION_DAYS,
     "custom": DEFAULT_RETENTION_DAYS,
 }
+
+# BUGFIX (disk-retention audit): the exported decisions_*.jsonl files themselves had
+# NO retention of their own -- this "export, then delete from the live graph" job
+# correctly stopped the LIVE db from growing forever, but its own designated cold-
+# storage destination just accumulated unconditionally, forever, directly
+# contradicting the standing "archive is not enough -- must actually delete to stay
+# bounded" requirement. 2 years is generous relative to the 180-365 day live
+# retention window this data already survived before being archived at all.
+ARCHIVE_FILE_MAX_AGE_DAYS = 730.0
 
 
 def main() -> None:
@@ -106,8 +115,19 @@ def main() -> None:
         else:
             LOGGER.info("No decisions older than %.0f days -- nothing to archive.", retention_days)
 
+        # Runs every call (cheap directory glob+stat), independent of whether this
+        # run itself archived anything -- bounds whatever has already accumulated,
+        # not just future growth.
+        pruned_archives = prune_dated_files(
+            state_dir / "decision_archive", "decisions_*.jsonl", ARCHIVE_FILE_MAX_AGE_DAYS,
+        )
+        if pruned_archives:
+            LOGGER.info("Pruned %d decision archive file(s) older than %.0f days.",
+                        pruned_archives, ARCHIVE_FILE_MAX_AGE_DAYS)
+
         write_job_health(state_dir, "live_decision_archive", time.time() - run_start,
-                          extra={"archived": archived_count, "retention_days": retention_days})
+                          extra={"archived": archived_count, "retention_days": retention_days,
+                                 "archive_files_pruned": pruned_archives})
     except Exception as e:
         LOGGER.error("live_decision_archive failed: %s", e, exc_info=True)
         write_job_health(state_dir, "live_decision_archive", time.time() - run_start, extra={"error": str(e)})

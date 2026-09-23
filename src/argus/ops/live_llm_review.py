@@ -98,7 +98,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from config import CONFIG  # noqa: E402
-from utils import write_job_health  # noqa: E402
+from utils import write_job_health, rotate_jsonl_if_oversized  # noqa: E402
 from intelligence.geoip import GeoIPEngine  # noqa: E402
 from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
@@ -418,6 +418,13 @@ def main() -> None:
 
     db_path = state_dir / "v13_graph.db"
     output_path = state_dir / _OUTPUT_FILENAME
+    # BUGFIX (disk-retention audit): pure append, no cap of any kind existed --
+    # also re-read in full every run (the "already reviewed" dedup set), so this
+    # bounds both disk growth AND that read cost over a long-running box. A
+    # rotation just means a handful of not-yet-expired decisions get re-reviewed
+    # once (wasted LLM calls, not incorrect output) -- same trade-off this
+    # codebase's own AlertJSONWriter already accepts for alerts.json.
+    rotate_jsonl_if_oversized(output_path)
 
     if not db_path.exists():
         write_job_health(state_dir, "live_llm_review", time.time() - run_start,

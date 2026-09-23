@@ -29,6 +29,7 @@ from core.state_guard import StateManager
 from core.identity import DeviceIdentityManager
 from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
+from core.subprocess_launchers import rotate_subprocess_log_if_oversized
 from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
@@ -3746,6 +3747,19 @@ class EnginePipeline:
                 # same way for the age-out path.
                 if self.ml_registry: self.ml_registry.discard_device(e_dev_id, reason="prune")
             self.state_manager.prune_expired_actions(now)  # PHASE 3: drop expired revoke-ledger entries
+            # BUGFIX (disk-retention audit): local_intel.py's LocalConfirmedIntel is
+            # documented as TTL-bounded (default 30d) and already has a working
+            # prune_expired() -- but nothing ever called it, so state/local_confirmed_intel.json
+            # grew forever even though every entry's TTL is enforced only at read time.
+            # Hourly cadence matches this same prune block's own cycle.
+            if hasattr(self, 'fp_engine') and self.fp_engine:
+                self.fp_engine.local_intel.prune_expired()
+            # BUGFIX (disk-retention audit): fritz_webhook.log/scheduler.log are raw
+            # subprocess stdout redirects (subprocess_launchers.py) held open for the
+            # life of those child processes -- no rotation of any kind existed, so
+            # they grew forever. Same hourly cadence as this block's other maintenance.
+            for _log_name in ("fritz_webhook.log", "scheduler.log"):
+                rotate_subprocess_log_if_oversized(self.state_dir / _log_name)
             self._last_prune = now
 
         # IPC Split-Brain Reconciliation: detect if the Uvicorn IPC endpoints wrote

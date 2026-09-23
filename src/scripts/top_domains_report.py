@@ -13,7 +13,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 from config import CONFIG
 from intelligence.threat_intel import ThreatIntel
-from utils import write_job_health
+from utils import write_job_health, prune_dated_files
 
 LOGGER = logging.getLogger("home_ids.top_domains")
 
@@ -147,6 +147,16 @@ def generate_report():
         LOGGER.info(f"Report saved to {report_file}")
     except Exception as e:
         LOGGER.error(f"Failed to write report file: {e}")
+
+    # BUGFIX (disk-retention audit): one brand-new dated file every day, forever,
+    # with no cleanup anywhere -- 3,650 files/10yr with zero pruning. 90 days
+    # matches this codebase's own longest evidence-retention window (x86_16gb).
+    try:
+        deleted = prune_dated_files(reports_dir, "top_domains_*.md", max_age_days=90)
+        if deleted:
+            LOGGER.info("Pruned %d top_domains report(s) older than 90 days.", deleted)
+    except Exception as e:
+        LOGGER.debug(f"Failed to prune old top_domains reports: {e}")
 
     # Send Telegram Summary
     if malicious_found > 0:

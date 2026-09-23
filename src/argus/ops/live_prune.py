@@ -116,6 +116,14 @@ def main() -> None:
         decision_retention_days = _DECISION_RETENTION_DAYS_BY_PROFILE.get(
             load_hardware_profile(CONFIG), DEFAULT_DECISION_RETENTION_DAYS)
         decision_prune_counts = store.prune_decisions_and_alerts(older_than_days=decision_retention_days)
+        # Disk-retention audit (2026-09-23): backtest_runs/threshold_history had NO
+        # pruning of any kind before this -- same "ride along on this job's existing
+        # daily cadence" reasoning as the two sweeps above, both cheap indexed
+        # deletes (idx_backtest_runs_started, idx_threshold_history_device).
+        backtest_runs_deleted = store.prune_backtest_runs()
+        threshold_history_deleted = store.prune_threshold_history()
+        stale_regime_baselines_deleted = store.prune_stale_regime_baselines()
+        stale_regime_trust_deleted = store.prune_stale_regime_trust()
         # MOVED (2026-09-20, data-lifecycle retuning) to its own, much more frequent
         # job -- live_prune_weak_notices.py, every 4h instead of this job's own daily
         # 3:15am. Running only once/day meant a weak notice created just after this
@@ -130,16 +138,21 @@ def main() -> None:
         store.close()
         LOGGER.info("Pruned %d evidence row(s) older than %d days, %d device_destinations row(s) "
                      "older than %d days, %d orphaned device_baselines row(s), %d decision(s)/"
-                     "%d alert_event(s) older than %d days, from %s",
+                     "%d alert_event(s) older than %d days, %d backtest_runs row(s), "
+                     "%d threshold_history row(s), from %s",
                      deleted, retention_days, dd_deleted, retention_days, orphaned_baselines_deleted,
                      decision_prune_counts["decisions"], decision_prune_counts["alert_events"],
-                     decision_retention_days, db_path)
+                     decision_retention_days, backtest_runs_deleted, threshold_history_deleted, db_path)
         write_job_health(state_dir, "live_prune", time.time() - run_start,
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
                                  "device_destinations_retention_days": retention_days,
                                  "orphaned_device_baselines_deleted": orphaned_baselines_deleted,
                                  "decision_retention_days": decision_retention_days,
+                                 "backtest_runs_deleted": backtest_runs_deleted,
+                                 "threshold_history_deleted": threshold_history_deleted,
+                                 "stale_regime_baselines_deleted": stale_regime_baselines_deleted,
+                                 "stale_regime_trust_deleted": stale_regime_trust_deleted,
                                  **{f"{k}_deleted": v for k, v in decision_prune_counts.items()}})
     except Exception as e:
         LOGGER.error("live_prune failed: %s", e, exc_info=True)
