@@ -746,6 +746,17 @@ reactive_capture:
   # network's normal traffic legitimately needs bigger/more-frequent captures. [LIVE]
   reactive_capture_max_bytes_per_hour: 500000000
 
+  # 2026-09-27 (Phase 2 of the autonomy-completion effort): the rate/byte-per-hour
+  # gates above bound how fast new captures happen, but say nothing about accumulated
+  # disk usage in reactive_capture_scratch_dir if cleanup ever falls behind. Hard
+  # ceiling on that directory specifically -- oldest entries pruned first when
+  # exceeded; if pruning can't recover enough space, new captures are rejected
+  # (logged/metriced as deferred_disk_budget, home_ids_reactive_capture_degraded=1)
+  # until it does. Separate from disk_budget_governor.py's own 20GB whole-stack
+  # budget, which explicitly treats this directory as monitor-only. 0 falls back to
+  # the same 5GB default, not unlimited. [LIVE]
+  reactive_capture_max_scratch_bytes: 5368709120
+
   # Per-trigger enable flags -- each source can be individually disabled without
   # touching the shared budget above. All default on, per explicit operator direction
   # ("more trigger rather than conservative"). [LIVE]

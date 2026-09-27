@@ -208,6 +208,8 @@ CONFIG_SCHEMA = [
      "desc": "Shared hourly budget every trigger draws from -- one burst captures the whole radio regardless of which trigger fired it."},
     {"s": "reactive_capture", "k": "reactive_capture_max_bytes_per_hour", "t": "number", "def": 500000000,
      "desc": "Second shared budget bounding cumulative bytes captured per hour. 0 disables (count-only)."},
+    {"s": "reactive_capture", "k": "reactive_capture_max_scratch_bytes", "t": "number", "def": 5368709120,
+     "desc": "Hard ceiling on the reactive_capture_scratch_dir's total disk usage (default 5GB). Oldest entries are pruned first when exceeded; if pruning can't recover enough space, new captures are rejected until it does. 0 falls back to the same 5GB default, not unlimited."},
     {"s": "reactive_capture", "k": "reactive_capture_new_device_trigger_enabled", "t": "bool", "def": True,
      "desc": "Fire a capture burst when a new device is first seen."},
     {"s": "reactive_capture", "k": "reactive_capture_arp_sweep_trigger_enabled", "t": "bool", "def": True,

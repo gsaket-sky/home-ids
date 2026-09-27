@@ -393,6 +393,92 @@ check("the stale-file sweep is actually invoked, not just imported",
       "cleanup_stale_scratch_files(scratch_dir)" in pipeline_src)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════════
+# Section H (2026-09-27, Phase 2 of the autonomy-completion effort): the scratch-dir
+# disk-budget gate -- reject-when-full, prune-oldest-first. Uses a REAL temp directory
+# with real files (unlike Sections A/A2 above, which never touch disk) since this is
+# exactly what _check_disk_budget() reads from the filesystem.
+# ═══════════════════════════════════════════════════════════════════════════════════
+import os as _os
+import shutil
+import tempfile
+
+
+def _make_scratch_file(scratch_dir, name, size_bytes, age_seconds_ago):
+    path = scratch_dir / name
+    path.write_bytes(b"x" * size_bytes)
+    ts = time.time() - age_seconds_ago
+    _os.utime(path, (ts, ts))
+    return path
+
+
+scratch_root = _PathForSysPath(tempfile.mkdtemp(prefix="reactive_capture_disk_budget_test_"))
+try:
+    # --- under budget: no pruning, dispatch allowed ---
+    _make_scratch_file(scratch_root, "small.pcap", 100, age_seconds_ago=10)
+    d10 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg10 = {"reactive_capture_scratch_dir": str(scratch_root), "reactive_capture_max_scratch_bytes": 10_000}
+    check("_check_disk_budget: under budget, allows a dispatch with no pruning",
+          d10._check_disk_budget(cfg10) is True)
+    check("_check_disk_budget: not degraded when under budget",
+          d10._disk_degraded is False)
+
+    # --- over budget: prunes the OLDEST file first, recovers under budget ---
+    scratch_root2 = _PathForSysPath(tempfile.mkdtemp(prefix="reactive_capture_disk_budget_test2_"))
+    _make_scratch_file(scratch_root2, "oldest.pcap", 6_000, age_seconds_ago=3000)
+    _make_scratch_file(scratch_root2, "newest.pcap", 3_000, age_seconds_ago=10)
+    d11 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg11 = {"reactive_capture_scratch_dir": str(scratch_root2), "reactive_capture_max_scratch_bytes": 5_000}
+    result11 = d11._check_disk_budget(cfg11)
+    check("_check_disk_budget: over budget, pruning the OLDEST file alone recovers under budget -- allows dispatch",
+          result11 is True, f"remaining entries: {list(scratch_root2.iterdir())}")
+    check("_check_disk_budget: the OLDEST file was removed, the NEWEST one was kept",
+          not (scratch_root2 / "oldest.pcap").exists() and (scratch_root2 / "newest.pcap").exists())
+    shutil.rmtree(scratch_root2, ignore_errors=True)
+
+    # --- over budget even after pruning everything prunable: the ONLY way this can
+    # happen given prune-oldest-FULLY (not partial) is the exempt history JSONL alone
+    # already exceeding budget -- any other oversized file gets pruned away entirely,
+    # which always succeeds. Also proves the exemption itself: the history file is
+    # never deleted even though it's the oldest/largest/only thing present. ---
+    scratch_root3 = _PathForSysPath(tempfile.mkdtemp(prefix="reactive_capture_disk_budget_test3_"))
+    _make_scratch_file(scratch_root3, "reactive_capture_history.jsonl", 20_000, age_seconds_ago=100000)
+    d12 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg12 = {"reactive_capture_scratch_dir": str(scratch_root3), "reactive_capture_max_scratch_bytes": 5_000}
+    result12 = d12._check_disk_budget(cfg12)
+    check("_check_disk_budget: still over budget after pruning everything prunable "
+          "(only the exempt history file remains) -- rejects",
+          result12 is False)
+    check("_check_disk_budget: sets self._disk_degraded so try_dispatch() can log/metric the right outcome",
+          d12._disk_degraded is True)
+    check("_check_disk_budget: the permanent history JSONL is exempt from scratch-overflow pruning "
+          "even when it's the oldest/largest/only thing present -- correctly stays over budget/rejects "
+          "rather than deleting it",
+          (scratch_root3 / "reactive_capture_history.jsonl").exists())
+    shutil.rmtree(scratch_root3, ignore_errors=True)
+
+    # --- try_dispatch() surfaces the disk-degraded rejection as its own metric outcome ---
+    scratch_root5 = _PathForSysPath(tempfile.mkdtemp(prefix="reactive_capture_disk_budget_test5_"))
+    _make_scratch_file(scratch_root5, "reactive_capture_history.jsonl", 20_000, age_seconds_ago=100000)
+    d14 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg14 = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+             "reactive_capture_scratch_dir": str(scratch_root5), "reactive_capture_max_scratch_bytes": 5_000}
+    dispatched14 = d14.try_dispatch(cfg14, zeek_fx=object(), trigger_reason="unit_test_disk_budget")
+    check("try_dispatch: a disk-degraded scratch dir rejects dispatch entirely, before even "
+          "touching the hourly count budget", dispatched14 is False and d14._count == 0,
+          f"dispatched={dispatched14} count={d14._count}")
+    shutil.rmtree(scratch_root5, ignore_errors=True)
+
+    # --- a nonexistent scratch dir is a safe no-op (nothing to check yet) ---
+    d15 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg15 = {"reactive_capture_scratch_dir": str(scratch_root / "does_not_exist_yet"),
+             "reactive_capture_max_scratch_bytes": 5_000}
+    check("_check_disk_budget: a scratch dir that doesn't exist yet is a safe no-op, not a crash",
+          d15._check_disk_budget(cfg15) is True)
+finally:
+    shutil.rmtree(scratch_root, ignore_errors=True)
+
+
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 25 check(s) FAILED: {FAILURES}")
     sys.exit(1)

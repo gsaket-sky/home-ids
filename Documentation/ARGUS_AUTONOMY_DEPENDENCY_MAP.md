@@ -102,7 +102,34 @@ All new tests added to `tests/test_argus_backtest_job.py` in the same hand-rolle
 `check()`/`FAILURES` convention as the file's existing tests.
 
 ### 4.2 Capture-queue disk protection (Phase 2)
-_Pending._
+Shipped 2026-09-27. `src/extractors/fritzbox_capture.py`'s `ReactiveCaptureDispatcher`
+gained `_check_disk_budget()`, a pre-dispatch gate on `reactive_capture_scratch_dir`'s
+total size, called first (before the existing hourly count/bytes gates) from
+`_check_and_consume_budget()`. Hard ceiling: `reactive_capture_max_scratch_bytes`
+(config key, default 5GB = 5368709120 bytes). On overflow: prunes oldest-first
+(excluding `reactive_capture_history.jsonl`/`.bak`, which are size-rotated separately
+and never deleted as scratch overflow, but DO still count toward total usage); if
+still over budget after pruning everything prunable, rejects the dispatch
+(`outcome=deferred_disk_budget` on `home_ids_reactive_capture_bursts_total`,
+`home_ids_reactive_capture_degraded` gauge set to 1) rather than ever violating the
+ceiling. Separate from `disk_budget_governor.py`'s own 20GB whole-stack budget, which
+explicitly treats this directory as monitor-only.
+
+Real regression found and fixed during this same phase, not by inspection: a full
+directory walk/stat on every `_check_and_consume_budget()` call (which fires on every
+trigger attempt, not just real dispatches) turned a previously pure in-memory check
+into synchronous disk I/O on the hot path, and broke a pre-existing concurrency test's
+timing assumptions (4 rapid-fire triggers all dispatched instead of only the first).
+Fixed by throttling the real scan to at most once per `_DISK_CHECK_INTERVAL_SECONDS`
+(60s), reusing the cached `self._disk_degraded` verdict in between -- the same
+"periodic, not per-call" precedent `cleanup_stale_scratch_files()` already
+established in this file for the identical reason.
+
+New metrics: `home_ids_reactive_capture_scratch_bytes` (gauge),
+`home_ids_reactive_capture_scratch_pruned_total` (counter),
+`home_ids_reactive_capture_degraded` (gauge). New config key documented in
+`config.yaml.example` and `middleware/config_schema.py`. New tests in
+`tests/test_phase25_reactive_capture_triggers.py`'s new "Section H".
 
 ### 4.3 BOCPD rebuild-on-promotion (Phase 5)
 _Pending._

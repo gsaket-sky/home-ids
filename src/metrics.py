@@ -314,7 +314,8 @@ reactive_capture_bursts_total = Counter(
     "burst actually ran in the background; outcome=deferred: shared hourly burst-COUNT "
     "budget was exhausted; outcome=deferred_bytes_budget: shared hourly aggregate-BYTES "
     "budget was exhausted, see Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md; "
-    "outcome=deferred_concurrent: a burst was already in flight)",
+    "outcome=deferred_concurrent: a burst was already in flight; outcome=deferred_disk_budget: "
+    "the scratch-dir disk budget was exhausted and pruning couldn't recover enough space)",
     ["trigger_reason", "outcome"]
 )
 reactive_capture_bytes_total = Counter("home_ids_reactive_capture_bytes_total", "Cumulative raw AVM pcap bytes captured per radio", ["radio"])
@@ -323,6 +324,17 @@ reactive_capture_last_burst_timestamp = Gauge("home_ids_reactive_capture_last_bu
 reactive_capture_dns_evasion_findings_total = Counter("home_ids_reactive_capture_dns_evasion_findings_total", "Total dns_evasion_anomaly findings produced across all devices by reactive-capture bursts")
 reactive_capture_suricata_findings_total = Counter("home_ids_reactive_capture_suricata_findings_total", "Total suricata_signature_match findings produced across all devices by batch-mode Suricata scans of reactive-capture burst pcaps")
 reactive_capture_stale_files_removed_total = Counter("home_ids_reactive_capture_stale_files_removed_total", "Orphaned capture files/directories removed by the periodic disk-safety sweep (process-crash recovery, not the normal per-burst cleanup path)")
+
+# 2026-09-27 (Phase 2 of the autonomy-completion effort): the reactive-capture scratch
+# dir had a rate/byte-per-hour limiter (above) but no actual disk-space awareness --
+# confirmed via direct grep before writing this: zero uses of disk/statvfs/
+# shutil.disk_usage anywhere in fritzbox_capture.py. These give it one: a hard ceiling
+# on the scratch dir specifically (reject-when-full after prune-oldest-first fails to
+# recover), separate from disk_budget_governor.py's own 20GB whole-stack budget, which
+# explicitly treats this directory as monitor-only.
+reactive_capture_scratch_bytes = Gauge("home_ids_reactive_capture_scratch_bytes", "Current total size in bytes of the reactive-capture scratch directory")
+reactive_capture_scratch_pruned_total = Counter("home_ids_reactive_capture_scratch_pruned_total", "Files removed by the pre-dispatch scratch-dir disk-budget pruner (oldest-first), separate from the stale-file crash-recovery sweep above")
+reactive_capture_degraded = Gauge("home_ids_reactive_capture_degraded", "1 if the scratch-dir disk budget is exhausted and pruning could not recover enough space for a new burst, 0 otherwise")
 
 # ===========================================================================
 # PHASE 21-METRICS: Local Confirmed-Intel Store Transparency (Phase D3)

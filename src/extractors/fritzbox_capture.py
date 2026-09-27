@@ -58,10 +58,17 @@ from metrics import (
     reactive_capture_bursts_total, reactive_capture_bytes_total, reactive_capture_errors_total,
     reactive_capture_last_burst_timestamp, reactive_capture_dns_evasion_findings_total,
     reactive_capture_stale_files_removed_total, reactive_capture_suricata_findings_total,
+    reactive_capture_scratch_bytes, reactive_capture_scratch_pruned_total, reactive_capture_degraded,
     suricata_scan_total, suricata_last_success_timestamp,
 )
 
 LOGGER = logging.getLogger("home_ids.fritzbox_capture")
+
+# 2026-09-27 (Phase 2 of the autonomy-completion effort): hard ceiling on the reactive-
+# capture scratch dir specifically -- see _check_disk_budget()'s own docstring for why
+# this is separate from disk_budget_governor.py's 20GB whole-stack budget.
+_DEFAULT_SCRATCH_BUDGET_BYTES = 5 * 1024 * 1024 * 1024  # 5GB, matches the plan's own figure
+_DISK_CHECK_INTERVAL_SECONDS = 60.0  # how often the scratch dir is actually re-scanned
 
 _AVM_MAGIC = 0xA1B2CD34
 _STANDARD_MAGIC = 0xA1B2C3D4
@@ -774,17 +781,142 @@ class ReactiveCaptureDispatcher:
         # a trigger that finds a burst already in flight, exactly like a budget-exhausted
         # trigger, and refunds the budget slot it consumed since it never actually ran.
         self._burst_lock = threading.Lock()
+        # Set by _check_disk_budget(), read by try_dispatch()'s own deferred-outcome
+        # logging -- avoids re-deriving (or double-computing/side-effecting via a
+        # second prune pass) the same disk-budget verdict twice per call.
+        self._disk_degraded = False
+        # BUGFIX (found by this same phase's own test run, not by inspection): a full
+        # directory walk/stat on every single _check_and_consume_budget() call -- which
+        # fires on every trigger attempt, not just real dispatches -- turned what was
+        # previously a pure in-memory bookkeeping call into synchronous disk I/O on the
+        # hot path. Confirmed live in this test suite: a pre-existing concurrency test
+        # (4 rapid-fire triggers 0.05s apart racing a 0.3s slow_capture) started
+        # spuriously dispatching all 4 instead of deferring 3, because the added I/O
+        # latency alone was enough to let each prior burst finish before the next
+        # trigger's budget check even completed. Throttled to re-scan the scratch dir
+        # at most once per _DISK_CHECK_INTERVAL_SECONDS, reusing the last computed
+        # verdict in between -- the same "periodic, not per-call" precedent this file's
+        # own cleanup_stale_scratch_files() already established for exactly this
+        # reason (see that function's own docstring).
+        self._last_disk_check = 0.0
+
+    def _check_disk_budget(self, config: dict) -> bool:
+        """Pure disk-space bookkeeping, no threading -- same testability convention as
+        _check_and_consume_budget() below. Reject-when-full, prune-oldest-first:
+        the hourly count/bytes gates below bound the RATE of new captures, but say
+        nothing about accumulated disk usage if cleanup ever falls behind (a burst
+        failing mid-ingest, a killed process leaving scratch files the age-based
+        cleanup_stale_scratch_files() sweep hasn't reached yet, etc.) -- confirmed via
+        direct grep before writing this: zero uses of disk/statvfs/shutil.disk_usage
+        anywhere in this file. disk_budget_governor.py's own 20GB whole-stack budget
+        explicitly treats this directory as monitor-only, so it's not covered there
+        either. This gives the scratch dir its own dedicated, enforced ceiling.
+
+        Returns True if there is (now, possibly after pruning) enough room for another
+        burst; False if pruning couldn't bring usage back under budget, in which case
+        the caller must not dispatch -- degraded_capture stays set until a future call
+        succeeds (e.g. once cleanup_stale_scratch_files()'s own periodic sweep or a
+        completed burst's normal cleanup frees enough space).
+
+        Throttled to actually re-scan the filesystem at most once per
+        _DISK_CHECK_INTERVAL_SECONDS (see __init__'s own comment on why) -- a call
+        inside that window reuses the last computed self._disk_degraded verdict
+        without touching disk at all."""
+        now = time.time()
+        if now - self._last_disk_check < _DISK_CHECK_INTERVAL_SECONDS:
+            return not self._disk_degraded
+        self._last_disk_check = now
+
+        budget = int(config.get("reactive_capture_max_scratch_bytes", 0) or _DEFAULT_SCRATCH_BUDGET_BYTES)
+        out_dir = Path(config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
+        if not out_dir.exists():
+            reactive_capture_scratch_bytes.set(0)
+            reactive_capture_degraded.set(0)
+            self._disk_degraded = False
+            return True
+
+        def _entry_size(entry) -> int:
+            return sum(f.stat().st_size for f in entry.rglob("*") if f.is_file()) if entry.is_dir() \
+                else entry.stat().st_size
+
+        # Total usage counts EVERYTHING in the directory, including the exempt history
+        # file(s) below -- they take up real disk space even though they're never
+        # candidates for pruning. Conflating "not prunable" with "not counted" would
+        # silently under-report actual usage (and, worse, a would-be-degraded
+        # directory containing only an oversized history file would read as empty).
+        prunable_entries = []
+        total = 0
+        for entry in out_dir.iterdir():
+            try:
+                size = _entry_size(entry)
+            except OSError:
+                continue
+            total += size
+            if entry.name in ("reactive_capture_history.jsonl", "reactive_capture_history.jsonl.bak"):
+                continue  # size-rotated separately, never pruned as scratch overflow
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            prunable_entries.append((mtime, size, entry))
+        prunable_entries.sort(key=lambda e: e[0])  # oldest first
+
+        reactive_capture_scratch_bytes.set(total)
+        if total <= budget:
+            reactive_capture_degraded.set(0)
+            self._disk_degraded = False
+            return True
+
+        LOGGER.warning(
+            "Reactive-capture scratch dir %s is over its %d-byte budget (%d bytes used) -- "
+            "pruning oldest entries first.", out_dir, budget, total,
+        )
+        pruned = 0
+        for mtime, size, entry in prunable_entries:
+            if total <= budget:
+                break
+            try:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink()
+                total -= size
+                pruned += 1
+            except OSError as e:
+                LOGGER.warning("Could not prune reactive-capture scratch entry %s: %s", entry, e)
+        if pruned:
+            reactive_capture_scratch_pruned_total.inc(pruned)
+        reactive_capture_scratch_bytes.set(total)
+
+        if total > budget:
+            LOGGER.error(
+                "Reactive-capture scratch dir %s still over its %d-byte budget after pruning "
+                "%d entries (%d bytes used) -- rejecting further captures until space frees up.",
+                out_dir, budget, pruned, total,
+            )
+            reactive_capture_degraded.set(1)
+            self._disk_degraded = True
+            return False
+        reactive_capture_degraded.set(0)
+        self._disk_degraded = False
+        return True
 
     def _check_and_consume_budget(self, config: dict) -> bool:
         """Pure budget bookkeeping, no threading -- kept separate from try_dispatch()
         so the hourly-window/count logic can be unit tested directly without spinning
         real threads.
 
-        Two independent gates share the same rolling window: burst COUNT (as before)
-        and, since the load analysis above, aggregate BYTES already captured this
-        window. reactive_capture_max_bytes_per_hour=0 (or unset) disables the bytes
-        gate entirely, matching the pre-fix behavior."""
+        Three independent gates share (or, for disk, govern) capture eligibility:
+        burst COUNT and aggregate BYTES already captured this rolling hourly window (as
+        before), plus (2026-09-27) the scratch-dir DISK budget, checked first since a
+        disk-full rejection is a harder stop than a rate-limit deferral. Disk budget
+        is intentionally NOT part of the rolling hourly window -- it reflects
+        accumulated state, not a per-hour rate, so it's re-checked fresh on every call.
+        reactive_capture_max_bytes_per_hour=0 (or unset) disables the bytes gate
+        entirely, matching the pre-fix behavior."""
         if not config.get("reactive_capture_enabled", False):
+            return False
+        if not self._check_disk_budget(config):
             return False
         max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
         max_bytes_per_hour = int(config.get("reactive_capture_max_bytes_per_hour", 0) or 0)
@@ -817,6 +949,14 @@ class ReactiveCaptureDispatcher:
         capture-and-ingest-only behavior, e.g. for a caller with no evidence store to
         feed."""
         if not self._check_and_consume_budget(config):
+            if config.get("reactive_capture_enabled", False) and self._disk_degraded:
+                # _check_disk_budget() already logged the detailed ERROR-level reason;
+                # this is just the trigger-level [DEFERRED] record for this outcome.
+                LOGGER.info("[DEFERRED] reactive-capture scratch-dir disk budget is degraded, "
+                            "deferring trigger '%s' -- will be reconsidered once space frees up.",
+                            trigger_reason)
+                reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred_disk_budget").inc()
+                return False
             if config.get("reactive_capture_enabled", False):
                 max_per_hour = int(config.get("reactive_capture_max_bursts_per_hour", 6))
                 max_bytes_per_hour = int(config.get("reactive_capture_max_bytes_per_hour", 0) or 0)
