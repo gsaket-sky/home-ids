@@ -21,7 +21,7 @@ caller. Confirmed via direct code inspection that nothing in production
 actually calls the broken path today, so this closes the gap proactively
 rather than reactively. Fixed at the source and locked in with a new parity
 test proving the fixed helper and the live manager's own real behavior now
-agree exactly.
+agree exactly. Deployed and verified live on `.94` same day (clean boot, zero restarts).
 
 ## [v16.16.0] - 2026-09-27
 
