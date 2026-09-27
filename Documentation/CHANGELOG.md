@@ -9,6 +9,19 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.11.0] - 2026-09-27
+
+Phase 5 of the full 16-parameter autonomous-tuning effort: a promoted
+`bocpd_hazard_rate` change now reaches an already-warm BOCPD tracker in place,
+closing a previously-documented limitation where it only took effect on the next
+process restart or cache eviction. The tracker's own hazard rate is updated
+directly (no eviction, no reload, hypotheses/posterior state fully preserved),
+via a periodic re-check that works across the real deployed process boundary
+(the promoter runs as its own scheduled subprocess, never in-process with the
+live pipeline). Also added a generic promotion/rollback notify mechanism on the
+autotune engine, mirroring the existing config-reload pattern, for any future
+in-process promoter. Deployed and verified live on `.94` same day.
+
 ## [v16.10.0] - 2026-09-27
 
 Phase 4 of the full 16-parameter autonomous-tuning effort, completing it:
