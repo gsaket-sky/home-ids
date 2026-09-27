@@ -1,5 +1,5 @@
 """
-v13 rolling-window-as-query (Phase 1 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 rolling-window-as-query (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Replaces core/state.py's RollingWindow (deques + Counters kept in memory per
 device, never persisted -- state.py:110-127,165-173 confirms this is intentional
 in v-current, lost on every restart) with plain time-bounded SQL queries against

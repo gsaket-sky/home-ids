@@ -19,7 +19,7 @@ Restart=always
 RestartSec=5
 
 # Sized against .19's real confirmed spec (31GB RAM, 4C/8T i7-4810MQ --
-# Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md's hardware topology table,
+# Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md's hardware topology table,
 # 2026-09-05) and this session's own live Docker headroom check (ollama+
 # open-webui idle at ~780MB combined, 30GB+ free) -- generous relative to
 # .94's own soc.service unit (MemoryMax=1G/CPUQuota=40%, Documentation/

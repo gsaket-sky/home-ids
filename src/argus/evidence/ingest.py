@@ -1,5 +1,5 @@
 """
-v13 evidence ingest adapter (Phase 1 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 evidence ingest adapter (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Converts v-current's Evidence (intelligence/hypotheses/evidence.py) into v13's
 Evidence v2 (v13/evidence/model.py) at one chokepoint, so every v13 module downstream
 can rely on mandatory destination attribution without re-deriving it per detector.

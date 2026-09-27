@@ -369,7 +369,7 @@ class DecisionEngine:
 
         trail.append(f"Verdict: {state} / {action} — {explanation} (confidence={threat_confidence:.2f})")
 
-        # REMOVED (2026-09-07, Workstream 1 of Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md):
+        # REMOVED (2026-09-07, Workstream 1 of Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md):
         # this used to also compute a Gap-1/2/3 shadow verdict here (fresh_arp_spoof/
         # fresh_geofence/fresh_confirmed_exploit + shadow_state/shadow_changed, logged to
         # state/shadow_decisions.jsonl by pipeline.py's _log_shadow_divergence()) -- a
@@ -377,7 +377,7 @@ class DecisionEngine:
         # flip live in v-current. It's permanently dead weight now: this evaluate() only
         # runs at all under the engine: v_current rollback path (v13's own decision engine
         # is the live default and already implements freshness-aware hard-stops for all
-        # four types, not just honeypot -- see V13_ARCHITECTURE_DEPENDENCY_MAP.md's A13),
+        # four types, not just honeypot -- see ARGUS_AUTONOMY_DEPENDENCY_MAP.md's A13),
         # so v-current has no live path left to ever flip this shadow finding into. See
         # git history for the removed computation if it's ever needed for reference.
         return {

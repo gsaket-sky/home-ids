@@ -1,5 +1,5 @@
 """
-v13 EvidenceGraph SQLite store (Phase 1 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 EvidenceGraph SQLite store (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Read/write API over graph/schema.sql. This module owns device/destination/evidence
 read+write and audit-preserving identity merges; hypothesis/decision writes are
 wired in by their own respective phases (the tables already exist in schema.sql,
@@ -79,7 +79,7 @@ _SHARED_INFRASTRUCTURE_DEVICE_RATIO = 0.4
 # INDEPENDENCE_FAMILY_MAP's own "honest status" framing) -- SQLite's own default is
 # -2000 (2MB); pi_8gb gets a modest bump given this box also runs Zeek/Suricata/
 # Ollama concurrently (see this file's own "Hardware topology" section in
-# V13_ARCHITECTURE_DEPENDENCY_MAP.md), x86_16gb/custom get more headroom to spend on
+# ARGUS_AUTONOMY_DEPENDENCY_MAP.md), x86_16gb/custom get more headroom to spend on
 # graph query performance since nothing else on that box is as resource-constrained.
 _HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
     # 2026-09-10 (AUDIT_V14_REVIEW_RESPONSE.md §2.2): 4MB was closer to SQLite's own
@@ -87,7 +87,7 @@ _HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
     # Zeek/Suricata/Ollama concurrently against. 48MB is still a conservative,
     # not-empirically-tuned first-pass bump (same honesty framing as the edge-cap
     # constant below) -- there's no real Pi-8GB hardware to measure against yet
-    # (V13_ARCHITECTURE_DEPENDENCY_MAP.md's own hardware-topology note), so this
+    # (ARGUS_AUTONOMY_DEPENDENCY_MAP.md's own hardware-topology note), so this
     # should be re-tuned with real iostat/RSS numbers once that hardware exists,
     # not treated as a final answer either direction.
     "pi_8gb": 48_000,

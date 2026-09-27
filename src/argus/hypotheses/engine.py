@@ -1,5 +1,5 @@
 """
-v13 HypothesisEngine (Phase 1/3 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 HypothesisEngine (Phase 1/3 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 Faithful port of intelligence/hypotheses/engine.py (786 lines, read in full this
 session before writing a single line here -- not reconstructed from memory or

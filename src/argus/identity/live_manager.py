@@ -48,7 +48,7 @@ address-family display labeling lives in `pipeline.py`'s alert-payload construct
 see that fix's own separate change.
 
 6. ORDINARY DEVICE MAC/IP HISTORY, DURABLE + QUERYABLE (Release 14, Workstream 3 --
-   Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md; an explicit architecture
+   Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md; an explicit architecture
    decision, asked and answered by the user rather than defaulted, because the
    identity subsystem has already had 3 real production incidents in this session
    alone). `_refresh_identity_signals()` override: runs the real v1 update

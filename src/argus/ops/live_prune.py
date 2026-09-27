@@ -9,7 +9,7 @@ belongs inside pipeline.py's 2s decision loop (src/v13/ingest/daemon.py already 
 this same separation for .19's own graph, via its own prune_interval_seconds gate).
 
 Real motivation, not a speculative safeguard: A14's write-path bugs (fixed, see
-Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md) demonstrated real, if since-fixed,
+Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md) demonstrated real, if since-fixed,
 runaway growth potential, and nothing on .94 was enforcing schema.sql's own documented
 90-day evidence retention policy at all until this file existed. Uses the SAME
 `state/v13_graph.db` path `src/v13/ops/live_engine.py` writes to (configured the same
@@ -18,7 +18,7 @@ way, via config.yaml's state_path).
 v13 full-architecture plan, Phase 10b: retention itself is now hardware_profile-driven
 -- a pi_8gb deployment prunes sooner (30 days) than the schema-documented 90-day
 default, given that box's own tighter, shared resource budget (see
-V13_ARCHITECTURE_DEPENDENCY_MAP.md's "Hardware topology" section); x86_16gb/custom
+ARGUS_AUTONOMY_DEPENDENCY_MAP.md's "Hardware topology" section); x86_16gb/custom
 keep the original 90-day default unchanged. A first-pass judgment call, not
 empirically tuned (same honesty framing this project's own INDEPENDENCE_FAMILY_MAP
 uses for a similar not-yet-validated number).

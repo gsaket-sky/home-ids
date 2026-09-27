@@ -1,5 +1,5 @@
 """
-v13 CL-AFPE (Phase 4 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 CL-AFPE (Phase 4 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 HONEST SCOPE NOTE (read this before assuming parity with v-current):
 intelligence/fp_engine.py is 2,847 lines covering many concerns beyond trust-cache

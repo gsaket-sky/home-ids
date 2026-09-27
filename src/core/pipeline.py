@@ -1861,7 +1861,7 @@ class EnginePipeline:
                     # 1033) -- without it, a safe_ips device (the router) touching the
                     # honeypot for a benign reason diverged CRITICAL in shadow on every
                     # single cycle it happened, live BENIGN, with nothing wrong.
-                    # V13 FAST CUTOVER (Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md, the
+                    # V13 FAST CUTOVER (Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md, the
                     # entry recording this cutover): v13's EvidenceGraph-based
                     # hypothesis/decision engine is now the LIVE decision path, not a shadow
                     # comparison -- superseding A10's earlier per-mechanism shadow-flip
@@ -1873,7 +1873,7 @@ class EnginePipeline:
                     # rollback switch (config edit + restart, no redeploy) if anything looks
                     # wrong -- kept from the superseded plan since it costs nothing.
                     #
-                    # Cleanup (2026-09-07, Workstream 1 of V13_FULL_ARCHITECTURE_SHIFT_PLAN.md):
+                    # Cleanup (2026-09-07, Workstream 1 of ARGUS_AUTONOMY_DEPENDENCY_MAP.md):
                     # Gap 1/2/3's OWN shadow experiment (shadow_changed/_log_shadow_divergence,
                     # DECISION_LOGIC_DEPENDENCY_MAP.md) used to be computed INSIDE
                     # core/decision_engine.py's evaluate() and logged here on divergence -- since

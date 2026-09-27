@@ -1,5 +1,5 @@
 """
-v13 dual-tier Ollama client (Phase 5 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 dual-tier Ollama client (Phase 5 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 Implements decision #3's resolution (2026-09-05, real-data evidence, see the
 dependency map's Ollama spike sections): full structured Tier-2 analysis always

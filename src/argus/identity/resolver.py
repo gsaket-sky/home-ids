@@ -1,5 +1,5 @@
 """
-v13 identity resolver (Phase 1 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 identity resolver (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Generalizes v-current's resolve_device_id() (core/identity.py) from one hardcoded
 gateway_ip/gateway_mac special case to an arbitrary list of `trust_anchors`
 (v13/config_v13.example.yaml's `network.trust_anchors`) -- an IDS product needs to

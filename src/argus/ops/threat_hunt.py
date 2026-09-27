@@ -1,6 +1,6 @@
 """
 threat_hunt.py - Release 14, net-new capability N1 (Documentation/
-V13_FULL_ARCHITECTURE_SHIFT_PLAN.md, "now possible, not yet built"): an ad-hoc
+ARGUS_AUTONOMY_DEPENDENCY_MAP.md, "now possible, not yet built"): an ad-hoc
 historical threat-hunting surface.
 
 "Show every device that ever touched X" or "trace the full evidence timeline

@@ -1,7 +1,7 @@
 """
 live_engine.py - the actual swap-in adapter `pipeline.py` calls instead of
 `core/decision_engine.py`'s `DecisionEngine.evaluate()`, per the v13 fast-cutover plan
-(Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md, the entry recording this cutover).
+(Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md, the entry recording this cutover).
 
 Converts v-current's real per-cycle Evidence/features into v13 Evidence v2 (mirroring
 `src/v13/ingest/sources.py`'s own `fallback_context` split exactly, since pipeline.py's

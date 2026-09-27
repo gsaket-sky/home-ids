@@ -1,5 +1,5 @@
 """
-v13 CL-AFPE ML scoring (Phase 6d -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 CL-AFPE ML scoring (Phase 6d -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 Reuses v-current's ALREADY-TRAINED LightGBM ONNX model and FastEmbed vendor-pattern
 embeddings, read-only -- no separate training pipeline. Ported from a direct read of

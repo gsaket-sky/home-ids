@@ -1,6 +1,6 @@
 """
 v13 INDEPENDENCE_FAMILY_MAP (Phase 3 groundwork, built early in Phase 1 since it's
-the plan's own "core design correction" -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+the plan's own "core design correction" -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 THE CATEGORY ERROR THIS FILE EXISTS TO AVOID REPEATING (Phase 64's postmortem,
 DECISION_LOGIC_DEPENDENCY_MAP.md:48, confirmed via direct research this session):

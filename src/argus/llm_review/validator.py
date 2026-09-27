@@ -1,5 +1,5 @@
 """
-v13 DeterministicValidator (Phase 5 -- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md).
+v13 DeterministicValidator (Phase 5 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 Faithful port of intelligence/ai_soc.py's DeterministicValidator (256 lines, read in
 full before writing anything). Every rejection rule and its ordering is copied

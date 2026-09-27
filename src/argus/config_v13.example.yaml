@@ -1,5 +1,5 @@
 # v13 generalized network/hardware config (design pass, Phase 0 -- see
-# Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md). Replaces hardcoded
+# Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md). Replaces hardcoded
 # single-value fields in config.yaml.example (gateway_ip, home_subnet/home_subnets,
 # a Fritz!Box-specific integration assumed always present) with lists/roles, so this
 # becomes a reusable IDS product config, not a home_ids-specific one. v-current's own

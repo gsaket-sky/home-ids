@@ -1,6 +1,6 @@
 """
 cl_afpe_flip_monitor.py - v13 full-architecture plan, Workstream 2
-(Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md).
+(Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 Runs on `.94` via scripts/scheduler.py (config.yaml's
 scheduled_jobs.scheduler.cl_afpe_flip_monitor block, 15-minute cron, same mechanism

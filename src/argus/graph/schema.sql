@@ -1,5 +1,5 @@
 -- v13 EvidenceGraph SQLite schema (design pass, Phase 0 -- see
--- Documentation/V13_ARCHITECTURE_DEPENDENCY_MAP.md). This file documents the design;
+-- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md). This file documents the design;
 -- graph/store.py (Phase 1) is the actual read/write API built on top of it. Answers
 -- HEE_ROADMAP.md item 4's storage objection directly: a real embedded database with
 -- indexes and an explicit retention policy, not another unbounded hand-rolled JSON
