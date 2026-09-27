@@ -9,6 +9,25 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.7.0] - 2026-09-27
+
+Phase 1 of the full 16-parameter autonomous-tuning effort: the four Tier-1 autotune
+parameters that were allowlisted and consumed live but had produced zero real
+proposals ever (`reputation_tier_suspicious_floor`, `reputation_tier_high_floor`,
+`bocpd_hazard_rate`, `fp_combined_suppress_threshold`) now have working candidate
+generators. Root-caused by running the real evidence-collection code directly
+against `.94`'s live graph: `fp_combined_suppress_threshold`'s calibration was
+pooling corrections of any verdict (including a hard-stop path's confidence=0.0
+sentinel), permanently poisoning its own safety gate; fixed by requiring the
+original verdict be UNCERTAIN, the only population actually comparable to the
+threshold it calibrates. The other three had no candidate generator at all —
+added native ones in `backtest_job.py` reusing the existing scoped
+propose/canary/promote/rollback machinery, plus a new raw reputation-score field on
+every decision's existing autotune audit trail and matching retroactive
+circuit-breakers for both reputation floors. Deployed and verified live on `.94`
+same day — new decisions confirmed carrying the new instrumentation, clean boot,
+no errors.
+
 ## [v16.5.0] - 2026-09-23
 
 Chronic console latency + pipeline-freeze root cause. Investigated a user report that
