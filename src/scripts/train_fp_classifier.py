@@ -380,6 +380,28 @@ def _collect_calibration_evidence(state_dir: Path) -> tuple:
         were LATER confirmed as false positives — by an operator OR by ollama_soc.py's
         validated LLM pass (see _FP_CORRECTION_TYPES). Proof that suppression at that
         score would have been correct.
+
+        BUGFIX (2026-09-27, Phase 1 of the autonomy-completion effort — this is the
+        real reason fp_combined_suppress_threshold has never once proposed a change
+        on live .94 data, confirmed by running this function directly against the
+        real graph, not guessed): this loop pooled a correction of ANY verdict
+        (CONFIRMED_THREAT, FALSE_POSITIVE, UNCERTAIN, from either STAGE_1_HARD_STOP
+        or STAGE_3_COMBINED) as if they were all comparable evidence about where the
+        suppress threshold should sit. Only an original verdict of UNCERTAIN is
+        actually adjacent to this parameter's decision boundary — the near-miss band
+        just below the current suppress threshold this parameter's calibration is
+        meant to probe. A STAGE_1_HARD_STOP correction has an unrelated sentinel
+        confidence (observed as low as 0.0 on real data); a CONFIRMED_THREAT
+        correction sits far BELOW combined_uncertain_threshold, a different regime
+        entirely — moving the suppress threshold down to either of those confidence
+        levels would suppress nearly everything, not calibrate anything. Either kind
+        of stray entry sets lowest_corrected near 0, which then permanently loses to
+        the "any uncorrected UNCERTAIN alert scoring >= the lowest confirmed-FP
+        score" safety gate below on any network with a nonzero volume of ordinary
+        UNCERTAIN alerts — i.e. every real network, forever. Requiring verdict ==
+        "UNCERTAIN" (matching the uncorrected side's own existing check just below,
+        which this loop was inconsistent with) is the actual fix, not a threshold
+        band-aid: it makes both sides of the comparison measure the same population.
       uncorrected_uncertain_scores: combined confidence of alerts published with verdict
         UNCERTAIN that were NEVER corrected by either source — no evidence either way.
         Used only as a safety ceiling: calibration refuses to act if this overlaps the
@@ -397,7 +419,13 @@ def _collect_calibration_evidence(state_dir: Path) -> tuple:
         if doc.get("type") not in _FP_CORRECTION_TYPES:
             continue
         original = doc.get("original_alert", {}) or {}
-        conf = original.get("fp_verdict", {}).get("confidence")
+        fp_verdict = original.get("fp_verdict", {}) or {}
+        # See this function's own docstring: only an original verdict of UNCERTAIN
+        # is comparable to fp_combined_suppress_threshold's own decision boundary --
+        # matches the verdict check the uncorrected side already applies below.
+        if fp_verdict.get("verdict") != "UNCERTAIN":
+            continue
+        conf = fp_verdict.get("confidence")
         if not isinstance(conf, (int, float)):
             continue
         corrected_fp_scores.append(float(conf))

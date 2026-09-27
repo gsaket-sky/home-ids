@@ -1031,6 +1031,21 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
                     "reputation_tier_high_floor": autotune.get_active_value(
                         "reputation_tier_high_floor", device_id, default=4.0),
                 }
+                # 2026-09-27 (Phase 1 of the autonomy-completion effort): the raw
+                # scores classify() actually judged this cycle against the two
+                # floors above -- without these, a retroactive calibration
+                # generator for either floor has no way to tell whether a
+                # DIFFERENT floor value would have changed this decision's
+                # reputation-tier outcome (confirmed via direct investigation:
+                # the `reputation` evidence_type row this cycle may also write
+                # only ever stores the resulting TIER, not these inputs, and
+                # its own features_json is unpopulated). Only meaningful when
+                # rep_vector was actually classified this cycle (device_id and
+                # rep_vector both set, same guard as tuned_rep above).
+                if rep_vector is not None:
+                    autotune_state["reputation_vt_score"] = rep_vector.vt_detection_ratio
+                    autotune_state["reputation_ti_score"] = rep_vector.ti_risk
+                    autotune_state["reputation_abuse_score"] = rep_vector.abuse_risk
             except Exception as e:
                 LOGGER.warning(
                     "Failed to resolve live-tunable autotuner parameters for device %r, "

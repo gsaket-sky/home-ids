@@ -520,6 +520,129 @@ check("run_backtest: surfaces circuit_breaker_rollbacks in its own return dict",
       f"got {result_cb7.get('circuit_breaker_rollbacks')}")
 
 
+# =============================================================================
+# Phase 1 (2026-09-27, autonomy-completion effort): the two reputation floors'
+# forward generator + retroactive circuit-breaker, and bocpd_hazard_rate's
+# forward generator. See backtest_job.py's own docstrings on
+# _propose_reputation_floor_changes()/_propose_bocpd_hazard_changes() for the
+# evidence model each uses.
+# =============================================================================
+def _insert_passing_backtest_run(store, run_id, at):
+    store._conn.execute(
+        "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES (?, ?, ?, ?)",
+        (run_id, at, at, 1),
+    )
+    store._maybe_commit()
+
+
+def _add_confirmed_decision_with_autotune_state(store, device_id, timestamp, autotune_state, confirmed=True):
+    store.insert_decision(
+        device_id=device_id, timestamp=timestamp, state="HIGH", decision_path="hypothesis_high",
+        confidence=0.85, risk_score=6.0,
+        raw_payload={"fp_verdict": {"verdict": "CONFIRMED_THREAT" if confirmed else "FALSE_POSITIVE"},
+                       "_autotune_state": autotune_state},
+    )
+
+
+# --- reputation floor generator: a single confirmed miss tightens (lowers) the floor ---
+store_rep1 = GraphStore(":memory:")
+store_rep1.upsert_device("rep_dev_a", device_type="iot", timestamp=CB_NOW)
+# vt/ti max scored 1.5, BELOW the suspicious floor (2.0) in effect at decision time --
+# reputation classification missed this one, and it was later confirmed a real threat.
+_add_confirmed_decision_with_autotune_state(
+    store_rep1, "rep_dev_a", timestamp=CB_NOW - 100,
+    autotune_state={"reputation_tier_suspicious_floor": 2.0, "reputation_vt_score": 1.5, "reputation_ti_score": 0.0},
+)
+_insert_passing_backtest_run(store_rep1, "rep_run_1", CB_NOW)
+rep_drift1 = backtest_job.compute_drift_result(store_rep1, now=CB_NOW)
+rep_proposals1 = backtest_job._propose_reputation_floor_changes(store_rep1, rep_drift1, "rep_run_1", CB_NOW)
+suspicious_device_proposals1 = [p for p in rep_proposals1
+                                  if p["parameter"] == "reputation_tier_suspicious_floor" and p.get("device_id") == "rep_dev_a"]
+check("_propose_reputation_floor_changes: a single confirmed-malicious destination "
+      "the current floor missed tightens (lowers) reputation_tier_suspicious_floor "
+      "for that device, no sample floor required",
+      len(suspicious_device_proposals1) == 1 and suspicious_device_proposals1[0]["accepted"]
+      and suspicious_device_proposals1[0]["proposed_new_value"] < 2.0,
+      f"got {suspicious_device_proposals1}")
+
+# --- reputation floor generator: no autotune_state recorded at all -> no proposal ---
+store_rep2 = GraphStore(":memory:")
+store_rep2.upsert_device("rep_dev_b", device_type="iot", timestamp=CB_NOW)
+_add_confirmed_threat_decision(store_rep2, "rep_dev_b", timestamp=CB_NOW - 100)  # pre-instrumentation shape
+_insert_passing_backtest_run(store_rep2, "rep_run_2", CB_NOW)
+rep_drift2 = backtest_job.compute_drift_result(store_rep2, now=CB_NOW)
+rep_proposals2 = backtest_job._propose_reputation_floor_changes(store_rep2, rep_drift2, "rep_run_2", CB_NOW)
+check("_propose_reputation_floor_changes: a decision with no recorded "
+      "_autotune_state (pre-instrumentation) contributes no evidence -- no crash, "
+      "no proposal from it", all(p.get("device_id") != "rep_dev_b" for p in rep_proposals2),
+      f"got {rep_proposals2}")
+
+# --- reputation floor retroactive circuit-breaker: near-miss + later confirmed threat ---
+store_rep3 = GraphStore(":memory:")
+store_rep3.upsert_device("rep_dev_c", device_type="iot", timestamp=CB_NOW)
+# global=2.0 (default), category RAISED to 3.0 (less sensitive -- harder to classify suspicious)
+_promote_scoped_directly(store_rep3, None, "iot", "reputation_tier_suspicious_floor", 2.0, 3.0,
+                            CB_NOW - 5000, "rep3_cat")
+# this decision's vt score (2.5) sits in [2.0, 3.0) -- parent(2.0) WOULD classify it suspicious, this category's 3.0 does NOT
+_add_confirmed_decision_with_autotune_state(
+    store_rep3, "rep_dev_c", timestamp=CB_NOW - 100,
+    autotune_state={"reputation_tier_suspicious_floor": 3.0, "reputation_vt_score": 2.5, "reputation_ti_score": 0.0},
+    confirmed=False,
+)
+_add_confirmed_threat_decision(store_rep3, "rep_dev_c", timestamp=CB_NOW - 90)
+rep_rollbacks1 = backtest_job.check_reputation_floor_retroactive_misses_and_rollback(
+    store_rep3, "reputation_tier_suspicious_floor", now=CB_NOW)
+check("check_reputation_floor_retroactive_misses_and_rollback: rolls back a "
+      "loosened category override when a real near-miss score + a real "
+      "CONFIRMED_THREAT decision line up",
+      len(rep_rollbacks1) == 1 and rep_rollbacks1[0]["change_id"] == "rep3_cat", f"got {rep_rollbacks1}")
+
+# --- bocpd_hazard_rate generator: a confirmed incident with NO preceding regime_change tightens (raises) the hazard rate ---
+store_bocpd1 = GraphStore(":memory:")
+store_bocpd1.upsert_device("bocpd_dev_a", device_type="iot", timestamp=CB_NOW)
+_add_confirmed_threat_decision(store_bocpd1, "bocpd_dev_a", timestamp=CB_NOW - 100)  # no regime_change evidence at all
+_insert_passing_backtest_run(store_bocpd1, "bocpd_run_1", CB_NOW)
+bocpd_drift1 = backtest_job.compute_drift_result(store_bocpd1, now=CB_NOW)
+bocpd_proposals1 = backtest_job._propose_bocpd_hazard_changes(store_bocpd1, bocpd_drift1, "bocpd_run_1", CB_NOW)
+bocpd_device_proposals1 = [p for p in bocpd_proposals1 if p.get("device_id") == "bocpd_dev_a"]
+check("_propose_bocpd_hazard_changes: a confirmed incident with no preceding "
+      "regime_change evidence (a missed/delayed shift) tightens (raises) "
+      "bocpd_hazard_rate for that device, no sample floor required",
+      len(bocpd_device_proposals1) == 1 and bocpd_device_proposals1[0]["accepted"]
+      and bocpd_device_proposals1[0]["proposed_new_value"] > backtest_job._BOCPD_HAZARD_DEFAULT,
+      f"got {bocpd_device_proposals1}")
+
+# --- bocpd_hazard_rate generator: flapping (repeated uncorroborated regime_change) blocks loosening ---
+store_bocpd2 = GraphStore(":memory:")
+store_bocpd2.upsert_device("bocpd_dev_b", device_type="iot", timestamp=CB_NOW)
+_promote_scoped_directly(store_bocpd2, None, None, "bocpd_hazard_rate",
+                            backtest_job._BOCPD_HAZARD_DEFAULT, backtest_job._BOCPD_HAZARD_DEFAULT,
+                            CB_NOW - 10000, "bocpd2_global")
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING):
+    ts = CB_NOW - 1000 - i * 10
+    _add_confirmed_decision_with_autotune_state(store_bocpd2, "bocpd_dev_b", timestamp=ts, autotune_state={})
+    store_bocpd2.insert_evidence(Evidence(
+        device_id="bocpd_dev_b", destination_id=NO_DESTINATION, evidence_type="regime_change",
+        independence_family="behavioral_baseline", timestamp=ts - 5, source="baseline_engine", confidence=1.0, value=1.0,
+    ))
+# every one of those regime_change/CONFIRMED_THREAT pairs is a real HIT (perfect recall) --
+# would ordinarily be eligible to loosen -- but ALSO fire _BOCPD_FLAP_MIN_UNCORROBORATED
+# extra, uncorroborated regime_change events for the SAME device with no nearby incident at all.
+for i in range(backtest_job._BOCPD_FLAP_MIN_UNCORROBORATED):
+    store_bocpd2.insert_evidence(Evidence(
+        device_id="bocpd_dev_b", destination_id=NO_DESTINATION, evidence_type="regime_change",
+        independence_family="behavioral_baseline", timestamp=CB_NOW - 500000 - i * 10,
+        source="baseline_engine", confidence=1.0, value=1.0,
+    ))
+bocpd_drift2 = backtest_job.compute_drift_result(store_bocpd2, now=CB_NOW)
+bocpd_proposals2 = backtest_job._propose_bocpd_hazard_changes(store_bocpd2, bocpd_drift2, "bocpd_run_2", CB_NOW)
+bocpd_device_proposals2 = [p for p in bocpd_proposals2 if p.get("device_id") == "bocpd_dev_b"]
+check("_propose_bocpd_hazard_changes: a perfect recall record that would "
+      "otherwise be eligible to loosen is BLOCKED from loosening by a real "
+      "flapping signal (repeated uncorroborated regime_change events) for the "
+      "same device", bocpd_device_proposals2 == [], f"got {bocpd_device_proposals2}")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

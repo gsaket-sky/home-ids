@@ -20,10 +20,10 @@ Status as of 2026-09-27 (Phase 0 baseline), live counts pulled directly from `.9
 
 | # | Parameter | Allowlisted (`autotune/engine.py`) | Consumption call site | Generator | Live proposals / promotions on `.94` |
 |---|---|---|---|---|---|
-| 1 | `reputation_tier_suspicious_floor` | yes | `ops/live_engine.py:286-289` (`_tuned_rep_vector`) | none real (dead) | 0 / 0 |
-| 2 | `reputation_tier_high_floor` | yes | `ops/live_engine.py:288-289` | none real (dead) | 0 / 0 |
-| 3 | `bocpd_hazard_rate` | yes | `baseline/engine.py:277-278` (`_load_tracker`, cache-miss only) | none real (dead) | 0 / 0 |
-| 4 | `fp_combined_suppress_threshold` | yes | `intelligence/fp_engine.py:2181-2191` | exists in `train_fp_classifier.py` but never fires | 0 / 0 |
+| 1 | `reputation_tier_suspicious_floor` | yes | `ops/live_engine.py:286-289` (`_tuned_rep_vector`) | **FIXED 2026-09-27 (Phase 1)**: native generator in `backtest_job.py`'s `_propose_reputation_floor_changes()`, recall-based, reuses `_decide_scoped_change()` | 0/0 as of fix (real proposals depend on future confirmed-threat volume with the new `_autotune_state` score instrumentation) |
+| 2 | `reputation_tier_high_floor` | yes | `ops/live_engine.py:288-289` | **FIXED 2026-09-27 (Phase 1)**: same generator as row 1 | 0/0 as of fix |
+| 3 | `bocpd_hazard_rate` | yes | `baseline/engine.py:277-278` (`_load_tracker`, cache-miss only) | **FIXED 2026-09-27 (Phase 1)**: native generator `_propose_bocpd_hazard_changes()` (delayed-shift + flapping evidence); also corrected a stale module comment in `backtest_job.py` claiming "ZERO live consumer" -- BaselineEngine has been live in `live_engine.py` since 2026-09-16 | 0/0 as of fix |
+| 4 | `fp_combined_suppress_threshold` | yes | `intelligence/fp_engine.py:2181-2191` | **BUG FIXED 2026-09-27 (Phase 1)**: `train_fp_classifier.py`'s `_collect_calibration_evidence()` was pooling corrections of ANY verdict (including STAGE_1_HARD_STOP's confidence=0.0 sentinel and CONFIRMED_THREAT corrections) instead of only UNCERTAIN-verdict corrections, permanently poisoning `lowest_corrected` near 0 | 0/0 as of fix -- confirmed via live `.94` data this is now a genuine "not enough unambiguous evidence yet" outcome, not a bug |
 | 5 | `arp_sweep_unique_targets_threshold` | yes | `intelligence/fp_engine.py:2222-2229`, `cl_afpe/engine.py:398` | `train_fp_classifier.py`'s `_propose_and_promote()` | 18 / 11 |
 | 6 | `hard_stop_candidate_sensitivity` | yes | `decision/engine.py:215,231` via `ops/live_engine.py:1025-1027` | `backtest_job.py` synthetic sweep | 70 / 1 |
 | 7 | `peer_deviation_multiplier` | no | `ops/live_engine.py:750-751,805` (hardcoded `_PEER_DEVIATION_MULTIPLIER=3.0`) | none | n/a (unwired) |
@@ -73,7 +73,33 @@ subsets gate each phase instead.)
 ## 4. Arg-provenance sections (added as each subsystem is built)
 
 ### 4.1 Autotune native generator registry (Phases 1, 3, 4)
-_Pending — filled in when Phase 1 lands._
+Phase 1 (2026-09-27) landed natively in `src/argus/ops/backtest_job.py` (not a
+separate module) — the generic propose/canary/promote/rollback machinery in
+`autotune/engine.py` was already generic; Phase 1 added real candidate generators
+for the 4 previously-dead Tier-1 parameters:
+- `fp_combined_suppress_threshold`: root-cause bug fix in
+  `src/scripts/train_fp_classifier.py`'s `_collect_calibration_evidence()` (verdict
+  population mismatch, see the matrix table above) -- the generator itself
+  (`calibrate_suppress_threshold()`/`_propose_and_promote()`) was already correct.
+- `reputation_tier_suspicious_floor`/`reputation_tier_high_floor`: new
+  `_propose_reputation_floor_changes()` + `_reputation_recall_hits_totals()` +
+  `check_reputation_floor_retroactive_misses_and_rollback()`, all reusing the
+  existing `_decide_scoped_change()`. Requires a NEW instrumentation field: every
+  decision's `_autotune_state` block (already existed for audit) now also carries
+  `reputation_vt_score`/`reputation_ti_score`/`reputation_abuse_score` (added in
+  `src/argus/ops/live_engine.py`, ~line 1027) -- decisions recorded before
+  2026-09-27 have no such field and are correctly treated as "no evidence", not
+  silently backfilled.
+- `bocpd_hazard_rate`: new `_propose_bocpd_hazard_changes()`, evidence = confirmed
+  incidents with no preceding `regime_change` evidence (delayed shift, tightens) +
+  a flapping veto (>= `_BOCPD_FLAP_MIN_UNCORROBORATED` uncorroborated regime_change
+  events blocks loosening only). No retroactive-rollback check exists for this
+  parameter -- it governs an algorithm's dynamics, not a scalar-vs-band comparison,
+  so the pattern the other 5 parameters' rollback checks use doesn't structurally
+  apply; documented as an honest scope limit in `backtest_job.py` itself.
+
+All new tests added to `tests/test_argus_backtest_job.py` in the same hand-rolled
+`check()`/`FAILURES` convention as the file's existing tests.
 
 ### 4.2 Capture-queue disk protection (Phase 2)
 _Pending._

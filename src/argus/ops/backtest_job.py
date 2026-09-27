@@ -71,17 +71,24 @@ _DEFAULT_ATTACK_FLOOR = 0.5
 # Release 15 Sheet 03a triggering logic (2026-09-15): propose_change() had zero
 # production callers before this -- the autotuner's safety infrastructure (canary,
 # backtest-gate, bounded steps, rollback) was fully built with nothing driving it.
-# Scoped to hard_stop_candidate_sensitivity ONLY, deliberately, not all four
-# TUNABLE_PARAMETERS: it's the one parameter with a real, grounded signal in this
-# run's own synthetic-sweep data (a per-class detection rate). The other three
-# (reputation_tier_suspicious_floor/high_floor, bocpd_hazard_rate) have no
-# comparable signal here -- the synthetic attack generators are behavioral, not
-# reputation/IOC-based, so they don't stress the reputation-tier floors at all;
-# bocpd_hazard_rate in particular has ZERO live consumer on .94 today
-# (BaselineEngine, Release 15 Sheet 00, only runs on the out-of-scope .19 shadow
-# host, confirmed this session) -- proposing changes to it would be motion with no
-# real effect. Left genuinely untriggered because there's no sound signal to act
-# on, not silently deferred out of caution -- see ARGUS_DECISIONS.md.
+# Scoped to hard_stop_candidate_sensitivity ONLY at the time, deliberately, not all
+# four TUNABLE_PARAMETERS: it's the one parameter with a real, grounded signal in
+# this run's own synthetic-sweep data (a per-class detection rate). The other three
+# (reputation_tier_suspicious_floor/high_floor, bocpd_hazard_rate) had no comparable
+# signal here -- the synthetic attack generators are behavioral, not reputation/IOC-
+# based, so they never stressed the reputation-tier floors.
+#
+# CORRECTED 2026-09-27 (Phase 1 of the autonomy-completion effort): the claim that
+# bocpd_hazard_rate "has ZERO live consumer on .94" was true when written but is
+# stale -- a later session (2026-09-16, "Baseline/BOCPD now live on .94") wired
+# BaselineEngine into live_engine.py's own evaluate() (see _get_baseline_engine()
+# there), which IS the live .94 pipeline; argus/ingest/daemon.py's separate
+# BaselineEngine instance on .19 is a different, out-of-scope process, not the only
+# one. bocpd_hazard_rate's own forward generator now lives in
+# _propose_bocpd_hazard_changes() below, added the same session this comment was
+# corrected -- reads baseline/engine.py's persisted `regime_change` evidence and
+# decisions.raw_payload_json ground truth, the same real signal every other
+# generator in this file uses, not synthetic sweep data.
 _TUNE_PARAMETER = "hard_stop_candidate_sensitivity"
 _TUNE_TIGHTEN_FLOOR = 0.70   # any class below this proposes tightening
 _TUNE_LOOSEN_CEILING = 1.0   # every class's RAW detection rate must be at 100% to even consider loosening
@@ -750,6 +757,436 @@ def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Op
     return rolled_back
 
 
+_REPUTATION_SUSPICIOUS_PARAMETER = "reputation_tier_suspicious_floor"
+_REPUTATION_HIGH_PARAMETER = "reputation_tier_high_floor"
+_REPUTATION_SUSPICIOUS_DEFAULT = 2.0  # matches classifier.py's own confirmed_vt_ti_floor default
+_REPUTATION_HIGH_DEFAULT = 4.0        # matches classifier.py's own confirmed_abuse_floor default
+
+# 2026-09-27 (Phase 1 of the autonomy-completion effort): the forward generator for
+# BOTH reputation floors -- allowlisted and consumed live since Sheet 03a, but with
+# zero real proposals ever on .94 (confirmed via direct query of threshold_history,
+# not guessed): unlike hard_stop_candidate_sensitivity/arp_sweep_unique_targets_threshold,
+# no synthetic attack class stresses these -- classifier.py's own confirmed_ioc check
+# (`vt_score > suspicious_floor or ti_score > suspicious_floor or abuse_score >=
+# high_floor`) needs the RAW vt/ti/abuse scores a real destination scored at decision
+# time, which weren't being recorded anywhere before this same effort's fix to
+# live_engine.py's autotune_state block (see that file's own 2026-09-27 comment) --
+# historical decisions before that fix carry no such record, an honest, stated gap,
+# not silently backfilled.
+#
+# Evidence model: for each scope, recall of the CURRENT floor at catching destinations
+# that were LATER independently confirmed malicious (fp_verdict.verdict ==
+# CONFIRMED_THREAT, the same ground truth every other retroactive/generator check in
+# this file already treats as authoritative) -- "opportunities" (n) are confirmed-
+# malicious decisions that carried a recorded raw score; "hits" are the ones where that
+# raw score already cleared the current floor. This plugs directly into the SAME
+# _decide_scoped_change() every other scoped generator in this file uses: a confirmed
+# threat the current floor MISSED (recall below _TUNE_TIGHTEN_FLOOR) tightens
+# (LOWERS the floor -- direction=+1 for both these parameters, "higher floor -> harder
+# to reach", so tighten moves opposite that) with no sample-size floor, matching the
+# "a single confirmed miss is real information" convention; a perfect,
+# Wilson-gated recall across enough confirmed threats safely raises the floor a
+# bounded step, matching the same asymmetry as every other parameter in this file.
+_REPUTATION_LOOKBACK_SECONDS = _RETROACTIVE_MISS_LOOKBACK_SECONDS  # same 7-day window as everything else here
+
+
+def _reputation_score_and_floor(payload: Dict[str, Any], parameter: str) -> "tuple[Optional[float], Optional[float]]":
+    """(raw_score, floor_in_effect_at_decision_time) for `parameter` from a decision's
+    already-parsed raw_payload_json, or (None, None) if this decision predates the
+    2026-09-27 autotune_state instrumentation or lacks the relevant field. Shared by
+    the retroactive-rollback check below and (in spirit -- that one reads scores
+    directly, not via this helper, since it needs a hits/n aggregate rather than a
+    single band comparison) _reputation_recall_hits_totals()."""
+    state = payload.get("_autotune_state") or {}
+    if parameter == _REPUTATION_SUSPICIOUS_PARAMETER:
+        vt = state.get("reputation_vt_score")
+        ti = state.get("reputation_ti_score")
+        candidates = [v for v in (vt, ti) if isinstance(v, (int, float))]
+        score = max(candidates) if candidates else None
+        floor_at_decision = state.get(_REPUTATION_SUSPICIOUS_PARAMETER)
+    else:
+        score = state.get("reputation_abuse_score")
+        score = score if isinstance(score, (int, float)) else None
+        floor_at_decision = state.get(_REPUTATION_HIGH_PARAMETER)
+    if not isinstance(floor_at_decision, (int, float)):
+        floor_at_decision = None
+    return score, floor_at_decision
+
+
+def check_reputation_floor_retroactive_misses_and_rollback(
+        store: GraphStore, parameter: str, now: Optional[float] = None,
+        lookback_seconds: float = _RETROACTIVE_MISS_LOOKBACK_SECONDS) -> List[Dict[str, Any]]:
+    """Same protective intent as the other retroactive checks in this file, for
+    either reputation floor (`parameter` is one of _REPUTATION_SUSPICIOUS_PARAMETER/
+    _REPUTATION_HIGH_PARAMETER) -- a clean fit for the same "scalar value vs. a band"
+    pattern arp_sweep/hard_stop use, since classifier.py's own confirmed_ioc check is
+    itself a scalar-vs-floor comparison.
+
+    Near-miss: a decision in scope whose recorded raw score (see
+    _reputation_score_and_floor()) falls in [scope_value, parent_value) -- i.e. the
+    parent tier's stricter (lower) floor would have classified this destination as
+    suspicious/high, but this scope's own looser (higher) floor did not. Confirmation:
+    that same decision (or a later one for the same device within
+    _HARD_STOP_FRESHNESS_SECONDS) reached fp_verdict.verdict == "CONFIRMED_THREAT" --
+    the established ground truth every other check in this file already uses. Only
+    ever evaluates decisions carrying the 2026-09-27 autotune_state instrumentation;
+    an older decision with no recorded score simply can't be re-banded, an honest
+    limitation, not a silent skip disguised as "no near-miss found"."""
+    now = now if now is not None else time.time()
+    since = now - lookback_seconds
+    engine = AutotuneEngine(store)
+    rolled_back: List[Dict[str, Any]] = []
+    default = _REPUTATION_SUSPICIOUS_DEFAULT if parameter == _REPUTATION_SUSPICIOUS_PARAMETER \
+        else _REPUTATION_HIGH_DEFAULT
+
+    for (change_id, scope_device_id, scope_device_type, scope_value, parent_value,
+         band_lo, band_hi, device_ids) in _iter_active_loosened_scopes(store, engine, parameter, default):
+        placeholders = ",".join("?" * len(device_ids))
+
+        candidate_rows = store._conn.execute(
+            f"SELECT decision_id, device_id, timestamp, raw_payload_json FROM decisions "
+            f"WHERE device_id IN ({placeholders}) AND timestamp >= ?",
+            (*device_ids, since),
+        ).fetchall()
+
+        near_misses = []
+        for row in candidate_rows:
+            try:
+                payload = json.loads(row["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            score, _floor = _reputation_score_and_floor(payload, parameter)
+            if score is not None and band_lo <= score < band_hi:
+                near_misses.append((row, payload))
+        if not near_misses:
+            continue
+
+        confirming_reason = None
+        for miss_row, miss_payload in near_misses:
+            if (miss_payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                confirming_reason = (
+                    f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
+                    f"{miss_row['device_id']} scored in [{band_lo:.3f}, {band_hi:.3f}) for {parameter} "
+                    f"(this scope's floor {scope_value:.3f} would not classify it suspicious/high, "
+                    f"the parent tier's {parent_value:.3f} would have) and was itself CONFIRMED_THREAT"
+                )
+                break
+            later_confirmed = store._conn.execute(
+                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
+                "AND timestamp > ? AND timestamp <= ?",
+                (miss_row["device_id"], miss_row["timestamp"], miss_row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+            ).fetchall()
+            for drow in later_confirmed:
+                try:
+                    later_payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (later_payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                    confirming_reason = (
+                        f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
+                        f"{miss_row['device_id']} scored in [{band_lo:.3f}, {band_hi:.3f}) for {parameter} "
+                        f"(this scope's floor {scope_value:.3f} would not classify it suspicious/high, "
+                        f"the parent tier's {parent_value:.3f} would have) -- a LATER decision "
+                        f"{drow['decision_id']} for the same device was CONFIRMED_THREAT"
+                    )
+                    break
+            if confirming_reason:
+                break
+
+        if confirming_reason is None:
+            continue
+
+        if engine.rollback_change(change_id, confirming_reason, now=now):
+            LOGGER.critical("[AUTOTUNE_CIRCUIT_BREAKER] %s", confirming_reason)
+            rolled_back.append({"change_id": change_id, "device_id": scope_device_id,
+                                  "device_type": scope_device_type, "reason": confirming_reason})
+
+    return rolled_back
+
+
+def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], parameter: str,
+                                      since: float) -> Dict[str, "tuple[int, int]"]:
+    """One pseudo-class ("reputation_recall") hits/n across `device_ids`: n = decisions
+    carrying a recorded raw score for `parameter` (see _reputation_score_and_floor())
+    whose fp_verdict.verdict was CONFIRMED_THREAT; hits = the subset where that score
+    already cleared this SAME decision's own recorded floor -- the floor that was
+    actually in effect when the decision was made, not today's (a decision made under
+    a since-changed floor must be judged against the floor it actually saw, or a
+    promotion during the window would corrupt this recall calculation)."""
+    if not device_ids:
+        return {}
+    placeholders = ",".join("?" * len(device_ids))
+    rows = store._conn.execute(
+        f"SELECT raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
+        f"AND timestamp >= ? AND raw_payload_json LIKE '%CONFIRMED_THREAT%'",
+        [*device_ids, since],
+    ).fetchall()
+    hits = 0
+    n = 0
+    for row in rows:
+        try:
+            payload = json.loads(row["raw_payload_json"] or "{}")
+        except (TypeError, ValueError):
+            continue
+        if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+            continue
+        score, floor_at_decision = _reputation_score_and_floor(payload, parameter)
+        if score is None or floor_at_decision is None:
+            continue
+        n += 1
+        comparison = score > floor_at_decision if parameter == _REPUTATION_SUSPICIOUS_PARAMETER \
+            else score >= floor_at_decision
+        if comparison:
+            hits += 1
+    return {"reputation_recall": (hits, n)} if n else {}
+
+
+def _propose_reputation_floor_changes(store: GraphStore, drift: Dict[str, Any], run_id: str,
+                                         now: float) -> List[Dict[str, Any]]:
+    """Global-, category-, and device-scoped proposals for both reputation floors,
+    same shape as _propose_tuning_change()/_propose_scoped_tuning_changes() above --
+    one independent evaluation per (parameter, scope), each with its own trial count,
+    Wilson bound, drift check, and trust-radius cap (enforced inside
+    AutotuneEngine.propose_change() itself, unchanged)."""
+    since = now - _REPUTATION_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    results: List[Dict[str, Any]] = []
+
+    all_device_rows = store._conn.execute(
+        "SELECT device_id FROM devices WHERE merged_into_device_id IS NULL",
+    ).fetchall()
+    all_device_ids = [r["device_id"] for r in all_device_rows]
+    device_type_of = _device_type_lookup(store, all_device_ids)
+    by_category: Dict[str, List[str]] = {}
+    for device_id, device_type in device_type_of.items():
+        if device_type:
+            by_category.setdefault(device_type, []).append(device_id)
+
+    for parameter in (_REPUTATION_SUSPICIOUS_PARAMETER, _REPUTATION_HIGH_PARAMETER):
+        bounds = TUNABLE_PARAMETERS[parameter]
+        direction = _LESS_SENSITIVE_DIRECTION[parameter]
+        param_default = _REPUTATION_SUSPICIOUS_DEFAULT if parameter == _REPUTATION_SUSPICIOUS_PARAMETER \
+            else _REPUTATION_HIGH_DEFAULT
+
+        # --- global scope ---
+        global_hits = _reputation_recall_hits_totals(store, all_device_ids, parameter, since)
+        current = engine.get_active_value(parameter, default=param_default)
+        decision = _decide_scoped_change(
+            current, bounds, direction, global_hits,
+            drift_at_scope=_scope_has_drift(drift, parameter, None, None),
+            scope_label="global", run_id=run_id, allow_loosen=True,
+        )
+        if decision is not None:
+            new_value, reason = decision
+            result = engine.propose_change(parameter, new_value, reason=reason, backtest_run_id=run_id, now=now)
+            results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                              "parameter": parameter, "proposed_new_value": new_value})
+
+        # --- category scope ---
+        for category, device_ids in by_category.items():
+            hits_totals = _reputation_recall_hits_totals(store, device_ids, parameter, since)
+            current = engine.get_active_value(parameter, device_type=category, default=param_default)
+            decision = _decide_scoped_change(
+                current, bounds, direction, hits_totals,
+                drift_at_scope=_scope_has_drift(drift, parameter, None, category),
+                scope_label=f"category:{category}", run_id=run_id, allow_loosen=True,
+            )
+            if decision is None:
+                continue
+            new_value, reason = decision
+            result = engine.propose_change(parameter, new_value, reason=reason, device_type=category,
+                                              backtest_run_id=run_id, now=now)
+            results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                              "parameter": parameter, "proposed_new_value": new_value, "device_type": category})
+
+        # --- device scope ---
+        for device_id in all_device_ids:
+            hits_totals = _reputation_recall_hits_totals(store, [device_id], parameter, since)
+            if not hits_totals:
+                continue
+            device_type = device_type_of.get(device_id)
+            current = engine.get_active_value(parameter, device_id=device_id, device_type=device_type,
+                                                 default=param_default)
+            decision = _decide_scoped_change(
+                current, bounds, direction, hits_totals,
+                drift_at_scope=_scope_has_drift(drift, parameter, device_id, None),
+                scope_label=f"device:{device_id}", run_id=run_id, allow_loosen=True,
+            )
+            if decision is None:
+                continue
+            new_value, reason = decision
+            result = engine.propose_change(parameter, new_value, reason=reason, device_id=device_id,
+                                              device_type=device_type, backtest_run_id=run_id, now=now)
+            results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                              "parameter": parameter, "proposed_new_value": new_value, "device_id": device_id})
+
+    return results
+
+
+_BOCPD_HAZARD_PARAMETER = "bocpd_hazard_rate"
+_BOCPD_HAZARD_DEFAULT = 1.0 / 500.0  # matches baseline/engine.py's own _DEFAULT_HAZARD_RATE
+_BOCPD_LOOKBACK_SECONDS = _RETROACTIVE_MISS_LOOKBACK_SECONDS  # same 7-day window as everything else here
+# A scope whose regime_change flags fire this many times in the window with NOT ONE
+# of them ever preceding a real confirmed incident is real information that this
+# scope is too trigger-happy -- see _propose_bocpd_hazard_changes()'s own docstring
+# for why this is the flapping half of "regime flapping versus delayed verified
+# shifts" (the plan's own named evidence source for this parameter). First-pass,
+# not-yet-empirically-tuned constant, same honesty framing as this file's others.
+_BOCPD_FLAP_MIN_UNCORROBORATED = 5
+
+
+def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_id: str,
+                                     now: float) -> List[Dict[str, Any]]:
+    """bocpd_hazard_rate's forward generator (2026-09-27, Phase 1 of the
+    autonomy-completion effort -- see this file's own corrected module-level
+    comment on _TUNE_PARAMETER for why this was previously left untriggered and why
+    that's no longer true). Evidence model, matching the plan's own named source for
+    this parameter ("regime flapping versus delayed verified shifts"):
+
+    DELAYED SHIFT (a real confirmed incident with no preceding regime_change flag --
+    reused directly as one pseudo-class "regime_shift_detection" hits/n, fed into the
+    SAME _decide_scoped_change() every other generator in this file uses): n = decisions
+    for devices in scope reaching fp_verdict.verdict == CONFIRMED_THREAT in the lookback
+    window; hits = the subset preceded by a `regime_change` evidence item for that same
+    device within _HARD_STOP_FRESHNESS_SECONDS beforehand. A confirmed incident BOCPD
+    never flagged in advance is exactly a missed regime shift -- tightens (raises the
+    hazard rate, direction=-1 so tighten moves opposite that, i.e. current + step)
+    with no sample floor, same "a single confirmed miss is real information" framing
+    every other tighten path in this file uses. A perfect, Wilson-gated record (every
+    confirmed incident WAS preceded by a flag) safely loosens (lowers the hazard rate)
+    a bounded step, same asymmetry as every other parameter here.
+
+    FLAPPING (at least _BOCPD_FLAP_MIN_UNCORROBORATED regime_change events for a scope
+    that never preceded a real incident -- independent of whether OTHER regime_change
+    events for that same scope DID; a run of noise is worth caution even alongside some
+    genuine hits): passed into _decide_scoped_change() as an ADDITIONAL veto OR'd onto
+    the ordinary drift check -- that parameter already means exactly "don't loosen this
+    scope right now", so a flapping scope is blocked from loosening (though a confirmed
+    miss can still force a tighten regardless -- becoming MORE cautious is never
+    something flapping evidence should block)."""
+    since = now - _BOCPD_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_BOCPD_HAZARD_PARAMETER]
+    direction = _LESS_SENSITIVE_DIRECTION[_BOCPD_HAZARD_PARAMETER]
+    results: List[Dict[str, Any]] = []
+
+    all_device_rows = store._conn.execute(
+        "SELECT device_id FROM devices WHERE merged_into_device_id IS NULL",
+    ).fetchall()
+    all_device_ids = [r["device_id"] for r in all_device_rows]
+    device_type_of = _device_type_lookup(store, all_device_ids)
+    by_category: Dict[str, List[str]] = {}
+    for device_id, device_type in device_type_of.items():
+        if device_type:
+            by_category.setdefault(device_type, []).append(device_id)
+
+    def hits_totals_and_flapping(device_ids: List[str]) -> "tuple[Dict[str, tuple], bool]":
+        if not device_ids:
+            return {}, False
+        placeholders = ",".join("?" * len(device_ids))
+        incident_rows = store._conn.execute(
+            f"SELECT device_id, timestamp, raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
+            f"AND timestamp >= ? AND raw_payload_json LIKE '%CONFIRMED_THREAT%'",
+            [*device_ids, since],
+        ).fetchall()
+        regime_rows = store._conn.execute(
+            f"SELECT device_id, timestamp FROM evidence WHERE evidence_type='regime_change' "
+            f"AND device_id IN ({placeholders}) AND timestamp >= ?",
+            [*device_ids, since],
+        ).fetchall()
+        regime_by_device: Dict[str, List[float]] = {}
+        for r in regime_rows:
+            regime_by_device.setdefault(r["device_id"], []).append(float(r["timestamp"]))
+
+        hits = 0
+        n = 0
+        corroborated_regime_ts = set()
+        for row in incident_rows:
+            try:
+                payload = json.loads(row["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+                continue
+            n += 1
+            preceding = [
+                ts for ts in regime_by_device.get(row["device_id"], [])
+                if row["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS <= ts <= row["timestamp"]
+            ]
+            if preceding:
+                hits += 1
+                corroborated_regime_ts.update((row["device_id"], ts) for ts in preceding)
+
+        total_regime_events = sum(len(v) for v in regime_by_device.values())
+        uncorroborated = total_regime_events - len(corroborated_regime_ts)
+        # Deliberately independent of whether OTHER regime_change events for this same
+        # scope DID corroborate a real incident -- a substantial run of flags that
+        # never once correlated with anything real is itself worth caution regardless
+        # of whether the scope also has some genuine hits elsewhere.
+        flapping = uncorroborated >= _BOCPD_FLAP_MIN_UNCORROBORATED
+
+        return ({"regime_shift_detection": (hits, n)} if n else {}), flapping
+
+    # --- global scope ---
+    hits_totals, flapping = hits_totals_and_flapping(all_device_ids)
+    current = engine.get_active_value(_BOCPD_HAZARD_PARAMETER, default=_BOCPD_HAZARD_DEFAULT)
+    decision = _decide_scoped_change(
+        current, bounds, direction, hits_totals,
+        drift_at_scope=(_scope_has_drift(drift, _BOCPD_HAZARD_PARAMETER, None, None) or flapping),
+        scope_label="global", run_id=run_id, allow_loosen=True,
+    )
+    if decision is not None:
+        new_value, reason = decision
+        result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason,
+                                          backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value})
+
+    # --- category scope ---
+    for category, device_ids in by_category.items():
+        hits_totals, flapping = hits_totals_and_flapping(device_ids)
+        if not hits_totals:
+            continue
+        current = engine.get_active_value(_BOCPD_HAZARD_PARAMETER, device_type=category, default=_BOCPD_HAZARD_DEFAULT)
+        decision = _decide_scoped_change(
+            current, bounds, direction, hits_totals,
+            drift_at_scope=(_scope_has_drift(drift, _BOCPD_HAZARD_PARAMETER, None, category) or flapping),
+            scope_label=f"category:{category}", run_id=run_id, allow_loosen=True,
+        )
+        if decision is None:
+            continue
+        new_value, reason = decision
+        result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason, device_type=category,
+                                          backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value,
+                          "device_type": category})
+
+    # --- device scope ---
+    for device_id in all_device_ids:
+        hits_totals, flapping = hits_totals_and_flapping([device_id])
+        if not hits_totals:
+            continue
+        device_type = device_type_of.get(device_id)
+        current = engine.get_active_value(_BOCPD_HAZARD_PARAMETER, device_id=device_id, device_type=device_type,
+                                             default=_BOCPD_HAZARD_DEFAULT)
+        decision = _decide_scoped_change(
+            current, bounds, direction, hits_totals,
+            drift_at_scope=(_scope_has_drift(drift, _BOCPD_HAZARD_PARAMETER, device_id, None) or flapping),
+            scope_label=f"device:{device_id}", run_id=run_id, allow_loosen=True,
+        )
+        if decision is None:
+            continue
+        new_value, reason = decision
+        result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason, device_id=device_id,
+                                          device_type=device_type, backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value,
+                          "device_id": device_id})
+
+    return results
+
+
 def run_golden_set() -> Dict[str, Any]:
     """Runs the existing real-incident regression suite as a subprocess.
     Zero tolerance: any real-incident regression (non-zero exit) fails this
@@ -881,6 +1318,25 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
         circuit_breaker_rollbacks += check_fp_combined_retroactive_misses_and_rollback(store, now=now)
     except Exception:
         LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] fp_combined retroactive-miss check failed, non-fatal")
+    # 2026-09-27 (Phase 1 of the autonomy-completion effort): same protection for both
+    # reputation floors, now that they have a real forward generator that can actually
+    # promote a loosened scope. bocpd_hazard_rate deliberately has NO equivalent check
+    # here -- it governs an entire changepoint-detection algorithm's dynamics, not a
+    # single scalar value crossing a band, so the "near-miss value in [scope, parent)"
+    # pattern every other check (including these two) relies on doesn't structurally
+    # apply to it; its own protection is the ordinary canary/backtest-confirmation gate
+    # plus this same generator re-evaluating (and proposing a tighten) every night a
+    # delayed shift keeps recurring -- an honest scope limit, not an oversight.
+    try:
+        circuit_breaker_rollbacks += check_reputation_floor_retroactive_misses_and_rollback(
+            store, _REPUTATION_SUSPICIOUS_PARAMETER, now=now)
+    except Exception:
+        LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] reputation_tier_suspicious_floor retroactive-miss check failed, non-fatal")
+    try:
+        circuit_breaker_rollbacks += check_reputation_floor_retroactive_misses_and_rollback(
+            store, _REPUTATION_HIGH_PARAMETER, now=now)
+    except Exception:
+        LOGGER.exception("[AUTOTUNE_CIRCUIT_BREAKER] reputation_tier_high_floor retroactive-miss check failed, non-fatal")
 
     # Release 15 Sheet 03a (2026-09-15): the triggering logic that was the autotuner's
     # one genuine remaining gap -- see _propose_tuning_change()'s own docstring for
@@ -907,6 +1363,22 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
             scoped_tuning_proposals = _propose_scoped_tuning_changes(store, all_trials, drift, run_id, now)
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] scoped (per-device/category) tuning proposal evaluation failed, non-fatal")
+        # 2026-09-27 (Phase 1 of the autonomy-completion effort): the two reputation
+        # floors' own forward generator -- see _propose_reputation_floor_changes()'s
+        # own docstring. Independent of the synthetic-sweep-driven proposals above
+        # (different evidence source entirely), same best-effort framing.
+        try:
+            reputation_tuning_proposals = _propose_reputation_floor_changes(store, drift, run_id, now)
+            scoped_tuning_proposals += reputation_tuning_proposals
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] reputation-floor tuning proposal evaluation failed, non-fatal")
+        # 2026-09-27 (Phase 1 of the autonomy-completion effort): bocpd_hazard_rate's
+        # own forward generator -- see _propose_bocpd_hazard_changes()'s own docstring.
+        try:
+            bocpd_tuning_proposals = _propose_bocpd_hazard_changes(store, drift, run_id, now)
+            scoped_tuning_proposals += bocpd_tuning_proposals
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] bocpd_hazard_rate tuning proposal evaluation failed, non-fatal")
         try:
             tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
         except Exception:
