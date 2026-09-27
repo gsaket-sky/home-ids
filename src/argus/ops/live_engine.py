@@ -798,18 +798,31 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
             return []
         since = ts - _PEER_DEVIATION_WINDOW_SECONDS
         my_count = store.get_distinct_destination_count(device_id, since)
-        if my_count < _PEER_DEVIATION_MIN_ABSOLUTE_COUNT:
+        # 2026-09-27 (Phase 3 of the autonomy-completion effort): both constants below
+        # are now allowlisted, device/category/global-scoped tunables -- resolved here
+        # (not hardcoded) so a promoted override actually changes this evidence-creation
+        # gate, not just something that reads inert. Defaults match the untouched
+        # original hardcoded values exactly, so this is inert-by-construction until a
+        # real promotion exists for this device, same pattern as every other tunable
+        # this module already resolves.
+        autotune = _get_autotune_engine()
+        min_absolute_count = autotune.get_active_value(
+            "peer_deviation_min_absolute_count", device_id, default=_PEER_DEVIATION_MIN_ABSOLUTE_COUNT)
+        multiplier = autotune.get_active_value(
+            "peer_deviation_multiplier", device_id, default=_PEER_DEVIATION_MULTIPLIER)
+        if my_count < min_absolute_count:
             return []
         peer_counts = [store.get_distinct_destination_count(p, since) for p in peers]
         peer_avg = sum(peer_counts) / len(peer_counts)
-        if peer_avg > 0 and my_count >= peer_avg * _PEER_DEVIATION_MULTIPLIER:
+        if peer_avg > 0 and my_count >= peer_avg * multiplier:
             return [Evidence(
                 device_id=device_id, destination_id=NO_DESTINATION, evidence_type="peer_deviation",
                 independence_family="peer_cohort_deviation", timestamp=ts,
                 source="v13_live_engine", confidence=0.6, value=float(my_count),
                 provenance=f"v13_live_engine:peer_deviation:{device_type}",
                 features={"device_type": device_type, "my_count": my_count,
-                          "peer_avg": round(peer_avg, 1), "peer_count": len(peers)},
+                          "peer_avg": round(peer_avg, 1), "peer_count": len(peers),
+                          "multiplier": multiplier, "min_absolute_count": min_absolute_count},
             )]
     except Exception as e:
         LOGGER.warning(
@@ -1006,6 +1019,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         # before Sheet 03a's live wiring.
         tuned_rep = rep_vector
         hard_stop_sensitivity = None
+        familiarity_trust_bar = 0.6  # matches DeviceProfileBenignHypothesis's own hardcoded default
         # Autonomous-behavior traceability (Documentation/ALERT_TRACE_GRAPH_PLAN.md,
         # 2026-09-22): the actually-active tunable values this cycle used, stashed
         # onto the decision dict so pipeline.py can persist them onto the matching
@@ -1024,12 +1038,22 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
                 tuned_rep = _tuned_rep_vector(rep_vector, device_id, autotune)
                 hard_stop_sensitivity = autotune.get_active_value(
                     "hard_stop_candidate_sensitivity", device_id, default=None)
+                familiarity_trust_bar = autotune.get_active_value(
+                    "familiarity_trust_bar", device_id, default=0.6)
                 autotune_state = {
                     "hard_stop_candidate_sensitivity": hard_stop_sensitivity,
                     "reputation_tier_suspicious_floor": autotune.get_active_value(
                         "reputation_tier_suspicious_floor", device_id, default=2.0),
                     "reputation_tier_high_floor": autotune.get_active_value(
                         "reputation_tier_high_floor", device_id, default=4.0),
+                    "familiarity_trust_bar": familiarity_trust_bar,
+                    # 2026-09-27 (Phase 3): the actual familiarity SCORE this cycle
+                    # judged against the bar above -- without this, a retroactive
+                    # calibration generator has no way to tell whether a different
+                    # bar would have changed DeviceProfileBenignHypothesis's outcome
+                    # for this decision (same reasoning as the reputation scores
+                    # added in Phase 1, just for this parameter's own boundary).
+                    "baseline_familiarity": baseline_familiarity,
                 }
                 # 2026-09-27 (Phase 1 of the autonomy-completion effort): the raw
                 # scores classify() actually judged this cycle against the two
@@ -1056,6 +1080,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             merged_v2, tuned_rep, device_type=device_type,
             baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
             now=ts, hard_stop_candidate_sensitivity=hard_stop_sensitivity,
+            familiarity_trust_bar=familiarity_trust_bar,
         )
         # See autotune_state's own comment above -- attached here (not persisted
         # into raw_payload_json by insert_decision(), which runs on this SAME dict

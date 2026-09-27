@@ -212,7 +212,8 @@ class DecisionEngine:
     def evaluate(self, evidence_list: List[Evidence], rep, device_type: str = "",
                   baseline_familiarity: float = 0.0, features: Optional[dict] = None,
                   is_safe: bool = False, now: Optional[float] = None,
-                  hard_stop_candidate_sensitivity: Optional[float] = None) -> Dict[str, Any]:
+                  hard_stop_candidate_sensitivity: Optional[float] = None,
+                  familiarity_trust_bar: Optional[float] = None) -> Dict[str, Any]:
         """hard_stop_candidate_sensitivity (Release 15, Sheet 03a live-wiring
         follow-up): overrides the confirmed_exploit hard-stop rule's
         min_confidence bar (default 0.9, hardcoded in DEFAULT_HARD_STOP_
@@ -228,10 +229,16 @@ class DecisionEngine:
         allowlist this parameter belongs to (TUNABLE_PARAMETERS) has exactly
         one entry that maps here, so a small, named special case in the loop
         below is the honest scope for what's actually tunable today, not a
-        speculative generic mechanism for tunables that don't exist yet."""
+        speculative generic mechanism for tunables that don't exist yet.
+
+        familiarity_trust_bar (2026-09-27, Phase 3 of the autonomy-completion
+        effort): same store-agnostic pattern -- resolved by live_engine.py
+        (device_id-aware) and passed through here as a plain float. None
+        preserves DeviceProfileBenignHypothesis's own hardcoded 0.6 default."""
         now = now if now is not None else time.time()
         hyp_results = self.hypothesis_engine.evaluate_all(
-            evidence_list, rep, device_type, baseline_familiarity, now=now)
+            evidence_list, rep, device_type, baseline_familiarity, now=now,
+            familiarity_trust_bar=familiarity_trust_bar)
 
         attack_score = hyp_results["attack"]["score"]
         benign_score = hyp_results["benign"]["score"]

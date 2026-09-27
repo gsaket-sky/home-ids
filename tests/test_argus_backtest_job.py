@@ -642,6 +642,103 @@ check("_propose_bocpd_hazard_changes: a perfect recall record that would "
       "flapping signal (repeated uncorroborated regime_change events) for the "
       "same device", bocpd_device_proposals2 == [], f"got {bocpd_device_proposals2}")
 
+# --- peer_deviation_multiplier/peer_deviation_min_absolute_count generator
+# (2026-09-27, Phase 3): loosen-only, real evidence -- see
+# _propose_peer_deviation_changes()'s own docstring for why only this direction. ---
+store_peer1 = GraphStore(":memory:")
+store_peer1.upsert_device("peer_dev_a", device_type="iot", timestamp=CB_NOW)
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING):
+    ts = CB_NOW - 1000 - i * 10
+    # my_count=20, peer_avg=5 -> ratio=4.0, above the default multiplier (3.0) and
+    # min_absolute_count (5.0) both -- a real firing under the CURRENT defaults.
+    store_peer1.insert_evidence(Evidence(
+        device_id="peer_dev_a", destination_id=NO_DESTINATION, evidence_type="peer_deviation",
+        independence_family="peer_cohort_deviation", timestamp=ts, source="v13_live_engine",
+        confidence=0.6, value=20.0,
+        features={"device_type": "iot", "my_count": 20.0, "peer_avg": 5.0, "peer_count": 3,
+                   "multiplier": 3.0, "min_absolute_count": 5.0},
+    ))
+    _add_confirmed_decision_with_autotune_state(store_peer1, "peer_dev_a", timestamp=ts, autotune_state={},
+                                                    confirmed=False)  # FALSE_POSITIVE, not CONFIRMED_THREAT
+_insert_passing_backtest_run(store_peer1, "peer_run_1", CB_NOW)
+peer_proposals1 = backtest_job._propose_peer_deviation_changes(store_peer1, "peer_run_1", CB_NOW)
+peer_mult_proposals1 = [p for p in peer_proposals1
+                          if p["parameter"] == "peer_deviation_multiplier" and p.get("device_id") == "peer_dev_a"]
+peer_count_proposals1 = [p for p in peer_proposals1
+                           if p["parameter"] == "peer_deviation_min_absolute_count" and p.get("device_id") == "peer_dev_a"]
+check("_propose_peer_deviation_changes: enough false-positive-confirmed firings "
+      "RAISES peer_deviation_multiplier just above the highest confirmed ratio (4.0)",
+      len(peer_mult_proposals1) == 1 and peer_mult_proposals1[0]["accepted"]
+      and abs(peer_mult_proposals1[0]["proposed_new_value"] - (4.0 + backtest_job._PEER_DEVIATION_MULTIPLIER_SAFETY_MARGIN)) < 1e-6,
+      f"got {peer_mult_proposals1}")
+check("_propose_peer_deviation_changes: same evidence RAISES peer_deviation_min_absolute_count, "
+      "clamped to TUNABLE_PARAMETERS' own max bound (20.0) since 20 + the safety margin would "
+      "otherwise exceed it",
+      len(peer_count_proposals1) == 1 and peer_count_proposals1[0]["accepted"]
+      and abs(peer_count_proposals1[0]["proposed_new_value"] - 20.0) < 1e-6,
+      f"got {peer_count_proposals1}")
+
+# --- below the sample floor: no proposal at all ---
+store_peer2 = GraphStore(":memory:")
+store_peer2.upsert_device("peer_dev_b", device_type="iot", timestamp=CB_NOW)
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING - 1):
+    ts = CB_NOW - 1000 - i * 10
+    store_peer2.insert_evidence(Evidence(
+        device_id="peer_dev_b", destination_id=NO_DESTINATION, evidence_type="peer_deviation",
+        independence_family="peer_cohort_deviation", timestamp=ts, source="v13_live_engine",
+        confidence=0.6, value=20.0,
+        features={"device_type": "iot", "my_count": 20.0, "peer_avg": 5.0, "peer_count": 3,
+                   "multiplier": 3.0, "min_absolute_count": 5.0},
+    ))
+    _add_confirmed_decision_with_autotune_state(store_peer2, "peer_dev_b", timestamp=ts, autotune_state={},
+                                                    confirmed=False)
+peer_proposals2 = backtest_job._propose_peer_deviation_changes(store_peer2, "peer_run_2", CB_NOW)
+check("_propose_peer_deviation_changes: below _MIN_TRIALS_FOR_LOOSENING false-positive-"
+      "confirmed firings makes no proposal at all -- loosening needs proof, matching "
+      "every other parameter's own asymmetry in this file",
+      all(p.get("device_id") != "peer_dev_b" for p in peer_proposals2), f"got {peer_proposals2}")
+
+# --- familiarity_trust_bar generator (2026-09-27, Phase 3): loosen-only, real
+# evidence -- see _propose_familiarity_trust_bar_changes()'s own docstring. ---
+store_fam1 = GraphStore(":memory:")
+store_fam1.upsert_device("fam_dev_a", device_type="iot", timestamp=CB_NOW)
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING):
+    ts = CB_NOW - 1000 - i * 10
+    _add_confirmed_decision_with_autotune_state(
+        store_fam1, "fam_dev_a", timestamp=ts,
+        autotune_state={"familiarity_trust_bar": 0.6, "baseline_familiarity": 0.5},
+        confirmed=False,  # FALSE_POSITIVE
+    )
+_insert_passing_backtest_run(store_fam1, "fam_run_1", CB_NOW)
+fam_proposals1 = backtest_job._propose_familiarity_trust_bar_changes(store_fam1, "fam_run_1", CB_NOW)
+fam_device_proposals1 = [p for p in fam_proposals1 if p.get("device_id") == "fam_dev_a"]
+check("_propose_familiarity_trust_bar_changes: enough false-positive-confirmed decisions "
+      "with familiarity below the bar LOWERS familiarity_trust_bar just above the highest "
+      "such familiarity score (0.5)",
+      len(fam_device_proposals1) == 1 and fam_device_proposals1[0]["accepted"]
+      and abs(fam_device_proposals1[0]["proposed_new_value"] - (0.5 + backtest_job._FAMILIARITY_SAFETY_MARGIN)) < 1e-6,
+      f"got {fam_device_proposals1}")
+
+# --- ambiguous overlap: a genuine CONFIRMED_THREAT at/below the proposed new bar blocks it ---
+store_fam2 = GraphStore(":memory:")
+store_fam2.upsert_device("fam_dev_b", device_type="iot", timestamp=CB_NOW)
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING):
+    ts = CB_NOW - 1000 - i * 10
+    _add_confirmed_decision_with_autotune_state(
+        store_fam2, "fam_dev_b", timestamp=ts,
+        autotune_state={"familiarity_trust_bar": 0.6, "baseline_familiarity": 0.5},
+        confirmed=False,
+    )
+_add_confirmed_decision_with_autotune_state(
+    store_fam2, "fam_dev_b", timestamp=CB_NOW - 50,
+    autotune_state={"familiarity_trust_bar": 0.6, "baseline_familiarity": 0.52},
+    confirmed=True,  # a genuine CONFIRMED_THREAT scoring just above the corrected evidence
+)
+fam_proposals2 = backtest_job._propose_familiarity_trust_bar_changes(store_fam2, "fam_run_2", CB_NOW)
+check("_propose_familiarity_trust_bar_changes: a genuine CONFIRMED_THREAT scoring at/below "
+      "the proposed new bar blocks the lowering entirely -- ambiguous overlap",
+      all(p.get("device_id") != "fam_dev_b" for p in fam_proposals2), f"got {fam_proposals2}")
+
 
 print()
 if FAILURES:

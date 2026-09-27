@@ -1187,6 +1187,269 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
     return results
 
 
+_PEER_DEVIATION_MULTIPLIER_PARAMETER = "peer_deviation_multiplier"
+_PEER_DEVIATION_MIN_COUNT_PARAMETER = "peer_deviation_min_absolute_count"
+_PEER_DEVIATION_MULTIPLIER_DEFAULT = 3.0    # matches live_engine.py's own _PEER_DEVIATION_MULTIPLIER
+_PEER_DEVIATION_MIN_COUNT_DEFAULT = 5.0     # matches live_engine.py's own _PEER_DEVIATION_MIN_ABSOLUTE_COUNT
+_PEER_DEVIATION_LOOKBACK_SECONDS = _RETROACTIVE_MISS_LOOKBACK_SECONDS  # same 7-day window as everything else here
+_PEER_DEVIATION_MULTIPLIER_SAFETY_MARGIN = 0.2  # stay this far above the highest false-positive-confirmed ratio
+_PEER_DEVIATION_MIN_COUNT_SAFETY_MARGIN = 1.0   # stay this far above the highest false-positive-confirmed my_count
+
+
+def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
+    """Forward generator for BOTH peer_deviation_* parameters (2026-09-27, Phase 3 of
+    the autonomy-completion effort) -- allowlisted and consumed live
+    (live_engine.py's _inject_peer_deviation_evidence()) since this same phase,
+    previously two hardcoded module constants with zero autotune wiring at all.
+
+    HONEST SCOPE NOTE, not hidden: this only ever LOOSENS (raises) either parameter,
+    never tightens (lowers). The available evidence is fundamentally one-directional
+    -- a `peer_deviation` evidence row only EXISTS when the gate already fired (its
+    own features_json records the exact my_count/peer_avg/multiplier/
+    min_absolute_count that were in effect at the time), so this generator can
+    directly measure "this firing turned out to be a false positive, and a stricter
+    bound would have prevented it" (loosen evidence). There is no equivalent recorded
+    signal for "this device SHOULD have fired but didn't" (a gate that never fires
+    leaves no evidence row behind at all) -- tightening this pair would need a
+    fundamentally different instrumentation approach (e.g. recording every
+    evaluation, not just firings), a real, separate piece of future work, not
+    silently deferred here. This mirrors this same codebase's own precedent for
+    other one-directional parameters (fp_combined_suppress_threshold's own
+    calibrate_suppress_threshold(): "raising it back up is a human decision").
+
+    Ground truth: a peer_deviation evidence item whose SAME decision (device_id,
+    same cycle) was published then later corrected to FALSE_POSITIVE -- reusing the
+    identical fp_verdict.verdict field every other check in this file already
+    treats as authoritative, just the opposite verdict value."""
+    since = now - _PEER_DEVIATION_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    results: List[Dict[str, Any]] = []
+
+    all_device_rows = store._conn.execute(
+        "SELECT device_id FROM devices WHERE merged_into_device_id IS NULL",
+    ).fetchall()
+    all_device_ids = [r["device_id"] for r in all_device_rows]
+    device_type_of = _device_type_lookup(store, all_device_ids)
+    by_category: Dict[str, List[str]] = {}
+    for device_id, device_type in device_type_of.items():
+        if device_type:
+            by_category.setdefault(device_type, []).append(device_id)
+
+    def false_positive_confirmed_ratios(device_ids: List[str]) -> List[Dict[str, float]]:
+        """One dict per false-positive-confirmed peer_deviation firing, in this
+        scope, with its recorded my_count/peer_avg ratio -- the data needed to know
+        how much stricter either bound would have to be to have prevented it."""
+        if not device_ids:
+            return []
+        placeholders = ",".join("?" * len(device_ids))
+        evidence_rows = store._conn.execute(
+            f"SELECT device_id, timestamp, features_json FROM evidence WHERE evidence_type='peer_deviation' "
+            f"AND device_id IN ({placeholders}) AND timestamp >= ?",
+            (*device_ids, since),
+        ).fetchall()
+        out = []
+        for row in evidence_rows:
+            try:
+                features = json.loads(row["features_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            my_count = features.get("my_count")
+            peer_avg = features.get("peer_avg")
+            if not isinstance(my_count, (int, float)) or not isinstance(peer_avg, (int, float)) or peer_avg <= 0:
+                continue
+            decision_rows = store._conn.execute(
+                "SELECT raw_payload_json FROM decisions WHERE device_id=? "
+                "AND timestamp >= ? AND timestamp <= ?",
+                (row["device_id"], row["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
+                 row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+            ).fetchall()
+            is_false_positive = False
+            for drow in decision_rows:
+                try:
+                    payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("fp_verdict") or {}).get("verdict") == "FALSE_POSITIVE":
+                    is_false_positive = True
+                    break
+            if is_false_positive:
+                out.append({"my_count": float(my_count), "peer_avg": float(peer_avg),
+                             "ratio": float(my_count) / float(peer_avg)})
+        return out
+
+    def propose_for_scope(device_ids: List[str], device_id=None, device_type=None,
+                            scope_label: str = "global") -> None:
+        # Same _MIN_TRIALS_FOR_LOOSENING bar this file already applies uniformly to
+        # every OTHER scope (global/category/device alike) for a loosening move --
+        # see hard_stop_candidate_sensitivity's own generator above.
+        fp_firings = false_positive_confirmed_ratios(device_ids)
+        if len(fp_firings) < _MIN_TRIALS_FOR_LOOSENING:
+            return
+
+        # --- peer_deviation_multiplier: raise to just above the highest false-
+        # positive-confirmed ratio, so that exact firing (and everything weaker)
+        # would no longer clear the bar. ---
+        bounds_mult = TUNABLE_PARAMETERS[_PEER_DEVIATION_MULTIPLIER_PARAMETER]
+        current_mult = engine.get_active_value(
+            _PEER_DEVIATION_MULTIPLIER_PARAMETER, device_id=device_id, device_type=device_type,
+            default=_PEER_DEVIATION_MULTIPLIER_DEFAULT)
+        highest_ratio = max(f["ratio"] for f in fp_firings)
+        candidate_mult = round(min(highest_ratio + _PEER_DEVIATION_MULTIPLIER_SAFETY_MARGIN, bounds_mult["max"]), 4)
+        if candidate_mult > current_mult:
+            reason = (
+                f"{len(fp_firings)} peer_deviation firing(s) in [{scope_label}] later confirmed FALSE_POSITIVE, "
+                f"highest my_count/peer_avg ratio {highest_ratio:.2f} -- raised peer_deviation_multiplier "
+                f"from {current_mult:.2f} to {candidate_mult:.2f} ({_PEER_DEVIATION_MULTIPLIER_SAFETY_MARGIN:.2f} "
+                f"safety margin above the highest false-positive-confirmed ratio)."
+            )
+            result = engine.propose_change(_PEER_DEVIATION_MULTIPLIER_PARAMETER, candidate_mult, reason=reason,
+                                              device_id=device_id, device_type=device_type,
+                                              backtest_run_id=run_id, now=now)
+            results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                              "parameter": _PEER_DEVIATION_MULTIPLIER_PARAMETER, "proposed_new_value": candidate_mult,
+                              "device_id": device_id, "device_type": device_type})
+
+        # --- peer_deviation_min_absolute_count: raise to just above the highest
+        # false-positive-confirmed my_count. ---
+        bounds_count = TUNABLE_PARAMETERS[_PEER_DEVIATION_MIN_COUNT_PARAMETER]
+        current_count = engine.get_active_value(
+            _PEER_DEVIATION_MIN_COUNT_PARAMETER, device_id=device_id, device_type=device_type,
+            default=_PEER_DEVIATION_MIN_COUNT_DEFAULT)
+        highest_count = max(f["my_count"] for f in fp_firings)
+        candidate_count = round(min(highest_count + _PEER_DEVIATION_MIN_COUNT_SAFETY_MARGIN, bounds_count["max"]), 4)
+        if candidate_count > current_count:
+            reason = (
+                f"{len(fp_firings)} peer_deviation firing(s) in [{scope_label}] later confirmed FALSE_POSITIVE, "
+                f"highest my_count {highest_count:.1f} -- raised peer_deviation_min_absolute_count "
+                f"from {current_count:.1f} to {candidate_count:.1f} ({_PEER_DEVIATION_MIN_COUNT_SAFETY_MARGIN:.1f} "
+                f"safety margin above the highest false-positive-confirmed count)."
+            )
+            result = engine.propose_change(_PEER_DEVIATION_MIN_COUNT_PARAMETER, candidate_count, reason=reason,
+                                              device_id=device_id, device_type=device_type,
+                                              backtest_run_id=run_id, now=now)
+            results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                              "parameter": _PEER_DEVIATION_MIN_COUNT_PARAMETER, "proposed_new_value": candidate_count,
+                              "device_id": device_id, "device_type": device_type})
+
+    propose_for_scope(all_device_ids, scope_label="global")
+    for category, device_ids in by_category.items():
+        propose_for_scope(device_ids, device_type=category, scope_label=f"category:{category}")
+    for device_id in all_device_ids:
+        propose_for_scope([device_id], device_id=device_id, device_type=device_type_of.get(device_id),
+                            scope_label=f"device:{device_id}")
+
+    return results
+
+
+_FAMILIARITY_TRUST_BAR_PARAMETER = "familiarity_trust_bar"
+_FAMILIARITY_TRUST_BAR_DEFAULT = 0.6  # matches DeviceProfileBenignHypothesis's own hardcoded default
+_FAMILIARITY_LOOKBACK_SECONDS = _RETROACTIVE_MISS_LOOKBACK_SECONDS  # same 7-day window as everything else here
+_FAMILIARITY_SAFETY_MARGIN = 0.02  # stay this far below the highest false-positive-confirmed familiarity score
+
+
+def _propose_familiarity_trust_bar_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
+    """Forward generator for familiarity_trust_bar (2026-09-27, Phase 3 of the
+    autonomy-completion effort) -- allowlisted and consumed live
+    (DeviceProfileBenignHypothesis, via decision/engine.py's/hypotheses/engine.py's
+    plain-float threading) since this same phase, previously a hardcoded class
+    constant with zero autotune wiring at all.
+
+    HONEST SCOPE NOTE, matching fp_combined_suppress_threshold's own precedent
+    (calibrate_suppress_threshold()'s docstring): only ever LOWERS the bar (becomes
+    MORE willing to call a device "familiar"), never raises it. Real evidence exists
+    for the other direction too (a device deemed familiar that later proved
+    malicious would argue for raising the bar), but raising trust requirements back
+    up is deliberately treated as a human decision here, the same conservative
+    choice already made for the suppress threshold -- this parameter governs the
+    same kind of "how much benefit of the doubt does a device get" trust surface.
+
+    Ground truth: a decision carrying the 2026-09-27 autotune_state instrumentation
+    (baseline_familiarity, familiarity_trust_bar) where baseline_familiarity was
+    BELOW the bar in effect (not treated as familiar) that was LATER confirmed a
+    false positive -- proof a lower bar would have granted it the benefit of the
+    doubt. Safety ceiling: refuse if any genuine CONFIRMED_THREAT decision's own
+    baseline_familiarity sits at/above the proposed new (lower) bar -- that would
+    incorrectly grant a real threat "familiar" status."""
+    since = now - _FAMILIARITY_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_FAMILIARITY_TRUST_BAR_PARAMETER]
+    results: List[Dict[str, Any]] = []
+
+    all_device_rows = store._conn.execute(
+        "SELECT device_id FROM devices WHERE merged_into_device_id IS NULL",
+    ).fetchall()
+    all_device_ids = [r["device_id"] for r in all_device_rows]
+    device_type_of = _device_type_lookup(store, all_device_ids)
+    by_category: Dict[str, List[str]] = {}
+    for device_id, device_type in device_type_of.items():
+        if device_type:
+            by_category.setdefault(device_type, []).append(device_id)
+
+    def scores(device_ids: List[str]) -> "tuple[List[float], List[float]]":
+        """(corrected_false_positive_familiarities, confirmed_threat_familiarities) for
+        decisions in scope carrying the instrumentation, in [since, now]."""
+        if not device_ids:
+            return [], []
+        placeholders = ",".join("?" * len(device_ids))
+        rows = store._conn.execute(
+            f"SELECT raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) AND timestamp >= ?",
+            [*device_ids, since],
+        ).fetchall()
+        corrected, confirmed = [], []
+        for row in rows:
+            try:
+                payload = json.loads(row["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            state = payload.get("_autotune_state") or {}
+            familiarity = state.get("baseline_familiarity")
+            bar_at_decision = state.get(_FAMILIARITY_TRUST_BAR_PARAMETER)
+            if not isinstance(familiarity, (int, float)) or not isinstance(bar_at_decision, (int, float)):
+                continue
+            verdict = (payload.get("fp_verdict") or {}).get("verdict")
+            if verdict == "CONFIRMED_THREAT":
+                confirmed.append(float(familiarity))
+            elif verdict == "FALSE_POSITIVE" and familiarity < bar_at_decision:
+                corrected.append(float(familiarity))
+        return corrected, confirmed
+
+    def propose_for_scope(device_ids: List[str], device_id=None, device_type=None,
+                            scope_label: str = "global") -> None:
+        corrected, confirmed = scores(device_ids)
+        if len(corrected) < _MIN_TRIALS_FOR_LOOSENING:
+            return
+        highest_corrected = max(corrected)
+        current = engine.get_active_value(
+            _FAMILIARITY_TRUST_BAR_PARAMETER, device_id=device_id, device_type=device_type,
+            default=_FAMILIARITY_TRUST_BAR_DEFAULT)
+        candidate = round(max(min(highest_corrected + _FAMILIARITY_SAFETY_MARGIN, current), bounds["min"]), 4)
+        if candidate >= current:
+            return
+        if confirmed and any(c >= candidate for c in confirmed):
+            return  # ambiguous overlap -- lowering this far would grant a genuine threat "familiar" status
+        reason = (
+            f"{len(corrected)} confirmed false positive(s) in [{scope_label}] with baseline_familiarity "
+            f"as high as {highest_corrected:.3f} (below the bar in effect at decision time) -- lowered "
+            f"familiarity_trust_bar from {current:.3f} to {candidate:.3f} ({_FAMILIARITY_SAFETY_MARGIN:.2f} "
+            f"safety margin above the highest false-positive-confirmed score)."
+        )
+        result = engine.propose_change(_FAMILIARITY_TRUST_BAR_PARAMETER, candidate, reason=reason,
+                                          device_id=device_id, device_type=device_type,
+                                          backtest_run_id=run_id, now=now)
+        results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                          "parameter": _FAMILIARITY_TRUST_BAR_PARAMETER, "proposed_new_value": candidate,
+                          "device_id": device_id, "device_type": device_type})
+
+    propose_for_scope(all_device_ids, scope_label="global")
+    for category, device_ids in by_category.items():
+        propose_for_scope(device_ids, device_type=category, scope_label=f"category:{category}")
+    for device_id in all_device_ids:
+        propose_for_scope([device_id], device_id=device_id, device_type=device_type_of.get(device_id),
+                            scope_label=f"device:{device_id}")
+
+    return results
+
+
 def run_golden_set() -> Dict[str, Any]:
     """Runs the existing real-incident regression suite as a subprocess.
     Zero tolerance: any real-incident regression (non-zero exit) fails this
@@ -1379,6 +1642,22 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
             scoped_tuning_proposals += bocpd_tuning_proposals
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] bocpd_hazard_rate tuning proposal evaluation failed, non-fatal")
+        # 2026-09-27 (Phase 3 of the autonomy-completion effort): the two
+        # peer_deviation_* parameters' own forward generator -- see
+        # _propose_peer_deviation_changes()'s own docstring for its honest,
+        # one-directional (loosen-only) scope.
+        try:
+            peer_deviation_proposals = _propose_peer_deviation_changes(store, run_id, now)
+            scoped_tuning_proposals += peer_deviation_proposals
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] peer_deviation tuning proposal evaluation failed, non-fatal")
+        # 2026-09-27 (Phase 3): familiarity_trust_bar's own forward generator -- see
+        # _propose_familiarity_trust_bar_changes()'s own docstring.
+        try:
+            familiarity_proposals = _propose_familiarity_trust_bar_changes(store, run_id, now)
+            scoped_tuning_proposals += familiarity_proposals
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] familiarity_trust_bar tuning proposal evaluation failed, non-fatal")
         try:
             tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
         except Exception:

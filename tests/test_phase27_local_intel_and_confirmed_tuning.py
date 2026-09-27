@@ -392,6 +392,67 @@ check("calibration NEVER raises the threshold, even when the confirmed-FP eviden
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section D0b (2026-09-27, Phase 3 of the autonomy-completion effort):
+# calibrate_uncertain_threshold() -- combined_uncertain_threshold's own calibration,
+# same rule shape as calibrate_suppress_threshold() above but mirrored to the OPPOSITE
+# boundary/population (CONFIRMED_THREAT-verdict corrections, not UNCERTAIN-verdict).
+# ═══════════════════════════════════════════════════════════════════════════════════
+from scripts.train_fp_classifier import (
+    calibrate_uncertain_threshold, AUTOTUNE_UNCERTAIN_SAFETY_MARGIN, AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR,
+)
+
+cut_val, cut_reason = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.40] * AUTOTUNE_MIN_SAMPLES, uncorrected_confirmed_scores=[],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check(">= min_samples confirmed-FPs published at CONFIRMED_THREAT severity LOWERS the "
+      "threshold to AUTOTUNE_UNCERTAIN_SAFETY_MARGIN above the HIGHEST such corrected score",
+      cut_val is not None and abs(cut_val - (0.40 + AUTOTUNE_UNCERTAIN_SAFETY_MARGIN)) < 1e-9,
+      f"got={cut_val}, reason={cut_reason}")
+
+cut_val2, cut_reason2 = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.40] * (AUTOTUNE_MIN_SAMPLES - 1), uncorrected_confirmed_scores=[],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("below min_samples confirmed-FPs makes NO change",
+      cut_val2 is None and cut_reason2.startswith("Only "), f"got={cut_val2}, reason={cut_reason2}")
+
+cut_val3, cut_reason3 = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.40] * AUTOTUNE_MIN_SAMPLES, uncorrected_confirmed_scores=[0.39],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("a genuine, uncorrected CONFIRMED_THREAT scoring AT OR BELOW the highest "
+      "corrected-FP score refuses to calibrate -- the ambiguous-overlap guard",
+      cut_val3 is None and cut_reason3.startswith("Refusing to calibrate"),
+      f"got={cut_val3}, reason={cut_reason3}")
+
+cut_val4, cut_reason4 = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.40] * AUTOTUNE_MIN_SAMPLES, uncorrected_confirmed_scores=[0.60],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("an uncorrected CONFIRMED_THREAT scoring safely ABOVE the highest corrected-FP "
+      "score does not block calibration",
+      cut_val4 is not None, f"got={cut_val4}, reason={cut_reason4}")
+
+cut_val5, cut_reason5 = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.05] * AUTOTUNE_MIN_SAMPLES, uncorrected_confirmed_scores=[],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("the lowered threshold never goes below AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR "
+      "regardless of how low the confirmed-FP evidence scores",
+      cut_val5 is not None and abs(cut_val5 - AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR) < 1e-9,
+      f"got={cut_val5}, reason={cut_reason5}")
+
+cut_val6, cut_reason6 = calibrate_uncertain_threshold(
+    corrected_confirmed_scores=[0.90] * AUTOTUNE_MIN_SAMPLES, uncorrected_confirmed_scores=[],
+    current=0.55, min_samples=AUTOTUNE_MIN_SAMPLES,
+)
+check("calibration NEVER raises the threshold, even when the confirmed-FP evidence "
+      "would otherwise compute a candidate ABOVE the current value -- one-directional by design",
+      cut_val6 is None and "would not lower" in cut_reason6, f"got={cut_val6}, reason={cut_reason6}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section D: train_fp_classifier.py -- calibrate_arp_sweep_threshold() bidirectional rule
 # ═══════════════════════════════════════════════════════════════════════════════════
 from scripts.train_fp_classifier import (

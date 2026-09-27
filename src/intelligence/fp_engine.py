@@ -756,6 +756,9 @@ class AutonomousFPEngine:
         # get_device_suppress_threshold()'s docstring. Computed once and reused for both
         # the actual decision and the audit-trail text below so they can never disagree.
         effective_suppress_threshold = self.get_device_suppress_threshold(device_id)
+        # 2026-09-27 (Phase 3 of the autonomy-completion effort): same reasoning,
+        # for the UNCERTAIN/CONFIRMED_THREAT boundary below.
+        effective_uncertain_threshold = self.get_device_uncertain_threshold(device_id)
 
         # VERSION 11 (P2, review #13/#14): a GENUINELY calibrated probability, when
         # train_fp_classifier.py has fit one against a real held-out split (see
@@ -879,7 +882,7 @@ class AutonomousFPEngine:
                           if base_domain and is_new_immunization else None,
             }
 
-        elif combined >= self.combined_uncertain_threshold:
+        elif combined >= effective_uncertain_threshold:
             # ---------------------------------------------------------------
             # UNCERTAIN – alert is published but marked as low-confidence
             # The pipeline will add an '⚠️ Low Confidence Alert' tag to Telegram
@@ -2204,6 +2207,26 @@ class AutonomousFPEngine:
         if profile and key in profile:
             return float(profile[key]["value"])
         return default
+
+    def get_device_uncertain_threshold(self, device_id: Optional[str]) -> float:
+        """The effective combined_uncertain_threshold for ONE device -- same
+        layered-fallback shape as get_device_suppress_threshold() above
+        (2026-09-27, Phase 3 of the autonomy-completion effort). No per-device
+        legacy profile key exists for this one (train_fp_classifier.py has never
+        calibrated it), so the legacy_value layer is just this property's own
+        config-driven value; AutotuneEngine's device -> category -> global chain
+        sits on top of that, same as every other tunable here."""
+        legacy_value = self.combined_uncertain_threshold
+        try:
+            return self._get_autotune_engine().get_active_value(
+                "combined_uncertain_threshold", device_id=device_id, default=legacy_value,
+            )
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to resolve autotuned combined_uncertain_threshold for device %r, "
+                "using legacy value this cycle: %s", device_id, e,
+            )
+            return legacy_value
 
     def get_device_arp_sweep_threshold(self, device_id: Optional[str], default: float) -> float:
         """PHASE 21D2: same layered-fallback shape as get_device_suppress_threshold()

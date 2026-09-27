@@ -67,6 +67,12 @@ TUNABLE_PARAMETERS: Dict[str, Dict[str, float]] = {
     # fine here even though legacy's own rule only ever lowers this value -- nothing
     # stops a future human-approved raise, and propose_change() has no direction lock.
     "fp_combined_suppress_threshold": {"min": 0.60, "max": 1.0, "max_step": 0.05},
+    # 2026-09-27 (Phase 3 of the autonomy-completion effort). Bounds/steps match the
+    # plan doc's own Tier-2 matrix exactly.
+    "peer_deviation_multiplier": {"min": 1.5, "max": 10.0, "max_step": 0.5},
+    "peer_deviation_min_absolute_count": {"min": 2.0, "max": 20.0, "max_step": 1.0},
+    "combined_uncertain_threshold": {"min": 0.30, "max": 0.80, "max_step": 0.05},
+    "familiarity_trust_bar": {"min": 0.30, "max": 0.90, "max_step": 0.05},
 }
 
 # First-pass, not-yet-empirically-tuned constants (this codebase's own
@@ -88,6 +94,10 @@ _LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
     "hard_stop_candidate_sensitivity": 1,    # higher bar -> requires more confidence to even be a hard-stop candidate
     "arp_sweep_unique_targets_threshold": 1,  # higher threshold -> more unique targets needed to flag a sweep
     "fp_combined_suppress_threshold": -1,     # lower threshold -> suppresses more, less sensitive to real threats
+    "peer_deviation_multiplier": 1,          # higher multiplier -> harder for a device to look like a cohort outlier
+    "peer_deviation_min_absolute_count": 1,  # higher floor -> harder to clear the "not just a trivial small-number swing" bar
+    "combined_uncertain_threshold": -1,       # lower threshold -> more borderline alerts get the softer UNCERTAIN tag instead of full CONFIRMED_THREAT
+    "familiarity_trust_bar": -1,              # higher bar -> harder for a device to be treated as "familiar", MORE suspicion generated (increasing is the MORE-sensitive direction here, unlike every other +1 parameter above)
 }
 _MIN_PROMOTIONS_FOR_TREND = 3  # first-pass, not-yet-empirically-tuned (same honesty framing)
 _DEFAULT_DRIFT_LOOKBACK_SECONDS = 7 * 86400.0

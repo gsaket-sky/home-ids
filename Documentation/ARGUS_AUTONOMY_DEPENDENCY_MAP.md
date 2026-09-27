@@ -26,10 +26,10 @@ Status as of 2026-09-27 (Phase 0 baseline), live counts pulled directly from `.9
 | 4 | `fp_combined_suppress_threshold` | yes | `intelligence/fp_engine.py:2181-2191` | **BUG FIXED 2026-09-27 (Phase 1)**: `train_fp_classifier.py`'s `_collect_calibration_evidence()` was pooling corrections of ANY verdict (including STAGE_1_HARD_STOP's confidence=0.0 sentinel and CONFIRMED_THREAT corrections) instead of only UNCERTAIN-verdict corrections, permanently poisoning `lowest_corrected` near 0 | 0/0 as of fix -- confirmed via live `.94` data this is now a genuine "not enough unambiguous evidence yet" outcome, not a bug |
 | 5 | `arp_sweep_unique_targets_threshold` | yes | `intelligence/fp_engine.py:2222-2229`, `cl_afpe/engine.py:398` | `train_fp_classifier.py`'s `_propose_and_promote()` | 18 / 11 |
 | 6 | `hard_stop_candidate_sensitivity` | yes | `decision/engine.py:215,231` via `ops/live_engine.py:1025-1027` | `backtest_job.py` synthetic sweep | 70 / 1 |
-| 7 | `peer_deviation_multiplier` | no | `ops/live_engine.py:750-751,805` (hardcoded `_PEER_DEVIATION_MULTIPLIER=3.0`) | none | n/a (unwired) |
-| 8 | `peer_deviation_min_absolute_count` | no | `ops/live_engine.py:751,801` (hardcoded `=5`) | none | n/a (unwired) |
-| 9 | `combined_uncertain_threshold` | no | `intelligence/fp_engine.py:453-455,882` (config key, default 0.55) | none | n/a (unwired) |
-| 10 | `familiarity_trust_bar` | no | `hypotheses/engine.py:746,765` (hardcoded `FAMILIARITY_TRUST_BAR=0.6`) | none | n/a (unwired) |
+| 7 | `peer_deviation_multiplier` | **YES (Phase 3)** | `ops/live_engine.py:_inject_peer_deviation_evidence()`, resolved via `get_active_value` | `backtest_job.py`'s `_propose_peer_deviation_changes()` (loosen-only, real evidence) | wired 2026-09-27 |
+| 8 | `peer_deviation_min_absolute_count` | **YES (Phase 3)** | same call site as row 7 | same generator as row 7 | wired 2026-09-27 |
+| 9 | `combined_uncertain_threshold` | **YES (Phase 3)** | `intelligence/fp_engine.py`'s new `get_device_uncertain_threshold()`, called from `evaluate()` | `train_fp_classifier.py`'s `calibrate_uncertain_threshold()` (loosen-only, mirrors `calibrate_suppress_threshold()`) | wired 2026-09-27 |
+| 10 | `familiarity_trust_bar` | **YES (Phase 3)** | threaded plain-float through `decision/engine.py`→`hypotheses/engine.py`'s `evaluate_all()` (instance-attribute override on `DeviceProfileBenignHypothesis`), resolved in `live_engine.py`; `llm_review/validator.py`'s `DeterministicValidator.validate()` also takes it explicitly now (was reading the class constant directly, a real drift risk `validator.py`'s own docstring warns about) | `backtest_job.py`'s `_propose_familiarity_trust_bar_changes()` (loosen-only, real evidence) | wired 2026-09-27 |
 | 11 | `trust_cache_ttl_seconds` | no | `cl_afpe/engine.py:148,306` (hardcoded `14*24*3600`) | none | n/a (unwired) |
 | 12 | `reputation_propagation_ttl_seconds` | no | `ops/live_engine.py:145,657` (hardcoded `86400`) | none | n/a (unwired) |
 | 13 | `pool_gaussian_kappa` | no | `ops/population_prior_builder.py:107,204-227` (hardcoded `5.0`) | none | n/a (unwired) |
@@ -73,6 +73,41 @@ subsets gate each phase instead.)
 ## 4. Arg-provenance sections (added as each subsystem is built)
 
 ### 4.1 Autotune native generator registry (Phases 1, 3, 4)
+Phase 3 (2026-09-27) wired the remaining Tier-2 parameters natively in
+`src/argus/ops/backtest_job.py` (generators) plus consumption call sites across
+`src/argus/ops/live_engine.py`, `src/intelligence/fp_engine.py`,
+`src/argus/decision/engine.py`, `src/argus/hypotheses/engine.py`,
+`src/argus/llm_review/validator.py`, `src/argus/ops/live_llm_review.py`,
+`src/scripts/train_fp_classifier.py`:
+- `peer_deviation_multiplier`/`peer_deviation_min_absolute_count`: consumption in
+  `_inject_peer_deviation_evidence()`; generator `_propose_peer_deviation_changes()`
+  is loosen-only (real evidence exists only for "this firing was a false positive,
+  raise the bar" — no recorded signal exists for "this should have fired but
+  didn't", an honest, structural scope limit, not an oversight).
+- `combined_uncertain_threshold`: consumption via new `get_device_uncertain_threshold()`
+  in `fp_engine.py` (mirrors `get_device_suppress_threshold()`'s own layered-fallback
+  shape exactly); generator `calibrate_uncertain_threshold()` in
+  `train_fp_classifier.py`, loosen-only, mirrors `calibrate_suppress_threshold()`
+  but reads the OPPOSITE evidence population (CONFIRMED_THREAT-verdict corrections,
+  not UNCERTAIN-verdict ones — mixing them would repeat Phase 1's own bug).
+- `familiarity_trust_bar`: consumption threaded as a plain float from
+  `live_engine.py` (device-scoped resolution) through `decision/engine.py` into
+  `hypotheses/engine.py`'s `evaluate_all()`, applied as an INSTANCE-attribute
+  override on the specific `DeviceProfileBenignHypothesis` object (deliberately not
+  a new positional arg on every one of the other 15 hypothesis classes' shared
+  `evaluate()` signature). Also threaded into `llm_review/validator.py`'s
+  `DeterministicValidator.validate()` (previously read
+  `DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR` directly at the class level
+  — a real, latent drift risk between the two consumers that `validator.py`'s own
+  docstring already warned about; now both read the SAME resolved per-device
+  value). Generator `_propose_familiarity_trust_bar_changes()` in `backtest_job.py`,
+  loosen-only, needed a NEW instrumentation field (`baseline_familiarity` added to
+  `_autotune_state`, alongside the bar itself) since nothing previously recorded the
+  familiarity score a decision was actually judged against.
+
+New `_autotune_state` fields (all added `live_engine.py`, decisions before
+2026-09-27 don't carry them): `familiarity_trust_bar`, `baseline_familiarity`.
+
 Phase 1 (2026-09-27) landed natively in `src/argus/ops/backtest_job.py` (not a
 separate module) — the generic propose/canary/promote/rollback machinery in
 `autotune/engine.py` was already generic; Phase 1 added real candidate generators

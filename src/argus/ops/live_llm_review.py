@@ -101,8 +101,10 @@ from config import CONFIG  # noqa: E402
 from utils import write_job_health, rotate_jsonl_if_oversized  # noqa: E402
 from intelligence.geoip import GeoIPEngine  # noqa: E402
 from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
+from argus.autotune.engine import AutotuneEngine  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.graph.window import RollingWindowView  # noqa: E402
+from argus.hypotheses.engine import DeviceProfileBenignHypothesis  # noqa: E402
 from argus.hypotheses.independence import family_for, NON_ATTACK_FAMILIES  # noqa: E402
 from argus.llm_review.ollama_client import OllamaClient, build_evidence_prompt  # noqa: E402
 from argus.llm_review.validator import DeterministicValidator, build_ground_truth, VALIDATOR_SCHEMA_VERSION  # noqa: E402
@@ -461,6 +463,7 @@ def main() -> None:
         window = RollingWindowView(store)
         client = OllamaClient(remote_url=ollama_url, remote_model=ollama_model)
         validator = DeterministicValidator()
+        autotune = AutotuneEngine(store)
         # Release 14, Workstream 4: human-facing digest enrichment only, never sent
         # to the LLM. GeoIPEngine fails safe internally (missing/unreadable mmdb ->
         # reader=None, every lookup then no-ops) -- matches ollama_soc.py's own
@@ -564,6 +567,9 @@ def main() -> None:
                             recommendation, evidence_list,
                             original_risk=decision.get("risk_score"),
                             ground_truth=ground_truth,
+                            familiarity_trust_bar=autotune.get_active_value(
+                                "familiarity_trust_bar", device_id,
+                                default=DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR),
                         )
                         # Populate the in-memory cache immediately -- a LATER
                         # candidate in this SAME run sharing this key is already

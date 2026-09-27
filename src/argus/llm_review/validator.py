@@ -82,7 +82,22 @@ class DeterministicValidator:
     def validate(self, recommendation: Dict[str, Any], evidence_list: List[Evidence],
                   original_risk: Optional[float] = None,
                   ground_truth: Optional[Dict[str, Any]] = None,
-                  baseline_familiarity: float = 0.0) -> bool:
+                  baseline_familiarity: float = 0.0,
+                  familiarity_trust_bar: Optional[float] = None) -> bool:
+        """familiarity_trust_bar (2026-09-27, Phase 3 of the autonomy-completion
+        effort): None (the default) preserves the exact prior behavior --
+        DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR's own current value
+        (this module's own docstring's whole point: staying in sync with that
+        hypothesis's constant, not redefining it). A caller with device_id
+        context (live_llm_review.py) resolves the per-device autotuned value
+        itself and passes it here, so both consumers of this tunable read the
+        SAME resolved number for the SAME device/cycle -- the exact class of
+        drift this module's docstring already warns Gap 6 found once between
+        two independently-defined copies of the same constant."""
+        effective_familiarity_trust_bar = (
+            familiarity_trust_bar if familiarity_trust_bar is not None
+            else DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR
+        )
         classification = recommendation.get("classification", "").lower()
         reason = recommendation.get("reason", "").lower()
 
@@ -119,11 +134,11 @@ class DeterministicValidator:
 
             rep_tier = (ground_truth or {}).get("rep_tier")
             if (rep_tier is not None and rep_tier not in _TRUSTED_REP_TIERS
-                    and baseline_familiarity < DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR):
+                    and baseline_familiarity < effective_familiarity_trust_bar):
                 LOGGER.warning(
                     "[VALIDATOR] Rejected: destination reputation tier %s is not trusted, and "
                     "no learned familiarity (%.2f < %.2f) -- 'benign' needs corroboration.",
-                    rep_tier, baseline_familiarity, DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR,
+                    rep_tier, baseline_familiarity, effective_familiarity_trust_bar,
                 )
                 return False
 

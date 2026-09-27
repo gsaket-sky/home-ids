@@ -852,13 +852,31 @@ class HypothesisEngine:
         ]
 
     def evaluate_all(self, evidence_list: List[Evidence], rep_vector, device_type: str = "",
-                       baseline_familiarity: float = 0.0, now: Optional[float] = None) -> Dict[str, Any]:
+                       baseline_familiarity: float = 0.0, now: Optional[float] = None,
+                       familiarity_trust_bar: Optional[float] = None) -> Dict[str, Any]:
         """Pure per-cycle evaluation -- ev_store is scored fresh from a plain
         evidence_list each call (typically graph/window.py's evidence_in_window()
         output), never a mutated object carried across cycles. No shadow-mode
         machinery -- v13 has no shipped/unshipped Gap-style variants to compare;
-        that entire mechanism was specific to v-current's incremental-flip history."""
+        that entire mechanism was specific to v-current's incremental-flip history.
+
+        familiarity_trust_bar (2026-09-27, Phase 3 of the autonomy-completion
+        effort): plain float resolved by the caller (decision/engine.py, itself
+        just passing through what live_engine.py resolved) -- this module stays
+        autotune-agnostic, same reasoning as decision/engine.py's own
+        hard_stop_candidate_sensitivity param. None preserves DeviceProfileBenign
+        Hypothesis's own hardcoded FAMILIARITY_TRUST_BAR class default. Applied as
+        an INSTANCE attribute override (not threaded through evaluate()'s shared
+        positional signature, which every other hypothesis class also uses
+        unchanged) -- the minimal-blast-radius way to reach one specific
+        hypothesis's one specific constant without changing the other 15 classes'
+        call convention."""
         ev_store = score_evidence(evidence_list, now=now)
+
+        if familiarity_trust_bar is not None:
+            for h in self.benign_hypotheses:
+                if isinstance(h, DeviceProfileBenignHypothesis):
+                    h.FAMILIARITY_TRUST_BAR = familiarity_trust_bar
 
         best_attack = None
         best_attack_score = 0.0

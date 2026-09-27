@@ -525,6 +525,138 @@ def calibrate_suppress_threshold(corrected_fp_scores: list, uncorrected_uncertai
     return candidate, reason
 
 
+# 2026-09-27 (Phase 3 of the autonomy-completion effort): combined_uncertain_threshold's
+# own calibration -- allowlisted and consumed live (fp_engine.py's
+# get_device_uncertain_threshold()) since this same phase, previously a pure config
+# value with zero autotune wiring at all. Deliberately a SEPARATE evidence population
+# from calibrate_suppress_threshold() above: that one needs UNCERTAIN-verdict
+# corrections (the near-miss band just below the SUPPRESS threshold); this one needs
+# CONFIRMED_THREAT-verdict corrections (the near-miss band just below the UNCERTAIN
+# threshold, i.e. where a corrected alert was published at FULL SEVERITY when it was
+# actually a false positive) -- mixing the two populations would be the exact same
+# category error Phase 1 fixed in _collect_calibration_evidence() itself.
+AUTOTUNE_UNCERTAIN_SAFETY_MARGIN = 0.02  # stays this far below the highest corrected-CONFIRMED_THREAT score
+AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR = 0.30  # matches TUNABLE_PARAMETERS' own bound for this parameter
+
+
+def _collect_uncertain_calibration_evidence(state_dir: Path) -> "tuple[list, list, dict, dict]":
+    """Same shape/sourcing as _collect_calibration_evidence() (same muted_docs +
+    alerts.json sources, same 90-day lookback), but for the DIFFERENT population
+    combined_uncertain_threshold's own boundary needs:
+
+    corrected_confirmed_scores: fp_verdict.confidence of alerts that were published
+      as CONFIRMED_THREAT (full severity -- the current uncertain_threshold's `else`
+      branch) but were LATER confirmed to be false positives. Proof that the
+      uncertain/confirmed boundary sat too high for these.
+    uncorrected_confirmed_scores: confidence of CONFIRMED_THREAT alerts that were
+      NEVER corrected -- genuine standing threats. Safety ceiling: refuse to lower
+      the boundary if any of these sits at/below the highest corrected score (the
+      same ambiguous-overlap refusal calibrate_suppress_threshold() applies)."""
+    muted_docs = _read_muted_docs_from_graph(
+        state_dir, since=time.time() - _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS,
+    )
+
+    corrected_confirmed_scores = []
+    per_device_corrected = {}
+    for doc in muted_docs:
+        if doc.get("type") not in _FP_CORRECTION_TYPES:
+            continue
+        original = doc.get("original_alert", {}) or {}
+        fp_verdict = original.get("fp_verdict", {}) or {}
+        if fp_verdict.get("verdict") != "CONFIRMED_THREAT" or fp_verdict.get("stage") != "STAGE_3_COMBINED":
+            continue  # same STAGE_1_HARD_STOP exclusion Phase 1 applied for the same reason
+        conf = fp_verdict.get("confidence")
+        if not isinstance(conf, (int, float)):
+            continue
+        corrected_confirmed_scores.append(float(conf))
+        device_id = original.get("device", {}).get("id", "unknown")
+        per_device_corrected.setdefault(device_id, []).append(float(conf))
+
+    corrected_keys = {_alert_dedup_key(_extract_payload(d)) for d in muted_docs}
+
+    uncorrected_confirmed_scores = []
+    per_device_uncorrected = {}
+    for path in _resolve_alert_input_paths(state_dir):
+        docs = _read_alert_docs(path)
+        if not docs:
+            continue
+        for doc in docs:
+            payload = _extract_payload(doc)
+            if payload.get("type") != "ids_alert":
+                continue
+            fp_v = payload.get("fp_verdict", {}) or {}
+            if fp_v.get("verdict") != "CONFIRMED_THREAT" or fp_v.get("stage") != "STAGE_3_COMBINED":
+                continue
+            if _alert_dedup_key(payload) in corrected_keys:
+                continue  # this one WAS corrected -- it's positive evidence, not negative
+            conf = fp_v.get("confidence")
+            if not isinstance(conf, (int, float)):
+                continue
+            uncorrected_confirmed_scores.append(float(conf))
+            device_id = payload.get("device", {}).get("id", "unknown")
+            per_device_uncorrected.setdefault(device_id, []).append(float(conf))
+        break  # mirrors _collect_calibration_evidence()'s own "first non-empty source wins"
+
+    return corrected_confirmed_scores, uncorrected_confirmed_scores, per_device_corrected, per_device_uncorrected
+
+
+def calibrate_uncertain_threshold(corrected_confirmed_scores: list, uncorrected_confirmed_scores: list,
+                                     current: float, min_samples: int = AUTOTUNE_MIN_SAMPLES) -> tuple:
+    """Mirrors calibrate_suppress_threshold()'s own rule shape exactly, moved to the
+    OPPOSITE boundary and the OPPOSITE population (see this module's own comment
+    above calibrate_suppress_threshold() for why they can't share evidence):
+
+    - Only ever LOWERS combined_uncertain_threshold (direction=-1 in
+      autotune/engine.py's _LESS_SENSITIVE_DIRECTION -- lowering IS the less-
+      sensitive move here, matching TUNABLE_PARAMETERS' own bound). Raising it back
+      up is a human decision, same as the suppress-threshold rule.
+    - Requires >= min_samples confirmed false positives (published at full
+      CONFIRMED_THREAT severity, later corrected) before proposing anything.
+    - Refuses to act if any UNCORRECTED genuine CONFIRMED_THREAT scored at or below
+      the highest corrected-FP score -- the same ambiguous-overlap safety rule.
+    - Never goes below AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR."""
+    if len(corrected_confirmed_scores) < min_samples:
+        return None, (
+            f"Only {len(corrected_confirmed_scores)} confirmed false positive(s) published at "
+            f"CONFIRMED_THREAT severity (need >= {min_samples}) -- not enough evidence to calibrate yet."
+        )
+
+    highest_corrected = max(corrected_confirmed_scores)
+
+    if uncorrected_confirmed_scores:
+        lowest_uncorrected = min(uncorrected_confirmed_scores)
+        if lowest_uncorrected <= highest_corrected:
+            return None, (
+                f"Refusing to calibrate: a genuine, uncorrected CONFIRMED_THREAT scored "
+                f"{lowest_uncorrected:.3f}, at or below the highest corrected-FP score "
+                f"{highest_corrected:.3f} -- ambiguous overlap, not safe to auto-resolve."
+            )
+
+    candidate = min(highest_corrected + AUTOTUNE_UNCERTAIN_SAFETY_MARGIN, current)
+    candidate = round(max(candidate, AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR), 4)
+
+    if candidate >= current:
+        return None, (
+            f"Calibration would not lower the threshold below its current effective "
+            f"value {current:.3f} -- no change needed."
+        )
+
+    gap_note = (
+        f", clean gap below the lowest uncorrected CONFIRMED_THREAT score "
+        f"{min(uncorrected_confirmed_scores):.3f}"
+        if uncorrected_confirmed_scores else
+        ", no uncorrected CONFIRMED_THREAT alerts observed in this window to compare against"
+    )
+    reason = (
+        f"{len(corrected_confirmed_scores)} confirmed false positive(s) published at full "
+        f"CONFIRMED_THREAT severity with combined scores as high as {highest_corrected:.3f} -- "
+        f"lowered combined_uncertain_threshold from {current:.3f} to {candidate:.3f} "
+        f"({AUTOTUNE_UNCERTAIN_SAFETY_MARGIN:.2f} safety margin above the highest corrected-FP "
+        f"score{gap_note})."
+    )
+    return candidate, reason
+
+
 def _collect_connection_abuse_corrections(state_dir: Path) -> dict:
     """PHASE 21D3 ('enable per device tuning'): independently scans the graph's
     fp_suppression_log entries for CONNECTION_ABUSE-signature corrections (covers
@@ -962,6 +1094,73 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
             )
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE » GLOBAL] Threshold calibration failed (non-fatal): {exc}")
+
+    # --- combined_uncertain_threshold global pass (2026-09-27, Phase 3) --------------
+    # Separate evidence collection from the suppress-threshold pass above -- see
+    # _collect_uncertain_calibration_evidence()'s own docstring for why they can't
+    # share a population. Best-effort, same "never take down the run" framing.
+    uncertain_outcome = "no_change_needed"
+    uncertain_evidence = (0, 0)
+    device_uncertain_outcomes: dict = {}
+    device_uncertain_evidence: dict = {}
+    try:
+        (corrected_confirmed_scores, uncorrected_confirmed_scores,
+         per_device_uncertain_corrected, per_device_uncertain_uncorrected) = \
+            _collect_uncertain_calibration_evidence(state_dir)
+        uncertain_evidence = (len(corrected_confirmed_scores), len(uncorrected_confirmed_scores))
+
+        # 0.55 matches fp_engine.py's own _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD (not
+        # imported -- this file's sibling suppress-threshold pass above uses the same
+        # plain-literal-default convention rather than importing fp_engine.py's
+        # private constants).
+        uncertain_config_default = float(CONFIG.get("fp_combined_uncertain_threshold", 0.55))
+        uncertain_global_current = (
+            engine.get_active_value("combined_uncertain_threshold", device_id=None, default=uncertain_config_default)
+            if engine is not None else uncertain_config_default
+        )
+        new_value, reason = calibrate_uncertain_threshold(
+            corrected_confirmed_scores, uncorrected_confirmed_scores,
+            current=uncertain_global_current, min_samples=AUTOTUNE_MIN_SAMPLES,
+        )
+        uncertain_outcome = _classify_outcome(new_value, reason)
+        LOGGER.info(f"[AUTOTUNE » GLOBAL] combined_uncertain_threshold: {reason}")
+        if new_value is not None and engine is not None:
+            _propose_and_promote(
+                engine, store, "combined_uncertain_threshold", new_value, reason,
+                evidence_detail={
+                    "corrected_count": len(corrected_confirmed_scores),
+                    "uncorrected_count": len(uncorrected_confirmed_scores),
+                    "rule": "calibrate_uncertain_threshold",
+                },
+                now=autotune_now,
+            )
+
+        # --- combined_uncertain_threshold per-device pass ---
+        uncertain_device_ids = set(per_device_uncertain_corrected.keys()) | set(per_device_uncertain_uncorrected.keys())
+        uncertain_device_ids.discard("unknown")
+        for device_id in sorted(uncertain_device_ids):
+            dev_corrected = per_device_uncertain_corrected.get(device_id, [])
+            dev_uncorrected = per_device_uncertain_uncorrected.get(device_id, [])
+            device_uncertain_evidence[device_id] = (len(dev_corrected), len(dev_uncorrected))
+            dev_current = engine.get_active_value(
+                "combined_uncertain_threshold", device_id=device_id, default=uncertain_global_current,
+            ) if engine is not None else uncertain_global_current
+            dev_new_value, dev_reason = calibrate_uncertain_threshold(
+                dev_corrected, dev_uncorrected, current=dev_current, min_samples=AUTOTUNE_DEVICE_MIN_SAMPLES,
+            )
+            device_uncertain_outcomes[device_id] = _classify_outcome(dev_new_value, dev_reason)
+            if dev_new_value is not None and engine is not None:
+                LOGGER.info(f"[AUTOTUNE » DEVICE {device_id}] combined_uncertain_threshold: {dev_reason}")
+                _propose_and_promote(
+                    engine, store, "combined_uncertain_threshold", dev_new_value, dev_reason,
+                    evidence_detail={
+                        "corrected_count": len(dev_corrected), "uncorrected_count": len(dev_uncorrected),
+                        "rule": "calibrate_uncertain_threshold",
+                    },
+                    device_id=device_id, now=autotune_now,
+                )
+    except Exception as exc:
+        LOGGER.error(f"[AUTOTUNE » GLOBAL] combined_uncertain_threshold calibration failed (non-fatal): {exc}")
 
     # --- Per-device pass -------------------------------------------------------------
     try:
