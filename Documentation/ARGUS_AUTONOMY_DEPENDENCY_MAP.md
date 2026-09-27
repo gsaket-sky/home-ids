@@ -454,11 +454,19 @@ effort's "fix forward with live data" standing instruction.
 
 **Real verification against `.94` (2026-09-27, over SSH)**: manually ran
 `discover()` against `.94`'s actual live network state -- correctly found
-`gateway` at the real FritzBox IP and `this_host` at `.94`'s own real LAN IP,
-matching the hand-configured values already known-correct for this network.
-(Exact IPs deliberately not repeated here --
+`gateway` at the real FritzBox IP and `this_host` at `.94`'s own real LAN
+IP+MAC, matching the hand-configured values already known-correct for this
+network. (Exact IPs deliberately not repeated here --
 [[feedback_no_real_pii_in_github]] -- see the session's own record for the
-literal values if ever needed again.)
+literal values if ever needed again.) The manual run's own ARP resolution
+failed with a raw-socket PermissionError (expected: a plain SSH shell has
+none of `soc.service`'s own `CAP_NET_RAW`/`CAP_NET_ADMIN` ambient capabilities,
+confirmed present in the real unit file) -- `discover()`'s fail-safe correctly
+degraded to `gateway` with `mac=None` rather than crashing, exactly the
+behavior `tests/test_argus_identity_discovery.py`'s section D already covers.
+Once wired into the live service in a later phase, ARP resolution will run
+with the same ambient capabilities the tarpit already depends on and should
+succeed there.
 
 Test: new `tests/test_argus_identity_discovery.py` (11 checks) -- fully mocked
 (`psutil.net_if_addrs()`, `subprocess.run()`, `scapy`'s ARP resolution), no
