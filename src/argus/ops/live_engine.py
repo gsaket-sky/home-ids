@@ -1298,3 +1298,46 @@ def evaluate_cl_afpe_shadow(alert_payload: dict, features: dict, decision: Optio
             "CL-AFPE shadow evaluation failed (compute-only -- the real fp_verdict this "
             "cycle is already decided and unaffected by this): %s", e, exc_info=True,
         )
+
+
+_shadow_evaluator = None
+
+
+def _get_shadow_evaluator():
+    """Lazy singleton, same shape as _get_cl_afpe_engine() above -- one
+    ShadowEvaluator per process, sharing this module's own GraphStore
+    singleton so canary reads/shadow_decisions writes land in the same db
+    file every other call site in this module already uses."""
+    global _shadow_evaluator
+    if _shadow_evaluator is None:
+        from argus.shadow.sandbox import ShadowEvaluator
+        _shadow_evaluator = ShadowEvaluator(_get_graph_store())
+    return _shadow_evaluator
+
+
+def maybe_shadow_evaluate(active_evidence, rep_vector, device_type: str, baseline_familiarity: float,
+                            features: dict, is_safe: bool, device_id: str, real_state: str,
+                            now: Optional[float] = None) -> None:
+    """The pipeline.py call site for Phase 7 (16-parameter autonomy plan) --
+    called immediately after the real argus_live_engine.evaluate() call above,
+    passing the SAME inputs plus that call's own decision["state"] as
+    real_state for the agreement comparison. Fire-and-forget, compute-only:
+    returns nothing, never raises -- a shadow-eval failure must never affect
+    the real decision this cycle already made, matching evaluate_cl_afpe_shadow()
+    immediately above. Picks at most one active canary per cycle (see
+    ShadowEvaluator.maybe_shadow_evaluate's own docstring for the scope
+    preference order); a no-op whenever no canary is active or resource
+    pressure is high, at negligible cost either way."""
+    ts = now if now is not None else time.time()
+    try:
+        evaluator = _get_shadow_evaluator()
+        evaluator.maybe_shadow_evaluate(
+            device_id=device_id, device_type=device_type, active_evidence_v1=active_evidence,
+            rep_vector=rep_vector, features=features, is_safe=is_safe,
+            baseline_familiarity=baseline_familiarity, real_state=real_state, now=ts,
+        )
+    except Exception as e:
+        LOGGER.error(
+            "Shadow-evaluation sandbox failed (compute-only -- the real decision this "
+            "cycle is already decided and unaffected by this): %s", e, exc_info=True,
+        )

@@ -1896,6 +1896,20 @@ class EnginePipeline:
                             features=features, is_safe=is_safe,
                         )
 
+                    # PHASE 7 (16-parameter autonomy plan, Documentation/
+                    # ARGUS_AUTONOMY_DEPENDENCY_MAP.md): shadow-test at most one
+                    # currently-in-canary autotune candidate against this exact cycle's
+                    # real inputs, using the SAME real decision's own state as the
+                    # agreement baseline. Compute-only, best-effort -- never raises, never
+                    # emits an alert/mitigation (see argus/shadow/sandbox.py's module
+                    # docstring for how that's guaranteed), and has zero effect on the
+                    # `decision` this cycle actually acts on below.
+                    argus_live_engine.maybe_shadow_evaluate(
+                        active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
+                        features=features, is_safe=is_safe, device_id=dev_id,
+                        real_state=decision["state"], now=now,
+                    )
+
                     # VERSION 11 (P1, review #9/#10): per-device learned behavioral baseline.
                     # Deliberately gated on the HEE's OWN verdict for THIS cycle being
                     # BENIGN/ANOMALOUS -- never records a port/ASN/domain the system itself

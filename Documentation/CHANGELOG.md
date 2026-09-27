@@ -9,6 +9,23 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.13.0] - 2026-09-27
+
+Phase 7 of the full 16-parameter autonomous-tuning effort, the largest net-new
+subsystem: a real shadow-evaluation sandbox. Every live decision cycle now
+shadow-tests at most one currently-in-canary autotune candidate against that
+exact cycle's real inputs, comparing the resulting state against what the real
+value actually produced — without ever emitting an alert or mitigation action,
+and without leaving any trace in the real graph. Safety is structural, not a
+convention: the shadow evaluate() call runs inside a real database transaction
+that is unconditionally rolled back the instant its decision state is read, so
+its evidence/decision writes never persist. Only a small `shadow_decisions`
+audit table (capped at 5000 rows) survives each comparison. Found and fixed a
+real candidate-selection bug in the same pass, via this phase's own test
+coverage: the original scope-preference logic (device-scoped candidate beats
+category-scoped beats global) could pick a broader-scoped candidate over a
+more specific one depending on row order, not true priority.
+
 ## [v16.12.0] - 2026-09-27
 
 Phase 6 of the full 16-parameter autonomous-tuning effort: autotune candidate

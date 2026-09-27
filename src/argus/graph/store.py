@@ -485,6 +485,20 @@ class GraphStore:
                 result_json                  TEXT NOT NULL DEFAULT '{}'
             );
             CREATE INDEX IF NOT EXISTS idx_operator_actions_alert_event ON operator_actions(alert_event_id);
+
+            -- Phase 7 of the autonomy-completion effort (2026-09-27) -- kept in exact
+            -- sync with schema.sql's own copy of this table; extend both together.
+            CREATE TABLE IF NOT EXISTS shadow_decisions (
+                shadow_id       TEXT PRIMARY KEY,
+                change_id       TEXT NOT NULL REFERENCES threshold_history(change_id),
+                device_id       TEXT REFERENCES devices(device_id),
+                timestamp       REAL NOT NULL,
+                real_state      TEXT NOT NULL,
+                shadow_state    TEXT NOT NULL,
+                agree           INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_shadow_decisions_change ON shadow_decisions(change_id, timestamp);
+            CREATE INDEX IF NOT EXISTS idx_shadow_decisions_timestamp ON shadow_decisions(timestamp);
             """
         )
         # alert_event_id on containment_actions predates this column on any db created

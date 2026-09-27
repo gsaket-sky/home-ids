@@ -62,6 +62,7 @@ changes it.
 subsets gate each phase instead.)
 
 - Autotune core/generators: `test_argus_autotune_engine.py`, `test_argus_autotune_reset.py`, `test_argus_backtest_job.py`
+- Shadow-evaluation sandbox: `test_argus_shadow_sandbox.py`
 - Baseline/BOCPD: `test_argus_baseline_engine.py`, `test_argus_bayesian_baseline.py`
 - Population priors/cohorts: `test_argus_population_prior_builder.py`
 - Live engine/decision path: `test_argus_live_engine.py`, `test_argus_decision_engine.py`, `test_argus_hypotheses_engine.py`
@@ -263,7 +264,56 @@ actually consults it and correctly separates "no new generation" from "promotion
 proceeds").
 
 ### 4.5 Shadow-evaluation sandbox (Phase 7)
-_Pending._
+**DONE 2026-09-27, shipped to `main`.** New `argus/shadow/sandbox.py` +
+`ShadowEvaluator` module-level singleton in `argus/ops/live_engine.py`
+(`_get_shadow_evaluator()`/`maybe_shadow_evaluate()`, same lazy-singleton shape as
+`_get_cl_afpe_engine()`). Wired into `core/pipeline.py` immediately after the real
+`argus_live_engine.evaluate(...)` call (the one that also feeds `decision` for this
+cycle) — passes the SAME real inputs (`active_evidence`, `rep_vector`, `device_type`,
+`baseline_familiarity`, `features`, `is_safe`, `dev_id`, `now`) plus `decision["state"]`
+as the agreement baseline. Runs EVERY cycle (not gated on an alert firing), unlike
+`evaluate_cl_afpe_shadow()`'s narrower alert-only call site — deliberate, so canary
+parameters get statistically meaningful comparison data from BENIGN cycles too, not
+just alert-worthy ones.
+
+New tables: `shadow_decisions` (schema.sql + `_migrate_existing_db()`, both updated —
+capped at 5000 rows, pruned oldest-first on write, no separate TTL job). New metrics:
+`shadow_eval_comparisons_total{parameter,agree}`, `shadow_eval_errors_total`,
+`shadow_eval_paused` (port 9106, `task` label convention).
+
+Safety: the shadow `evaluate()` call is wrapped in a real `GraphStore.transaction()`,
+force-rolled-back via an internal `_ShadowAbort` sentinel right after reading the
+shadow decision's state — confirmed via grep that `core/pipeline.py` never itself
+calls `store.transaction()`, so this is always the genuine outermost transaction, not
+a no-op nested passthrough. Candidate substitution: `AutotuneEngine.get_active_value`
+is monkey-patched at the CLASS level for the one target parameter only, for the
+duration of the shadow call, always restored in a `finally`. Alert/mitigation
+isolation needs no special guard: alerting/containment happen in `pipeline.py` AFTER
+`evaluate()` returns, and the shadow caller never touches `alert_manager`/
+`ips_mitigator` at all.
+
+Candidate selection picks AT MOST ONE currently-in-canary `threshold_history` row per
+cycle (`WHERE promoted_at IS NULL AND rolled_back_at IS NULL AND canary_until > now`),
+preferring device-scoped > category-scoped > global — **a real priority-ordering bug
+was found and fixed by this phase's own test coverage**: the original single-pass
+loop broke on the FIRST scope match encountered in row order, so a device-scoped
+canary occurring after a matching category/global row in scan order was wrongly
+passed over. Fixed to three separate passes (device, then category, then global),
+each independently confirmed by `tests/test_argus_shadow_sandbox.py`'s section D.
+Resource-pressure-gated via the same `is_resource_pressure_active()` Prometheus scrape
+Phase 6 introduced (`shadow_eval_paused` gauge tracks the pause state live).
+
+Never touches `resolver.resolve_device_id()` directly (§4.9's landmine does not apply
+here) — `device_id` arrives already-canonical from `core/pipeline.py`'s own call site.
+
+Test: new `tests/test_argus_shadow_sandbox.py` (21 checks, hand-rolled convention) —
+proves the rollback guarantee with real `evidence`/`decisions` row counts before/after,
+the candidate-substitution mechanism actually reaches a stubbed `evaluate()`, the
+fail-safe never propagates and always restores the patch, the (now-fixed) scope
+priority order, the resource-pressure pause, and the row-count-cap pruning. Also ran
+`tests/test_argus_live_engine.py`, `tests/test_argus_autotune_engine.py`,
+`tests/test_real_world_alert_regression.py` — all green, no regression from the
+`pipeline.py`/`live_engine.py` call-site additions.
 
 ### 4.6 Behavioral cohorts (Phase 8)
 _Pending._
@@ -298,6 +348,8 @@ _Pending._
 (`v13_stable_device_id(anchor.ip)`). `live_manager.py` already found and worked around
 this discrepancy for its own call path; the pure function itself is still broken for
 any other caller. Nothing in production calls the broken path today (confirmed via
-grep at plan time), but Phase 7's shadow sandbox and Phase 10's discovery diff logic
-are both candidates that could accidentally call `resolver.resolve_device_id()`
-directly — Phase 11 fixes the source function before those exist.
+grep at plan time). Phase 7's shadow sandbox is now built (§4.5) and confirmed NOT to
+call `resolver.resolve_device_id()` directly — it reuses whatever already-canonical
+`device_id` `core/pipeline.py` passes in. Phase 10's discovery diff logic remains a
+candidate that could accidentally call the broken path directly — Phase 11 fixes the
+source function before that one exists.

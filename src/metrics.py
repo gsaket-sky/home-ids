@@ -464,6 +464,24 @@ health_component_state = Gauge("home_ids_health_component_state", "Health-manage
 health_recovery_attempts = Gauge("home_ids_health_recovery_attempts", "Self-heal attempts in the component's current back-off window", ["component"])
 health_pressure_level = Gauge("home_ids_health_pressure_level", "Host resource pressure as classified by the health manager: 0 normal, 1 resource pressure, 2 conservation, 3 critical")
 
+# 2026-09-27 (Phase 7 of the autonomy-completion effort): deterministic shadow
+# evaluation -- compares what a still-in-canary autotune candidate would have
+# decided against the real, live decision for the same cycle, without ever
+# emitting an alert/mitigation action. See argus/shadow/sandbox.py.
+shadow_eval_comparisons_total = Counter(
+    "home_ids_shadow_eval_comparisons_total",
+    "Shadow-vs-real decision comparisons by parameter and agreement outcome",
+    ["parameter", "agree"],
+)
+shadow_eval_errors_total = Counter(
+    "home_ids_shadow_eval_errors_total",
+    "Shadow evaluation attempts that failed to produce a comparison (best-effort, never blocks the real decision)",
+)
+shadow_eval_paused = Gauge(
+    "home_ids_shadow_eval_paused",
+    "1 if shadow evaluation is currently paused (resource pressure), 0 otherwise",
+)
+
 # Argus evidence graph -- set by core/argus_metrics.py's read-only background exporter.
 argus_alert_events_24h = Gauge("home_ids_argus_alert_events_24h", "Alert events in the last 24h by outcome (FIRED = published to you, SUPPRESSED_AUTONOMOUS = hidden by the false-positive filter, LOGGED_ONLY = recorded below the alert bar)", ["status"])
 argus_alert_events_retained = Gauge("home_ids_argus_alert_events_retained", "Alert events currently retained in the evidence graph by outcome (survives restarts)", ["status"])

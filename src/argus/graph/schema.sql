@@ -308,6 +308,29 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     coverage_json             TEXT NOT NULL DEFAULT '{}',   -- degraded-coverage bookkeeping
     overall_pass              INTEGER NOT NULL DEFAULT 0    -- 0/1, the autotuner's actual gate
 );
+
+-- Deterministic shadow evaluation (Phase 7 of the autonomy-completion effort,
+-- 2026-09-27, Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md). Compact decision
+-- DIFFS only (per the plan's own "shadow_deltas stores compact decision
+-- differences only" requirement) -- never raw evidence/evidence snapshots, which
+-- already live in `evidence`/`decisions` themselves and would just duplicate them
+-- here. One row per (currently-in-canary change, device, real-decision-cycle)
+-- comparison: what the REAL promoted/default value produced this cycle vs. what
+-- the CANDIDATE (still-in-canary) value would have produced against the exact
+-- same input, computed by argus/shadow/sandbox.py's ShadowContext. Bounded by
+-- row count (not a schema-level TTL -- SQLite has none), enforced opportunistically
+-- on write by the sandbox module itself, not a separate pruning job.
+CREATE TABLE IF NOT EXISTS shadow_decisions (
+    shadow_id       TEXT PRIMARY KEY,
+    change_id       TEXT NOT NULL REFERENCES threshold_history(change_id),
+    device_id       TEXT REFERENCES devices(device_id),  -- NULL for a global-scope candidate
+    timestamp       REAL NOT NULL,
+    real_state      TEXT NOT NULL,    -- this cycle's REAL decision state (BENIGN/SUSPICIOUS/HIGH/CRITICAL)
+    shadow_state    TEXT NOT NULL,    -- what the CANDIDATE value would have produced against the same input
+    agree           INTEGER NOT NULL  -- 0/1, real_state == shadow_state
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_decisions_change ON shadow_decisions(change_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_shadow_decisions_timestamp ON shadow_decisions(timestamp);
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_started ON backtest_runs(started_at);
 
 -- Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): one row
