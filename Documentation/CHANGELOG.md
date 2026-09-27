@@ -9,6 +9,24 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.16.0] - 2026-09-27
+
+Phase 10 of the zero-site network bootstrap: real network auto-discovery.
+A new module finds this network's gateway and this host's own LAN-facing
+address purely from generic OS/network primitives -- the kernel's own
+routing table, a real ARP request/reply, the OS's own interface list --
+never a hardcoded IP range or household-specific rule. Handles the
+multi-NIC case correctly (a Docker-bridge-style decoy interface doesn't get
+mistaken for the real LAN-facing one) and degrades gracefully when a
+gateway or its MAC can't be found, rather than fabricating a placeholder.
+Every run logs a loud diff against whatever is currently configured, so
+drift is visible immediately rather than requiring a separate check.
+
+This module is intentionally not wired into anything live yet -- it's
+verified once against this network's own real state and shipped inert; a
+later phase is what makes its output the authoritative source instead of
+hand-edited configuration.
+
 ## [v16.15.0] - 2026-09-27
 
 Phase 9 of the zero-site network bootstrap: `hardware_profile` and

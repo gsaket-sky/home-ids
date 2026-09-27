@@ -428,7 +428,48 @@ already generalized past the single `gateway_ip` string-match to an arbitrary
 _Will change in Phase 11 (resolver.py's own formula fixed at the source) and again in
 Phase 13 (trust_anchors auto-populated, cutover from hand-edited config)._
 
-### 4.8 Zero-site bootstrap: `RouterAdapter` (Phase 12)
+#### 4.7b Zero-site bootstrap B: auto-discovery (Phase 10)
+**DONE 2026-09-27, shipped to `main`.** New `argus/identity/discovery.py`, purely
+additive and NOT yet wired into any live call site (Phase 13's cutover is what
+makes its output authoritative) -- built and deployed for real per the user's
+"no dry-run-only phase" instruction, verified once against `.94`'s real network
+over SSH, then left in place unused rather than gated behind a flag.
+
+Two roles discovered, both from generic OS/network primitives only (no
+household-specific rule): `this_host` (`psutil.net_if_addrs()`, selecting
+whichever non-loopback interface's own subnet actually contains the discovered
+gateway -- avoids the multi-NIC ambiguity a naive "first interface" pick would
+hit, e.g. a Docker bridge interface enumerated before the real LAN NIC) and
+`gateway` (the kernel's own default-route table via `ip route show default`,
+MAC resolved via a real ARP request/reply using `scapy.srp()` -- the same
+generic L2 primitive `mitigation/ips.py`'s own tarpit already depends on, not a
+new dependency). Output is the exact `[{role, ip, mac}, ...]` shape
+`argus/config/trust_anchors.py`'s `load_trust_anchors()` already expects --
+zero adaptation needed at the Phase 13 cutover.
+
+`discover()` always logs a diff against whatever `trust_anchors` is currently
+configured (WARNING-level if anything changed, INFO if not) -- a PERMANENT
+feature every call makes, not a one-time dry-run gate, matching this whole
+effort's "fix forward with live data" standing instruction.
+
+**Real verification against `.94` (2026-09-27, over SSH)**: manually ran
+`discover()` against `.94`'s actual live network state -- correctly found
+`gateway` at the real FritzBox IP and `this_host` at `.94`'s own real LAN IP,
+matching the hand-configured values already known-correct for this network.
+(Exact IPs deliberately not repeated here --
+[[feedback_no_real_pii_in_github]] -- see the session's own record for the
+literal values if ever needed again.)
+
+Test: new `tests/test_argus_identity_discovery.py` (11 checks) -- fully mocked
+(`psutil.net_if_addrs()`, `subprocess.run()`, `scapy`'s ARP resolution), no
+real packet capture or network I/O in the test itself. Covers: single-NIC
+discovery, the multi-NIC subnet-matching selection (a Docker-bridge-style
+decoy interface correctly loses out to the real LAN NIC), graceful
+degradation when no default route or ARP reply is found (never a crash, never
+a fabricated anchor), an empty interface table, and both drift-logging
+branches.
+
+## 4.8 Zero-site bootstrap: `RouterAdapter` (Phase 12)
 _Pending._
 
 ### 4.9 Known landmine, not yet fixed (tracked here until Phase 11 closes it)
