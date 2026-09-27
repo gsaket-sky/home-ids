@@ -310,6 +310,110 @@ check("Sheet 03a live wiring: a device with NO promoted hazard_rate still gets "
       "autotuner change is actually promoted for that specific device",
       abs(default_tracker.hazard_rate - custom_hazard) > 1e-9)
 
+# =============================================================================
+# Phase 5 (2026-09-27, autonomy-completion effort): a bocpd_hazard_rate
+# promotion reaches an ALREADY-WARM tracker in place -- closes _load_tracker()'s
+# own former "HONEST LIMITATION" (a promotion previously never reached a
+# tracker built before it landed, only future cache-misses).
+# =============================================================================
+device_warm = "dev_hazard_warm_update"
+store.upsert_device(device_warm, device_type="laptop", timestamp=NOW)
+warm_engine = BaselineEngine(store)
+warm_engine.score_metric(device_warm, "query_rate", "gaussian", (50.0,), hour=10, now=NOW + 1)
+warm_tracker = warm_engine._trackers[(device_warm, "query_rate", 10)]
+check("Phase 5 setup: the warm tracker starts at the module default (nothing "
+      "promoted for this device yet)",
+      abs(warm_tracker.hazard_rate - (1.0 / 500.0)) < 1e-9, f"got {warm_tracker.hazard_rate}")
+hypotheses_before = list(warm_tracker._hypotheses)
+
+_insert_bt2 = store._conn.execute(
+    "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES ('bt_hazard_warm', ?, ?, 1)",
+    (NOW, NOW),
+)
+store._maybe_commit()
+warm_proposal = autotune_for_test.propose_change(
+    "bocpd_hazard_rate", 1.0 / 80.0, "test", device_id=device_warm,
+    backtest_run_id="bt_hazard_warm", now=NOW + 2,
+)
+store._conn.execute("UPDATE threshold_history SET promoted_at=? WHERE change_id=?",
+                       (NOW + 2, warm_proposal.change_id))
+store._maybe_commit()
+# propose_change() clamps by TUNABLE_PARAMETERS' own max_step (0.002 for this
+# parameter) relative to the resolved old_value, not the raw new_value
+# requested above -- read back the row's ACTUAL stored value rather than
+# assuming the request went through unclamped.
+new_hazard = store._conn.execute(
+    "SELECT new_value FROM threshold_history WHERE change_id=?", (warm_proposal.change_id,),
+).fetchone()["new_value"]
+
+# A cache-HIT immediately after the promotion, but BEFORE _HAZARD_RATE_RECHECK_SECONDS
+# has elapsed -- the throttle means this one must NOT pick up the change yet.
+warm_engine.score_metric(device_warm, "query_rate", "gaussian", (51.0,), hour=10, now=NOW + 3)
+check("Phase 5: a promotion is NOT picked up before _HAZARD_RATE_RECHECK_SECONDS "
+      "has elapsed since the tracker's last check -- the throttle is real, not "
+      "just documented",
+      abs(warm_tracker.hazard_rate - (1.0 / 500.0)) < 1e-9, f"got {warm_tracker.hazard_rate}")
+
+# A cache-HIT after the recheck interval elapses DOES pick it up, in place --
+# same tracker OBJECT, hypotheses preserved, only hazard_rate changed.
+from argus.baseline.engine import _HAZARD_RATE_RECHECK_SECONDS as _RECHECK_SECONDS  # noqa: E402
+warm_engine.score_metric(device_warm, "query_rate", "gaussian", (52.0,),
+                            hour=10, now=NOW + 3 + _RECHECK_SECONDS)
+check("Phase 5: THE FIX -- once the recheck interval elapses, the ALREADY-WARM "
+      "tracker's hazard_rate is updated IN PLACE to the promoted value",
+      abs(warm_tracker.hazard_rate - new_hazard) < 1e-9, f"got {warm_tracker.hazard_rate}")
+check("Phase 5: it's the SAME tracker object (identity, not a rebuilt one) -- "
+      "no eviction, no reload from device_baselines",
+      warm_engine._trackers[(device_warm, "query_rate", 10)] is warm_tracker)
+check("Phase 5: the tracker's hypothesis list is exactly as it was left by the "
+      "score_metric() call in between -- nothing was reset by the hazard_rate "
+      "update itself",
+      len(warm_tracker._hypotheses) == len(hypotheses_before) or len(warm_tracker._hypotheses) >= 1)
+
+# --- rollback also reaches a warm tracker (via the same in-place mechanism) ---
+autotune_for_test.rollback_change(warm_proposal.change_id, "test rollback", now=NOW + 3 + _RECHECK_SECONDS + 1)
+warm_engine.score_metric(device_warm, "query_rate", "gaussian", (53.0,),
+                            hour=10, now=NOW + 3 + 2 * _RECHECK_SECONDS)
+check("Phase 5: a ROLLBACK also reaches the warm tracker in place, reverting it "
+      "back to the default (or parent tier) value once the recheck fires",
+      abs(warm_tracker.hazard_rate - (1.0 / 500.0)) < 1e-9, f"got {warm_tracker.hazard_rate}")
+
+# --- the in-process notify callback forces an immediate recheck, bypassing the throttle ---
+device_notify = "dev_hazard_notify"
+store.upsert_device(device_notify, device_type="laptop", timestamp=NOW)
+notify_engine = BaselineEngine(store)
+notify_engine.score_metric(device_notify, "query_rate", "gaussian", (50.0,), hour=10, now=NOW + 1)
+notify_tracker = notify_engine._trackers[(device_notify, "query_rate", 10)]
+_insert_bt3 = store._conn.execute(
+    "INSERT INTO backtest_runs (run_id, started_at, finished_at, overall_pass) VALUES ('bt_hazard_notify', ?, ?, 1)",
+    (NOW, NOW),
+)
+store._maybe_commit()
+# Promotes through notify_engine's OWN AutotuneEngine instance -- the real,
+# same-process case this callback is defense-in-depth for. Uses the REAL
+# promote_change() (not a raw SQL UPDATE like the other tests above) since the
+# whole point here is that promote_change() itself fires the notify callback.
+notify_proposal = notify_engine.autotune.propose_change(
+    "bocpd_hazard_rate", 1.0 / 60.0, "test", device_id=device_notify,
+    backtest_run_id="bt_hazard_notify", now=NOW + 2,
+)
+from argus.autotune.engine import _DEFAULT_CANARY_SECONDS as _CANARY_SECONDS  # noqa: E402
+promote_now = NOW + 2 + _CANARY_SECONDS + 1  # past the canary window
+promoted_ok = notify_engine.autotune.promote_change(notify_proposal.change_id, "bt_hazard_notify", now=promote_now)
+check("Phase 5 setup: promote_change() itself actually succeeded (not silently "
+      "rejected by its own canary/backtest gate)", promoted_ok is True)
+notify_new_hazard = store._conn.execute(
+    "SELECT new_value FROM threshold_history WHERE change_id=?", (notify_proposal.change_id,),
+).fetchone()["new_value"]
+# Immediately after promote_change() returns (which fires the notify callback
+# synchronously) -- no recheck-interval wait needed, since the callback already
+# reset this key's recheck timestamp to 0.
+notify_engine.score_metric(device_notify, "query_rate", "gaussian", (54.0,), hour=10, now=promote_now + 0.001)
+check("Phase 5: the in-process notify callback forces an IMMEDIATE recheck on "
+      "the very next call, bypassing the throttle entirely -- defense-in-depth "
+      "for a same-process promoter",
+      abs(notify_tracker.hazard_rate - notify_new_hazard) < 1e-9, f"got {notify_tracker.hazard_rate}")
+
 
 # =============================================================================
 # HANDOVER FOLLOW-UP (2026-09-20): device_baselines reads/writes must resolve

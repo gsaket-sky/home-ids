@@ -30,7 +30,7 @@ def check(name, cond, detail=""):
 
 from argus.autotune.engine import (  # noqa: E402
     AutotuneEngine, TUNABLE_PARAMETERS, compute_drift_result, wilson_lower_bound,
-    _MIN_TRIALS_FOR_LOOSENING, _TRUST_RADIUS_MAX_STEPS,
+    _MIN_TRIALS_FOR_LOOSENING, _TRUST_RADIUS_MAX_STEPS, _DEFAULT_CANARY_SECONDS,
 )
 from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
@@ -552,6 +552,60 @@ fp_bounds = TUNABLE_PARAMETERS["fp_combined_suppress_threshold"]
 check("TUNABLE_PARAMETERS: fp_combined_suppress_threshold stays plain-symmetric "
       "(no max_step_up/max_step_down needed)",
       "max_step" in fp_bounds and "max_step_up" not in fp_bounds and "max_step_down" not in fp_bounds)
+
+# =============================================================================
+# set_notify/_fire_notify (2026-09-27, Phase 5 of the autonomy-completion
+# effort): the same multi-subscriber, exception-isolated notify mechanism
+# src/config.py's LiveConfig already uses, now on AutotuneEngine too -- closes
+# baseline/engine.py's own former "HONEST LIMITATION" for bocpd_hazard_rate.
+# =============================================================================
+notify_store = GraphStore(":memory:")
+notify_store.upsert_device("notify_dev", timestamp=NOW)
+notify_engine_for_test = AutotuneEngine(notify_store)
+notify_calls = []
+
+
+def _raising_subscriber(parameter, device_id, device_type, event):
+    notify_calls.append(("raising", parameter, device_id, device_type, event))
+    raise RuntimeError("simulated subscriber failure")
+
+
+def _ok_subscriber(parameter, device_id, device_type, event):
+    notify_calls.append(("ok", parameter, device_id, device_type, event))
+
+
+notify_engine_for_test.set_notify(_raising_subscriber)
+notify_engine_for_test.set_notify(_ok_subscriber)
+
+_insert_backtest(notify_store, "bt_notify", passed=True, at=NOW)
+notify_proposal_for_test = notify_engine_for_test.propose_change(
+    "hard_stop_candidate_sensitivity", 0.80, "test", device_id="notify_dev",
+    backtest_run_id="bt_notify", now=NOW,
+)
+check("set_notify test setup: the proposal itself was accepted",
+      notify_proposal_for_test.accepted, f"got {notify_proposal_for_test}")
+
+promoted_for_notify_test = notify_engine_for_test.promote_change(
+    notify_proposal_for_test.change_id, "bt_notify", now=NOW + _DEFAULT_CANARY_SECONDS + 1,
+)
+check("set_notify: promote_change() itself still succeeds even though ONE "
+      "subscriber raises -- a notify failure must never look like the "
+      "promotion failed", promoted_for_notify_test is True)
+check("set_notify: BOTH subscribers were called (the raising one did not "
+      "prevent the second, working one from running)",
+      len(notify_calls) == 2 and notify_calls[0][0] == "raising" and notify_calls[1][0] == "ok")
+check("set_notify: the callback receives the correct parameter/device_id/"
+      "device_type/event",
+      notify_calls[1] == ("ok", "hard_stop_candidate_sensitivity", "notify_dev", None, "promoted"),
+      f"got {notify_calls[1]}")
+
+notify_calls.clear()
+rolled_back_for_notify_test = notify_engine_for_test.rollback_change(
+    notify_proposal_for_test.change_id, "test rollback", now=NOW + _DEFAULT_CANARY_SECONDS + 2,
+)
+check("set_notify: rollback_change() also fires the notify, with event='rolled_back'",
+      rolled_back_for_notify_test is True and len(notify_calls) == 2
+      and notify_calls[1][4] == "rolled_back", f"got {notify_calls}")
 
 
 print()

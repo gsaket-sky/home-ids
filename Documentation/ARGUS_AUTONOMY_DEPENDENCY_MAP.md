@@ -198,7 +198,38 @@ New metrics: `home_ids_reactive_capture_scratch_bytes` (gauge),
 `tests/test_phase25_reactive_capture_triggers.py`'s new "Section H".
 
 ### 4.3 BOCPD rebuild-on-promotion (Phase 5)
-_Pending._
+Shipped 2026-09-27. Closes `baseline/engine.py`'s own former "HONEST LIMITATION"
+(a promoted `bocpd_hazard_rate` never reached an already-warm tracker until it was
+next reconstructed). Two mechanisms, deliberately separate because one is inert on
+the real deployed topology:
+
+1. **The mechanism that actually matters**: `_load_tracker()`'s cache-HIT path now
+   re-checks the promoted value at most once per `_HAZARD_RATE_RECHECK_SECONDS`
+   (60s) and, if changed, updates `tracker.hazard_rate` **in place** — no eviction,
+   no reload, hypothesis list/posterior state fully preserved (`BOCPDTracker.observe()`
+   reads `self.hazard_rate` fresh every call, never bakes it into a closure, so this
+   is a safe mutation). This works across the real process boundary:
+   `bocpd_hazard_rate`'s own promoter (`backtest_job.py`'s `run_backtest()`) runs as
+   its own scheduled OS subprocess, never in-process with the live `soc.service`
+   pipeline `BaselineEngine` actually runs inside — the re-check works because it
+   re-reads the shared SQLite `threshold_history` table, the real cross-process
+   channel.
+2. **`AutotuneEngine.set_notify()`/`_fire_notify()`**: a new generic promotion/rollback
+   notify mechanism, mirroring `src/config.py`'s `LiveConfig` exactly (multi-subscriber,
+   exception-isolated). `BaselineEngine` registers a callback that forces an immediate
+   re-check (bypassing the 60s throttle) for the affected device's keys. Confirmed via
+   direct investigation this is **defense-in-depth only** for the current deployment —
+   it would matter for a future in-process promoter, but has zero effect on
+   `bocpd_hazard_rate`'s real promotion path today, which is cross-process. Kept anyway
+   since it's the same reusable, already-tested pattern this codebase established for
+   config reload, and genuinely useful for any future in-process caller of
+   `promote_change()`/`rollback_change()`.
+
+`now` threaded through `_load_tracker()` (previously used `time.time()` directly,
+inconsistent with this codebase's deterministic-testing convention). New tests in
+`tests/test_argus_baseline_engine.py` (throttle, in-place update, hypothesis
+preservation, rollback, notify) and `tests/test_argus_autotune_engine.py` (the
+generic notify mechanism + exception isolation, independent of BOCPD).
 
 ### 4.4 Resource-aware autotune/shadow pause (Phase 6)
 _Pending._

@@ -13,10 +13,13 @@ GraphStore reads/writes, JSON (de)serialization, and the incident/probation
 gating logic live; bayesian.py stays free of any of that.
 """
 import json
+import logging
 import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from argus.autotune.engine import AutotuneEngine
+
+LOGGER = logging.getLogger("argus.baseline.engine")
 from argus.baseline.bayesian import (
     BetaBaseline, BOCPDTracker, GaussianBaseline, MarkovBaseline, PoissonBaseline,
     weaken_beta, weaken_gaussian, weaken_poisson,
@@ -86,6 +89,14 @@ _CHANGEPOINT_CONFIRM_SAMPLES = 3
 _CHANGEPOINT_CONFIRM_AVG_SURPRISE = 3.0
 
 _DEFAULT_HAZARD_RATE = 1.0 / 500.0  # ~500-cycle expected regime length by default
+
+# 2026-09-27 (Phase 5 of the autonomy-completion effort): how often a warm
+# tracker's hazard_rate is re-checked against the currently-promoted value.
+# First-pass, not-yet-empirically-tuned constant, same honesty framing as this
+# module's other first-pass constants -- cheap enough (one indexed SELECT) to
+# run fairly often without real cost, but not so often it re-queries SQLite on
+# literally every observation.
+_HAZARD_RATE_RECHECK_SECONDS = 60.0
 
 # --- activity-state taxonomy (Markov axis 1) ---------------------------------
 
@@ -196,6 +207,30 @@ class BaselineEngine:
         # promoted -- inert by construction until that happens, never a
         # behavior change on its own.
         self.autotune = AutotuneEngine(store)
+        # 2026-09-27 (Phase 5 of the autonomy-completion effort): closes
+        # _load_tracker()'s own "HONEST LIMITATION" below. Registered for
+        # defense-in-depth (a FUTURE caller that promotes bocpd_hazard_rate
+        # in-process, in the same process this BaselineEngine runs in, would
+        # reach this immediately) -- but confirmed via direct investigation
+        # this is NOT the mechanism that actually matters for the real
+        # deployed topology: bocpd_hazard_rate's own promoter
+        # (backtest_job.py's run_backtest(), via _propose_bocpd_hazard_changes())
+        # runs as its own separate scheduled OS subprocess (scripts/scheduler.py),
+        # never in-process with the live soc.service pipeline this BaselineEngine
+        # actually runs inside of -- an in-process callback can never fire across
+        # that process boundary. The REAL fix is the periodic re-check inside
+        # _load_tracker()'s own cache-HIT path below, which re-reads the
+        # promoted value from the shared SQLite threshold_history table (the
+        # actual cross-process channel) instead of relying on a same-process
+        # notification.
+        self.autotune.set_notify(self._on_autotune_notify)
+        # (device_id, metric, hour) -> (hazard_rate tracker was last confirmed
+        # to be using, wall-clock of that last confirmation) -- throttles the
+        # re-check to _HAZARD_RATE_RECHECK_SECONDS instead of every single
+        # cache-hit call, same "periodic, not per-call" precedent already
+        # established elsewhere in this codebase (fritzbox_capture.py's own
+        # disk-budget check).
+        self._tracker_hazard_state: Dict[Tuple[str, str, int], Tuple[float, float]] = {}
         # In-memory cache of live BOCPDTracker objects, keyed by
         # (device_id, metric, hour) -- avoids reconstructing the whole
         # hypothesis list from JSON every cycle for a device active every
@@ -246,16 +281,47 @@ class BaselineEngine:
 
     # ---------------------------------------------------------- persistence
 
-    def _load_tracker(self, device_id: str, metric: str, model_kind: str, hour: int) -> Tuple[BOCPDTracker, int]:
+    def _load_tracker(self, device_id: str, metric: str, model_kind: str, hour: int,
+                        now: Optional[float] = None) -> Tuple[BOCPDTracker, int]:
         """Loads the live BOCPDTracker for (device, metric, hour), or builds
         a fresh one seeded from the population prior (hierarchical shrinkage
         for cold start) if none exists yet. Returns (tracker, regime_id) --
         regime_id is tracked alongside, not inside BOCPDTracker itself, since
         it's this engine's own concept (which REGIME's row to read/write),
-        distinct from BOCPD's internal run-length hypotheses."""
+        distinct from BOCPD's internal run-length hypotheses.
+
+        FIXED (2026-09-27, Phase 5 of the autonomy-completion effort -- closes
+        this method's own former "HONEST LIMITATION"): a cache-HIT no longer
+        just returns the warm tracker unconditionally. At most once per
+        _HAZARD_RATE_RECHECK_SECONDS, it re-reads the currently-promoted
+        bocpd_hazard_rate and, if it has changed since this tracker was built
+        (or last confirmed), updates `tracker.hazard_rate` IN PLACE --
+        BOCPDTracker.observe() reads `self.hazard_rate` fresh every call
+        (bayesian.py:349's own class, not baked into any per-hypothesis
+        closure), so this is a safe, lossless in-place update: no hypothesis
+        list eviction, no reload from device_baselines, no posterior state
+        lost or reconstructed. This is real, effective cache invalidation
+        precisely BECAUSE it re-reads the shared SQLite threshold_history
+        table (the actual cross-process channel bocpd_hazard_rate's own
+        promoter uses -- see this class's own __init__ comment on why an
+        in-process notify callback alone can't reach this)."""
+        now = now if now is not None else time.time()
         key = (device_id, metric, hour)
         if key in self._trackers:
-            return self._trackers[key], self._regime_for(device_id, metric, hour)
+            tracker = self._trackers[key]
+            last_hazard, last_checked = self._tracker_hazard_state.get(key, (tracker.hazard_rate, 0.0))
+            if now - last_checked >= _HAZARD_RATE_RECHECK_SECONDS:
+                current_hazard = self.autotune.get_active_value(
+                    "bocpd_hazard_rate", device_id, default=_DEFAULT_HAZARD_RATE)
+                if current_hazard != tracker.hazard_rate:
+                    LOGGER.info(
+                        "bocpd_hazard_rate promotion/rollback reached warm tracker (device=%r, "
+                        "metric=%r, hour=%r): %.6f -> %.6f, updated in place, hypotheses preserved",
+                        device_id, metric, hour, tracker.hazard_rate, current_hazard,
+                    )
+                    tracker.hazard_rate = current_hazard
+                self._tracker_hazard_state[key] = (current_hazard, now)
+            return tracker, self._regime_for(device_id, metric, hour)
 
         row = self.store._conn.execute(
             "SELECT * FROM device_baselines WHERE device_id=? AND metric=? AND hour=? "
@@ -265,17 +331,9 @@ class BaselineEngine:
 
         model_cls = _MODEL_CLASSES[model_kind]
         fit_fn = _fit_fn_for(model_kind)
-        # Read once per cache-miss (tracker construction), not every cycle --
-        # matches get_active_value()'s own cost profile (one indexed SELECT
-        # against the small, append-only threshold_history table) and this
-        # engine's own "cached in-memory for the process lifetime" tracker
-        # model. HONEST LIMITATION: a hazard_rate promoted AFTER this device/
-        # metric/hour's tracker is already warm in THIS process does not take
-        # effect until the tracker is next reconstructed (process restart, or
-        # this key evicted) -- live cache invalidation on promotion is real,
-        # separate follow-up; not a silent gap (see this comment).
         hazard_rate = self.autotune.get_active_value(
             "bocpd_hazard_rate", device_id, default=_DEFAULT_HAZARD_RATE)
+        self._tracker_hazard_state[key] = (hazard_rate, now)
 
         if row is not None:
             regime_id = int(row["regime_id"])
@@ -305,6 +363,29 @@ class BaselineEngine:
         self._trackers[key] = tracker
         regime_id = int(row["regime_id"]) if row is not None else 0
         return tracker, regime_id
+
+    def _on_autotune_notify(self, parameter: str, device_id: Optional[str],
+                              device_type: Optional[str], event: str) -> None:
+        """AutotuneEngine.set_notify() subscriber -- see __init__'s own comment
+        on why this is defense-in-depth (a same-process promoter), not the
+        mechanism that handles the real, cross-process deployment topology
+        (that's _load_tracker()'s own periodic re-check). Forces the NEXT
+        _load_tracker() call for every potentially-affected warm tracker to
+        immediately re-check and update in place, by resetting this key's
+        recheck timestamp to 0, rather than duplicating the update logic here.
+        Scoped correctly: a device-scoped promotion only forces that one
+        device's own keys; category/global forces every warm key (this cache
+        has no device_type index, so a category-scoped promotion can't cheaply
+        narrow further -- correctness over a small, one-time-per-promotion
+        optimization)."""
+        if parameter != "bocpd_hazard_rate":
+            return
+        for key in list(self._tracker_hazard_state.keys()):
+            key_device_id, _metric, _hour = key
+            if device_id is not None and key_device_id != device_id:
+                continue
+            hazard, _checked_at = self._tracker_hazard_state[key]
+            self._tracker_hazard_state[key] = (hazard, 0.0)
 
     def _seeded_model(self, device_id: str, metric: str, model_kind: str, hour: int, model_cls):
         """Hierarchical shrinkage: a brand-new run-length-zero hypothesis (or
@@ -441,7 +522,7 @@ class BaselineEngine:
         # caller already did this cycle, not dependent on ordering.
         self.store.upsert_device(device_id, timestamp=now)
 
-        tracker, regime_id = self._load_tracker(device_id, metric, model_kind, hour)
+        tracker, regime_id = self._load_tracker(device_id, metric, model_kind, hour, now=now)
         model_cls = _MODEL_CLASSES[model_kind]
         pre_spike_dominant = tracker.dominant_model()  # snapshot BEFORE this cycle's update -- the confirmation anchor
 

@@ -210,14 +210,18 @@ prune hypotheses below weight 1e-4, cap at 40 by weight (bounds memory/CPU)
 ```
 
 `hazard_rate` (default `1/500` — an expected ~500-cycle regime length) is one of the
-four live-tunable autotune parameters (`bocpd_hazard_rate`, §13). **UPDATE
-(2026-09-16): now has a real live consumer on `.94`** (`BaselineEngine._load_tracker()`
-reads it via `get_active_value()` on every tracker construction) — the "motion with no
-live effect" framing this section carried until now is stale. `backtest_job.py`'s real
-proposer (§13) still doesn't trigger it, but for a different, still-accurate reason:
-the nightly synthetic attack sweep has no signal shaped for this parameter (it's a
-regime-sensitivity knob, not a detection-sensitivity one) — not because nothing would
-read a promoted value.
+16 live-tunable autotune parameters (`bocpd_hazard_rate`, see
+`Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md`). **UPDATE (2026-09-16): has a real
+live consumer on `.94`** (`BaselineEngine._load_tracker()` reads it via
+`get_active_value()` on every tracker construction). **UPDATE (2026-09-27): the two
+claims below this line are now STALE, superseded by the same-day autonomy-completion
+effort** — `backtest_job.py`'s `_propose_bocpd_hazard_changes()` is a real forward
+generator for this parameter (delayed-shift-miss + regime-flapping evidence, not a
+synthetic-sweep signal, which genuinely doesn't fit this parameter), and
+`_load_tracker()`'s own cache-hit path now periodically re-reads the promoted value
+and updates an already-warm tracker's `hazard_rate` in place (no eviction, hypotheses
+preserved) — the "HONEST LIMITATION" comment this file used to quote no longer
+applies. See the dependency-map doc for current status.
 
 **Regime-change confirmation is two-stage, not a single-cycle trigger** — the code's
 own docstring documents two real false-positive modes this closed (a single 4-sigma

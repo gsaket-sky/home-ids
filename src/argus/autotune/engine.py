@@ -29,12 +29,15 @@ bundled into this commit -- the same honest-gap pattern already used for
 Sheet 00's `risk` metric and Sheet 02's scheduler wiring.
 """
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from argus.graph.store import GraphStore
+
+LOGGER = logging.getLogger("argus.autotune.engine")
 
 # Explicit, closed allowlist -- the ONLY parameters this module may ever
 # propose a change to. (name -> (min, max, max_step_per_change)). Adding a
@@ -196,6 +199,37 @@ def _directional_step_bound(bounds: Dict[str, float], direction: int) -> float:
 class AutotuneEngine:
     def __init__(self, store: GraphStore):
         self.store = store
+        # 2026-09-27 (Phase 5 of the autonomy-completion effort): promotion-
+        # notify subscribers -- mirrors src/config.py's own LiveConfig
+        # (_notify_cbs/set_notify()/_fire_notify(), the exact pattern
+        # core/pipeline.py's own _on_config_reload already consumes). Closes
+        # baseline/engine.py's own documented "HONEST LIMITATION": a promoted
+        # bocpd_hazard_rate change previously had no way to reach an already-warm
+        # BOCPDTracker until that tracker was next reconstructed on its own.
+        self._notify_cbs: list = []
+
+    def set_notify(self, cb) -> None:
+        """Registers `cb` as an ADDITIONAL promotion/rollback subscriber -- does
+        not replace any previously-registered callback, same multi-subscriber
+        reasoning as LiveConfig.set_notify()'s own docstring."""
+        self._notify_cbs.append(cb)
+
+    def _fire_notify(self, parameter: str, device_id: Optional[str], device_type: Optional[str],
+                       event: str) -> None:
+        """Calls every registered subscriber, isolated so one callback raising
+        never prevents the others from running or blocks the promotion/rollback
+        itself (the state change has already been committed by the time this
+        fires -- a notify failure must never look like the promotion/rollback
+        failed)."""
+        for cb in self._notify_cbs:
+            try:
+                cb(parameter, device_id, device_type, event)
+            except Exception:
+                LOGGER.exception(
+                    "Autotune promotion-notify callback raised for parameter=%r "
+                    "device_id=%r device_type=%r event=%r, continuing with remaining subscribers",
+                    parameter, device_id, device_type, event,
+                )
 
     # ---------------------------------------------------------- reads
 
@@ -460,6 +494,10 @@ class AutotuneEngine:
             "UPDATE threshold_history SET promoted_at=? WHERE change_id=?", (now, change_id),
         )
         self.store._maybe_commit()
+        # 2026-09-27 (Phase 5): fired AFTER commit -- a subscriber sees the
+        # already-durable state change, never a promotion that could still be
+        # rolled back by a concurrent failure between the write and the notify.
+        self._fire_notify(row["parameter"], row["device_id"], row["device_type"], "promoted")
         return True
 
     def rollback_change(self, change_id: str, reason: str, now: Optional[float] = None) -> bool:
@@ -469,7 +507,8 @@ class AutotuneEngine:
         change is a safe no-op, not an error."""
         now = now if now is not None else time.time()
         row = self.store._conn.execute(
-            "SELECT rolled_back_at FROM threshold_history WHERE change_id=?", (change_id,),
+            "SELECT parameter, device_id, device_type, rolled_back_at FROM threshold_history WHERE change_id=?",
+            (change_id,),
         ).fetchone()
         if row is None:
             return False
@@ -480,6 +519,9 @@ class AutotuneEngine:
             (now, reason, change_id),
         )
         self.store._maybe_commit()
+        # 2026-09-27 (Phase 5): a rollback also invalidates any tracker built
+        # with the now-reverted value -- same notify, different event label.
+        self._fire_notify(row["parameter"], row["device_id"], row["device_type"], "rolled_back")
         return True
 
     def rollback_all_unconfirmed_for_backtest(self, backtest_run_id: str, reason: str,
