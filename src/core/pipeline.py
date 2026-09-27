@@ -51,7 +51,7 @@ from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
 from argus.ops import live_engine as argus_live_engine  # argus fast cutover -- see Documentation/ARGUS_ARCHITECTURE.md
 from argus.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
-from argus.config.trust_anchors import load_trust_anchors_from_config, load_hardware_profile  # v13 full-architecture plan, Phase 3
+from argus.config.trust_anchors import bootstrap_trust_anchors, load_hardware_profile  # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors is now auto-discovered/authoritative, not hand-configured-only (see bootstrap_trust_anchors()'s own docstring for the gateway-continuity safety guard)
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES  # 2026-09-15 Telegram WHY-block dedup fix, see grouped_evidence's own comment
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
@@ -756,7 +756,14 @@ class EnginePipeline:
         # (A13) -- "v_current" uses the real, unmodified DeviceIdentityManager exactly
         # as before Phase 3 existed.
         if self.config.get("engine", "argus") == "argus":
-            trust_anchors = load_trust_anchors_from_config(self.config)
+            # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors
+            # is now auto-discovered/authoritative rather than hand-configured-only --
+            # see bootstrap_trust_anchors()'s own docstring for the gateway-continuity
+            # safety guard (refuses to auto-adopt a discovered gateway that doesn't match
+            # the last-known-good one). Runs ONCE here at construction time, same as the
+            # hand-configured load it replaces -- a one-time ARP round-trip at boot, not
+            # a per-cycle cost.
+            trust_anchors = bootstrap_trust_anchors(self.config)
             self.identity_manager = LiveIdentityManager(
                 self.state_manager, self.config, argus_live_engine.get_graph_store(), trust_anchors,
             )

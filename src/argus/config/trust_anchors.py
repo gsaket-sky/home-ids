@@ -20,6 +20,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from argus.identity.resolver import TrustAnchor
+from argus.identity.discovery import discover
 
 LOGGER = logging.getLogger("v13_config_trust_anchors")
 
@@ -74,6 +75,86 @@ def load_trust_anchors_from_config(config: Dict[str, Any]) -> Dict[str, TrustAnc
         )
         return {}
     return load_trust_anchors(network_cfg.get("trust_anchors"))
+
+
+def bootstrap_trust_anchors(config: Dict[str, Any]) -> Dict[str, TrustAnchor]:
+    """Zero-site bootstrap E (Phase 13, autonomy-completion effort, 2026-09-27):
+    trust_anchors is now AUTHORITATIVE, auto-populated by
+    argus.identity.discovery.discover(), replacing config.yaml's hand-maintained
+    network.trust_anchors as the primary source. The hand-configured value (if
+    any) is used only as (a) discover()'s own diff-logging baseline and (b) the
+    gateway-continuity safety guard's comparison baseline below -- never itself
+    returned unmodified once a discovery run has actually succeeded.
+
+    THE SAFETY GUARD (the one built-in mechanism the zero-site bootstrap plan
+    calls for -- a code-level guard that does the real safety work, not a human
+    approval gate or a staged rollout): the discovered gateway anchor's IP must
+    be VERIFIED EQUAL to the current/last-known-good gateway IP (network.
+    trust_anchors's own configured gateway entry if present, else the legacy
+    gateway_ip key, else "no prior value -- first-ever adoption, nothing to
+    conflict with") before being adopted. On a mismatch, this warns LOUDLY and
+    refuses to auto-adopt the newly discovered gateway, keeping the last-known-
+    good one instead -- turning "this network's gateway IP silently changed"
+    into a loud logged event an operator will see, instead of a silent identity
+    reset for every device this system tracks (every device's OWN identity
+    resolution can depend on the gateway anchor's stability, per resolver.py's
+    own continuity-safety fix, Phase 11).
+
+    this_host has no continuity risk of this kind (it's never used as a merge
+    anchor for OTHER devices, only to mark this one host as infrastructure) and
+    is always adopted fresh from discovery. Any OTHER hand-configured role
+    (e.g. a manually-added household anchor discover() has no way to find, like
+    a NAS) is preserved untouched -- this function only ever touches the
+    'gateway'/'this_host' roles discover() actually produces.
+
+    Never raises: a discover() failure of any kind degrades to the existing
+    hand-configured trust_anchors unchanged -- the exact same behavior as
+    before this function existed."""
+    hand_configured_raw = (config.get("network") or {}).get("trust_anchors") or []
+    hand_configured = load_trust_anchors(hand_configured_raw)
+
+    try:
+        discovered_raw = discover(previous_trust_anchors=hand_configured_raw)
+    except Exception:
+        LOGGER.exception(
+            "[BOOTSTRAP] discover() failed -- falling back to the hand-configured "
+            "trust_anchors unchanged, exactly as if this phase didn't exist."
+        )
+        return hand_configured
+
+    discovered = load_trust_anchors(discovered_raw)
+
+    last_known_good_gateway_ip: Optional[str] = None
+    if "gateway" in hand_configured and hand_configured["gateway"].ip:
+        last_known_good_gateway_ip = hand_configured["gateway"].ip
+    elif config.get("gateway_ip"):
+        last_known_good_gateway_ip = config.get("gateway_ip")
+
+    result: Dict[str, TrustAnchor] = dict(hand_configured)
+
+    discovered_gateway = discovered.get("gateway")
+    if discovered_gateway is not None:
+        if last_known_good_gateway_ip and discovered_gateway.ip != last_known_good_gateway_ip:
+            LOGGER.warning(
+                "[BOOTSTRAP] discovered gateway ip %r does NOT match the last-known-good "
+                "gateway %r -- REFUSING to auto-adopt it. Keeping the last-known-good "
+                "gateway anchor. If this network's gateway genuinely changed, update "
+                "network.trust_anchors (or the legacy gateway_ip key) by hand to accept it.",
+                discovered_gateway.ip, last_known_good_gateway_ip,
+            )
+            if "gateway" not in result and last_known_good_gateway_ip:
+                # Legacy gateway_ip was the only prior source (network.trust_anchors was
+                # never configured at all) -- preserve continuity with it directly rather
+                # than silently dropping gateway anchoring altogether.
+                result["gateway"] = TrustAnchor(role="gateway", ip=last_known_good_gateway_ip)
+        else:
+            result["gateway"] = discovered_gateway
+
+    this_host_discovered = discovered.get("this_host")
+    if this_host_discovered is not None:
+        result["this_host"] = this_host_discovered
+
+    return result
 
 
 def load_hardware_profile(config: Dict[str, Any]) -> str:

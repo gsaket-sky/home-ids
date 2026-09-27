@@ -52,6 +52,7 @@ import requests
 
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_burst
 from intelligence.detectors.suricata_scan import run_and_attribute as run_suricata_and_attribute
+from mitigation.router_adapter import get_router_adapter
 from utils import memory_limited_preexec_fn, rotate_jsonl_if_oversized
 from core.heartbeat import write_component_heartbeat
 from metrics import (
@@ -913,7 +914,16 @@ class ReactiveCaptureDispatcher:
         is intentionally NOT part of the rolling hourly window -- it reflects
         accumulated state, not a per-hour rate, so it's re-checked fresh on every call.
         reactive_capture_max_bytes_per_hour=0 (or unset) disables the bytes gate
-        entirely, matching the pre-fix behavior."""
+        entirely, matching the pre-fix behavior.
+
+        Phase 13 (zero-site bootstrap E, RouterAdapter capability check,
+        autonomy-completion effort): reactive capture is AVM-pcap-format-specific
+        (capture.lua) -- structurally impossible without a Fritz!Box, regardless
+        of reactive_capture_enabled. Checked first, cheaper than and independent
+        of every other gate below (a router_type=none deployment should never
+        even reach the disk/rate-limit checks for a capability it doesn't have)."""
+        if not get_router_adapter(config).capture_supported:
+            return False
         if not config.get("reactive_capture_enabled", False):
             return False
         if not self._check_disk_budget(config):
@@ -949,6 +959,15 @@ class ReactiveCaptureDispatcher:
         capture-and-ingest-only behavior, e.g. for a caller with no evidence store to
         feed."""
         if not self._check_and_consume_budget(config):
+            if not get_router_adapter(config).capture_supported:
+                LOGGER.info(
+                    "[DEFERRED] reactive capture is unsupported by the configured router "
+                    "adapter (router_type=%r) -- AVM-format capture requires a Fritz!Box, "
+                    "deferring trigger '%s' permanently for this configuration.",
+                    config.get("router_type", "fritzbox"), trigger_reason,
+                )
+                reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="unsupported_router").inc()
+                return False
             if config.get("reactive_capture_enabled", False) and self._disk_degraded:
                 # _check_disk_budget() already logged the detailed ERROR-level reason;
                 # this is just the trigger-level [DEFERRED] record for this outcome.

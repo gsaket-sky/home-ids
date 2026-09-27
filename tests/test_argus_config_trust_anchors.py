@@ -21,9 +21,10 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
+import argus.config.trust_anchors as trust_anchors_module  # noqa: E402
 from argus.config.trust_anchors import (  # noqa: E402
     load_trust_anchors, load_trust_anchors_from_config, load_hardware_profile,
-    VALID_HARDWARE_PROFILES, DEFAULT_HARDWARE_PROFILE,
+    bootstrap_trust_anchors, VALID_HARDWARE_PROFILES, DEFAULT_HARDWARE_PROFILE,
 )
 from argus.identity.resolver import TrustAnchor, resolve_device_id  # noqa: E402
 
@@ -113,6 +114,106 @@ check("F: an unrecognized value falls back to the default rather than propagatin
 check("F: DEFAULT_HARDWARE_PROFILE is itself always a member of VALID_HARDWARE_PROFILES "
       "(a basic self-consistency guard against a future typo in either constant)",
       DEFAULT_HARDWARE_PROFILE in VALID_HARDWARE_PROFILES)
+
+
+# --- G (Phase 13, 2026-09-27): bootstrap_trust_anchors() -- the zero-site
+# bootstrap cutover, auto-discovery + the gateway-continuity safety guard ---
+
+_real_discover = trust_anchors_module.discover
+
+
+def _mock_discover(gateway_ip=None, gateway_mac=None, this_host_ip=None, this_host_mac=None):
+    anchors = []
+    if gateway_ip:
+        anchors.append({"role": "gateway", "ip": gateway_ip, "mac": gateway_mac})
+    if this_host_ip:
+        anchors.append({"role": "this_host", "ip": this_host_ip, "mac": this_host_mac})
+    return lambda previous_trust_anchors=None: anchors
+
+
+# G1: first-ever adoption -- nothing hand-configured, nothing to conflict with.
+trust_anchors_module.discover = _mock_discover(
+    gateway_ip="192.168.1.1", gateway_mac="aa:bb:cc:00:00:01",
+    this_host_ip="192.168.1.50", this_host_mac="aa:bb:cc:00:00:02",
+)
+result_g1 = bootstrap_trust_anchors({})
+check("G1: first-ever adoption -- no hand-configured trust_anchors and no legacy "
+      "gateway_ip -- the discovered gateway/this_host are adopted directly",
+      result_g1["gateway"].ip == "192.168.1.1" and result_g1["this_host"].ip == "192.168.1.50")
+
+# G2: discovered gateway matches the hand-configured one exactly -- adopted (and
+# picks up a fresher mac from discovery).
+config_g2 = {"network": {"trust_anchors": [{"role": "gateway", "ip": "192.168.1.1"}]}}
+trust_anchors_module.discover = _mock_discover(gateway_ip="192.168.1.1", gateway_mac="aa:bb:cc:00:00:99")
+result_g2 = bootstrap_trust_anchors(config_g2)
+check("G2: a discovered gateway matching the hand-configured ip is adopted, "
+      "picking up discovery's own (fresher) mac",
+      result_g2["gateway"].ip == "192.168.1.1" and result_g2["gateway"].mac == "aa:bb:cc:00:00:99")
+
+# G3: THE SAFETY GUARD -- discovered gateway does NOT match hand-configured one --
+# refused, last-known-good kept, loud warning (can't easily assert the log text
+# here without a handler, but the RETURNED value is the real behavioral contract).
+config_g3 = {"network": {"trust_anchors": [{"role": "gateway", "ip": "192.168.1.1", "mac": "aa:bb:cc:00:00:01"}]}}
+trust_anchors_module.discover = _mock_discover(gateway_ip="10.0.0.1", gateway_mac="ff:ff:ff:ff:ff:ff")
+result_g3 = bootstrap_trust_anchors(config_g3)
+check("G3: THE SAFETY GUARD -- a discovered gateway ip that does NOT match the "
+      "hand-configured (last-known-good) one is REFUSED -- the original ip/mac "
+      "are kept, not the mismatched discovery",
+      result_g3["gateway"].ip == "192.168.1.1" and result_g3["gateway"].mac == "aa:bb:cc:00:00:01")
+
+# G4: same guard, but the ONLY prior source is the legacy gateway_ip key (no
+# network.trust_anchors configured at all) -- still refuses and preserves
+# continuity with the legacy value, not silently dropping gateway anchoring.
+config_g4 = {"gateway_ip": "192.168.1.1"}
+trust_anchors_module.discover = _mock_discover(gateway_ip="10.0.0.1")
+result_g4 = bootstrap_trust_anchors(config_g4)
+check("G4: with ONLY the legacy gateway_ip configured (no network.trust_anchors "
+      "at all), a mismatched discovery still refuses and falls back to a "
+      "gateway anchor built from the legacy ip directly",
+      result_g4["gateway"].ip == "192.168.1.1")
+
+# G5: this_host has no continuity risk -- always adopted fresh, even alongside a
+# refused gateway mismatch in the SAME call.
+config_g5 = {"network": {"trust_anchors": [
+    {"role": "gateway", "ip": "192.168.1.1"},
+    {"role": "this_host", "ip": "192.168.1.40"},
+]}}
+trust_anchors_module.discover = _mock_discover(
+    gateway_ip="10.0.0.1",  # mismatch -- refused
+    this_host_ip="192.168.1.99",  # different from hand-configured -- still adopted
+)
+result_g5 = bootstrap_trust_anchors(config_g5)
+check("G5: this_host is always adopted fresh from discovery, independent of "
+      "whether the SAME call's gateway discovery was refused",
+      result_g5["this_host"].ip == "192.168.1.99" and result_g5["gateway"].ip == "192.168.1.1")
+
+# G6: a hand-configured anchor discovery has no concept of (e.g. a manually-added
+# household anchor) is preserved untouched.
+config_g6 = {"network": {"trust_anchors": [
+    {"role": "gateway", "ip": "192.168.1.1"},
+    {"role": "nas", "ip": "192.168.1.5", "mac": "cc:cc:cc:00:00:01"},
+]}}
+trust_anchors_module.discover = _mock_discover(gateway_ip="192.168.1.1")
+result_g6 = bootstrap_trust_anchors(config_g6)
+check("G6: a hand-configured anchor with a role discover() doesn't produce (e.g. "
+      "'nas') survives untouched", result_g6["nas"].ip == "192.168.1.5"
+      and result_g6["nas"].mac == "cc:cc:cc:00:00:01")
+
+# G7: discover() itself raising -- degrades to the hand-configured value unchanged.
+config_g7 = {"network": {"trust_anchors": [{"role": "gateway", "ip": "192.168.1.1"}]}}
+
+
+def _raising_discover(previous_trust_anchors=None):
+    raise RuntimeError("simulated discovery failure")
+
+
+trust_anchors_module.discover = _raising_discover
+result_g7 = bootstrap_trust_anchors(config_g7)
+check("G7: FAIL-SAFE -- a raising discover() degrades to the hand-configured "
+      "trust_anchors unchanged, never raises out to the caller",
+      result_g7["gateway"].ip == "192.168.1.1" and set(result_g7.keys()) == {"gateway"})
+
+trust_anchors_module.discover = _real_discover
 
 
 print(f"\n{'='*60}")

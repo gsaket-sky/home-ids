@@ -59,6 +59,35 @@ check("budget resets once the hourly window has elapsed, even if the prior windo
       d3._check_and_consume_budget(enabled_config) is True)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
+# Section A1b (Phase 13, RouterAdapter capability check, autonomy-completion effort):
+# reactive capture is AVM-pcap-format-specific -- structurally impossible without a
+# real Fritz!Box, checked BEFORE reactive_capture_enabled/the rate-limit budgets, not
+# alongside them.
+# ═══════════════════════════════════════════════════════════════════════════════════
+no_router_config = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+                      "router_type": "none"}
+d_no_router = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+check("router_type='none' rejects dispatch even though reactive_capture_enabled=True "
+      "and the rate budget is wide open -- capability, not rate, is the reason",
+      d_no_router._check_and_consume_budget(no_router_config) is False)
+check("REGRESSION GUARD: a 'none' router never actually consumed a budget slot "
+      "(the count never incremented) -- this is a capability rejection, not a "
+      "rate-limit deferral that should count against the hourly window",
+      d_no_router._count == 0)
+
+fritzbox_config = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6,
+                     "router_type": "fritzbox"}
+d_fritzbox = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+check("router_type='fritzbox' is unaffected -- dispatch proceeds normally",
+      d_fritzbox._check_and_consume_budget(fritzbox_config) is True)
+
+d_default = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+check("no router_type key at all defaults to the same (unaffected) fritzbox behavior "
+      "as an explicit router_type='fritzbox' -- matches every real deployment's "
+      "config.yaml before this phase existed",
+      d_default._check_and_consume_budget(enabled_config) is True)
+
+# ═══════════════════════════════════════════════════════════════════════════════════
 # Section A2 (LOAD-ANALYSIS FIX #1, Documentation/REACTIVE_CAPTURE_LOAD_ANALYSIS.md §5):
 # aggregate bytes-per-hour budget -- a SECOND gate alongside burst count, since count
 # alone never bounded how large any one burst was (a real incident saw burst size
@@ -475,6 +504,15 @@ try:
              "reactive_capture_max_scratch_bytes": 5_000}
     check("_check_disk_budget: a scratch dir that doesn't exist yet is a safe no-op, not a crash",
           d15._check_disk_budget(cfg15) is True)
+
+    # --- try_dispatch() surfaces the router-capability rejection distinctly (Phase 13) ---
+    d16 = ReactiveCaptureDispatcher(capture_fn=lambda *a, **k: None)
+    cfg16 = {"reactive_capture_enabled": True, "reactive_capture_max_bursts_per_hour": 6, "router_type": "none"}
+    dispatched16 = d16.try_dispatch(cfg16, zeek_fx=object(), trigger_reason="unit_test_no_router")
+    check("try_dispatch: router_type='none' rejects dispatch entirely -- structural "
+          "capability, never counted against the hourly budget",
+          dispatched16 is False and d16._count == 0,
+          f"dispatched={dispatched16} count={d16._count}")
 finally:
     shutil.rmtree(scratch_root, ignore_errors=True)
 

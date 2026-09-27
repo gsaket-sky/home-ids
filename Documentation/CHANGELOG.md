@@ -9,6 +9,37 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.19.0] - 2026-09-28
+
+Phase 13, the final phase of the full 16-parameter autonomous-tuning /
+zero-site network bootstrap effort: the network configuration cutover. This
+system's own network anchors (its gateway and its own address) are now
+discovered automatically at startup instead of requiring hand-edited
+configuration -- a network can now be onboarded without manually typing in
+router details at all.
+
+One built-in safety mechanism protects this from ever going wrong silently:
+the freshly discovered gateway must match whatever this system already knew
+as the real gateway before the new value is accepted. A genuine mismatch is
+refused and logged loudly rather than silently adopted -- since every
+device's own identity tracking can depend on the gateway staying stable,
+a wrong guess here could otherwise reset identity history across the whole
+network at once. The previous hand-edited configuration path is left in
+place as inert fallback code, not deleted.
+
+Also closed the one remaining piece of the router-independence work from
+Phase 12: reactive packet capture is specific to one router brand's own
+proprietary format, so it now checks the same router-capability signal
+Phase 12 introduced before ever attempting a capture, with its own clear
+log reason when skipped for that cause specifically -- rather than being
+silently lumped in with an ordinary rate-limit deferral.
+
+This closes the full 13-phase autonomy-completion effort: all 16 tunable
+parameters wired end to end with real generators, a real shadow-evaluation
+sandbox, behavioral cohorts, and a fully network-agnostic bootstrap path,
+all deployed and verified against this project's own real network
+throughout.
+
 ## [v16.18.0] - 2026-09-27
 
 Phase 12 of the zero-site network bootstrap: hardware-level router isolation

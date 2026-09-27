@@ -426,8 +426,9 @@ already generalized past the single `gateway_ip` string-match to an arbitrary
 5. non-generic hostname -> `stable_device_id(f"host:{hostname}")`.
 6. MAC fallback -> `stable_device_id(mac)`.
 7. raw IP fallback -> `stable_device_id(ip)`.
-_Will change in Phase 11 (resolver.py's own formula fixed at the source) and again in
-Phase 13 (trust_anchors auto-populated, cutover from hand-edited config)._
+_Changed in Phase 11 (resolver.py's own formula fixed at the source, DONE) and again
+in Phase 13 (trust_anchors auto-populated, cutover from hand-edited config, DONE --
+see §4.10 below for the full account)._
 
 #### 4.7b Zero-site bootstrap B: auto-discovery (Phase 10)
 **DONE 2026-09-27, shipped to `main`.** New `argus/identity/discovery.py`, purely
@@ -549,3 +550,65 @@ role-only one -- the property this fix exists to guarantee for any future caller
 `tests/test_argus_identity_resolver.py`'s own pre-existing assertion (which had
 encoded the OLD, broken formula as its expected value) updated to match the fix,
 plus a new role-only-anchor case.
+
+### 4.10 Zero-site bootstrap E: the cutover (Phase 13, FINAL phase, 2026-09-27)
+**DONE, shipped to `main` -- the entire 13-phase autonomy-completion effort's own
+last phase.** `network.trust_anchors` is now AUTHORITATIVE, auto-populated by
+Phase 10's `discover()`, replacing hand-edited YAML as the primary source.
+New `argus/config/trust_anchors.py::bootstrap_trust_anchors(config)`, called once
+at `core/pipeline.py`'s construction time (replacing the old plain
+`load_trust_anchors_from_config()` call) -- a one-time ARP round-trip at boot, not
+a per-cycle cost.
+
+**THE SAFETY GUARD** (the one built-in mechanism the plan calls for -- a
+code-level guard doing the real safety work, not a human approval gate or a
+staged rollout): the discovered `gateway` anchor's IP must be VERIFIED EQUAL to
+the current/last-known-good gateway IP (`network.trust_anchors`'s own configured
+gateway entry if present, else the legacy `gateway_ip` key, else "no prior
+value -- first-ever adoption, nothing to conflict with") before being adopted.
+On a mismatch, this warns LOUDLY and refuses to auto-adopt the newly discovered
+gateway, keeping the last-known-good one instead -- turning "this network's
+gateway silently changed" into a loud logged event, not a silent device-identity
+reset for every device this system tracks (every device's own identity
+resolution can depend on the gateway anchor's stability, per resolver.py's own
+Phase 11 continuity fix). `this_host` has no such continuity risk and is always
+adopted fresh from discovery. Any hand-configured role `discover()` doesn't
+produce (e.g. a manually-added household anchor) is preserved untouched.
+`discover()` failing of any kind degrades to the hand-configured
+`trust_anchors` unchanged -- the exact same behavior as before this phase
+existed.
+
+`config.yaml`'s hand-maintained `gateway_ip` STOPS being the primary source for
+the live (`engine=argus`) path -- `core/identity.py`'s own hardcoded-gateway-IP
+special case is untouched and stays as inert fallback code (already dead
+whenever `LiveIdentityManager` is active, exactly as the plan specified), never
+deleted.
+
+**RouterAdapter wired into a real mitigation-capability check**
+(`extractors/fritzbox_capture.py`): reactive capture is AVM-pcap-format-specific
+(`capture.lua`), structurally impossible without a Fritz!Box regardless of
+`reactive_capture_enabled` -- `ReactiveCaptureDispatcher._check_and_consume_budget()`
+now checks `get_router_adapter(config).capture_supported` FIRST, before every
+other gate, and `try_dispatch()` surfaces this as its own distinct `[DEFERRED]`
+log reason/metric outcome (`unsupported_router`), not conflated with an ordinary
+rate-limit deferral.
+
+Test: extended `tests/test_argus_config_trust_anchors.py` (new section G, 7
+checks covering first-ever adoption, a matching gateway, THE SAFETY GUARD firing
+on a mismatch — both via `network.trust_anchors` and via the legacy `gateway_ip`
+key alone —, `this_host`'s no-continuity-risk always-fresh adoption, a preserved
+hand-configured extra role, and the `discover()`-raises fail-safe) and
+`tests/test_phase25_reactive_capture_triggers.py` (5 new checks for the
+capability gate, at both the pure-budget-logic and `try_dispatch()` levels). Also
+ran `tests/test_argus_identity_resolver.py`, `tests/test_argus_live_identity.py`,
+`tests/test_identity_reconcile_dhcp_ja4_signal.py`,
+`tests/test_identity_reconcile_pass.py`, `tests/test_phase23_fritzbox_capture.py`,
+`tests/test_disk_budget_governor.py`, `tests/test_real_world_alert_regression.py`
+-- all green, no regression. A real Python import of `core.pipeline` (not just a
+syntax check) confirmed no circular-import issue from the new
+`trust_anchors.py -> discovery.py` dependency.
+
+**This closes the full 13-phase 16-parameter autonomy-completion effort.** See
+`Documentation/CHANGELOG.md` for the per-phase release history (v16.7.0 through
+this phase's own tag) and this file's section 1 table for final per-parameter
+status.
