@@ -24,7 +24,9 @@ audit table (capped at 5000 rows) survives each comparison. Found and fixed a
 real candidate-selection bug in the same pass, via this phase's own test
 coverage: the original scope-preference logic (device-scoped candidate beats
 category-scoped beats global) could pick a broader-scoped candidate over a
-more specific one depending on row order, not true priority.
+more specific one depending on row order, not true priority. Deployed and
+verified live on `.94` same day (clean boot, zero restarts, `shadow_decisions`
+table confirmed present).
 
 ## [v16.12.0] - 2026-09-27
 
