@@ -21,7 +21,7 @@ reusing the exact function the live pipeline uses to load it at startup, not
 a second, separately-maintained validator -- so a malformed entry now shows
 up on the console instead of requiring a log grep to notice. Both are
 read-only through the console (each is only ever read once at startup),
-consistent with how this API already treats every other startup-only key.
+consistent with how this API already treats every other startup-only key. Deployed and verified live on `.94` same day (clean boot, zero restarts, both new rows confirmed present via a real curl against the live console API).
 
 ## [v16.14.0] - 2026-09-27
 
