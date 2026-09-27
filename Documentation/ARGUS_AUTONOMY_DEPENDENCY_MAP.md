@@ -69,6 +69,7 @@ subsets gate each phase instead.)
 - CL-AFPE: `test_argus_cl_afpe.py`, `test_argus_cl_afpe_composite_trust.py`, `test_argus_cl_afpe_flip_monitor.py`, `test_argus_cl_afpe_ml_scoring.py`, `test_argus_live_cl_afpe_shadow.py`
 - Identity: `test_argus_identity_resolver.py`, `test_argus_live_identity.py`, `test_identity_reconcile_dhcp_ja4_signal.py`, `test_identity_reconcile_pass.py`, `test_phase39_retroactive_identity_merge.py`, `test_phase64_device_identity_guard.py`
 - Health/resource: `test_health_manager_state_machine.py`, `test_resource_pressure_modes.py`, `test_health_manager_healing_actions.py`, `test_health_manager_memory_diagnostics.py`
+- Router/mitigation: `test_mitigation_router_adapter.py`, `test_mitigation_api.py`, `test_ips_operator_actions.py`, `test_phase55_router_reconcile_timeout.py`
 - Capture/disk: `test_phase23_fritzbox_capture.py`, `test_disk_budget_governor.py`
 - Config/trust anchors: `test_argus_config_trust_anchors.py`
 - Regression gate (run before/after any evidence-scoring or decision-path change): `test_real_world_alert_regression.py`
@@ -478,7 +479,53 @@ a fabricated anchor), an empty interface table, and both drift-logging
 branches.
 
 ## 4.8 Zero-site bootstrap: `RouterAdapter` (Phase 12)
-_Pending._
+**DONE 2026-09-27, shipped to `main`.** New `mitigation/router_adapter.py`,
+implementing the shape `Documentation/SHIPPABILITY_AND_SCALE_PLAN.md`'s SS1
+already proposed: `RouterAdapter` interface (`isolate`/`unisolate`/`get_hosts`/
+`get_isolation_status`/`health_check`/`capture_supported`), `FritzBoxAdapter`
+(thin wrapper, unchanged TR-064/FritzHosts logic) and `NoRouterAdapter` (the
+safe default: Pi-hole DNS sinkholing + the Layer-2 tarpit stay fully active,
+only hardware-level isolation and reactive AVM-format capture are
+unavailable). Selected via a new `router_type` config key (`"fritzbox"`
+default, `"none"` for a network with no supported router), resolved FRESH on
+every request/dispatch (no caching), so changing it takes effect immediately,
+no restart needed.
+
+**Real discovery during investigation, not assumed**: `mitigation/ips.py` needed
+ZERO changes for this phase. Confirmed via direct read that it already talks to
+router isolation over a generic local HTTP webhook
+(`router_webhook_url`/`router_hosts_url`, default `http://127.0.0.1:8010/...`),
+never importing `fritzbox_api.py` or `FritzConnection` directly -- the
+abstraction boundary this phase formalizes already existed at that HTTP layer.
+The real Fritz!Box-specific logic lived entirely in
+`middleware/routers/fritzbox_api.py`'s THREE route handlers (`/isolate`,
+`/hosts`, `/api/ipc/router_isolation_status`), which now delegate to
+`get_router_adapter(CONFIG)` instead of hardcoding TR-064/FritzHosts calls
+inline -- moved behind the adapter unchanged, not reimplemented.
+`main.py`'s startup diagnostic summary also now calls the adapter's
+`health_check()` instead of hardcoding a `FritzConnection` probe, so
+`router_type=none` correctly reports "no router configured" instead of a
+misleading FritzBox connection failure.
+
+`ips.py`'s own Layer-2 IPv6 NDP-tarpit mitigation
+(`mitigate()`/`get_containment_status()`/`operator_isolate_router()`) is
+completely untouched -- already vendor-agnostic, exactly the case
+`SHIPPABILITY_AND_SCALE_PLAN.md`'s SS1 calls out as not needing this fix.
+`_router_isolated_devices`/`_tarpit_active_targets` dict shapes unchanged.
+
+Test: new `tests/test_mitigation_router_adapter.py` (mocked
+`fritzbox_api`/`fritzconnection`, no real network I/O) covering factory
+selection (including the fail-safe-to-`NoRouterAdapter` case for an
+unrecognized `router_type`), every `NoRouterAdapter` method's safe-degrade
+behavior, and `FritzBoxAdapter`'s real call-through/parsing/error-propagation
+behavior. Also ran (and updated where the refactor moved a source-guarded
+string) `tests/test_mitigation_api.py`, `tests/test_ips_operator_actions.py`,
+`tests/test_phase55_router_reconcile_timeout.py` -- all green.
+`tests/test_phase62_tarpit_release_on_benign.py` fails on `main` already, for
+a reason unrelated to this phase (reads `src/scripts/ollama_soc.py`, retired
+in an earlier commit consolidating Layer-3 LLM review onto
+`live_llm_review.py` -- the test was never updated to match); flagged here,
+not fixed, since it's out of this phase's scope.
 
 ### 4.9 Landmine CLOSED (Phase 11, 2026-09-27)
 `argus/identity/resolver.py`'s pure `_anchor_device_id()` FIXED: an anchor with a

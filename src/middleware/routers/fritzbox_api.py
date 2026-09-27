@@ -10,6 +10,7 @@ from fritzconnection.core.exceptions import FritzConnectionException, FritzActio
 from middleware.auth import verify_token, CONFIG, LOGGER
 from core.state_guard import StateManager
 from mitigation.ips import IPSMitigator
+from mitigation.router_adapter import get_router_adapter
 from pathlib import Path
 
 router = APIRouter()
@@ -99,6 +100,19 @@ def execute_fritzbox_isolation(action: str, mac_address: str, ip_address: str, r
     except Exception as e:
         LOGGER.error("❌ [FATAL ERROR] Unexpected failure during router action: %s", e)
 
+def _dispatch_router_action(action: str, mac_address: str, ip_address: str, reason: str):
+    """Phase 12 (RouterAdapter abstraction): resolves the configured adapter
+    (router_type, default 'fritzbox') fresh on every call rather than caching it
+    -- a live config change to router_type takes effect on the NEXT isolation
+    request, no restart needed, matching this module's own no-connection-caching-
+    across-config-changes convention elsewhere."""
+    adapter = get_router_adapter(CONFIG)
+    if action == "isolate":
+        adapter.isolate(mac=mac_address, ip=ip_address, reason=reason)
+    else:
+        adapter.unisolate(mac=mac_address, ip=ip_address, reason=reason)
+
+
 @router.post("/isolate", status_code=202)
 async def isolate_device(
     payload: IsolationRequest, 
@@ -112,7 +126,7 @@ async def isolate_device(
     LOGGER.info("Received router webhook command '%s' for %s (%s)", action_lower, payload.mac, payload.ip)
     
     background_tasks.add_task(
-        execute_fritzbox_isolation, 
+        _dispatch_router_action,
         action=action_lower,
         mac_address=payload.mac, 
         ip_address=payload.ip, 
@@ -123,33 +137,12 @@ async def isolate_device(
 
 @router.get("/hosts", response_model=List[Dict[str, Any]])
 def get_dhcp_hosts(token: str = Depends(verify_token)):
-    fritz_ip = CONFIG.get("fritz_ip", "192.168.1.1")
-    fritz_user = CONFIG.get("fritz_user", "admin")
-    fritz_pass = CONFIG.get("fritz_password", "")
-
-    if not fritz_pass:
-        raise HTTPException(status_code=500, detail="FritzBox credentials not configured.")
-
-    timeout_seconds = float(CONFIG.get("router_hosts_timeout_seconds", 5.0))
-    if timeout_seconds <= 0:
-        timeout_seconds = 5.0
-
+    adapter = get_router_adapter(CONFIG)
     try:
-        fh = _get_fritz_hosts(fritz_ip, fritz_user, fritz_pass, timeout_seconds)
-        hosts_info = fh.get_hosts_info()
-        parsed_hosts = []
-        for host in hosts_info:
-            if host.get("ip"):
-                parsed_hosts.append({
-                    "ip": host.get("ip"),
-                    "mac": host.get("mac", "unknown").lower(),
-                    "name": host.get("name", "unknown")
-                })
-        return parsed_hosts
+        return adapter.get_hosts()
     except Exception as errors:
-        LOGGER.error("Failed to fetch hosts from FritzBox: %s", errors)
-        _invalidate_fritz_hosts_cache()
-        raise HTTPException(status_code=503, detail="FritzBox connection failed.")
+        LOGGER.error("Failed to fetch hosts from the configured router adapter: %s", errors)
+        raise HTTPException(status_code=503, detail="Router connection failed.")
 
 @router.get("/api/ipc/router_isolation_status")
 def router_isolation_status(ip: str, token: str = Depends(verify_token)):
@@ -160,34 +153,24 @@ def router_isolation_status(ip: str, token: str = Depends(verify_token)):
     (and therefore Grafana's containment panel) stuck reporting "still isolated"
     forever. Mirrors execute_fritzbox_isolation()'s own connection/action pattern,
     just a Get instead of a Set on the same X_AVM-DE_HostFilter:1 TR-064 service."""
-    fritz_ip = CONFIG.get("fritz_ip", "192.168.1.1")
-    fritz_user = CONFIG.get("fritz_user", "admin")
-    fritz_pass = CONFIG.get("fritz_password", "")
-    if not fritz_pass:
-        raise HTTPException(status_code=500, detail="FritzBox credentials not configured.")
-
-    # BUGFIX (live audit, 2026-09-04): was router_webhook_timeout_seconds (5.0s, tuned
-    # for the isolate/unisolate SET action) -- confirmed live this Fritzbox's
-    # GetWANAccessByIP genuinely takes ~10s round-trip, close enough to 5s that the
-    # CALLER's own HTTP client-side timeout to THIS endpoint (ips.py's
-    # reconcile_router_isolation_state(), also fixed the same day) was timing out even
-    # on requests that would have eventually succeeded here. Own, more generous budget
-    # for this read-only query, independent of the SET actions' timeout.
-    timeout_seconds = float(CONFIG.get("router_status_query_timeout_seconds", 20.0))
-    if timeout_seconds <= 0:
-        timeout_seconds = 20.0
-
+    # Phase 12 (RouterAdapter abstraction): delegates to the configured adapter's
+    # get_isolation_status() -- NoRouterAdapter returns False unconditionally
+    # (nothing was ever isolated without a router), so ips.py's reconcile worker
+    # correctly sees "not isolated" rather than erroring on a network with no
+    # router configured.
+    adapter = get_router_adapter(CONFIG)
     try:
-        fc = FritzConnection(address=fritz_ip, user=fritz_user, password=fritz_pass, timeout=timeout_seconds)
-        result = fc.call_action("X_AVM-DE_HostFilter:1", "GetWANAccessByIP", NewIPv4Address=ip)
-        is_disallowed = bool(result.get("NewDisallow", 0))
+        is_disallowed = adapter.get_isolation_status(ip)
         return {"ip": ip, "isolated": is_disallowed}
     except FritzActionError as e:
         LOGGER.error("❌ [API ERROR] Fritz!Box refused TR-064 status query for %s: %s", ip, e)
         raise HTTPException(status_code=502, detail=f"FritzBox refused status query: {e}")
     except FritzConnectionException as e:
-        LOGGER.error("❌ [NETWORK ERROR] Could not reach Fritz!Box at %s: %s", fritz_ip, e)
+        LOGGER.error("❌ [NETWORK ERROR] Could not reach Fritz!Box for status query on %s: %s", ip, e)
         raise HTTPException(status_code=503, detail="FritzBox connection failed.")
+    except Exception as e:
+        LOGGER.error("❌ [ADAPTER ERROR] Router adapter status query failed for %s: %s", ip, e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 class IPCReleaseRequest(BaseModel):
     target: str = Field(..., description="Target IP, MAC, hostname, or 'all'")

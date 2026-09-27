@@ -9,6 +9,26 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.18.0] - 2026-09-27
+
+Phase 12 of the zero-site network bootstrap: hardware-level router isolation
+is now a swappable adapter instead of hardcoded to one specific router brand.
+A network without a supported router can now run this system fully -- DNS
+sinkholing and the Layer-2 containment tarpit stay completely unaffected
+either way; only hardware-level WAN isolation and reactive packet capture
+require the router integration.
+
+Investigation found the mitigation engine itself needed no changes at all: it
+already talked to router isolation through a generic local webhook, never
+importing the router-specific code directly. The actual router-specific logic
+lived entirely behind that webhook, which now selects between the real
+integration and a safe do-nothing default via one new config key, resolved
+fresh on every request so switching it takes effect immediately. The
+supported router's own existing logic is completely unchanged, just moved
+behind the new interface rather than reimplemented. The startup health
+summary also now reports an honest "no router configured" status instead of
+a misleading connection failure when running without one.
+
 ## [v16.17.0] - 2026-09-27
 
 Phase 11 of the zero-site network bootstrap: closed a real identity-continuity

@@ -200,6 +200,8 @@ CONFIG_SCHEMA = [
     {"s": "pihole_integration", "k": "pihole_api_timeout_seconds", "t": "number", "def": 5.0,
      "desc": "HTTP timeout for Pi-hole API calls."},
 
+    {"s": "fritzbox_router", "k": "router_type", "t": "enum", "options": ["fritzbox", "none"], "def": "fritzbox",
+     "desc": "Phase 12 (RouterAdapter abstraction): which router integration handles hardware-level isolation/host-list queries. 'fritzbox' (default) uses the real TR-064 integration below; 'none' disables hardware isolation entirely -- Pi-hole DNS sinkholing and the Layer-2 tarpit stay fully active regardless. Resolved fresh on every isolation request, no restart needed to change it."},
     {"s": "fritzbox_router", "k": "fritz_ip", "t": "string", "def": "192.168.1.1",
      "desc": "Fritz!Box LAN IP -- target for TR-064 isolation calls."},
     {"s": "fritzbox_router", "k": "fritz_user", "t": "string", "def": "admin",

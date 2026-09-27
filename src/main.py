@@ -455,15 +455,16 @@ def main():
                     router_line = "⚠️ Disabled"
                 else:
                     try:
-                        fritz_ip = CONFIG.get("fritz_ip", "")
-                        fritz_pass = CONFIG.get("fritz_password", "")
-                        if not fritz_pass:
-                            router_line = "❌ Failed (fritz_password not configured)"
-                        else:
-                            from fritzconnection import FritzConnection
-                            FritzConnection(address=fritz_ip, user=CONFIG.get("fritz_user", "admin"),
-                                             password=fritz_pass, timeout=3.0)
-                            router_line = f"✅ Online (authenticated to {fritz_ip})"
+                        # Phase 12 (RouterAdapter abstraction): delegates to the
+                        # configured adapter's own health_check() instead of
+                        # hardcoding a FritzConnection probe -- on router_type=none,
+                        # this now reports the real (accurate) "no router adapter
+                        # configured" status instead of a misleading FritzBox
+                        # connection failure for a network that never had one.
+                        from mitigation.router_adapter import get_router_adapter
+                        adapter = get_router_adapter(CONFIG)
+                        ok, detail = adapter.health_check()
+                        router_line = f"✅ Online ({detail})" if ok else f"❌ Failed ({detail})"
                     except Exception as exc:
                         router_line = f"❌ Failed ({exc})"
 

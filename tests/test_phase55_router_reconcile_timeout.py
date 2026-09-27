@@ -213,12 +213,21 @@ with tempfile.TemporaryDirectory() as tmpdir:
 # Section F: source-level checks
 # ═══════════════════════════════════════════════════════════════════════════════════
 _fritzbox_api_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "middleware" / "routers" / "fritzbox_api.py").read_text(encoding="utf-8")
-check("fritzbox_api.py's router_isolation_status() endpoint also uses the new "
-      "router_status_query_timeout_seconds config key for its own FritzConnection call",
-      'CONFIG.get("router_status_query_timeout_seconds", 20.0)' in _fritzbox_api_src)
 check("REGRESSION GUARD: execute_fritzbox_isolation() (the SET action) still uses the "
       "original router_webhook_timeout_seconds key, untouched by this fix",
       'CONFIG.get("router_webhook_timeout_seconds", 5.0)' in _fritzbox_api_src)
+
+# PHASE 12 UPDATE (RouterAdapter abstraction, autonomy-completion effort): the real
+# FritzConnection/GetWANAccessByIP call this section originally guarded moved from
+# fritzbox_api.py's router_isolation_status() endpoint into
+# mitigation/router_adapter.py's FritzBoxAdapter.get_isolation_status() (the endpoint
+# now delegates to the configured adapter) -- this assertion follows the logic to its
+# new real location rather than asserting a string that's no longer where the real
+# work happens.
+_router_adapter_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "mitigation" / "router_adapter.py").read_text(encoding="utf-8")
+check("mitigation/router_adapter.py's FritzBoxAdapter.get_isolation_status() uses the "
+      "new router_status_query_timeout_seconds config key for its own FritzConnection call",
+      'self.config.get("router_status_query_timeout_seconds", 20.0)' in _router_adapter_src)
 
 _ips_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "mitigation" / "ips.py").read_text(encoding="utf-8")
 check("REGRESSION GUARD: _isolate_device_router()/_unisolate_device_router() (the SET "
