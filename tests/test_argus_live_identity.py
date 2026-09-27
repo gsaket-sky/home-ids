@@ -155,6 +155,32 @@ check("C: this_host's anchor id matches v-current's own stable_device_id(ip) for
       host_id == v13_stable_device_id(THIS_HOST_IP))
 
 
+# --- C2 (Phase 11, 2026-09-27): parity between LiveIdentityManager's own inline
+# workaround and resolver.py's now-FIXED pure _anchor_device_id() ---
+#
+# Before this phase, resolver.py's _anchor_device_id() always used the role-based
+# hash, a DIFFERENT value than what LiveIdentityManager actually returns for an
+# anchor with a configured ip -- LiveIdentityManager never called the broken pure
+# function for these branches at all (see its own resolve_device_id() docstring),
+# so nothing in production was affected, but any FUTURE direct caller of the pure
+# function would have silently diverged from what the live manager actually does.
+# This asserts the fixed pure function now agrees byte-for-byte with the live
+# manager's own real behavior, for both an ip-configured anchor and a role-only one.
+from argus.identity.resolver import _anchor_device_id  # noqa: E402
+
+check("C2: resolver.py's fixed pure _anchor_device_id() matches LiveIdentityManager's "
+      "own real gateway-anchor id exactly -- the parity this fix is FOR",
+      _anchor_device_id(two_anchors["gateway"]) == gw_id)
+check("C2: same parity for the this_host anchor",
+      _anchor_device_id(two_anchors["this_host"]) == host_id)
+
+role_only_anchor_c2 = TrustAnchor(role="printer", ip=None, mac="cc:dd:ee:00:00:09")
+check("C2: a role-only anchor (no ip) still uses the role-based hash in the pure "
+      "function -- unaffected by this fix, since there's no ip to be continuity-"
+      "safe WITH in that case",
+      _anchor_device_id(role_only_anchor_c2) == v13_stable_device_id("anchor:printer"))
+
+
 # --- D. Persistence: a learned anchor MAC survives a fresh instance (restart) ---
 
 store_d = _fresh_graph_store("d")

@@ -103,6 +103,32 @@ def _is_trackable_ip(ip: str) -> bool:
 
 
 def _anchor_device_id(anchor: TrustAnchor) -> str:
+    """Continuity-safe by construction (2026-09-27, Phase 11 of the autonomy-
+    completion effort). An anchor WITH a configured ip resolves via
+    stable_device_id(anchor.ip) directly -- the same formula pre-v13 code always
+    used for its one anchor (gateway_ip) -- so a newly-configured trust anchor
+    resolves to the SAME device_id its history already lives under, not a fresh
+    role-based hash that would silently reset it. A role-only anchor (no ip
+    configured, a real but rare case) has no continuity to preserve, so it falls
+    back to the role-based hash -- there's nothing to be compatible WITH in that
+    case.
+
+    BUGFIX: this function previously used the role-based hash unconditionally,
+    even when anchor.ip was set. argus/identity/live_manager.py's
+    LiveIdentityManager already found this breaks gateway continuity in
+    production and worked around it at its own call site (never delegating
+    trust_anchors into resolve_device_id() below at all, and inlining
+    v13_stable_device_id(anchor.ip) itself) -- but this pure function itself
+    was still broken for any OTHER caller. Confirmed via grep at fix time:
+    LiveIdentityManager is resolver.py's only real caller, and its own
+    resolve_device_id() never passes trust_anchors through to the delegate
+    call below, so branches 1/2 of resolve_device_id() (which are the only
+    callers of this function) are dead code in production today -- this fix
+    has zero live behavior change, it closes the landmine for any future
+    caller (e.g. Phase 10's discovery diff logic, if it ever calls this
+    directly) before one exists."""
+    if anchor.ip:
+        return stable_device_id(anchor.ip)
     return stable_device_id(f"anchor:{anchor.role}")
 
 

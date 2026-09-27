@@ -9,6 +9,20 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.17.0] - 2026-09-27
+
+Phase 11 of the zero-site network bootstrap: closed a real identity-continuity
+landmine before anything could hit it. A helper function used to reset a
+trust-anchor device's identity to a brand-new one instead of preserving its
+existing history the moment it was called directly -- the live identity
+manager had already discovered this independently and worked around it at its
+own call site, but the shared helper itself stayed broken for any other
+caller. Confirmed via direct code inspection that nothing in production
+actually calls the broken path today, so this closes the gap proactively
+rather than reactively. Fixed at the source and locked in with a new parity
+test proving the fixed helper and the live manager's own real behavior now
+agree exactly.
+
 ## [v16.16.0] - 2026-09-27
 
 Phase 10 of the zero-site network bootstrap: real network auto-discovery.

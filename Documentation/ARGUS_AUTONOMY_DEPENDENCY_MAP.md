@@ -480,15 +480,25 @@ branches.
 ## 4.8 Zero-site bootstrap: `RouterAdapter` (Phase 12)
 _Pending._
 
-### 4.9 Known landmine, not yet fixed (tracked here until Phase 11 closes it)
-`argus/identity/resolver.py`'s pure `_anchor_device_id()` uses a role-based hash
-(`stable_device_id(f"anchor:{role}")`), different from the literal-IP hash
-`live_manager.py`'s `LiveIdentityManager` actually uses in production
-(`v13_stable_device_id(anchor.ip)`). `live_manager.py` already found and worked around
-this discrepancy for its own call path; the pure function itself is still broken for
-any other caller. Nothing in production calls the broken path today (confirmed via
-grep at plan time). Phase 7's shadow sandbox is now built (§4.5) and confirmed NOT to
-call `resolver.resolve_device_id()` directly — it reuses whatever already-canonical
-`device_id` `core/pipeline.py` passes in. Phase 10's discovery diff logic remains a
-candidate that could accidentally call the broken path directly — Phase 11 fixes the
-source function before that one exists.
+### 4.9 Landmine CLOSED (Phase 11, 2026-09-27)
+`argus/identity/resolver.py`'s pure `_anchor_device_id()` FIXED: an anchor with a
+configured `ip` now resolves via `stable_device_id(anchor.ip)` directly (matching
+pre-v13 code's own historical formula for its one anchor, `gateway_ip`), falling
+back to the role-based hash (`stable_device_id(f"anchor:{role}")`) only for a
+role-only anchor with no `ip` configured. Confirmed via grep at fix time:
+`live_manager.py`'s `LiveIdentityManager` is `resolver.py`'s only real caller, and
+its own `resolve_device_id()` never delegates `trust_anchors` into the pure
+`resolve_device_id()` call at all (branches 1/2 there are dead code in production
+today) -- so this fix has ZERO live behavior change, it closes the landmine before
+Phase 10's discovery diff logic (or any other future caller) could hit it directly.
+`live_manager.py`'s own inline workaround (`v13_stable_device_id(anchor.ip) if
+anchor.ip else _anchor_device_id(role)`) is left in place, not refactored to
+delegate to the now-fixed pure function -- a working, already-tested live code
+path, deliberately not touched for a purely cosmetic DRY cleanup on a sensitive
+identity-resolution path. New parity test (`tests/test_argus_live_identity.py`,
+section C2) asserts the fixed pure function and the live manager's own real
+behavior now agree byte-for-byte, for both an ip-configured anchor and a
+role-only one -- the property this fix exists to guarantee for any future caller.
+`tests/test_argus_identity_resolver.py`'s own pre-existing assertion (which had
+encoded the OLD, broken formula as its expected value) updated to match the fix,
+plus a new role-only-anchor case.

@@ -27,7 +27,7 @@ def check(name, cond, detail=""):
 
 from argus.identity.resolver import (  # noqa: E402
     resolve_device_id, stable_device_id, is_generic_hostname, TrustAnchor,
-    is_locally_administered_mac,
+    is_locally_administered_mac, _anchor_device_id,
 )
 
 # --- is_locally_administered_mac (Phase 3): real MAC-randomization detection ---
@@ -67,10 +67,24 @@ anchors = {
 }
 
 # --- 1. exact trust-anchor IP match ---
+# PHASE 11 FIX (2026-09-27): an anchor WITH a configured ip resolves via
+# stable_device_id(anchor.ip) directly, not a role-based hash -- continuity
+# with pre-v13 code's one real anchor (gateway_ip), which always used this
+# same ip-based formula. This assertion used to expect the OLD, broken
+# role-based formula (stable_device_id("anchor:gateway")); updated to match
+# the fix, not left asserting the bug.
 gw_id = resolve_device_id("192.168.1.1", trust_anchors=anchors)
-check("exact trust-anchor IP match resolves to a fixed anchor id", gw_id == stable_device_id("anchor:gateway"))
+check("exact trust-anchor IP match resolves via stable_device_id(anchor.ip) -- "
+      "continuity-safe, not a role-based hash", gw_id == stable_device_id("192.168.1.1"))
 nas_id = resolve_device_id("192.168.1.3", trust_anchors=anchors)
 check("a different anchor's exact IP resolves to ITS OWN distinct fixed id", nas_id != gw_id)
+
+# --- 1b. a role-only anchor (no ip configured) falls back to the role-based hash ---
+role_only_anchor = TrustAnchor(role="printer", ip=None, mac="cc:dd:ee:00:00:09")
+role_only_id = _anchor_device_id(role_only_anchor)
+check("a role-only anchor (no ip) still falls back to the role-based hash -- "
+      "there's no ip-based continuity to preserve in this case",
+      role_only_id == stable_device_id("anchor:printer"))
 
 # --- 2. learned anchor MAC on a different IP (multi-homed anchor) ---
 gw_other_iface = resolve_device_id(
