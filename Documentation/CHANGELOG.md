@@ -9,6 +9,20 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.8.0] - 2026-09-27
+
+Phase 2 of the full 16-parameter autonomous-tuning effort: the reactive-capture
+scratch directory now has a real disk-space budget. It previously had a rate/byte-
+per-hour limiter but no disk-space awareness at all, and the separate whole-stack
+20GB disk governor explicitly treats this directory as monitor-only. Added a
+pre-dispatch check with a hard 5GB ceiling, pruning oldest entries first and
+rejecting new captures if pruning can't recover enough space (new
+`home_ids_reactive_capture_degraded` metric). Found and fixed a real regression
+during the same phase, not by inspection: the naive version turned a previously
+pure in-memory check into synchronous disk I/O on every trigger attempt, breaking
+a pre-existing concurrency test's timing — fixed by throttling the actual
+filesystem scan to once per 60s. Deployed and verified live on `.94` same day.
+
 ## [v16.7.0] - 2026-09-27
 
 Phase 1 of the full 16-parameter autonomous-tuning effort: the four Tier-1 autotune
