@@ -27,7 +27,7 @@ fresh on every request so switching it takes effect immediately. The
 supported router's own existing logic is completely unchanged, just moved
 behind the new interface rather than reimplemented. The startup health
 summary also now reports an honest "no router configured" status instead of
-a misleading connection failure when running without one.
+a misleading connection failure when running without one. Deployed and verified live on `.94` -- clean boot, zero restarts, the real /hosts endpoint confirmed still returning genuine Fritz!Box host data end-to-end through the new adapter path, and the config API confirmed showing `router_type=fritzbox` as the live default.
 
 ## [v16.17.0] - 2026-09-27
 
