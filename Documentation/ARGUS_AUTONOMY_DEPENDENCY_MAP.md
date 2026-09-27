@@ -30,12 +30,14 @@ Status as of 2026-09-27 (Phase 0 baseline), live counts pulled directly from `.9
 | 8 | `peer_deviation_min_absolute_count` | **YES (Phase 3)** | same call site as row 7 | same generator as row 7 | wired 2026-09-27 |
 | 9 | `combined_uncertain_threshold` | **YES (Phase 3)** | `intelligence/fp_engine.py`'s new `get_device_uncertain_threshold()`, called from `evaluate()` | `train_fp_classifier.py`'s `calibrate_uncertain_threshold()` (loosen-only, mirrors `calibrate_suppress_threshold()`) | wired 2026-09-27 |
 | 10 | `familiarity_trust_bar` | **YES (Phase 3)** | threaded plain-float through `decision/engine.py`→`hypotheses/engine.py`'s `evaluate_all()` (instance-attribute override on `DeviceProfileBenignHypothesis`), resolved in `live_engine.py`; `llm_review/validator.py`'s `DeterministicValidator.validate()` also takes it explicitly now (was reading the class constant directly, a real drift risk `validator.py`'s own docstring warns about) | `backtest_job.py`'s `_propose_familiarity_trust_bar_changes()` (loosen-only, real evidence) | wired 2026-09-27 |
-| 11 | `trust_cache_ttl_seconds` | no | `cl_afpe/engine.py:148,306` (hardcoded `14*24*3600`) | none | n/a (unwired) |
-| 12 | `reputation_propagation_ttl_seconds` | no | `ops/live_engine.py:145,657` (hardcoded `86400`) | none | n/a (unwired) |
-| 13 | `pool_gaussian_kappa` | no | `ops/population_prior_builder.py:107,204-227` (hardcoded `5.0`) | none | n/a (unwired) |
-| 14 | `pool_gaussian_alpha` | no | `ops/population_prior_builder.py:108,204-227` (hardcoded `10.0`) | none | n/a (unwired) |
-| 15 | `pool_beta_total` | no | `ops/population_prior_builder.py:109,204-227` (hardcoded `10.0`) | none | n/a (unwired) |
-| 16 | `pool_poisson_rate` | no | `ops/population_prior_builder.py:110,204-227` (hardcoded `5.0`) | none | n/a (unwired) |
+| 11 | `trust_cache_ttl_seconds` | **YES (Phase 4)** | `cl_afpe/engine.py`'s `_active_trust_edges()`, global-scope only | `backtest_job.py`'s `_propose_trust_cache_ttl_changes()` (tighten-only, single-instance "trust blindness") | wired 2026-09-27 |
+| 12 | `reputation_propagation_ttl_seconds` | **YES (Phase 4)** | `ops/live_engine.py`'s `_inject_graph_derived_evidence()`, device-scoped | `backtest_job.py`'s `_propose_reputation_propagation_ttl_changes()` (loosen-only, sample-floor-gated — mirror image of row 11, see its docstring for a real sign-error this file's own tests caught and fixed) | wired 2026-09-27 |
+| 13 | `pool_gaussian_kappa` | **YES (Phase 4)** | `ops/population_prior_builder.py`'s `_pool_gaussian()`, category-scoped | `population_prior_builder.py`'s `_propose_pool_pseudocount_change()` (between/within-device dispersion ratio heuristic — a real, first-pass proxy for "population-prior error", not the fully rigorous posterior-predictive checking the plan's own evidence description implies; see that function's own HONEST SCOPE NOTE) | wired 2026-09-27 |
+| 14 | `pool_gaussian_alpha` | **YES (Phase 4)** | same call site as row 13 | same generator as row 13 | wired 2026-09-27 |
+| 15 | `pool_beta_total` | **YES (Phase 4)** | `ops/population_prior_builder.py`'s `_pool_beta()`, category-scoped | same generator family (dispersion ratio), `_beta_dispersion()` | wired 2026-09-27 |
+| 16 | `pool_poisson_rate` | **YES (Phase 4)** | `ops/population_prior_builder.py`'s `_pool_poisson()`, category-scoped | same generator family, `_poisson_dispersion()` | wired 2026-09-27 |
+
+**All 16 parameters are now wired end to end (allowlisted, consumed live, real forward generator) as of Phase 4, 2026-09-27.** Whether any given one has ever actually *fired* on real `.94` data is a separate question — check `threshold_history` directly, don't assume from this table.
 
 This table is the single source of truth for "is parameter X actually tuning itself
 right now" — update every row whose status changes at the end of the phase that
@@ -73,6 +75,35 @@ subsets gate each phase instead.)
 ## 4. Arg-provenance sections (added as each subsystem is built)
 
 ### 4.1 Autotune native generator registry (Phases 1, 3, 4)
+Phase 4 (2026-09-27) completes all 16 parameters:
+- `trust_cache_ttl_seconds`/`reputation_propagation_ttl_seconds`: consumption in
+  `cl_afpe/engine.py`'s `_active_trust_edges()` (global-scope, via a new lazy
+  `_get_autotune_engine()` on `ClAfpeEngine`) and `live_engine.py`'s
+  `_inject_graph_derived_evidence()` (device-scoped). Generators in
+  `backtest_job.py` are mirror-image asymmetric (one tighten-only/single-
+  instance, one loosen-only/sample-floor-gated) — a real sign error in the
+  loosen one (computed the tighten formula, which for a `direction=-1`
+  parameter moved the value the WRONG way) was caught by this phase's own test
+  suite before it ever shipped, not by inspection. Worth re-reading if adding
+  any new `direction=-1` parameter: the generic `current - direction*step`
+  tighten / `current + direction*step` loosen formulas only give the right
+  arithmetic sign when the evidence-to-action mapping (does THIS evidence mean
+  tighten or loosen) is derived correctly first — get that backwards and the
+  formula still "works", just moves the parameter the wrong way.
+- `pool_gaussian_kappa`/`pool_gaussian_alpha`/`pool_beta_total`/`pool_poisson_rate`:
+  consumption in `population_prior_builder.py`'s `_pool_gaussian()`/`_pool_beta()`/
+  `_pool_poisson()`, category-scoped (population priors are inherently per-
+  device_type, no per-device version makes sense). Generator
+  (`_propose_pool_pseudocount_change()` + per-model-kind `_gaussian_dispersion()`/
+  `_beta_dispersion()`/`_poisson_dispersion()` helpers, all in
+  `population_prior_builder.py`) is a first-pass between/within-device dispersion
+  ratio heuristic, explicitly NOT the fully rigorous posterior-predictive
+  checking the plan doc's own "population-prior error" evidence description
+  implies — that would need real, separate statistical infrastructure this phase
+  didn't build from scratch; documented as an honest scope limit in the code
+  itself, matching this repo's own established pattern for similar gaps
+  (`bocpd_hazard_rate`'s retroactive-rollback scope limit, Phase 1).
+
 Phase 3 (2026-09-27) wired the remaining Tier-2 parameters natively in
 `src/argus/ops/backtest_job.py` (generators) plus consumption call sites across
 `src/argus/ops/live_engine.py`, `src/intelligence/fp_engine.py`,

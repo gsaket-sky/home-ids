@@ -123,6 +123,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from argus.autotune.engine import AutotuneEngine
 from argus.graph.store import GraphStore
 from argus.evidence.model import NO_DESTINATION
 from argus.cl_afpe.ml_scoring import MLScorer, NEUTRAL_LGBM_SCORE, combine_scores, stage3_rule_fallback
@@ -249,6 +250,18 @@ class ClAfpeEngine:
         # rule fallback, exactly matching v1's own "model not loaded yet" behavior,
         # never an error).
         self.ml_scorer = ml_scorer
+        # 2026-09-27 (Phase 4 of the autonomy-completion effort): lazy, same
+        # construct-once-reuse pattern live_engine.py's own _get_autotune_engine()
+        # already uses -- trust_cache_ttl_seconds is global-scope-only here (the
+        # fallback used when an edge has no per-entry ttl_seconds of its own; the
+        # edges themselves carry per-immunization TTLs already, see immunize()
+        # above), so no device_id threading is needed at this call site.
+        self._autotune_engine: Optional[AutotuneEngine] = None
+
+    def _get_autotune_engine(self) -> AutotuneEngine:
+        if self._autotune_engine is None:
+            self._autotune_engine = AutotuneEngine(self.store)
+        return self._autotune_engine
 
     # --- trust cache / immunization (graph 'trusts' edges) ----------------------
 
@@ -302,8 +315,10 @@ class ClAfpeEngine:
         now = now if now is not None else time.time()
         edges = self.store.get_edges(relation="trusts", dst_id=destination_id) if destination_id else self.store.get_edges(relation="trusts")
         active = []
+        default_ttl = self._get_autotune_engine().get_active_value(
+            "trust_cache_ttl_seconds", default=TRUST_CACHE_TTL_SECONDS)
         for e in edges:
-            ttl = e["metadata"].get("ttl_seconds") or TRUST_CACHE_TTL_SECONDS
+            ttl = e["metadata"].get("ttl_seconds") or default_ttl
             if (now - e["timestamp"]) < ttl:
                 active.append(e)
         return active

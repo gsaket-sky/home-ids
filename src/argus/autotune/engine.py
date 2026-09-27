@@ -73,6 +73,16 @@ TUNABLE_PARAMETERS: Dict[str, Dict[str, float]] = {
     "peer_deviation_min_absolute_count": {"min": 2.0, "max": 20.0, "max_step": 1.0},
     "combined_uncertain_threshold": {"min": 0.30, "max": 0.80, "max_step": 0.05},
     "familiarity_trust_bar": {"min": 0.30, "max": 0.90, "max_step": 0.05},
+    # 2026-09-27 (Phase 4 of the autonomy-completion effort, completes all 16
+    # parameters). Bounds/steps match the plan doc's own Tier-3 matrix exactly
+    # (TTLs in seconds, not days/hours -- this module's own scale for every other
+    # time-based bound elsewhere in the codebase).
+    "trust_cache_ttl_seconds": {"min": 86400.0, "max": 30 * 86400.0, "max_step": 86400.0},
+    "reputation_propagation_ttl_seconds": {"min": 3600.0, "max": 7 * 86400.0, "max_step": 3600.0},
+    "pool_gaussian_kappa": {"min": 1.0, "max": 20.0, "max_step": 1.0},
+    "pool_gaussian_alpha": {"min": 1.0, "max": 50.0, "max_step": 1.0},
+    "pool_beta_total": {"min": 1.0, "max": 50.0, "max_step": 1.0},
+    "pool_poisson_rate": {"min": 1.0, "max": 20.0, "max_step": 1.0},
 }
 
 # First-pass, not-yet-empirically-tuned constants (this codebase's own
@@ -98,6 +108,12 @@ _LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
     "peer_deviation_min_absolute_count": 1,  # higher floor -> harder to clear the "not just a trivial small-number swing" bar
     "combined_uncertain_threshold": -1,       # lower threshold -> more borderline alerts get the softer UNCERTAIN tag instead of full CONFIRMED_THREAT
     "familiarity_trust_bar": -1,              # higher bar -> harder for a device to be treated as "familiar", MORE suspicion generated (increasing is the MORE-sensitive direction here, unlike every other +1 parameter above)
+    "trust_cache_ttl_seconds": 1,              # longer TTL -> an immunized destination stays trusted/suppressed longer, less sensitive to it re-offending
+    "reputation_propagation_ttl_seconds": -1,  # longer TTL -> a cached suspicious-tier classification keeps propagating as corroborating evidence to OTHER devices longer, more sensitive (like familiarity_trust_bar, increasing is the MORE-sensitive direction)
+    "pool_gaussian_kappa": 1,                  # higher prior pseudo-count -> the population prior dominates a device's own observations more, damping real per-device anomalies, less sensitive
+    "pool_gaussian_alpha": 1,                  # same reasoning as pool_gaussian_kappa -- both are Normal-Gamma prior pseudo-counts
+    "pool_beta_total": 1,                      # same reasoning -- Beta prior's total pseudo-count
+    "pool_poisson_rate": 1,                    # same reasoning -- a stronger/higher assumed baseline rate makes a real elevated count look less anomalous, less sensitive
 }
 _MIN_PROMOTIONS_FOR_TREND = 3  # first-pass, not-yet-empirically-tuned (same honesty framing)
 _DEFAULT_DRIFT_LOOKBACK_SECONDS = 7 * 86400.0

@@ -653,8 +653,14 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
                 ))
 
             rep = store.get_destination_reputation(dest)
+            # 2026-09-27 (Phase 4 of the autonomy-completion effort): resolved per
+            # device, same pattern as every other tunable this module reads --
+            # inert by construction until a real promotion exists (default matches
+            # the untouched original hardcoded value exactly).
+            propagation_ttl = _get_autotune_engine().get_active_value(
+                "reputation_propagation_ttl_seconds", device_id, default=_REPUTATION_PROPAGATION_TTL_SECONDS)
             if (rep and rep["tier"] >= _REPUTATION_PROPAGATION_MIN_TIER
-                    and (ts - rep["cached_at"]) <= _REPUTATION_PROPAGATION_TTL_SECONDS):
+                    and (ts - rep["cached_at"]) <= propagation_ttl):
                 synthetic.append(Evidence(
                     device_id=device_id, destination_id=dest, evidence_type="reputation",
                     independence_family="reputation", timestamp=ts,

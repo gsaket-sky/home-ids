@@ -415,6 +415,45 @@ store_l.close()
 store_m.close()
 store_k.close()
 
+# =============================================================================
+# N (2026-09-27, Phase 4 of the autonomy-completion effort): the 4 pool_*
+# parameters' own forward generator -- widely-disagreeing contributors (a real
+# between-device dispersion far above the within-device noise the prior implies)
+# tightens pool_gaussian_kappa/alpha. See _propose_pool_pseudocount_change()'s
+# own HONEST SCOPE NOTE for what this ratio-based heuristic does and doesn't cover.
+# =============================================================================
+from argus.autotune.engine import AutotuneEngine as _AutotuneEngineForTest  # noqa: E402
+
+store_n = GraphStore(":memory:")
+engine_n = BaselineEngine(store_n)
+autotune_n = _AutotuneEngineForTest(store_n)
+
+# 3 contributors whose means are WAY more spread out (10, 50, 90) than any one
+# device's own within-device noise (gauss stddev=2.0 per _seed_gaussian_device) --
+# a real, large between/within dispersion mismatch.
+_seed_gaussian_device(store_n, engine_n, "devN1", "router", mean=10.0)
+_seed_gaussian_device(store_n, engine_n, "devN2", "router", mean=50.0)
+_seed_gaussian_device(store_n, engine_n, "devN3", "router", mean=90.0)
+
+kappa_before = autotune_n.get_active_value("pool_gaussian_kappa", device_type="router",
+                                              default=ppb._POOL_GAUSSIAN_KAPPA)
+result_n = ppb.build_population_priors(store_n, now=NOW + 1000)
+check("N: build_population_priors() still writes a real pool for widely-"
+      "disagreeing contributors (the dispersion check doesn't block the pool "
+      "itself from being written)", result_n["written"] >= 1, f"got {result_n}")
+
+proposal_row_n = store_n._conn.execute(
+    "SELECT parameter, new_value, old_value, reason FROM threshold_history "
+    "WHERE parameter IN ('pool_gaussian_kappa', 'pool_gaussian_alpha') AND device_type='router'"
+).fetchall()
+check("N: widely-disagreeing contributors (real between-device dispersion far "
+      "above the within-device noise the prior implies) TIGHTENS both "
+      "pool_gaussian_kappa and pool_gaussian_alpha for that category",
+      len(proposal_row_n) == 2 and all(r["new_value"] < r["old_value"] for r in proposal_row_n),
+      f"got {[dict(r) for r in proposal_row_n]}")
+
+store_n.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")

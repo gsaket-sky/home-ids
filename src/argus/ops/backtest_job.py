@@ -1450,6 +1450,166 @@ def _propose_familiarity_trust_bar_changes(store: GraphStore, run_id: str, now: 
     return results
 
 
+_TRUST_CACHE_TTL_PARAMETER = "trust_cache_ttl_seconds"
+_TRUST_CACHE_TTL_DEFAULT = 14 * 86400.0  # matches cl_afpe/engine.py's own TRUST_CACHE_TTL_SECONDS
+_REPUTATION_PROPAGATION_TTL_PARAMETER = "reputation_propagation_ttl_seconds"
+_REPUTATION_PROPAGATION_TTL_DEFAULT = 86400.0  # matches live_engine.py's own _REPUTATION_PROPAGATION_TTL_SECONDS
+_TTL_LOOKBACK_SECONDS = _RETROACTIVE_MISS_LOOKBACK_SECONDS  # same 7-day window as everything else here
+
+
+def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
+    """Forward generator for trust_cache_ttl_seconds (2026-09-27, Phase 4 of the
+    autonomy-completion effort, completes all 16 parameters) -- allowlisted and
+    consumed live (cl_afpe/engine.py's _active_trust_edges()) since this same
+    phase, previously a hardcoded module constant with zero autotune wiring.
+
+    HONEST SCOPE NOTE: global-only (a 'trusts' edge isn't consistently
+    device-scoped -- some carry a device_id in metadata, most don't, matching
+    v1's own documented "globally unscoped" trust-cache design), and tighten-only
+    (shorten the TTL). Real evidence: a destination that was actively trust-cached
+    (an unexpired 'trusts' edge existed) when a NEW piece of attack-shaped
+    evidence for that SAME destination correlated with a CONFIRMED_THREAT
+    decision for the touching device -- i.e. the immunity was still active
+    during a real, later-confirmed incident ('trust blindness', the plan's own
+    named evidence source for this parameter). A single such instance is real
+    information the TTL let a real threat go unnoticed for too long, matching
+    this file's own 'a single confirmed miss' convention. No equivalent LOOSEN
+    signal exists here -- 'devices repeatedly re-immunized the same still-safe
+    destination' would need per-immunization churn history this schema doesn't
+    currently retain; raising the TTL back up stays a human decision, the same
+    conservative choice already made for fp_combined_suppress_threshold."""
+    since = now - _TTL_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_TRUST_CACHE_TTL_PARAMETER]
+    direction = _LESS_SENSITIVE_DIRECTION[_TRUST_CACHE_TTL_PARAMETER]
+
+    trust_rows = store._conn.execute(
+        "SELECT src_id, dst_id, timestamp, metadata_json FROM edges WHERE relation='trusts' AND timestamp >= ?",
+        (since,),
+    ).fetchall()
+    if not trust_rows:
+        return []
+
+    current = engine.get_active_value(_TRUST_CACHE_TTL_PARAMETER, default=_TRUST_CACHE_TTL_DEFAULT)
+    for row in trust_rows:
+        try:
+            meta = json.loads(row["metadata_json"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        ttl = meta.get("ttl_seconds") or current
+        trust_window_end = row["timestamp"] + ttl
+
+        evidence_rows = store._conn.execute(
+            "SELECT device_id, timestamp FROM evidence WHERE destination_id=? "
+            "AND timestamp > ? AND timestamp < ?",
+            (row["dst_id"], row["timestamp"], trust_window_end),
+        ).fetchall()
+        for ev in evidence_rows:
+            decision_rows = store._conn.execute(
+                "SELECT raw_payload_json, timestamp FROM decisions WHERE device_id=? "
+                "AND timestamp >= ? AND timestamp <= ?",
+                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
+                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+            ).fetchall()
+            for drow in decision_rows:
+                try:
+                    payload = json.loads(drow["raw_payload_json"] or "{}")
+                except (TypeError, ValueError):
+                    continue
+                if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+                    continue
+                new_value = round(max(current - direction * bounds["max_step"], bounds["min"]), 2)
+                if new_value == current:
+                    return []
+                reason = (
+                    f"destination {row['dst_id']} was still trust-cached (immunized at "
+                    f"{row['timestamp']:.0f}, TTL {ttl:.0f}s) when device {ev['device_id']}'s "
+                    f"decision at {drow['timestamp']:.0f} was CONFIRMED_THREAT -- the immunity "
+                    f"was still active during a real, later-confirmed incident ('trust blindness') -- "
+                    f"tightened trust_cache_ttl_seconds from {current:.0f} to {new_value:.0f}."
+                )
+                result = engine.propose_change(_TRUST_CACHE_TTL_PARAMETER, new_value, reason=reason,
+                                                  backtest_run_id=run_id, now=now)
+                return [{"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                           "parameter": _TRUST_CACHE_TTL_PARAMETER, "proposed_new_value": new_value}]
+    return []
+
+
+def _propose_reputation_propagation_ttl_changes(store: GraphStore, run_id: str, now: float) -> List[Dict[str, Any]]:
+    """Forward generator for reputation_propagation_ttl_seconds (2026-09-27, Phase
+    4) -- allowlisted and consumed live (live_engine.py's
+    _inject_graph_derived_evidence()) since this same phase.
+
+    HONEST SCOPE NOTE: LOOSEN-only (shortens the TTL), gated by a sample floor --
+    NOT single-instance-tighten, despite trust_cache_ttl_seconds's own generator
+    above being exactly that. The two parameters' failure modes are mirror
+    images, not parallel: a longer reputation_propagation_ttl_seconds means a
+    cached SUSPICIOUS-tier classification propagates as corroborating 'reputation'
+    evidence to OTHER devices for longer, which is the MORE-sensitive direction
+    here (direction=-1 -- increasing is more-sensitive, unlike every +1 parameter
+    where increasing is less-sensitive). A propagated hit contributing to a LATER
+    confirmed false positive is therefore evidence the system was too sensitive
+    for too long -- a request to become LESS sensitive, i.e. LOOSEN (shorten the
+    TTL), which correctly needs the stricter loosen-side evidence bar every other
+    loosen move in this file requires, not the tighten side's single-instance
+    rule. (An earlier version of this function got this backwards -- treated it
+    as a single-instance tighten computing current - direction*step, which for
+    direction=-1 actually INCREASED the TTL, the wrong direction entirely; caught
+    by this file's own test suite, not by inspection.)
+
+    Ground truth: a 'reputation' evidence_type row (the propagation mechanism's
+    own evidence, see live_engine.py) contributing to a decision LATER confirmed
+    FALSE_POSITIVE. No equivalent TIGHTEN signal exists here -- would need
+    evidence of a propagated hit that correctly corroborated a real threat within
+    its TTL but WOULD have expired under a shorter one, which needs per-hit
+    outcome tracking this schema doesn't currently retain; raising the TTL back
+    up stays a human decision, the same conservative choice made throughout this
+    file for parameters where only one direction has real evidence."""
+    since = now - _TTL_LOOKBACK_SECONDS
+    engine = AutotuneEngine(store)
+    bounds = TUNABLE_PARAMETERS[_REPUTATION_PROPAGATION_TTL_PARAMETER]
+    direction = _LESS_SENSITIVE_DIRECTION[_REPUTATION_PROPAGATION_TTL_PARAMETER]
+    current = engine.get_active_value(_REPUTATION_PROPAGATION_TTL_PARAMETER,
+                                          default=_REPUTATION_PROPAGATION_TTL_DEFAULT)
+
+    prop_rows = store._conn.execute(
+        "SELECT device_id, timestamp FROM evidence WHERE evidence_type='reputation' "
+        "AND provenance='v13_live_engine:reputation_propagation' AND timestamp >= ?",
+        (since,),
+    ).fetchall()
+    false_positive_confirmed = 0
+    for ev in prop_rows:
+        decision_rows = store._conn.execute(
+            "SELECT raw_payload_json FROM decisions WHERE device_id=? "
+            "AND timestamp >= ? AND timestamp <= ?",
+            (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
+             ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
+        ).fetchall()
+        for drow in decision_rows:
+            try:
+                payload = json.loads(drow["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if (payload.get("fp_verdict") or {}).get("verdict") == "FALSE_POSITIVE":
+                false_positive_confirmed += 1
+                break
+
+    if false_positive_confirmed >= _MIN_TRIALS_FOR_LOOSENING:
+        new_value = round(max(min(current + direction * bounds["max_step"], bounds["max"]), bounds["min"]), 0)
+        if new_value != current:
+            reason = (
+                f"{false_positive_confirmed} propagated 'reputation' evidence item(s) contributed to "
+                f"decisions LATER confirmed FALSE_POSITIVE -- stale cached reputation propagated too "
+                f"long -- loosened (shortened) reputation_propagation_ttl_seconds from {current:.0f} "
+                f"to {new_value:.0f}."
+            )
+            result = engine.propose_change(_REPUTATION_PROPAGATION_TTL_PARAMETER, new_value, reason=reason,
+                                              backtest_run_id=run_id, now=now)
+            return [{"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
+                       "parameter": _REPUTATION_PROPAGATION_TTL_PARAMETER, "proposed_new_value": new_value}]
+    return []
+
+
 def run_golden_set() -> Dict[str, Any]:
     """Runs the existing real-incident regression suite as a subprocess.
     Zero tolerance: any real-incident regression (non-zero exit) fails this
@@ -1658,6 +1818,19 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
             scoped_tuning_proposals += familiarity_proposals
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] familiarity_trust_bar tuning proposal evaluation failed, non-fatal")
+        # 2026-09-27 (Phase 4, completes all 16 parameters): the two TTL parameters'
+        # own forward generators -- see each one's own docstring for its honest,
+        # tighten-only scope. The 4 pool_* parameters' own generator runs inside
+        # population_prior_builder.py's own daily job, not here (it already has
+        # the pooled contributor data in hand at build time).
+        try:
+            scoped_tuning_proposals += _propose_trust_cache_ttl_changes(store, run_id, now)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] trust_cache_ttl_seconds tuning proposal evaluation failed, non-fatal")
+        try:
+            scoped_tuning_proposals += _propose_reputation_propagation_ttl_changes(store, run_id, now)
+        except Exception:
+            LOGGER.exception("[AUTOTUNE_TRIGGER] reputation_propagation_ttl_seconds tuning proposal evaluation failed, non-fatal")
         try:
             tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
         except Exception:

@@ -739,6 +739,79 @@ check("_propose_familiarity_trust_bar_changes: a genuine CONFIRMED_THREAT scorin
       "the proposed new bar blocks the lowering entirely -- ambiguous overlap",
       all(p.get("device_id") != "fam_dev_b" for p in fam_proposals2), f"got {fam_proposals2}")
 
+# --- trust_cache_ttl_seconds generator (2026-09-27, Phase 4): tighten-only, real
+# 'trust blindness' evidence -- see _propose_trust_cache_ttl_changes()'s own docstring. ---
+store_ttl1 = GraphStore(":memory:")
+store_ttl1.upsert_device("ttl_dev_a", device_type="iot", timestamp=CB_NOW)
+store_ttl1.upsert_destination("ttl_dest_a", "domain", timestamp=CB_NOW - 5000)
+store_ttl1.add_edge("device", "ttl_dev_a", "destination", "ttl_dest_a", "trusts",
+                       timestamp=CB_NOW - 5000, metadata={"ttl_seconds": 10000.0})
+# fresh attack-shaped evidence for the SAME (still-trusted) destination...
+store_ttl1.insert_evidence(Evidence(
+    device_id="ttl_dev_a", destination_id="ttl_dest_a", evidence_type="zeek_exfiltration",
+    independence_family="network_behavior", timestamp=CB_NOW - 4000, source="zeek", confidence=0.8, value=1.0,
+))
+# ...and the device's own decision right around then was CONFIRMED_THREAT.
+_add_confirmed_threat_decision(store_ttl1, "ttl_dev_a", timestamp=CB_NOW - 3990)
+_insert_passing_backtest_run(store_ttl1, "ttl_run_1", CB_NOW)
+ttl_proposals1 = backtest_job._propose_trust_cache_ttl_changes(store_ttl1, "ttl_run_1", CB_NOW)
+check("_propose_trust_cache_ttl_changes: a destination still trust-cached during a "
+      "real, later-confirmed incident ('trust blindness') tightens (shortens) "
+      "trust_cache_ttl_seconds, no sample floor required",
+      len(ttl_proposals1) == 1 and ttl_proposals1[0]["accepted"]
+      and ttl_proposals1[0]["proposed_new_value"] < backtest_job._TRUST_CACHE_TTL_DEFAULT,
+      f"got {ttl_proposals1}")
+
+# --- no trust blindness at all -> no proposal ---
+store_ttl2 = GraphStore(":memory:")
+store_ttl2.upsert_device("ttl_dev_b", device_type="iot", timestamp=CB_NOW)
+store_ttl2.upsert_destination("ttl_dest_b", "domain", timestamp=CB_NOW - 5000)
+store_ttl2.add_edge("device", "ttl_dev_b", "destination", "ttl_dest_b", "trusts",
+                       timestamp=CB_NOW - 5000, metadata={"ttl_seconds": 10000.0})
+ttl_proposals2 = backtest_job._propose_trust_cache_ttl_changes(store_ttl2, "ttl_run_2", CB_NOW)
+check("_propose_trust_cache_ttl_changes: an active trust edge with no attack-shaped "
+      "evidence/confirmed incident during its window makes no proposal at all",
+      ttl_proposals2 == [], f"got {ttl_proposals2}")
+
+# --- reputation_propagation_ttl_seconds generator (2026-09-27, Phase 4): LOOSEN-
+# only (shortens the TTL), gated by a sample floor -- the mirror image of
+# trust_cache_ttl_seconds's own single-instance tighten above, see this
+# generator's own docstring for why. ---
+store_reptl1 = GraphStore(":memory:")
+store_reptl1.upsert_device("reptl_dev_a", device_type="iot", timestamp=CB_NOW)
+for i in range(backtest_job._MIN_TRIALS_FOR_LOOSENING):
+    ts = CB_NOW - 1000 - i * 10
+    store_reptl1.insert_evidence(Evidence(
+        device_id="reptl_dev_a", destination_id=NO_DESTINATION, evidence_type="reputation",
+        independence_family="reputation", timestamp=ts, source="v13_live_engine",
+        confidence=1.0, value=5.0, provenance="v13_live_engine:reputation_propagation",
+    ))
+    _add_confirmed_decision_with_autotune_state(store_reptl1, "reptl_dev_a", timestamp=ts + 10,
+                                                    autotune_state={}, confirmed=False)  # FALSE_POSITIVE
+_insert_passing_backtest_run(store_reptl1, "reptl_run_1", CB_NOW)
+reptl_proposals1 = backtest_job._propose_reputation_propagation_ttl_changes(store_reptl1, "reptl_run_1", CB_NOW)
+check("_propose_reputation_propagation_ttl_changes: enough propagated-reputation-"
+      "caused false positives LOOSENS (shortens) reputation_propagation_ttl_seconds",
+      len(reptl_proposals1) == 1 and reptl_proposals1[0]["accepted"]
+      and reptl_proposals1[0]["proposed_new_value"] < backtest_job._REPUTATION_PROPAGATION_TTL_DEFAULT,
+      f"got {reptl_proposals1}")
+
+# --- below the sample floor: no proposal at all ---
+store_reptl2 = GraphStore(":memory:")
+store_reptl2.upsert_device("reptl_dev_b", device_type="iot", timestamp=CB_NOW)
+store_reptl2.insert_evidence(Evidence(
+    device_id="reptl_dev_b", destination_id=NO_DESTINATION, evidence_type="reputation",
+    independence_family="reputation", timestamp=CB_NOW - 100, source="v13_live_engine",
+    confidence=1.0, value=5.0, provenance="v13_live_engine:reputation_propagation",
+))
+_add_confirmed_decision_with_autotune_state(store_reptl2, "reptl_dev_b", timestamp=CB_NOW - 90,
+                                                autotune_state={}, confirmed=False)
+reptl_proposals2 = backtest_job._propose_reputation_propagation_ttl_changes(store_reptl2, "reptl_run_2", CB_NOW)
+check("_propose_reputation_propagation_ttl_changes: a single false-positive-"
+      "confirmed propagation hit, below _MIN_TRIALS_FOR_LOOSENING, makes no "
+      "proposal at all -- loosening needs proof",
+      reptl_proposals2 == [], f"got {reptl_proposals2}")
+
 
 print()
 if FAILURES:
