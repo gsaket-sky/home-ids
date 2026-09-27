@@ -83,6 +83,7 @@ from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENS
 from argus.baseline.engine import ACTIVITY_STATES  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
+from utils import is_resource_pressure_active  # noqa: E402
 
 LOGGER = logging.getLogger("argus.ops.population_prior_builder")
 
@@ -454,6 +455,19 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
     # real promotion exists for that category (default matches the untouched
     # original hardcoded constants exactly).
     autotune = AutotuneEngine(store)
+    # 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause
+    # for the pool_* pseudo-count CANDIDATE GENERATOR specifically -- see
+    # utils.is_resource_pressure_active()'s own docstring for why this is a
+    # cross-process scrape (this job runs as its own scheduled subprocess, never
+    # in-process with the live pipeline whose resource state this checks).
+    # Deliberately does NOT skip the pool rebuild/write itself below -- that's
+    # ordinary population-prior maintenance (core learning infrastructure), not
+    # autotune candidate generation, and must keep running regardless of pressure.
+    tuning_paused = is_resource_pressure_active()
+    if tuning_paused:
+        LOGGER.warning("[AUTOTUNE] resource pressure active on the live pipeline -- "
+                         "skipping pool_* candidate generation this run (population-"
+                         "prior rebuild itself is unaffected).")
 
     # device_type per device is resolved ONCE, in Python (see _device_type_map()'s
     # own docstring for why this isn't a SQL join on the devices.device_type
@@ -487,30 +501,33 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
                 alpha = autotune.get_active_value("pool_gaussian_alpha", device_type=device_type,
                                                      default=_POOL_GAUSSIAN_ALPHA)
                 pooled = _pool_gaussian(contributors, kappa=kappa, alpha=alpha)
-                between, within, n = _gaussian_dispersion(contributors)
-                for param_name, current in (("pool_gaussian_kappa", kappa), ("pool_gaussian_alpha", alpha)):
-                    _propose_pool_pseudocount_change(
-                        autotune, store, param_name, device_type, current,
-                        TUNABLE_PARAMETERS[param_name], _LESS_SENSITIVE_DIRECTION[param_name],
-                        between, within, n, now)
+                if not tuning_paused:
+                    between, within, n = _gaussian_dispersion(contributors)
+                    for param_name, current in (("pool_gaussian_kappa", kappa), ("pool_gaussian_alpha", alpha)):
+                        _propose_pool_pseudocount_change(
+                            autotune, store, param_name, device_type, current,
+                            TUNABLE_PARAMETERS[param_name], _LESS_SENSITIVE_DIRECTION[param_name],
+                            between, within, n, now)
             elif model_kind == "beta":
                 beta_total = autotune.get_active_value("pool_beta_total", device_type=device_type,
                                                            default=_POOL_BETA_TOTAL)
                 pooled = _pool_beta(contributors, beta_total=beta_total)
-                between, within, n = _beta_dispersion(contributors)
-                _propose_pool_pseudocount_change(
-                    autotune, store, "pool_beta_total", device_type, beta_total,
-                    TUNABLE_PARAMETERS["pool_beta_total"], _LESS_SENSITIVE_DIRECTION["pool_beta_total"],
-                    between, within, n, now)
+                if not tuning_paused:
+                    between, within, n = _beta_dispersion(contributors)
+                    _propose_pool_pseudocount_change(
+                        autotune, store, "pool_beta_total", device_type, beta_total,
+                        TUNABLE_PARAMETERS["pool_beta_total"], _LESS_SENSITIVE_DIRECTION["pool_beta_total"],
+                        between, within, n, now)
             elif model_kind == "poisson":
                 poisson_rate = autotune.get_active_value("pool_poisson_rate", device_type=device_type,
                                                              default=_POOL_POISSON_RATE)
                 pooled = _pool_poisson(contributors, poisson_rate=poisson_rate)
-                between, within, n = _poisson_dispersion(contributors)
-                _propose_pool_pseudocount_change(
-                    autotune, store, "pool_poisson_rate", device_type, poisson_rate,
-                    TUNABLE_PARAMETERS["pool_poisson_rate"], _LESS_SENSITIVE_DIRECTION["pool_poisson_rate"],
-                    between, within, n, now)
+                if not tuning_paused:
+                    between, within, n = _poisson_dispersion(contributors)
+                    _propose_pool_pseudocount_change(
+                        autotune, store, "pool_poisson_rate", device_type, poisson_rate,
+                        TUNABLE_PARAMETERS["pool_poisson_rate"], _LESS_SENSITIVE_DIRECTION["pool_poisson_rate"],
+                        between, within, n, now)
             else:
                 continue
             _write_population_prior(

@@ -9,6 +9,20 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.12.0] - 2026-09-27
+
+Phase 6 of the full 16-parameter autonomous-tuning effort: autotune candidate
+generation now pauses under real resource pressure. Confirmed via direct
+investigation that every candidate generator (the nightly backtest job, the
+threshold-calibration job, the population-prior builder) runs as its own
+scheduled subprocess, never in-process with the live pipeline — so this
+reuses the pipeline's already-exposed Prometheus resource-pressure gauge via a
+local scrape, rather than an in-process flag that would have been invisible
+across that process boundary. Fails open on any scrape failure. Active
+detection and promotion of already-vetted changes are both completely
+unaffected — only new candidate generation pauses. Deployed and verified live
+on `.94` same day.
+
 ## [v16.11.0] - 2026-09-27
 
 Phase 5 of the full 16-parameter autonomous-tuning effort: a promoted

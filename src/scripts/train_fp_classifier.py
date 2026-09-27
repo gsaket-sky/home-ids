@@ -65,7 +65,7 @@ SRC_DIR = SCRIPT_DIR.parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from utils import entropy as compute_entropy, write_job_health
+from utils import entropy as compute_entropy, write_job_health, is_resource_pressure_active
 from config import CONFIG
 from intelligence.fp_engine import AutonomousFPEngine
 from argus.graph.store import GraphStore
@@ -1047,6 +1047,31 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                       f"(threshold_history writes will be skipped entirely this run): {exc}")
         store = None
         engine = None
+
+    # 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause
+    # for new candidate generation -- see utils.is_resource_pressure_active()'s own
+    # docstring for why this is a cross-process scrape (this function runs either
+    # via the daily cron trigger or fp_engine.py's own weekly-retrain subprocess,
+    # never in-process with the live pipeline whose OWN resource state this checks).
+    # Every pass below bundles propose+opportunistic-promote in one call
+    # (_propose_and_promote()'s own docstring) -- unlike backtest_job.py's
+    # run_backtest(), which separates proposal from promotion cleanly enough to
+    # pause just the former, splitting that same distinction out of this file's
+    # three passes would be a larger refactor than this phase's actual scope;
+    # skipping the WHOLE calibration pass under genuine resource pressure (falling
+    # back to the next cron cycle) is a safe, honestly-simpler choice -- this
+    # entire file is optimization, never detection, so nothing safety-relevant is
+    # affected either way.
+    if is_resource_pressure_active():
+        LOGGER.warning("[AUTOTUNE] resource pressure active on the live pipeline -- "
+                         "skipping this entire threshold-calibration run.")
+        _write_autotune_relay_stats(state_dir, run_start, "skipped_resource_pressure", (0, 0), {}, {}, store=store)
+        if store is not None:
+            try:
+                store.close()
+            except Exception:
+                pass
+        return
 
     try:
         corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected = \

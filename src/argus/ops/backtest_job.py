@@ -57,6 +57,7 @@ from argus.decision.engine import _HARD_STOP_FRESHNESS_SECONDS  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
+from utils import is_resource_pressure_active  # noqa: E402
 
 LOGGER = logging.getLogger("v13.ops.backtest_job")
 
@@ -1770,7 +1771,22 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
     tuning_proposal = None
     scoped_tuning_proposals: List[Dict[str, Any]] = []
     tuning_promoted: List[str] = []
-    if overall_pass:
+    # 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause
+    # for NEW candidate generation specifically -- see is_resource_pressure_active()'s
+    # own docstring for why this is a cross-process scrape, not an in-process flag.
+    # Deliberately does NOT gate _promote_eligible_tuning_changes() below: promoting
+    # an ALREADY-canaried, already-vetted change costs nothing extra and isn't "new
+    # tuning candidate generation" the plan's own resource-pressure requirement is
+    # about; active detection (every get_active_value() read, everywhere) is
+    # completely unaffected either way.
+    resource_paused = is_resource_pressure_active()
+    if resource_paused:
+        LOGGER.warning(
+            "[AUTOTUNE_TRIGGER] resource pressure active on the live pipeline -- "
+            "skipping all NEW candidate generation this run (promotion of "
+            "already-canaried changes below is unaffected)."
+        )
+    if overall_pass and not resource_paused:
         try:
             tuning_proposal = _propose_tuning_change(store, synthetic, drift, run_id, now)
         except Exception:
@@ -1831,6 +1847,12 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
             scoped_tuning_proposals += _propose_reputation_propagation_ttl_changes(store, run_id, now)
         except Exception:
             LOGGER.exception("[AUTOTUNE_TRIGGER] reputation_propagation_ttl_seconds tuning proposal evaluation failed, non-fatal")
+
+    # Deliberately its OWN `if overall_pass:` block, NOT nested under the
+    # `resource_paused` check above -- promoting an already-canaried change is
+    # not new candidate generation (see this function's own comment on that
+    # distinction) and must proceed regardless of resource pressure.
+    if overall_pass:
         try:
             tuning_promoted = _promote_eligible_tuning_changes(store, run_id, now)
         except Exception:
@@ -1855,7 +1877,8 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
             "overall_pass": overall_pass, "tuning_proposal": tuning_proposal,
             "scoped_tuning_proposals": scoped_tuning_proposals,
             "tuning_promoted": tuning_promoted,
-            "circuit_breaker_rollbacks": circuit_breaker_rollbacks}
+            "circuit_breaker_rollbacks": circuit_breaker_rollbacks,
+            "resource_paused": resource_paused}
 
 
 def main() -> None:

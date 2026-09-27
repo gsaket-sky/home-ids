@@ -232,7 +232,35 @@ preservation, rollback, notify) and `tests/test_argus_autotune_engine.py` (the
 generic notify mechanism + exception isolation, independent of BOCPD).
 
 ### 4.4 Resource-aware autotune/shadow pause (Phase 6)
-_Pending._
+Shipped 2026-09-27. New `src/utils.py` function `is_resource_pressure_active(min_level=1,
+metrics_url=...)`: the cross-process signal every candidate generator checks before
+proposing anything new. HONEST DESIGN NOTE, confirmed via direct investigation:
+the plan's own wording ("an in-process flag, same pattern as the existing
+ti_engine/abuseipdb/virustotal `.paused` flags") assumes candidate generation runs
+in-process with the live pipeline. It doesn't — `backtest_job.py`'s `run_backtest()`,
+`train_fp_classifier.py`'s `run_threshold_calibration()`, and
+`population_prior_builder.py`'s `build_population_priors()` all run as their own
+scheduled OS subprocesses (`scripts/scheduler.py`), the same cross-process gap Phase 5
+already found for `bocpd_hazard_rate`'s tracker cache. An in-process flag on
+`self.pipeline` would be structurally invisible to them. Instead: a local scrape of
+the live pipeline's own already-running `/metrics` endpoint (port 9105), reading the
+EXISTING `home_ids_health_pressure_level` Prometheus gauge `health_manager.py` already
+sets — no new state file, no new relay, matching the project's Prometheus-native
+observability standard. Fails OPEN (not paused) on any scrape failure, so a metrics
+outage can never silently disable autotuning.
+
+Wired at the candidate-GENERATION layer only in all three files — `get_active_value()`
+reads (active detection) are completely unaffected, and PROMOTION of already-canaried
+changes also proceeds regardless (not "new candidate generation"). `job_coordinator.py`/
+`resource_gate.py` deliberately untouched — those arbitrate separate OS subprocess
+scheduling slots (a different resource question), not the live pipeline's own RSS/swap
+health this pause is about.
+
+New tests: `tests/test_resource_pressure_modes.py` (5 new tests for
+`is_resource_pressure_active()` itself, using a real local HTTP server, not a mock) and
+`tests/test_argus_backtest_job.py` (one integration test confirming `run_backtest()`
+actually consults it and correctly separates "no new generation" from "promotion still
+proceeds").
 
 ### 4.5 Shadow-evaluation sandbox (Phase 7)
 _Pending._

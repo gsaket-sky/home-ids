@@ -812,6 +812,53 @@ check("_propose_reputation_propagation_ttl_changes: a single false-positive-"
       "proposal at all -- loosening needs proof",
       reptl_proposals2 == [], f"got {reptl_proposals2}")
 
+# =============================================================================
+# Phase 6 (2026-09-27, autonomy-completion effort): run_backtest()'s own
+# resource-pressure wiring -- is_resource_pressure_active() itself is tested
+# directly (real local HTTP server) in test_resource_pressure_modes.py; this
+# confirms run_backtest() actually CONSULTS it and reacts correctly: no NEW
+# candidate generation, but an ALREADY-canaried pending change still promotes.
+# =============================================================================
+store_pause = GraphStore(":memory:")
+store_pause.upsert_device("pause_dev_a", device_type="iot", timestamp=CB_NOW)
+store_pause.upsert_device("pause_dev_b", device_type="iot", timestamp=CB_NOW)
+# A confirmed miss that WOULD normally tighten reputation_tier_suspicious_floor
+# (see the earlier _propose_reputation_floor_changes test) -- present here to
+# prove the pause actually suppresses generation, not just that nothing else
+# happened to fire.
+_add_confirmed_decision_with_autotune_state(
+    store_pause, "pause_dev_a", timestamp=CB_NOW - 100,
+    autotune_state={"reputation_tier_suspicious_floor": 2.0, "reputation_vt_score": 1.5, "reputation_ti_score": 0.0},
+)
+# A pre-existing, canary-elapsed, still-PENDING proposal for a DIFFERENT
+# parameter/device -- must still promote even while paused (promotion is not
+# "new candidate generation").
+_promote_scoped_directly(store_pause, "pause_dev_b", None, "hard_stop_candidate_sensitivity",
+                            0.9, 0.85, CB_NOW - 100000, "pause_pending_change")
+store_pause._conn.execute(
+    "UPDATE threshold_history SET canary_until=?, promoted_at=NULL WHERE change_id=?",
+    (CB_NOW - 1, "pause_pending_change"),
+)
+store_pause._maybe_commit()
+
+original_is_resource_pressure_active = backtest_job.is_resource_pressure_active
+backtest_job.is_resource_pressure_active = lambda *a, **k: True
+try:
+    result_paused = backtest_job.run_backtest(store_pause, device_ids=["pause_dev_a"], now=CB_NOW)
+finally:
+    backtest_job.is_resource_pressure_active = original_is_resource_pressure_active
+
+check("run_backtest: surfaces resource_paused=True in its own return dict when "
+      "the live pipeline reports resource pressure",
+      result_paused.get("resource_paused") is True, f"got {result_paused}")
+check("run_backtest: NO new candidate generation happens while paused, even "
+      "though real evidence that would otherwise tighten a parameter is present",
+      result_paused["tuning_proposal"] is None and result_paused["scoped_tuning_proposals"] == [],
+      f"got {result_paused}")
+check("run_backtest: an ALREADY-canaried pending change still PROMOTES while "
+      "paused -- promotion is not new candidate generation",
+      "pause_pending_change" in result_paused["tuning_promoted"], f"got {result_paused['tuning_promoted']}")
+
 
 print()
 if FAILURES:

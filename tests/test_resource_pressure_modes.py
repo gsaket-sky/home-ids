@@ -485,5 +485,87 @@ def test_a_real_hang_inside_check_cycle_is_bounded_end_to_end(hm, monkeypatch):
     released.set()
 
 
+# =============================================================================
+# Phase 6 (2026-09-27, autonomy-completion effort): utils.is_resource_pressure_active()
+# -- the cross-process signal autotune candidate generators (backtest_job.py,
+# train_fp_classifier.py, population_prior_builder.py) use to pause new tuning
+# proposals under real resource pressure, since none of them run in-process with
+# the live pipeline whose health_manager.py this scrapes.
+# =============================================================================
+import http.server
+import threading
+
+from utils import is_resource_pressure_active
+
+
+def _serve_metrics_body(body: str):
+    """A real local HTTP server serving `body` as a Prometheus /metrics response
+    -- exercises the actual urllib scrape path end-to-end, not a mocked one,
+    matching this codebase's own established testing convention elsewhere."""
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+
+        def log_message(self, *args):
+            pass  # keep test output quiet
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, port
+
+
+def test_is_resource_pressure_active_parses_normal_level():
+    server, port = _serve_metrics_body(
+        "# HELP home_ids_health_pressure_level Host resource pressure\n"
+        "# TYPE home_ids_health_pressure_level gauge\n"
+        "home_ids_health_pressure_level 0.0\n"
+    )
+    try:
+        assert is_resource_pressure_active(metrics_url=f"http://127.0.0.1:{port}/metrics") is False
+    finally:
+        server.shutdown()
+
+
+def test_is_resource_pressure_active_parses_resource_pressure_level():
+    server, port = _serve_metrics_body("home_ids_health_pressure_level 1.0\n")
+    try:
+        assert is_resource_pressure_active(metrics_url=f"http://127.0.0.1:{port}/metrics") is True
+    finally:
+        server.shutdown()
+
+
+def test_is_resource_pressure_active_respects_min_level():
+    server, port = _serve_metrics_body("home_ids_health_pressure_level 1.0\n")
+    try:
+        # RESOURCE_PRESSURE (1) is below a caller-specified min_level of 2 (CONSERVATION)
+        assert is_resource_pressure_active(min_level=2, metrics_url=f"http://127.0.0.1:{port}/metrics") is False
+        assert is_resource_pressure_active(min_level=1, metrics_url=f"http://127.0.0.1:{port}/metrics") is True
+    finally:
+        server.shutdown()
+
+
+def test_is_resource_pressure_active_fails_open_on_unreachable_server():
+    """THE SAFETY PROPERTY: a scrape failure (server down, network hiccup, no
+    live pipeline running at all) must never silently and permanently disable
+    autotuning -- fails open (False, i.e. NOT paused), not closed."""
+    assert is_resource_pressure_active(metrics_url="http://127.0.0.1:1/metrics") is False
+
+
+def test_is_resource_pressure_active_fails_open_on_missing_metric():
+    """A /metrics response that exists but doesn't happen to carry this specific
+    gauge (e.g. an unrelated service accidentally answering on that port) is
+    treated the same as unreachable -- fail open, not a crash."""
+    server, port = _serve_metrics_body("home_ids_some_unrelated_metric 5.0\n")
+    try:
+        assert is_resource_pressure_active(metrics_url=f"http://127.0.0.1:{port}/metrics") is False
+    finally:
+        server.shutdown()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

@@ -216,6 +216,59 @@ def job_result_status(extra: dict = None) -> str:
     return "success"
 
 
+# 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause for
+# autotune candidate generation. HONEST DESIGN NOTE, confirmed via direct
+# investigation, not assumed: every real candidate generator (backtest_job.py's
+# nightly run_backtest(), train_fp_classifier.py's run_threshold_calibration(),
+# population_prior_builder.py's build_population_priors()) runs as its OWN
+# scheduled OS subprocess (scripts/scheduler.py), never in-process with the live
+# soc.service pipeline whose OWN RSS/swap pressure health_manager.py actually
+# tracks -- an in-process flag on the live pipeline object (the shape the plan
+# doc's wording suggests) would be structurally invisible to these subprocesses,
+# the same cross-process gap Phase 5 already found and fixed for
+# bocpd_hazard_rate's tracker cache. core/resource_gate.py's own
+# may_admit_new_job() already gates whether these jobs get to run AT ALL under
+# system-wide cgroup/load pressure, but that's a DIFFERENT question (job-
+# scheduling admission) from this one (the live pipeline's own process health) --
+# see resource_gate.py's own docstring on why the two are deliberately separate.
+# This reuses the EXISTING home_ids_health_pressure_level Prometheus gauge
+# (metrics.py, already set live by health_manager.py's _apply_pressure_level())
+# as the cross-process signal, via a local scrape of the pipeline's own already-
+# running /metrics endpoint -- no new state file, no new relay, matching this
+# project's own Prometheus-native observability standard.
+_RESOURCE_PRESSURE_METRICS_URL = "http://127.0.0.1:9105/metrics"
+_RESOURCE_PRESSURE_METRIC_NAME = "home_ids_health_pressure_level"
+_RESOURCE_PRESSURE_SCRAPE_TIMEOUT_SECONDS = 2.0
+
+
+def is_resource_pressure_active(min_level: int = 1, metrics_url: str = _RESOURCE_PRESSURE_METRICS_URL) -> bool:
+    """True if the live pipeline's own current resource-pressure level (0=normal,
+    1=resource_pressure, 2=conservation, 3=critical -- see health_manager.py's own
+    _PRESSURE_ORDER) is at or above `min_level`. Fails OPEN (returns False, i.e.
+    "not paused") on any scrape failure -- the live pipeline being briefly
+    unreachable (a restart, a transient network hiccup, or this being called from
+    a dev/test environment with no live pipeline running at all) must never
+    silently and permanently disable autotuning; a missed pause on one rare
+    unlucky night is a far smaller cost than tuning going dark indefinitely
+    because a metrics scrape happened to fail once."""
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(metrics_url, timeout=_RESOURCE_PRESSURE_SCRAPE_TIMEOUT_SECONDS) as resp:
+            body = resp.read().decode("utf-8", errors="ignore")
+    except Exception as exc:
+        LOGGER.debug("Resource-pressure scrape failed (%s), assuming NOT under pressure: %s", metrics_url, exc)
+        return False
+    for line in body.splitlines():
+        if line.startswith(_RESOURCE_PRESSURE_METRIC_NAME + " ") or line.startswith(_RESOURCE_PRESSURE_METRIC_NAME + "{"):
+            try:
+                value = float(line.rsplit(" ", 1)[-1])
+            except (ValueError, IndexError):
+                continue
+            return value >= min_level
+    return False
+
+
 def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: dict = None) -> None:
     # Prometheus path (2026-09-23): hand the result to the launching scheduler over its
     # result pipe, which exports it on the scheduler's own /metrics endpoint -- see
