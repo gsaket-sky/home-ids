@@ -30,11 +30,23 @@ scalar/list/enum, and gets its own dedicated merge-aware endpoints
 (PATCH/DELETE /api/config/device_type_overrides/{pattern}) in routers/config_api.py
 instead of the generic per-key PATCH/DELETE.
 """
+from argus.config.trust_anchors import DEFAULT_HARDWARE_PROFILE, VALID_HARDWARE_PROFILES
 from config import _STATIC_KEYS
 
 RUNTIME_RESTART_KEYS = frozenset({
     "lateral_movement_ports",
     "local_confirmed_intel_ttl_seconds",
+    # Phase 9 (zero-site bootstrap A, autonomy-completion effort): both read ONCE at
+    # startup, not re-checked live -- hardware_profile via argus/ops/live_engine.py's
+    # configure() call (-> GraphStore(..., hardware_profile=...), confirmed by
+    # test_argus_live_engine.py's own hardware-profile evidence-cap coverage);
+    # network.trust_anchors via core/pipeline.py's load_trust_anchors_from_config()
+    # call, passed once into LiveIdentityManager's constructor, never re-read per
+    # cycle. network.trust_anchors is also nested (dotted), so config_api.py's own
+    # existing convention already forces it read-only regardless -- listed here too
+    # for is_restart_required()'s own correctness, not because it changes behavior.
+    "hardware_profile",
+    "network.trust_anchors",
 })
 
 
@@ -143,6 +155,26 @@ CONFIG_SCHEMA = [
      "desc": "How long a candidate stays eligible for re-identification merging after last being seen (30 min)."},
     {"s": "device_identity", "k": "gateway_ip", "t": "string", "def": "",
      "desc": "Your router's IP -- pinned to one canonical device_id since a router genuinely has multiple physical MACs. Blank disables this special case."},
+    # Phase 9 (zero-site bootstrap A, autonomy-completion effort, 2026-09-27): these
+    # 2 keys existed in config.yaml and were already loaded (argus/config/
+    # trust_anchors.py, since the v13 full-architecture plan's Phase 2) but had no
+    # CONFIG_SCHEMA entry at all -- invisible to GET /api/config, unvalidated by
+    # anything but a best-effort log warning at load time. hardware_profile is a
+    # plain top-level scalar, so the existing generic enum mechanism applies
+    # unchanged -- options come directly from VALID_HARDWARE_PROFILES (imported,
+    # not copied), so this schema row can never silently drift out of sync with
+    # trust_anchors.py's own real validation rule. network.trust_anchors is a
+    # nested list-of-dicts (like device_type_overrides, a shape the generic PATCH
+    # coercion below was never built for) -- this row is READ-ONLY display only
+    # (the module's own existing "dotted key" convention already enforces that),
+    # with real structural validation surfaced by config_api.py's get_config()
+    # reusing load_trust_anchors() itself, not a second, possibly-drifting
+    # reimplementation of its rules.
+    {"s": "device_identity", "k": "hardware_profile", "t": "enum",
+     "options": sorted(VALID_HARDWARE_PROFILES), "def": DEFAULT_HARDWARE_PROFILE,
+     "desc": "Sizing profile for CL-AFPE pruning aggressiveness and similar memory/disk-bound behavior. Falls back to the default on an unrecognized value, same as this list."},
+    {"s": "device_identity", "k": "network.trust_anchors", "t": "list", "def": [],
+     "desc": "Read-only display of your configured network.trust_anchors (role/ip/mac list) -- edit via config.yaml + restart. See this row's own 'trust_anchors_valid'/'trust_anchors_issues' fields in GET /api/config for real validation against the same rules the live pipeline uses."},
 
     {"s": "ips_mitigation", "k": "ips_enabled", "t": "bool", "def": True,
      "desc": "Global kill switch for all active response. False = detection-only, nothing gets blocked."},

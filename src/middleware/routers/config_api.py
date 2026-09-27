@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from middleware.auth import verify_token, CONFIG, LOGGER
 from middleware.config_schema import CONFIG_SCHEMA, is_restart_required
+from argus.config.trust_anchors import load_trust_anchors
 
 from config import CONFIG_FILE
 from utils import rotate_jsonl_if_oversized
@@ -202,7 +203,7 @@ def get_config(token: str = Depends(verify_token)):
             value = CONFIG.get(key, row["def"])
             override_entry = overrides.get(key)
             editable = not restart_required
-        rows.append({
+        row_out = {
             "section": row["s"], "key": key, "type": row["t"], "description": row["desc"],
             "suggested_default": row["def"], "options": row.get("options"),
             "value": value, "restart_required": restart_required, "editable": editable,
@@ -210,7 +211,21 @@ def get_config(token: str = Depends(verify_token)):
             "baseline": override_entry["baseline"] if override_entry else None,
             "set_by": override_entry.get("set_by") if override_entry else None,
             "set_at": override_entry.get("set_at") if override_entry else None,
-        })
+        }
+        if key == "network.trust_anchors":
+            # Phase 9 (zero-site bootstrap A): real structural validation, reusing
+            # load_trust_anchors() itself -- the SAME function core/pipeline.py's own
+            # startup call site uses -- rather than a second, possibly-drifting
+            # reimplementation of its rules. Coarse (accepted-vs-raw count, not a
+            # per-entry issue list) is an honest first-pass scope limit: the real
+            # function already logs a specific warning per malformed entry, so the
+            # detail exists in the log, just not yet surfaced entry-by-entry here.
+            raw_list = value if isinstance(value, list) else []
+            accepted = load_trust_anchors(raw_list)
+            row_out["trust_anchors_raw_count"] = len(raw_list)
+            row_out["trust_anchors_accepted_count"] = len(accepted)
+            row_out["trust_anchors_valid"] = len(accepted) == len(raw_list)
+        rows.append(row_out)
 
     dt_overrides = CONFIG.get(DEVICE_TYPE_OVERRIDES_KEY, {}) or {}
     return {

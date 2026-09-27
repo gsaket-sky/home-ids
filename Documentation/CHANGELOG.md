@@ -9,6 +9,20 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.15.0] - 2026-09-27
+
+Phase 9 of the zero-site network bootstrap: `hardware_profile` and
+`network.trust_anchors` are now real config-schema entries, visible through
+the console's config API for the first time (previously loaded silently at
+startup with no visibility outside the logs). `hardware_profile` gained real
+enum validation reusing the same valid-value list the loader itself enforces.
+`network.trust_anchors` gets genuine structural validation on every read --
+reusing the exact function the live pipeline uses to load it at startup, not
+a second, separately-maintained validator -- so a malformed entry now shows
+up on the console instead of requiring a log grep to notice. Both are
+read-only through the console (each is only ever read once at startup),
+consistent with how this API already treats every other startup-only key.
+
 ## [v16.14.0] - 2026-09-27
 
 Phase 8 of the full 16-parameter autonomous-tuning effort: behavioral cohorts,

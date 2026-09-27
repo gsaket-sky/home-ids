@@ -374,6 +374,40 @@ ran `tests/test_phase44_mac_vendor_and_device_type.py` (the NULL-footgun/no-
 guessed-category regression guard this phase's own design explicitly respects)
 and `tests/test_real_world_alert_regression.py` -- all green, no regression.
 
+### 4.6b Zero-site bootstrap A: config-schema validation (Phase 9)
+**DONE 2026-09-27, shipped to `main`.** `hardware_profile` and `network.trust_anchors`
+were already loaded (`argus/config/trust_anchors.py`, since the v13 full-architecture
+plan's Phase 2) but had NO `CONFIG_SCHEMA` entry at all -- invisible to
+`GET /api/config`, validated only by a best-effort log warning at load time.
+
+`middleware/config_schema.py`: `hardware_profile` is a plain top-level scalar, so it
+now uses the existing generic "enum" mechanism unchanged, with `options` imported
+directly from `trust_anchors.py`'s own `VALID_HARDWARE_PROFILES` (never copied --
+can't silently drift out of sync with the real validation rule). `network.trust_anchors`
+is a nested list-of-dicts (the same "doesn't fit the generic PATCH shape" problem
+`device_type_overrides` already has) -- added as a READ-ONLY display row (the
+existing dotted-key convention already forces this). Both added to
+`RUNTIME_RESTART_KEYS` (verified against their real read call sites: `hardware_profile`
+via `argus_live_engine.configure()` -> `GraphStore(..., hardware_profile=...)`;
+`network.trust_anchors` via `core/pipeline.py`'s one-time `LiveIdentityManager`
+construction).
+
+`middleware/routers/config_api.py`'s `get_config()`: the `network.trust_anchors` row
+gets real structural validation by calling `load_trust_anchors()` itself (the SAME
+function `core/pipeline.py`'s own startup call site uses) against the raw configured
+list, surfacing `trust_anchors_raw_count`/`trust_anchors_accepted_count`/
+`trust_anchors_valid` -- an operator can now see a malformed trust_anchors entry from
+the console without restarting and grepping logs. Coarse (accepted-vs-raw count, not
+a per-entry issue list) is an honest first-pass scope limit -- the real function
+already logs a specific warning per malformed entry; that detail isn't yet
+duplicated into this API response.
+
+Test: extended `tests/test_config_api.py` (6 new pytest cases: hardware_profile enum
+PATCH-rejection + GET shape, trust_anchors dotted-key PATCH-rejection, and 3
+validation-surface cases -- all valid, a malformed entry flagged, and no `network` key
+configured at all). `tests/test_argus_config_trust_anchors.py` re-run unchanged
+(nothing in `trust_anchors.py` itself was touched) -- all green.
+
 ### 4.7 Zero-site bootstrap: identity-resolution priority chain
 Current state (Phase 0, unchanged from today's production behavior):
 `LiveIdentityManager.resolve_device_id()` (`argus/identity/live_manager.py:227-297`) is

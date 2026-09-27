@@ -178,6 +178,83 @@ def test_set_notify_supports_multiple_subscribers(isolated_overrides, monkeypatc
     assert calls_b and calls_b[-1] == {"poll_interval": 11}, "the SECOND-registered subscriber must also fire"
 
 
+def test_patch_rejects_hardware_profile_restart_required(isolated_overrides):
+    """Phase 9 (zero-site bootstrap A): hardware_profile is read once at
+    argus_live_engine.configure() -- config_schema.RUNTIME_RESTART_KEYS should
+    block a live PATCH the same way lateral_movement_ports already does."""
+    with pytest.raises(HTTPException) as exc:
+        config_api.patch_config("hardware_profile", config_api.ConfigValuePayload(value="pi_8gb"), token="test")
+    assert exc.value.status_code == 400
+
+
+def test_patch_rejects_trust_anchors_dotted_key(isolated_overrides):
+    """network.trust_anchors is nested -- rejected on the dotted-key check before
+    is_restart_required() is even consulted, matching every other nested key."""
+    with pytest.raises(HTTPException) as exc:
+        config_api.patch_config(
+            "network.trust_anchors", config_api.ConfigValuePayload(value=[]), token="test"
+        )
+    assert exc.value.status_code == 400
+
+
+def test_get_config_includes_hardware_profile_enum(isolated_overrides):
+    response = config_api.get_config(token="test")
+    by_key = {row["key"]: row for row in response["rows"]}
+    assert "hardware_profile" in by_key
+    row = by_key["hardware_profile"]
+    assert row["type"] == "enum"
+    assert set(row["options"]) == {"pi_8gb", "x86_16gb", "custom"}
+    assert row["restart_required"] is True
+    assert row["editable"] is False
+
+
+def test_get_config_trust_anchors_validation_all_valid(isolated_overrides, monkeypatch):
+    """Phase 9: real structural validation, reusing load_trust_anchors() itself --
+    a config with only well-formed entries reports valid=True and matching counts."""
+    monkeypatch.setitem(CONFIG._config, "network", {
+        "trust_anchors": [
+            {"role": "gateway", "ip": "192.168.1.1"},
+            {"role": "this_host", "ip": "192.168.1.2"},
+        ],
+    })
+    response = config_api.get_config(token="test")
+    by_key = {row["key"]: row for row in response["rows"]}
+    row = by_key["network.trust_anchors"]
+    assert row["editable"] is False  # nested key, read-only display regardless
+    assert row["trust_anchors_raw_count"] == 2
+    assert row["trust_anchors_accepted_count"] == 2
+    assert row["trust_anchors_valid"] is True
+
+
+def test_get_config_trust_anchors_validation_flags_malformed_entries(isolated_overrides, monkeypatch):
+    """A raw list with a genuinely malformed entry (missing role) is reported as
+    invalid, with the accepted count real and lower than the raw count -- not
+    just a silent log warning an operator would have to go grep for."""
+    monkeypatch.setitem(CONFIG._config, "network", {
+        "trust_anchors": [
+            {"role": "gateway", "ip": "192.168.1.1"},
+            {"ip": "192.168.1.2"},  # missing role -- load_trust_anchors() skips this
+        ],
+    })
+    response = config_api.get_config(token="test")
+    by_key = {row["key"]: row for row in response["rows"]}
+    row = by_key["network.trust_anchors"]
+    assert row["trust_anchors_raw_count"] == 2
+    assert row["trust_anchors_accepted_count"] == 1
+    assert row["trust_anchors_valid"] is False
+
+
+def test_get_config_trust_anchors_validation_handles_absent_config(isolated_overrides):
+    """No 'network' key configured at all (a deployment that hasn't opted in yet) --
+    reports 0/0, valid=True (vacuously), not a crash."""
+    response = config_api.get_config(token="test")
+    by_key = {row["key"]: row for row in response["rows"]}
+    row = by_key["network.trust_anchors"]
+    assert row["trust_anchors_raw_count"] == 0
+    assert row["trust_anchors_accepted_count"] == 0
+    assert row["trust_anchors_valid"] is True
+
+
 def test_notify_subscriber_exception_does_not_block_others(isolated_overrides, monkeypatch):
     """A single misbehaving subscriber must not prevent every OTHER subscriber
     (e.g. main.py's log_level hook) from receiving the same change."""
