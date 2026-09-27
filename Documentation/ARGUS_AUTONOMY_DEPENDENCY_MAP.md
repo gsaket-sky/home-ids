@@ -64,7 +64,7 @@ subsets gate each phase instead.)
 - Autotune core/generators: `test_argus_autotune_engine.py`, `test_argus_autotune_reset.py`, `test_argus_backtest_job.py`
 - Shadow-evaluation sandbox: `test_argus_shadow_sandbox.py`
 - Baseline/BOCPD: `test_argus_baseline_engine.py`, `test_argus_bayesian_baseline.py`
-- Population priors/cohorts: `test_argus_population_prior_builder.py`
+- Population priors/cohorts: `test_argus_population_prior_builder.py`, `test_phase44_mac_vendor_and_device_type.py`
 - Live engine/decision path: `test_argus_live_engine.py`, `test_argus_decision_engine.py`, `test_argus_hypotheses_engine.py`
 - CL-AFPE: `test_argus_cl_afpe.py`, `test_argus_cl_afpe_composite_trust.py`, `test_argus_cl_afpe_flip_monitor.py`, `test_argus_cl_afpe_ml_scoring.py`, `test_argus_live_cl_afpe_shadow.py`
 - Identity: `test_argus_identity_resolver.py`, `test_argus_live_identity.py`, `test_identity_reconcile_dhcp_ja4_signal.py`, `test_identity_reconcile_pass.py`, `test_phase39_retroactive_identity_merge.py`, `test_phase64_device_identity_guard.py`
@@ -316,7 +316,63 @@ priority order, the resource-pressure pause, and the row-count-cap pruning. Also
 `pipeline.py`/`live_engine.py` call-site additions.
 
 ### 4.6 Behavioral cohorts (Phase 8)
-_Pending._
+**DONE 2026-09-27, shipped to `main`.** The plan's own pointer ("cohort key reuses
+`cl_afpe_trust.behavior_fingerprint`") was checked directly and does NOT fit:
+`behavior_fingerprint` is `derive_activity_state(evidence_types_this_cycle)`
+(`baseline/engine.py`'s 8-value `ACTIVITY_STATES` label) -- a coarse, shared
+per-EVIDENCE-CYCLE label, identical for every device showing the same evidence
+types, not a per-device behavioral signature. Built a genuinely new device-level
+cohort key instead, reusing the closest REAL existing per-device behavioral
+signal already tracked today: `device_baselines`' own learned Gaussian posteriors
+for `query_rate`/`entropy_avg`/`unique_domains` (all generic, already-tracked
+traffic statistics -- never anything household-specific,
+[[feedback_network_agnostic_design]]).
+
+`population_prior_builder.py`'s new `_compute_behavioral_cohorts()`: population-
+RELATIVE tertile bucketing (rank-based, not value-cutoff-based -- an earlier
+value-cutoff version was found by this phase's own test coverage to split two
+near-identical devices across adjacent buckets purely because one straddled a
+specific rank's boundary value; fixed to assign each device a bucket by its own
+rank among the population instead). Requires real data on all 3 metrics (an
+incomplete device gets no cohort_key, not a guessed one) and >= 6 devices with
+complete data (below that, a tertile split is statistically meaningless).
+Persists to new `device_cohort_membership` table (schema.sql +
+`_migrate_existing_db()`, both updated).
+
+New `device_identity_stability` table, stamped by `GraphStore.merge_device()`
+itself (one hook catches every real merge call site: `core/identity.py`'s real-
+time path, `pipeline.py`'s periodic reconciliation worker, and
+`merge_fragmented_devices.py`, since all 3 already mirror through
+`merge_device()`). Used as an ADDITIONAL contributor-eligibility gate for cohort
+pooling only (>= 7 days stable, or never-merged) -- deliberately NOT applied
+retroactively to the existing device_type pooling, a narrower scope for this
+phase.
+
+New `cohort_priors` table (same shape as `population_priors`, cohort-keyed
+instead of device_type-keyed, gaussian/beta/poisson only -- cohort-scoped Markov
+pooling is an honest, documented scope limit, not built this phase). Read ONLY
+as a fallback in `baseline/engine.py`'s `_seeded_model()`/`_load_markov()` when
+no device_type prior exists, never overriding a working device_type prior. Does
+NOT get its own autotune-tunable pseudo-counts (the existing `pool_*` parameters
+stay category/device_type-scoped, matching the closed 16-parameter set) -- fixed
+module defaults only for cohort pooling, an honest first-pass scope limit.
+
+**Real bug found and fixed as a paired fix while touching this same cold-start
+path**: `_load_markov()` read ONLY the raw `devices.device_type` SQL column,
+skipping `metadata_json` -- the exact footgun `_device_type_map()`'s own
+docstring already documents (the column is NULL for every real device on `.94`).
+This silently made the Markov axis's own device-type cold-start prior
+permanently inert in production, unlike every other axis's `_seeded_model()`
+call. Fixed to check `metadata_json` first, matching every other axis.
+
+Test: extended `tests/test_argus_population_prior_builder.py` (new section O,
+9 checks: cohort assignment, cross-cohort separation, cohort_priors pooling, the
+identity-stability gate, the insufficient-population bail) and
+`tests/test_argus_baseline_engine.py` (3 checks: cohort fallback works,
+device_type prior still wins when both exist, the `_load_markov()` bugfix). Also
+ran `tests/test_phase44_mac_vendor_and_device_type.py` (the NULL-footgun/no-
+guessed-category regression guard this phase's own design explicitly respects)
+and `tests/test_real_world_alert_regression.py` -- all green, no regression.
 
 ### 4.7 Zero-site bootstrap: identity-resolution priority chain
 Current state (Phase 0, unchanged from today's production behavior):

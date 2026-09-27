@@ -454,6 +454,120 @@ check("N: widely-disagreeing contributors (real between-device dispersion far "
 
 store_n.close()
 
+
+# =============================================================================
+# O (2026-09-27, Phase 8 of the autonomy-completion effort): behavioral cohorts --
+# a per-device grouping DISTINCT from device_type, derived purely from each
+# device's own already-tracked behavioral statistics (query_rate/entropy_avg/
+# unique_domains), for devices with no device_type at all.
+# =============================================================================
+
+def _seed_cohort_device(store, engine, device_id, query_rate, entropy_avg, unique_domains,
+                          n=50, hour=10, seed_ts=NOW):
+    """Same real-data-through-score_metric() convention as _seed_gaussian_device()
+    above, but seeds ALL 3 _COHORT_METRICS (not just query_rate) and deliberately
+    passes NO device_type -- these devices must be pooled by cohort alone."""
+    store.upsert_device(device_id, timestamp=seed_ts)
+    for i in range(n):
+        engine.score_metric(device_id, "query_rate", "gaussian",
+                              (random.gauss(query_rate, 1.0),), hour, now=seed_ts + i)
+        engine.score_metric(device_id, "entropy_avg", "gaussian",
+                              (random.gauss(entropy_avg, 0.1),), hour, now=seed_ts + i)
+        engine.score_metric(device_id, "unique_domains", "gaussian",
+                              (random.gauss(unique_domains, 1.0),), hour, now=seed_ts + i)
+
+
+store_o = GraphStore(":memory:")
+engine_o = BaselineEngine(store_o)
+
+# 3 clean clusters of 3 devices each (low/mid/high), cleanly separated on ALL 3
+# metrics -- 9 devices lines up exactly with _COHORT_BUCKET_COUNT (3 buckets x 3
+# devices each), so rank-based tertile bucketing puts each cluster's ranks
+# entirely within one bucket, not split across a boundary. No device_type on
+# any of them (cohort-only pooling).
+for dev_id in ("devOlow1", "devOlow2", "devOlow3"):
+    _seed_cohort_device(store_o, engine_o, dev_id, query_rate=10.0, entropy_avg=1.0, unique_domains=5.0)
+for dev_id in ("devOmid1", "devOmid2", "devOmid3"):
+    _seed_cohort_device(store_o, engine_o, dev_id, query_rate=100.0, entropy_avg=2.5, unique_domains=40.0)
+for dev_id in ("devOhigh1", "devOhigh2", "devOhigh3"):
+    _seed_cohort_device(store_o, engine_o, dev_id, query_rate=200.0, entropy_avg=4.0, unique_domains=80.0)
+
+cohort_map_o = ppb._compute_behavioral_cohorts(store_o, NOW + 1000)
+check("O: all 9 devices with complete, real 3-metric data got assigned a cohort_key",
+      len(cohort_map_o) == 9, f"got {cohort_map_o}")
+check("O: the 3 'low' devices all landed in the SAME cohort",
+      len({cohort_map_o.get(d) for d in ("devOlow1", "devOlow2", "devOlow3")}) == 1)
+check("O: the 3 'mid' devices all landed in the SAME cohort",
+      len({cohort_map_o.get(d) for d in ("devOmid1", "devOmid2", "devOmid3")}) == 1)
+check("O: the 3 'high' devices all landed in the SAME cohort",
+      len({cohort_map_o.get(d) for d in ("devOhigh1", "devOhigh2", "devOhigh3")}) == 1)
+check("O: 'low', 'mid', and 'high' are genuinely 3 DIFFERENT cohort keys, not a shared bucket",
+      len({cohort_map_o.get("devOlow1"), cohort_map_o.get("devOmid1"), cohort_map_o.get("devOhigh1")}) == 3)
+
+membership_rows_o = store_o._conn.execute(
+    "SELECT device_id, cohort_key FROM device_cohort_membership").fetchall()
+check("O: cohort assignments were actually persisted to device_cohort_membership",
+      len(membership_rows_o) == 9)
+
+result_o = ppb.build_population_priors(store_o, now=NOW + 2000)
+check("O: build_population_priors() reports at least 1 device assigned a cohort",
+      result_o["cohorts_computed"] == 9, f"got {result_o}")
+
+low_cohort_key = cohort_map_o["devOlow1"]
+cohort_prior_row_o = store_o._conn.execute(
+    "SELECT posterior_params_json, contributed_by_json FROM cohort_priors "
+    "WHERE cohort_key=? AND metric='query_rate' AND hour=10", (low_cohort_key,),
+).fetchone()
+check("O: a real cohort_priors row was written for the 'low' cohort's query_rate pool",
+      cohort_prior_row_o is not None)
+if cohort_prior_row_o is not None:
+    contributors_o = json.loads(cohort_prior_row_o["contributed_by_json"])
+    check("O: all 3 'low' devices contributed to their cohort's pool",
+          sorted(contributors_o) == ["devOlow1", "devOlow2", "devOlow3"], f"got {contributors_o}")
+    params_o = json.loads(cohort_prior_row_o["posterior_params_json"])
+    check("O: pooled mu is close to the real 'low' group mean (10.0), not the 'high' "
+          "group's -- cohorts pool separately from each other",
+          abs(params_o["mu"] - 10.0) < 3.0, f"got {params_o['mu']}")
+
+# --- identity-stability gate: a recently-merged device is excluded from cohort pooling ---
+now_o2 = NOW + 3000
+store_o._conn.execute(
+    "INSERT INTO device_identity_stability (device_id, last_identity_change_at) VALUES (?, ?)",
+    ("devOlow1", now_o2 - (1.0 * 86400.0)),  # merged 1 day ago -- well under the 7-day gate
+)
+store_o._maybe_commit()
+check("O: a device merged only 1 day ago is NOT stable enough to contribute to cohort pooling",
+      not ppb._device_identity_stable_enough(store_o, "devOlow1", now_o2))
+check("O: a device that has NEVER been merged (no row at all) IS treated as eligible -- "
+      "'never merged' carries no instability signal",
+      ppb._device_identity_stable_enough(store_o, "devOlow2", now_o2))
+
+result_o2 = ppb.build_population_priors(store_o, now=now_o2)
+cohort_prior_row_o2 = store_o._conn.execute(
+    "SELECT contributed_by_json FROM cohort_priors WHERE cohort_key=? AND metric='query_rate' AND hour=10",
+    (low_cohort_key,),
+).fetchone()
+if cohort_prior_row_o2 is not None:
+    contributors_o2 = json.loads(cohort_prior_row_o2["contributed_by_json"])
+    check("O: THE GATE -- the recently-merged device is excluded from the rebuilt pool, "
+          "even though it's otherwise eligible (real device_type-less data, currently clean)",
+          "devOlow1" not in contributors_o2, f"got {contributors_o2}")
+    check("O: the other 2 'low' devices (never merged) still contribute",
+          set(contributors_o2) == {"devOlow2", "devOlow3"}, f"got {contributors_o2}")
+
+store_o.close()
+
+# --- too few devices for a meaningful population -> no cohorts computed at all ---
+store_o3 = GraphStore(":memory:")
+engine_o3 = BaselineEngine(store_o3)
+for dev_id in ("devOfew1", "devOfew2", "devOfew3"):
+    _seed_cohort_device(store_o3, engine_o3, dev_id, query_rate=10.0, entropy_avg=1.0, unique_domains=5.0)
+cohort_map_o3 = ppb._compute_behavioral_cohorts(store_o3, NOW + 1000)
+check("O: fewer than _COHORT_MIN_DEVICES_FOR_BUCKETING (6) devices with complete data "
+      "-> no cohorts computed at all, not a statistically meaningless split",
+      cohort_map_o3 == {}, f"got {cohort_map_o3}")
+store_o3.close()
+
 print(f"\n{'='*60}")
 if FAILURES:
     print(f"FAILED: {len(FAILURES)} check(s) failed: {FAILURES}")

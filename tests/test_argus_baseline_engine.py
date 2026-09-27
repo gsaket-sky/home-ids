@@ -33,6 +33,7 @@ def check(name, cond, detail=""):
 
 
 from argus.autotune.engine import AutotuneEngine  # noqa: E402
+from argus.baseline.bayesian import GaussianBaseline  # noqa: E402
 from argus.baseline.engine import BaselineEngine, derive_activity_state  # noqa: E402
 from argus.evidence.model import NO_DESTINATION  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
@@ -483,6 +484,85 @@ check("is_learning_paused: resolves the stale orphan id too -- a decision made "
       "the orphan's own (dead) id",
       fresh_engine7.is_learning_paused("orphan_dev7", now=MERGE_NOW7 + 40)
       == fresh_engine7.is_learning_paused("canonical_dev7", now=MERGE_NOW7 + 40))
+
+
+# =============================================================================
+# Phase 8 (behavioral cohorts, autonomy-completion effort, 2026-09-27): cohort
+# prior as a FALLBACK when no device_type prior exists -- and the paired
+# _load_markov() metadata_json bugfix found while extending this same path.
+# =============================================================================
+store8 = GraphStore(":memory:")
+engine8 = BaselineEngine(store8)
+NOW8 = 2_000_000_000.0
+
+# A brand-new device with NO device_type at all, but a cohort_key ALREADY
+# assigned (as if population_prior_builder.py's nightly job profiled it on a
+# prior run) -- only a cohort_priors row exists, no population_priors row.
+store8._conn.execute(
+    "INSERT INTO cohort_priors (cohort_key, metric, hour, model_kind, posterior_params_json, updated_at) "
+    "VALUES ('cohort_low', 'query_rate', 14, 'gaussian', ?, ?)",
+    (json.dumps({"mu": 12.0, "kappa": 5.0, "alpha": 10.0, "beta": 2.4, "n": 90}), NOW8),
+)
+store8._conn.commit()
+device_cohort_only = "dev_cohort_only"
+store8.upsert_device(device_cohort_only, timestamp=NOW8)  # no device_type
+store8.upsert_device_cohort_membership(device_cohort_only, "cohort_low", NOW8)
+
+seed_result_8a = engine8.score_metric(device_cohort_only, "query_rate", "gaussian", (12.5,), hour=14, now=NOW8)
+check("PHASE 8: a device with NO device_type but a real cohort_key assigned, "
+      "scored close to its COHORT's own prior mean, shows low surprise from its "
+      "very first observation -- _seeded_model()'s cohort fallback actually works",
+      seed_result_8a is None or seed_result_8a.value < 3.0,
+      f"got {seed_result_8a.value if seed_result_8a else 'None (also fine)'}")
+
+# A device_type prior, when it EXISTS, must still win over a cohort prior --
+# cohort is a fallback, never an override.
+store8._conn.execute(
+    "INSERT INTO population_priors (device_type, metric, hour, model_kind, posterior_params_json, updated_at) "
+    "VALUES ('router', 'query_rate', 15, 'gaussian', ?, ?)",
+    (json.dumps({"mu": 500.0, "kappa": 5.0, "alpha": 10.0, "beta": 50.0, "n": 300}), NOW8),
+)
+store8._conn.execute(
+    "INSERT INTO cohort_priors (cohort_key, metric, hour, model_kind, posterior_params_json, updated_at) "
+    "VALUES ('cohort_low', 'query_rate', 15, 'gaussian', ?, ?)",
+    (json.dumps({"mu": 12.0, "kappa": 5.0, "alpha": 10.0, "beta": 2.4, "n": 90}), NOW8),
+)
+store8._conn.commit()
+device_both = "dev_has_both_priors"
+store8.upsert_device(device_both, device_type="router", timestamp=NOW8)
+store8.upsert_device_cohort_membership(device_both, "cohort_low", NOW8)
+seeded_model_8b = engine8._seeded_model(device_both, "query_rate", "gaussian", 15, GaussianBaseline)
+check("PHASE 8: a device WITH a real device_type prior uses that prior, not its "
+      "own cohort prior -- cohort is strictly a fallback, never an override",
+      abs(seeded_model_8b.mu - 500.0) < 5.0, f"got mu={seeded_model_8b.mu}")
+
+# _load_markov() BUGFIX: device_type living only in metadata_json (the real
+# production shape) must still be found -- this path used to read ONLY the raw
+# devices.device_type COLUMN, silently making the Markov axis's own cold-start
+# prior permanently inert in production (same footgun class
+# test_phase44_mac_vendor_and_device_type.py already guards elsewhere).
+store8._conn.execute(
+    "INSERT INTO population_priors (device_type, metric, hour, model_kind, posterior_params_json, updated_at) "
+    "VALUES ('iot', 'activity_state', 0, 'markov', ?, ?)",
+    (json.dumps({"states": ["NORMAL", "RECON"], "pseudo_count": 0.5,
+                  "counts1": {"NORMAL": {"RECON": 5.0}}, "counts2": {}}), NOW8),
+)
+store8._conn.commit()
+device_markov_meta_only = "dev_markov_meta_only"
+store8._conn.execute(
+    "INSERT INTO devices (device_id, device_type, first_seen, last_seen, metadata_json) "
+    "VALUES (?, NULL, ?, ?, ?)",
+    (device_markov_meta_only, NOW8, NOW8, json.dumps({"device_type": "iot"})),
+)
+store8._conn.commit()
+markov_loaded = engine8._load_markov(device_markov_meta_only, "activity_state")
+check("PHASE 8 BUGFIX: _load_markov()'s cold-start prior lookup now checks "
+      "metadata_json first (matching every other axis's _seeded_model() call), "
+      "not just the raw devices.device_type COLUMN which is NULL in production",
+      markov_loaded.counts1.get("NORMAL", {}).get("RECON") == 5.0,
+      f"got counts1={markov_loaded.counts1}")
+
+store8.close()
 
 
 print()

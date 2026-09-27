@@ -229,6 +229,51 @@ CREATE TABLE IF NOT EXISTS population_priors (
     PRIMARY KEY (device_type, metric, hour)
 );
 
+-- Behavioral cohort membership (Phase 8, autonomy-completion effort) -- a per-
+-- device grouping DISTINCT from device_type, derived purely from this
+-- device's OWN already-tracked behavioral statistics (device_baselines), not
+-- from any user-set/self-reported category or household-specific rule. Exists
+-- to let cohort_priors below pool devices by behavioral similarity for
+-- devices with no device_type (or an "unknown" one) -- see
+-- population_prior_builder.py's _compute_behavioral_cohorts() for the exact
+-- bucketing algorithm and its honest first-pass scope.
+CREATE TABLE IF NOT EXISTS device_cohort_membership (
+    device_id   TEXT PRIMARY KEY REFERENCES devices(device_id),
+    cohort_key  TEXT NOT NULL,
+    joined_at   REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
+
+-- Tracks the most recent identity-changing merge for a device (an orphan's
+-- history folded into it via GraphStore.merge_device()) -- "days since last
+-- identity change" is `now - last_identity_change_at`. Used as an ADDITIONAL
+-- contributor-eligibility gate for cohort pooling only (a frequently-
+-- remerged device's own historical baseline may span more than one physical
+-- device, an unusually risky contributor for a coarse cross-device pool) --
+-- deliberately NOT applied retroactively to the existing device_type
+-- pooling above, a narrower scope for this phase.
+CREATE TABLE IF NOT EXISTS device_identity_stability (
+    device_id                TEXT PRIMARY KEY REFERENCES devices(device_id),
+    last_identity_change_at  REAL NOT NULL
+);
+
+-- Population priors pooled by BEHAVIORAL COHORT instead of device_type --
+-- same shape as population_priors above, read ONLY as a fallback when no
+-- device_type-scoped prior exists yet (baseline/engine.py's
+-- _seeded_model()/_load_markov()), never overriding a working device_type
+-- prior. Gaussian/beta/poisson only (cohort-scoped Markov pooling is an
+-- honest, documented scope limit -- not built this phase).
+CREATE TABLE IF NOT EXISTS cohort_priors (
+    cohort_key             TEXT NOT NULL,
+    metric                 TEXT NOT NULL,
+    hour                   INTEGER NOT NULL,
+    model_kind             TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson')),
+    posterior_params_json  TEXT NOT NULL DEFAULT '{}',
+    contributed_by_json    TEXT NOT NULL DEFAULT '[]',
+    updated_at              REAL NOT NULL,
+    PRIMARY KEY (cohort_key, metric, hour)
+);
+
 -- CL-AFPE's trust key (Sheet 03) -- the six-dimensional composite key, a dedicated
 -- table rather than the generic `edges` table, matching this file's own established
 -- "generic edges + dedicated concept table" split (same reasoning already applied to

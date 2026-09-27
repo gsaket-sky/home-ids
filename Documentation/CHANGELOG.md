@@ -9,6 +9,30 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.14.0] - 2026-09-27
+
+Phase 8 of the full 16-parameter autonomous-tuning effort: behavioral cohorts,
+a per-device grouping distinct from `device_type`, for pooling cold-start
+statistics on devices with no `device_type` set at all (the common case in
+production). The plan's own pointer to reuse an existing behavior-fingerprint
+signal was checked directly against the real code and didn't fit -- that
+signal turned out to be a coarse, shared per-evidence-cycle label, not a
+per-device behavioral signature. Built a genuinely new cohort key instead,
+derived purely from each device's own already-tracked traffic statistics
+(query rate, DNS entropy, unique domains queried), using population-relative
+tertile bucketing so it stays honest across any network's real traffic
+volumes, never a fixed number tuned to one household. A real bucketing bug
+(value-cutoff based, not rank-based) was found and fixed via this phase's own
+test coverage before it ever shipped. Also closed an unrelated, real bug
+found while extending this same cold-start path: the Markov activity-state
+axis's own device-type prior lookup only checked one of two places a
+device's type can live, silently making it permanently inert in production.
+Cohort priors are strictly a fallback -- read only when no device-type prior
+exists, never overriding one that does. New identity-stability tracking
+(days since a device's last identity-changing merge) gates which devices may
+contribute to a cohort's pooled statistics, so a frequently re-identified
+device can't quietly corrupt a shared pool.
+
 ## [v16.13.0] - 2026-09-27
 
 Phase 7 of the full 16-parameter autonomous-tuning effort, the largest net-new

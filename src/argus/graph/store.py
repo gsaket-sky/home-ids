@@ -499,6 +499,29 @@ class GraphStore:
             );
             CREATE INDEX IF NOT EXISTS idx_shadow_decisions_change ON shadow_decisions(change_id, timestamp);
             CREATE INDEX IF NOT EXISTS idx_shadow_decisions_timestamp ON shadow_decisions(timestamp);
+
+            -- Phase 8 of the autonomy-completion effort (2026-09-27) -- kept in exact
+            -- sync with schema.sql's own copy of these 3 tables; extend both together.
+            CREATE TABLE IF NOT EXISTS device_cohort_membership (
+                device_id   TEXT PRIMARY KEY REFERENCES devices(device_id),
+                cohort_key  TEXT NOT NULL,
+                joined_at   REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS device_identity_stability (
+                device_id                TEXT PRIMARY KEY REFERENCES devices(device_id),
+                last_identity_change_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS cohort_priors (
+                cohort_key             TEXT NOT NULL,
+                metric                 TEXT NOT NULL,
+                hour                   INTEGER NOT NULL,
+                model_kind             TEXT NOT NULL CHECK (model_kind IN ('gaussian','beta','poisson')),
+                posterior_params_json  TEXT NOT NULL DEFAULT '{}',
+                contributed_by_json    TEXT NOT NULL DEFAULT '[]',
+                updated_at              REAL NOT NULL,
+                PRIMARY KEY (cohort_key, metric, hour)
+            );
             """
         )
         # alert_event_id on containment_actions predates this column on any db created
@@ -744,7 +767,63 @@ class GraphStore:
             (canonical_id, orphan_id),
         )
         self.add_edge("device", orphan_id, "device", canonical_id, "merged_into", ts)
+        # Phase 8 (behavioral cohorts, autonomy-completion effort): every real
+        # identity-merge call site (core/identity.py's real-time path,
+        # pipeline.py's periodic reconciliation worker, merge_fragmented_devices.py)
+        # already mirrors here -- one stamp catches "this device's identity just
+        # changed" for all of them, no new call sites needed. Read via
+        # get_identity_stable_days().
+        self._conn.execute(
+            "INSERT INTO device_identity_stability (device_id, last_identity_change_at) VALUES (?, ?) "
+            "ON CONFLICT(device_id) DO UPDATE SET last_identity_change_at=excluded.last_identity_change_at",
+            (canonical_id, ts),
+        )
         self._maybe_commit()
+
+    def get_identity_stable_days(self, device_id: str, now: Optional[float] = None) -> Optional[float]:
+        """Days since this device's last identity-changing merge (an orphan folded
+        into it via merge_device()). None if it has never been through a merge --
+        callers should treat that as 'no signal either way' (never merged is not
+        the same claim as 'confirmed stable'), not as maximally stable."""
+        row = self._conn.execute(
+            "SELECT last_identity_change_at FROM device_identity_stability WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        ts = now if now is not None else time.time()
+        return (ts - row["last_identity_change_at"]) / 86400.0
+
+    def upsert_device_cohort_membership(self, device_id: str, cohort_key: str, now: float) -> None:
+        """Behavioral-cohort assignment (Phase 8, autonomy-completion effort) --
+        joined_at only resets when cohort_key actually changes from what's already
+        stored, so 'how long has this device been in its current cohort' stays a
+        meaningful signal across nightly recomputation, not reset every run."""
+        row = self._conn.execute(
+            "SELECT cohort_key FROM device_cohort_membership WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        if row is not None and row["cohort_key"] == cohort_key:
+            self._conn.execute(
+                "UPDATE device_cohort_membership SET updated_at = ? WHERE device_id = ?",
+                (now, device_id),
+            )
+        else:
+            self._conn.execute(
+                "INSERT INTO device_cohort_membership (device_id, cohort_key, joined_at, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(device_id) DO UPDATE SET cohort_key=excluded.cohort_key, "
+                "joined_at=excluded.joined_at, updated_at=excluded.updated_at",
+                (device_id, cohort_key, now, now),
+            )
+        self._maybe_commit()
+
+    def get_device_cohort_key(self, device_id: str) -> Optional[str]:
+        row = self._conn.execute(
+            "SELECT cohort_key FROM device_cohort_membership WHERE device_id = ?",
+            (device_id,),
+        ).fetchone()
+        return row["cohort_key"] if row is not None else None
 
     # --- destinations --------------------------------------------------------
 

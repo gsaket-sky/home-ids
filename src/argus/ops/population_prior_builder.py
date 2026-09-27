@@ -115,6 +115,17 @@ _POOL_MARKOV_MAX_TOTAL = 50.0  # cap on summed real transition counts, scaled do
 
 _CONTINUOUS_MODEL_KINDS = ("gaussian", "beta", "poisson")
 
+# Phase 8 (behavioral cohorts, autonomy-completion effort, 2026-09-27): a per-device
+# grouping DISTINCT from device_type, for pooling devices with no device_type (or an
+# "unknown" one) -- see _compute_behavioral_cohorts()'s own docstring for the exact
+# algorithm and its honest first-pass scope. Metrics are deliberately generic, already-
+# tracked traffic statistics only -- never anything household-specific
+# ([[feedback_network_agnostic_design]]).
+_COHORT_METRICS = ("query_rate", "entropy_avg", "unique_domains")
+_COHORT_BUCKET_COUNT = 3  # low/med/high, population-relative tertiles
+_COHORT_MIN_DEVICES_FOR_BUCKETING = 6  # below this, a tertile split is statistically meaningless
+_COHORT_MIN_STABLE_DAYS = 7.0  # additional contributor-eligibility gate for cohort pooling only
+
 
 def _device_is_currently_clean(store: GraphStore, device_id: str) -> bool:
     """Same 'currently clean' concept baseline/engine.py's own is_learning_paused()
@@ -165,6 +176,136 @@ def _device_type_map(store: GraphStore) -> Dict[str, str]:
         if dtype:
             out[row["device_id"]] = dtype
     return out
+
+
+def _compute_behavioral_cohorts(store: GraphStore, now: float) -> Dict[str, str]:
+    """Assigns each eligible device a behavioral-cohort key, DISTINCT from
+    device_type, derived purely from this device's OWN already-learned per-metric
+    statistics (device_baselines) -- never from a user-set/self-reported category,
+    and never from any household-specific rule (only generic, already-tracked
+    traffic statistics: query_rate/entropy_avg/unique_domains). Honest first-pass,
+    same framing as this module's own pool_* dispersion-ratio heuristic:
+    population-RELATIVE tertile buckets (low/med/high vs. the CURRENT population's
+    own spread), not fixed absolute thresholds -- required for network-agnosticism
+    ([[feedback_network_agnostic_design]]): a household with heavy DNS traffic and
+    one with light traffic both get a genuine low/med/high split relative to
+    themselves, never a number hand-tuned to any one network's real volumes.
+
+    Requires real per-device data on ALL _COHORT_METRICS (an incomplete device
+    gets no cohort_key at all, not a guessed one -- the same "no signal, no
+    fallback category" principle test_phase44_mac_vendor_and_device_type.py
+    already guards for infer_device_type()) and a real population of at least
+    _COHORT_MIN_DEVICES_FOR_BUCKETING devices -- too few devices makes a tertile
+    split statistically meaningless, not just noisy.
+
+    Persists to device_cohort_membership (GraphStore.upsert_device_cohort_membership()
+    -- joined_at only resets if the computed cohort_key actually changed from last
+    run, so "how long has this device been in its current cohort" stays a
+    meaningful signal across nightly recomputation, not reset every run)."""
+    rows = store._conn.execute(
+        "SELECT device_id, metric, n, posterior_params_json FROM device_baselines "
+        "WHERE model_kind = 'gaussian' AND metric IN (?, ?, ?)",
+        _COHORT_METRICS,
+    ).fetchall()
+
+    # Weighted mean per (device_id, metric) across every hour/regime bucket --
+    # weighted by each row's own real sample count, not a flat average of
+    # already-decayed per-hour means.
+    weighted: Dict[Tuple[str, str], List[Tuple[float, float]]] = {}
+    for row in rows:
+        n = row["n"] or 0
+        if n < _MIN_N_TO_CONTRIBUTE:
+            continue
+        try:
+            params = json.loads(row["posterior_params_json"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        mu = params.get("mu")
+        if mu is None:
+            continue
+        weighted.setdefault((row["device_id"], row["metric"]), []).append((float(mu), float(n)))
+
+    device_metric_mean: Dict[str, Dict[str, float]] = {}
+    for (device_id, metric), samples in weighted.items():
+        total_n = sum(n for _, n in samples)
+        if total_n <= 0:
+            continue
+        device_metric_mean.setdefault(device_id, {})[metric] = (
+            sum(mu * n for mu, n in samples) / total_n
+        )
+
+    # Only devices with a real value on ALL 3 metrics get a cohort key -- an
+    # incomplete profile gets none, not a guessed partial one.
+    complete_devices = {
+        device_id: means for device_id, means in device_metric_mean.items()
+        if all(m in means for m in _COHORT_METRICS)
+    }
+    if len(complete_devices) < _COHORT_MIN_DEVICES_FOR_BUCKETING:
+        return {}
+
+    # Population-relative tertile buckets per metric, computed fresh from THIS
+    # run's own population -- each device gets a bucket by its OWN RANK among all
+    # devices for that metric, never a fixed absolute number. Deliberately
+    # rank-based, not a value-cutoff-based split (an earlier version drew cutoffs
+    # from specific rank's VALUES, e.g. cutoff = values[4]; with real, noisy
+    # per-device means this could split two near-identical devices across
+    # adjacent buckets purely because one of them straddled that exact boundary
+    # value -- found via this module's own test coverage before it ever shipped).
+    # Rank-based bucketing has no such boundary-value ambiguity: two devices
+    # ranked next to each other only ever land in different buckets when the
+    # bucket-size arithmetic actually calls for a new bucket to start.
+    bucket_by_device: Dict[str, Dict[str, int]] = {device_id: {} for device_id in complete_devices}
+    for metric in _COHORT_METRICS:
+        ranked_ids = sorted(complete_devices.keys(), key=lambda d: complete_devices[d][metric])
+        total = len(ranked_ids)
+        for rank, device_id in enumerate(ranked_ids):
+            bucket_by_device[device_id][metric] = min(
+                int(rank * _COHORT_BUCKET_COUNT / total), _COHORT_BUCKET_COUNT - 1)
+
+    cohort_map: Dict[str, str] = {}
+    for device_id, buckets in bucket_by_device.items():
+        parts = [f"{metric}:{buckets[metric]}" for metric in sorted(_COHORT_METRICS)]
+        cohort_map[device_id] = "|".join(parts)
+
+    for device_id, cohort_key in cohort_map.items():
+        store.upsert_device_cohort_membership(device_id, cohort_key, now)
+
+    return cohort_map
+
+
+def _device_identity_stable_enough(store: GraphStore, device_id: str, now: float) -> bool:
+    """Additional contributor-eligibility gate for COHORT pooling only (not applied
+    to the existing device_type pooling above -- a deliberately narrower scope for
+    this phase). A device with NO identity-stability row at all (never been through
+    a merge) is treated as eligible -- 'never merged' carries no instability signal,
+    it just means no signal either way."""
+    stable_days = store.get_identity_stable_days(device_id, now)
+    return stable_days is None or stable_days >= _COHORT_MIN_STABLE_DAYS
+
+
+def _write_cohort_prior(store: GraphStore, cohort_key: str, metric: str, hour: int,
+                          model_kind: str, posterior_params: dict, contributor_ids: List[str],
+                          now: float) -> None:
+    store._conn.execute(
+        "INSERT INTO cohort_priors "
+        "(cohort_key, metric, hour, model_kind, posterior_params_json, contributed_by_json, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(cohort_key, metric, hour) DO UPDATE SET "
+        "model_kind=excluded.model_kind, posterior_params_json=excluded.posterior_params_json, "
+        "contributed_by_json=excluded.contributed_by_json, updated_at=excluded.updated_at",
+        (cohort_key, metric, hour, model_kind, json.dumps(posterior_params),
+         json.dumps(sorted(contributor_ids)), now),
+    )
+    store._maybe_commit()
+
+
+def _delete_cohort_prior_if_present(store: GraphStore, cohort_key: str, metric: str, hour: int) -> bool:
+    cur = store._conn.execute(
+        "DELETE FROM cohort_priors WHERE cohort_key=? AND metric=? AND hour=?",
+        (cohort_key, metric, hour),
+    )
+    store._maybe_commit()
+    return cur.rowcount > 0
 
 
 def _eligible_contributors(store: GraphStore, device_ids: List[str], metric: str, hour: int,
@@ -577,12 +718,70 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
             )
             failed += 1
 
+    # Phase 8 (behavioral cohorts, autonomy-completion effort): a SEPARATE pooling
+    # pass, keyed by behavioral cohort instead of device_type -- read ONLY as a
+    # fallback by baseline/engine.py's _seeded_model()/_load_markov() when no
+    # device_type prior exists, never overriding one that does. Gaussian/beta/
+    # poisson only (see cohort_priors' own schema comment for why Markov cohort
+    # pooling isn't built this phase). Deliberately does NOT use the autotune-
+    # tunable pool_* pseudo-counts above (those are category/device_type-scoped
+    # parameters from the original 16-parameter plan; inventing new cohort-scoped
+    # tunables is outside that closed set) -- fixed module defaults only, an
+    # honest, documented scope limit for this first pass.
+    cohort_map = _compute_behavioral_cohorts(store, now)
+    cohorts_computed = len(cohort_map)
+    if cohort_map:
+        cohort_raw_rows = store._conn.execute(
+            "SELECT DISTINCT device_id, metric, hour, model_kind FROM device_baselines "
+            "WHERE model_kind IN ('gaussian', 'beta', 'poisson')"
+        ).fetchall()
+        cohort_groups_seen: Dict[Tuple[str, str, int, str], List[str]] = {}
+        for row in cohort_raw_rows:
+            cohort_key = cohort_map.get(row["device_id"])
+            if not cohort_key:
+                continue
+            key = (cohort_key, row["metric"], row["hour"], row["model_kind"])
+            cohort_groups_seen.setdefault(key, []).append(row["device_id"])
+
+        for (cohort_key, metric, hour, model_kind), device_ids in cohort_groups_seen.items():
+            try:
+                contributors = _eligible_contributors(store, device_ids, metric, hour, model_kind)
+                contributors = [
+                    (dev_id, params) for dev_id, params in contributors
+                    if _device_identity_stable_enough(store, dev_id, now)
+                ]
+                if len(contributors) < _MIN_CONTRIBUTORS:
+                    skipped_insufficient += 1
+                    if _delete_cohort_prior_if_present(store, cohort_key, metric, hour):
+                        removed_stale += 1
+                    continue
+                if model_kind == "gaussian":
+                    pooled = _pool_gaussian(contributors)
+                elif model_kind == "beta":
+                    pooled = _pool_beta(contributors)
+                elif model_kind == "poisson":
+                    pooled = _pool_poisson(contributors)
+                else:
+                    continue
+                _write_cohort_prior(
+                    store, cohort_key, metric, hour, model_kind, pooled,
+                    [dev_id for dev_id, _ in contributors], now)
+                written += 1
+            except Exception:
+                LOGGER.exception(
+                    "Failed to build cohort prior for cohort_key=%r metric=%r hour=%r "
+                    "model_kind=%r (non-fatal, continuing with the next group)",
+                    cohort_key, metric, hour, model_kind,
+                )
+                failed += 1
+
     return {
         "written": written,
         "skipped_insufficient_contributors": skipped_insufficient,
         "removed_stale": removed_stale,
         "failed": failed,
         "groups_considered": len(groups_seen) + len(markov_groups_seen),
+        "cohorts_computed": cohorts_computed,
     }
 
 
@@ -599,9 +798,10 @@ def main() -> None:
     LOGGER.info(
         "Population prior build complete: %d pool(s) written, %d skipped (too few "
         "eligible contributors), %d stale pool(s) removed, %d failed, %d group(s) "
-        "considered.",
+        "considered, %d device(s) assigned a behavioral cohort.",
         result["written"], result["skipped_insufficient_contributors"],
         result["removed_stale"], result["failed"], result["groups_considered"],
+        result["cohorts_computed"],
     )
 
     # Same heartbeat convention as every other argus/ops/*.py scheduled job (see

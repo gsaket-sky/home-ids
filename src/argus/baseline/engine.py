@@ -392,10 +392,23 @@ class BaselineEngine:
         a brand-new device's very first model) starts from the device-type
         population prior instead of a flat, uninformative default -- the
         concrete mechanism that makes adding a new device to a plug-and-
-        forget deployment safe from cycle one."""
+        forget deployment safe from cycle one.
+
+        PHASE 8 (behavioral cohorts, autonomy-completion effort): when no
+        device_type prior exists at all (the common case in production --
+        device_type is user-set/self-reported and NULL for most real devices,
+        see population_prior_builder.py's own _device_type_map() docstring),
+        falls back to this device's own BEHAVIORAL cohort prior instead --
+        still real, still device-type-independent, purely additive coverage
+        for devices that otherwise get zero cold-start benefit. Never
+        overrides a working device_type prior when one exists."""
         device_type = self.store.get_device_metadata(device_id).get("device_type") \
             or self._device_type_column(device_id)
         prior = self._load_population_prior(device_type, metric, hour)
+        if prior is None:
+            cohort_key = self._device_cohort_key(device_id)
+            if cohort_key:
+                prior = self._load_cohort_prior(cohort_key, metric, hour)
         if prior is not None:
             return model_cls.from_dict(prior)
         return model_cls()
@@ -406,11 +419,23 @@ class BaselineEngine:
         ).fetchone()
         return row["device_type"] if row is not None else None
 
+    def _device_cohort_key(self, device_id: str) -> Optional[str]:
+        return self.store.get_device_cohort_key(device_id)
+
     def _load_population_prior(self, device_type: Optional[str], metric: str, hour: int) -> Optional[dict]:
         pool_type = device_type or "__unknown__"
         row = self.store._conn.execute(
             "SELECT posterior_params_json FROM population_priors WHERE device_type=? AND metric=? AND hour=?",
             (pool_type, metric, hour),
+        ).fetchone()
+        if row is None:
+            return None
+        return json.loads(row["posterior_params_json"])
+
+    def _load_cohort_prior(self, cohort_key: str, metric: str, hour: int) -> Optional[dict]:
+        row = self.store._conn.execute(
+            "SELECT posterior_params_json FROM cohort_priors WHERE cohort_key=? AND metric=? AND hour=?",
+            (cohort_key, metric, hour),
         ).fetchone()
         if row is None:
             return None
@@ -622,8 +647,22 @@ class BaselineEngine:
         ).fetchone()
         if row is not None:
             return MarkovBaseline.from_dict(json.loads(row["posterior_params_json"]))
-        device_type = self._device_type_column(device_id)
+        # BUGFIX (Phase 8, behavioral cohorts, found while extending this same
+        # cold-start path): this used to read ONLY the raw devices.device_type SQL
+        # column, skipping metadata_json -- the same class of footgun
+        # population_prior_builder.py's _device_type_map() docstring already
+        # documents (the column is NULL for every real device on `.94`; the live
+        # pipeline only ever writes device_type into metadata_json). That silently
+        # made the Markov axis's own device-type cold-start prior permanently
+        # inert in production, unlike every other axis's _seeded_model() call,
+        # which already checked metadata_json first.
+        device_type = self.store.get_device_metadata(device_id).get("device_type") \
+            or self._device_type_column(device_id)
         prior = self._load_population_prior(device_type, axis, hour=0)
+        if prior is None:
+            cohort_key = self._device_cohort_key(device_id)
+            if cohort_key:
+                prior = self._load_cohort_prior(cohort_key, axis, hour=0)
         if prior is not None:
             return MarkovBaseline.from_dict(prior)
         return MarkovBaseline(ACTIVITY_STATES if axis == "activity_state" else [])
