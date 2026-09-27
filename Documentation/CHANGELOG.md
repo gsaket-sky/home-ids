@@ -9,6 +9,35 @@ All notable changes to the Home IDS project will be documented in this file.
 > `Documentation/ARGUS_DECISIONS.md` describe where it all landed. Entries resume below
 > from `v16.1.0` onward.
 
+## [v16.10.0] - 2026-09-27
+
+Phase 4 of the full 16-parameter autonomous-tuning effort, completing it:
+`trust_cache_ttl_seconds`, `reputation_propagation_ttl_seconds`, and the 4
+`pool_*` population-prior pseudo-counts were the last hardcoded constants with
+zero autotune wiring — all 6 now have real consumption call sites and real
+forward generators. The two TTL parameters are mirror-image asymmetric (one
+tighten-only on a single confirmed "trust blindness" incident, one loosen-only
+gated by a sample floor); a real sign error in the loosen generator — computed
+the tighten formula for loosen-direction evidence, moving the parameter the
+wrong way — was caught by this phase's own test suite before it shipped, not by
+review. The 4 population-prior parameters use a first-pass between/within-device
+dispersion-ratio heuristic, explicitly documented as a simpler proxy than the
+fully rigorous statistical calibration the source plan's evidence description
+implies. Deployed and verified live on `.94` same day.
+
+## [v16.9.0] - 2026-09-27
+
+Phase 3 of the full 16-parameter autonomous-tuning effort:
+`peer_deviation_multiplier`, `peer_deviation_min_absolute_count`,
+`combined_uncertain_threshold`, and `familiarity_trust_bar` were hardcoded
+constants with zero autotune wiring — all 4 now have real consumption call
+sites and real (honestly loosen-only, where that's all the real evidence
+supports) forward generators. Also fixed a real, independently-discovered drift
+risk in the LLM-review validator: it read a hypothesis class's trust-bar
+constant directly instead of the per-device autotuned value, a gap the
+module's own docstring had already warned about. Deployed and verified live on
+`.94` same day.
+
 ## [v16.8.0] - 2026-09-27
 
 Phase 2 of the full 16-parameter autonomous-tuning effort: the reactive-capture
