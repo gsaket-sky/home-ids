@@ -31,7 +31,7 @@ Cohort priors are strictly a fallback -- read only when no device-type prior
 exists, never overriding one that does. New identity-stability tracking
 (days since a device's last identity-changing merge) gates which devices may
 contribute to a cohort's pooled statistics, so a frequently re-identified
-device can't quietly corrupt a shared pool.
+device can't quietly corrupt a shared pool. Deployed and verified live on `.94` same day (clean boot, zero restarts, 45 real devices assigned a behavioral cohort on the first manual run against production data).
 
 ## [v16.13.0] - 2026-09-27
 
