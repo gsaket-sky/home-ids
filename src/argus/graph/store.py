@@ -1752,23 +1752,42 @@ class GraphStore:
         (matches get_distinct_destination_count()'s own read-time filtering, kept
         symmetric with insert_evidence()'s write-everything/filter-on-read
         convention) -- a future consumer wanting the unfiltered picture doesn't
-        need a second write path."""
+        need a second write path.
+
+        BUGFIX (2026-09-28, live root-cause investigation): this used to call
+        upsert_device() once and upsert_destination() once PER destination_id
+        OUTSIDE self.transaction() -- each of those commits on its own
+        (_maybe_commit()'s documented behavior when not already inside a
+        transaction), so a single device with N destinations this cycle cost N+2
+        individual synchronous SQLite commits, on the live pipeline's own MainThread,
+        every ~2s poll cycle, for every device with new/updated traffic. A live
+        py-spy capture caught MainThread blocked inside get_distinct_destination_
+        count()'s own SELECT waiting out PRAGMA busy_timeout -- this write pattern
+        is the most direct explanation: many more, smaller commits than necessary
+        means many more chances for a concurrent reader/writer (the metrics
+        exporter's own thread, a scheduled job subprocess) to be holding the lock
+        at exactly the moment this method (or the read right after it) needs it.
+        Wrapping the whole method in self.transaction() reduces this to exactly ONE
+        commit per call, matching the documented reason transaction() exists
+        (its own docstring: "a whole poll cycle's writes... cost one commit instead
+        of the ~4-per-item cost") -- this call site had simply never been moved onto
+        it."""
         ts = timestamp if timestamp is not None else time.time()
         if not destination_ids:
             return
-        self.upsert_device(device_id, timestamp=ts)
-        for dest_id in destination_ids:
-            if not dest_id or dest_id == NO_DESTINATION:
-                continue
-            dest_kind = "ip" if _looks_like_ip(dest_id) else "domain"
-            self.upsert_destination(dest_id, dest_kind, timestamp=ts)
-            self._conn.execute(
-                "INSERT INTO device_destinations (device_id, destination_id, first_seen, last_seen) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(device_id, destination_id) DO UPDATE SET last_seen = excluded.last_seen",
-                (device_id, dest_id, ts, ts),
-            )
-        self._maybe_commit()
+        with self.transaction():
+            self.upsert_device(device_id, timestamp=ts)
+            for dest_id in destination_ids:
+                if not dest_id or dest_id == NO_DESTINATION:
+                    continue
+                dest_kind = "ip" if _looks_like_ip(dest_id) else "domain"
+                self.upsert_destination(dest_id, dest_kind, timestamp=ts)
+                self._conn.execute(
+                    "INSERT INTO device_destinations (device_id, destination_id, first_seen, last_seen) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(device_id, destination_id) DO UPDATE SET last_seen = excluded.last_seen",
+                    (device_id, dest_id, ts, ts),
+                )
 
     def get_distinct_destination_count(self, device_id: str, since: float) -> int:
         """Release 14, N2: the behavioral metric peer-cohort baselining compares

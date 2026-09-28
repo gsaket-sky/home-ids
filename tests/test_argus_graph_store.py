@@ -720,6 +720,30 @@ check("prune_device_destinations deletes rows older than the retention window",
 check("prune_device_destinations actually removes the pruned rows -- count drops to 0",
       store.get_distinct_destination_count("n2_dev_rt", since=0.0) == 0)
 
+# BUGFIX regression (2026-09-28, live root-cause investigation): record_device_
+# destinations() used to commit once per upsert_device() call PLUS once per
+# upsert_destination() call PLUS a final commit (N+2 commits for N destinations),
+# all outside self.transaction() -- a live py-spy capture caught the pipeline's
+# MainThread blocked inside get_distinct_destination_count()'s own SELECT waiting
+# out PRAGMA busy_timeout, and this write pattern (many more, smaller commits than
+# necessary, on the hot per-device-per-cycle path) was the most direct explanation.
+# Now wrapped in self.transaction() -- must commit exactly ONCE per call.
+executed_sql = []
+store._conn.set_trace_callback(executed_sql.append)
+try:
+    store.record_device_destinations(
+        "n2_dev_commit_count",
+        ["e1.example.com", "e2.example.com", "e3.example.com", "e4.example.com"],
+        timestamp=9_400_000.0,
+    )
+finally:
+    store._conn.set_trace_callback(None)
+commit_calls = [s for s in executed_sql if s.strip().upper() == "COMMIT"]
+check("record_device_destinations commits exactly ONCE per call regardless of how "
+      "many destinations it records (used to commit N+2 times before being wrapped "
+      "in self.transaction())",
+      len(commit_calls) == 1, f"got {len(commit_calls)} commits")
+
 # --- prune_orphaned_device_baselines (2026-09-20, identity-merge handover follow-up:
 # the concrete cleanup half of the device_baselines 89-vs-13-device_id anomaly) ---
 store.upsert_device("pb_orphan1", timestamp=9_500_000.0)
