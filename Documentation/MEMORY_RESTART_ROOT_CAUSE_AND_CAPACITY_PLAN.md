@@ -27,11 +27,61 @@ devices sharing one cache window, including the subtle case where the second
 device correctly sees the first as a peer since its write already committed --
 identical to what an uncached scan would also have seen at that point). Full
 `tests/test_real_world_alert_regression.py` suite also re-run, all passing
-(this touches an evidence-injection hot path). NOT yet deployed/verified live
-on `.94` -- per standing rule, needs fresh explicit confirmation before any
-SSH/restart action. Once deployed, re-check `collector_lag_seconds` against
-this doc's own 2.0s `poll_interval` target and the ~1.9-4.2s post-Bug-4
-baseline recorded below, to see how much of the residual gap this closes.
+(this touches an evidence-injection hot path).
+
+**DEPLOYED + LIVE-VERIFIED same session** (user confirmed commit, then
+deploy+restart, individually): pushed as commit `f33e39b`, pulled into the
+`.94` deploy checkout (`~/myscripts/home-ids/SOC`, a separate git remote --
+`home_ids_deploy` -- from this dev machine's `home_ids`), `soc.service`
+restarted cleanly (`journalctl` shows no errors attributable to this change).
+5 repeated `py-spy dump --nonblocking` snapshots of the live `MainThread`
+post-deploy never once caught `get_device_type_cohorts`/
+`get_devices_with_metadata_value` executing -- consistent with the cache
+working as designed (the whole point was to make this call rare enough that a
+live snapshot is unlikely to catch it mid-execution, unlike Bug 4's
+`is_local_or_multicast_destination`, which WAS caught repeatedly before its
+own fix).
+
+**Honest result on `collector_lag_seconds` itself: inconclusive as a single
+number, but informative.** Queried Prometheus directly (`.94` runs it
+locally, `curl http://127.0.0.1:9090/api/v1/query_range`) for real before/after
+data around the actual restart (17:39:30 CEST) rather than trusting the
+older, possibly-stale ~1.9-4.2s figure recorded earlier in this doc: the
+~33min PRE-restart window (17:06-17:39, OLD code) averaged ~4.4s with one
+9.8s spike; the ~11min POST-restart window (17:39-17:50, NEW code) averaged
+~3.8s with no spike that large in that shorter window -- a modest, not
+dramatic, improvement, and too short a window to call definitively causal.
+5 repeated direct `py-spy` snapshots after the restart caught the MainThread
+in 5 DIFFERENT real query call sites (`get_evidence_for_device`,
+`get_devices_targeting`, `get_latest_decision_for_device`,
+`dns_features.compute`, JSON deserialization) -- confirming this fix's own
+premise (get_devices_with_metadata_value was A real cost) but also showing
+the residual lag is now genuinely DIFFUSE across many per-device GraphStore
+read paths, not concentrated in one obvious next call site the way Bugs 2/4
+were. **Conclusion: this fix is correct, verified, safe, and real, but should
+not be expected to single-handedly close the gap to the 2.0s poll_interval
+target -- a future session chasing more of this residual lag should expect to
+need broader restructuring (e.g. batching per-cycle queries across all
+devices at once, rather than one-by-one), not another single hot function.**
+
+**Separate, NEW finding while gathering this comparison, NOT investigated
+further this session -- flag for next session:** Prometheus history showed a
+much more severe, SUSTAINED 15-18s `collector_lag_seconds` spike from
+~15:50-16:12 CEST the same day (over an hour before this fix's own restart,
+unrelated to it), correlating in `journalctl` with
+`reactive_capture_max_bytes_per_hour` (500MB) being exhausted and a rapid,
+repeated burst of `[DEFERRED]` `dns_suspicion`/`spotcheck` capture triggers
+interleaved with many `PEER_COHORT_DEVIATION` escalation warnings -- high
+real event volume, not an obvious code bug, but never root-caused. Also
+found while checking this: **9 `soc.service` restarts happened on `.94`
+TODAY alone** (2026-09-28) before this session's own deploy restart -- sudo
+audit log (`/var/log/auth.log`) confirms 8 of the 9 were manual
+`sudo systemctl restart soc.service` commands from this same dev PC (not
+health_manager self-heals), matching the EXACT pattern already diagnosed as
+"Bug 1" below (not a new bug -- see that section). The 1 unaccounted-for
+restart (03:40:25 CEST) has no matching audit-log entry and was not checked
+further -- possibly the one genuine self-heal of the day, per Bug 1's own
+"usually ~1 real one" finding, but not confirmed.
 
 **Status (2026-09-28, HANDOVER — read this first): user reported "since adding
 health manager, the script keeps getting restarted frequently" and separately
