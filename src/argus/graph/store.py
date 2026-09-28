@@ -2053,10 +2053,29 @@ class GraphStore:
         never yet evaluated), not an error.
 
         Excludes merged_into_device_id IS NOT NULL rows -- an orphaned identity that
-        was merged into a canonical device_id shouldn't double-list alongside it."""
+        was merged into a canonical device_id shouldn't double-list alongside it.
+
+        BUGFIX (2026-09-28, console "unidentified devices" investigation): d.device_type
+        was being returned straight from the devices table's own COLUMN, which nothing
+        on the live per-cycle write path ever populates -- confirmed live: 0 of 152 real
+        devices on .94 had it set. The real value lives in metadata_json['device_type']
+        (written by live_engine.py's _inject_peer_deviation_evidence(), same field
+        get_devices_with_metadata_value()/get_device_type_cohorts() above already read
+        from) -- this method just wasn't looking there, so the console silently lost a
+        device_type it actually had on record for any device StateManager's own live
+        identity cache had since aged out (confirmed live: 3225e9d4690a/c7ede3867502
+        tagged "server", d12bf8b7dd2b tagged "iot" in metadata_json, all showing
+        "unknown" in the console before this fix). metadata_json wins when both are
+        present; the column is kept as a fallback for the one batch job
+        (population_prior_builder.py) that does write it directly. display_label has
+        the same "nothing populates it" gap (see live_retro_hunter.py's own comment)
+        but no metadata_json equivalent to recover it from, so it's left as-is --
+        hostname resolution already has a separate, working source (StateManager) at
+        the API layer."""
         rows = self._conn.execute(
             """
-            SELECT d.device_id, d.display_label, d.device_type, d.first_seen, d.last_seen,
+            SELECT d.device_id, d.display_label, d.device_type, d.metadata_json,
+                   d.first_seen, d.last_seen,
                    dec.decision_id, dec.state, dec.risk_score, dec.confidence,
                    dec.timestamp AS decision_timestamp
             FROM devices d
@@ -2068,7 +2087,17 @@ class GraphStore:
             ORDER BY dec.timestamp DESC
             """
         ).fetchall()
-        return [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            metadata_json = d.pop("metadata_json", None)
+            try:
+                meta = json.loads(metadata_json) if metadata_json else {}
+            except (TypeError, ValueError):
+                meta = {}
+            d["device_type"] = meta.get("device_type") or d["device_type"]
+            out.append(d)
+        return out
 
     def get_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,
                    src_id: Optional[str] = None, dst_kind: Optional[str] = None,

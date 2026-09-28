@@ -1277,6 +1277,39 @@ check("REGRESSION GUARD: no dangling edges left behind across the batched delete
       remaining_edges == 0, f"got {remaining_edges}")
 batch_store.close()
 
+# --- get_devices_with_latest_decision device_type fallback (2026-09-28, console
+# "unidentified devices" investigation -- BUGFIX: was reading the devices table's own
+# device_type COLUMN, which nothing on the live per-cycle write path ever populates;
+# the real value lives in metadata_json) ---
+ldd_dir = tempfile.mkdtemp(prefix="v13_graph_ldd_test_")
+ldd_store = GraphStore(str(_PathForSysPath(ldd_dir) / "test_latest_decision_device_type.db"))
+ldd_store.upsert_device("ldd_meta_only", timestamp=9_500_000.0)
+ldd_store.update_device_metadata("ldd_meta_only", {"device_type": "iot"}, timestamp=9_500_000.0)
+ldd_store.upsert_device("ldd_column_only", device_type="router", timestamp=9_500_000.0)
+ldd_store.upsert_device("ldd_neither", timestamp=9_500_000.0)
+ldd_store.upsert_device("ldd_both", device_type="camera", timestamp=9_500_000.0)
+ldd_store.update_device_metadata("ldd_both", {"device_type": "laptop"}, timestamp=9_500_000.0)
+
+ldd_rows = {r["device_id"]: r for r in ldd_store.get_devices_with_latest_decision()}
+check("THE FIX: a device with device_type ONLY in metadata_json (the real live shape "
+      "on .94 -- confirmed 0 of 152 real devices had the column set) now correctly "
+      "surfaces it, instead of falling through to 'unknown'",
+      ldd_rows["ldd_meta_only"]["device_type"] == "iot", f"got {ldd_rows['ldd_meta_only']['device_type']}")
+check("REGRESSION GUARD: a device with device_type ONLY in the column (the one real "
+      "writer, population_prior_builder.py) still works",
+      ldd_rows["ldd_column_only"]["device_type"] == "router")
+check("REGRESSION GUARD: a device with neither returns None, not a crash or a made-up "
+      "default -- callers (devices_api.py) already handle this with their own "
+      "'or \"unknown\"' fallback",
+      ldd_rows["ldd_neither"]["device_type"] is None)
+check("metadata_json wins when both the column AND metadata_json have a value -- "
+      "metadata_json is the one every live write path actually keeps current",
+      ldd_rows["ldd_both"]["device_type"] == "laptop", f"got {ldd_rows['ldd_both']['device_type']}")
+check("the raw metadata_json blob itself is not leaked into the returned row shape "
+      "(internal detail, not part of this method's documented contract)",
+      "metadata_json" not in ldd_rows["ldd_both"])
+ldd_store.close()
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")
