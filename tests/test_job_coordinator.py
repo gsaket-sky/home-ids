@@ -387,3 +387,59 @@ def test_reclaim_promotes_parked_job_and_reports_the_kill(tmp_path):
             if p.poll() is None:
                 p.terminate()
                 p.wait()
+
+
+# --- persisted starvation-backstop clock (2026-09-28 root-cause fix) -----------
+# live_prune (one cron slot/day) was silently deferred every night for a week
+# because the old in-memory `pending_since` dict in scheduler.py got wiped on
+# every soc.service restart, before its clock could ever reach the 60-minute
+# backstop. These functions move that clock into disk-persisted state so it
+# survives a scheduler.py restart.
+
+def test_deferral_start_is_recorded_and_persists_across_a_fresh_read(tmp_path):
+    first_seen = job_coordinator.record_deferral_start(tmp_path, "live_prune")
+    assert (tmp_path / job_coordinator.PENDING_FILENAME).exists()
+    # A second call (simulating the next scheduler tick, or a brand-new process
+    # after a restart reading the same state_dir) must NOT reset the clock.
+    second_seen = job_coordinator.record_deferral_start(tmp_path, "live_prune")
+    assert second_seen == first_seen
+
+
+def test_get_deferred_minutes_reflects_elapsed_time_since_first_seen(tmp_path):
+    ninety_minutes_ago = time.time() - 90 * 60
+    job_coordinator._atomic_write_json(
+        tmp_path / job_coordinator.PENDING_FILENAME, {"live_prune": ninety_minutes_ago}
+    )
+    minutes = job_coordinator.get_deferred_minutes(tmp_path, "live_prune")
+    assert 89.0 <= minutes <= 91.0
+
+
+def test_get_deferred_minutes_is_zero_for_a_job_never_recorded(tmp_path):
+    assert job_coordinator.get_deferred_minutes(tmp_path, "never_seen") == 0.0
+
+
+def test_clear_deferral_resets_the_clock_for_next_time(tmp_path):
+    job_coordinator.record_deferral_start(tmp_path, "live_prune")
+    job_coordinator.clear_deferral(tmp_path, "live_prune")
+    assert job_coordinator.get_deferred_minutes(tmp_path, "live_prune") == 0.0
+    # A subsequent deferral starts a brand-new clock, not the old one.
+    restarted = job_coordinator.record_deferral_start(tmp_path, "live_prune")
+    assert time.time() - restarted < 1.0
+
+
+def test_deferral_clock_for_one_job_does_not_affect_another(tmp_path):
+    job_coordinator._atomic_write_json(
+        tmp_path / job_coordinator.PENDING_FILENAME,
+        {"live_prune": time.time() - 3600},
+    )
+    job_coordinator.record_deferral_start(tmp_path, "top_domains_report")
+    assert job_coordinator.get_deferred_minutes(tmp_path, "live_prune") >= 59.0
+    assert job_coordinator.get_deferred_minutes(tmp_path, "top_domains_report") < 1.0
+
+
+def test_corrupt_pending_file_self_heals_instead_of_crashing(tmp_path):
+    (tmp_path / job_coordinator.PENDING_FILENAME).write_text("{not valid json", encoding="utf-8")
+    assert job_coordinator.get_deferred_minutes(tmp_path, "live_prune") == 0.0
+    # record_deferral_start must recover (treat corrupt as empty) rather than raise.
+    first_seen = job_coordinator.record_deferral_start(tmp_path, "live_prune")
+    assert time.time() - first_seen < 1.0

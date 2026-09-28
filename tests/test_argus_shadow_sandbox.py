@@ -287,8 +287,8 @@ store_e = _fresh_store()
 store_e.upsert_device("shadowDevE", timestamp=NOW)
 _insert_canary(store_e, "combined_uncertain_threshold", 0.7, device_id=None)
 
-_real_is_pressure = sandbox.is_resource_pressure_active
-sandbox.is_resource_pressure_active = lambda *a, **kw: True
+_real_is_pressure = sandbox.is_resource_pressure_active_in_process
+sandbox.is_resource_pressure_active_in_process = lambda *a, **kw: True
 calls_seen_e = []
 sandbox.evaluate_candidate_shadow = lambda *a, **kw: calls_seen_e.append(1) or True
 try:
@@ -299,7 +299,7 @@ try:
         baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
     )
 finally:
-    sandbox.is_resource_pressure_active = _real_is_pressure
+    sandbox.is_resource_pressure_active_in_process = _real_is_pressure
     sandbox.evaluate_candidate_shadow = _real_evaluate_candidate_shadow
 
 check("E: under active resource pressure, maybe_shadow_evaluate() is a complete no-op "
@@ -308,7 +308,7 @@ check("E: under active resource pressure, maybe_shadow_evaluate() is a complete 
 check("E: the shadow_eval_paused gauge reads 1 while pressure is active",
       sandbox.shadow_eval_paused._value.get() == 1)
 
-sandbox.is_resource_pressure_active = lambda *a, **kw: False
+sandbox.is_resource_pressure_active_in_process = lambda *a, **kw: False
 try:
     evaluator_e2 = ShadowEvaluator(store_e)
     evaluator_e2.maybe_shadow_evaluate(
@@ -317,7 +317,7 @@ try:
         baseline_familiarity=0.0, real_state="BENIGN", now=NOW,
     )
 finally:
-    sandbox.is_resource_pressure_active = _real_is_pressure
+    sandbox.is_resource_pressure_active_in_process = _real_is_pressure
 
 check("E: the shadow_eval_paused gauge clears back to 0 once pressure is no longer active",
       sandbox.shadow_eval_paused._value.get() == 0)

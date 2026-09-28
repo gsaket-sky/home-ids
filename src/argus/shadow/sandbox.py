@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional
 from argus.autotune.engine import AutotuneEngine
 from argus.graph.store import GraphStore
 from metrics import shadow_eval_comparisons_total, shadow_eval_errors_total, shadow_eval_paused
-from utils import is_resource_pressure_active
+from utils import is_resource_pressure_active_in_process
 
 LOGGER = logging.getLogger("argus.shadow.sandbox")
 
@@ -188,7 +188,7 @@ class ShadowEvaluator:
         cycle it's riding alongside."""
         now = now if now is not None else time.time()
         try:
-            if is_resource_pressure_active():
+            if is_resource_pressure_active_in_process():
                 shadow_eval_paused.set(1)
                 return
             shadow_eval_paused.set(0)

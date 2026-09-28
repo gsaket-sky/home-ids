@@ -250,7 +250,18 @@ def is_resource_pressure_active(min_level: int = 1, metrics_url: str = _RESOURCE
     a dev/test environment with no live pipeline running at all) must never
     silently and permanently disable autotuning; a missed pause on one rare
     unlucky night is a far smaller cost than tuning going dark indefinitely
-    because a metrics scrape happened to fail once."""
+    because a metrics scrape happened to fail once.
+
+    For an EXTERNAL subprocess (train_fp_classifier.py/population_prior_builder.py/
+    backtest_job.py's candidate generators) this HTTP scrape of the live pipeline's
+    own /metrics endpoint is the only channel that reaches across the process
+    boundary -- correct and necessary there. A caller that already runs INSIDE the
+    live pipeline process itself (e.g. sandbox.py's ShadowEvaluator, called once per
+    device per decision cycle from the main loop) should use
+    is_resource_pressure_active_in_process() instead -- see that function's own
+    docstring for why (2026-09-28 incident: this HTTP version on that hot path was
+    found live-blocking the main thread for the sum of every device's own socket
+    timeout, once per cycle)."""
     import urllib.request
 
     try:
@@ -267,6 +278,35 @@ def is_resource_pressure_active(min_level: int = 1, metrics_url: str = _RESOURCE
                 continue
             return value >= min_level
     return False
+
+
+def is_resource_pressure_active_in_process(min_level: int = 1) -> bool:
+    """Same semantics as is_resource_pressure_active() above, but for a caller that
+    already runs INSIDE the live pipeline process -- reads metrics.py's own
+    health_pressure_level Gauge object directly (an in-memory attribute read, no
+    socket, no timeout) instead of round-tripping an HTTP GET to itself.
+
+    2026-09-28 root-cause note: sandbox.py's ShadowEvaluator.maybe_shadow_evaluate()
+    used to call the HTTP-scrape version above, once per device on every ~2s main
+    loop cycle, on the pipeline's OWN MainThread. A live py-spy capture during a
+    heartbeat-staleness incident caught MainThread blocked inside that call's
+    urlopen()/readinto() -- with 40+ active devices each independently scraping the
+    same process's own /metrics endpoint (itself served by a thread competing for
+    the same GIL), the per-device 2s socket timeouts could sum to the exact
+    multi-minute heartbeat staleness health_manager's watchdog was catching
+    (including the real self-restart at 2026-09-27 10:56:28, heartbeat stale 311s).
+    Reading the Gauge directly is not just faster -- it's correct: this call site
+    never had a cross-process boundary to cross in the first place.
+
+    Fails OPEN (returns False) if the internal prometheus_client value accessor
+    is ever unavailable (e.g. a future prometheus_client version change) -- same
+    fail-open contract as the HTTP version, for the same reason."""
+    try:
+        from metrics import health_pressure_level
+        return float(health_pressure_level._value.get()) >= min_level
+    except Exception as exc:
+        LOGGER.debug("In-process resource-pressure read failed, assuming NOT under pressure: %s", exc)
+        return False
 
 
 def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: dict = None) -> None:

@@ -495,7 +495,7 @@ def test_a_real_hang_inside_check_cycle_is_bounded_end_to_end(hm, monkeypatch):
 import http.server
 import threading
 
-from utils import is_resource_pressure_active
+from utils import is_resource_pressure_active, is_resource_pressure_active_in_process
 
 
 def _serve_metrics_body(body: str):
@@ -565,6 +565,48 @@ def test_is_resource_pressure_active_fails_open_on_missing_metric():
         assert is_resource_pressure_active(metrics_url=f"http://127.0.0.1:{port}/metrics") is False
     finally:
         server.shutdown()
+
+
+# =============================================================================
+# 2026-09-28 root-cause fix: sandbox.py's ShadowEvaluator (in-process, called once
+# per device on every main-loop cycle) used to call the HTTP-scrape version above
+# against its own /metrics endpoint -- a live py-spy capture caught the pipeline's
+# MainThread blocked inside that call during a heartbeat-staleness incident.
+# is_resource_pressure_active_in_process() reads the Gauge object directly instead
+# (no socket at all), for a caller that never had a process boundary to cross.
+# =============================================================================
+from metrics import health_pressure_level
+
+
+def test_is_resource_pressure_active_in_process_reads_gauge_directly():
+    health_pressure_level.set(0.0)
+    try:
+        assert is_resource_pressure_active_in_process() is False
+        health_pressure_level.set(1.0)
+        assert is_resource_pressure_active_in_process() is True
+    finally:
+        health_pressure_level.set(0.0)
+
+
+def test_is_resource_pressure_active_in_process_respects_min_level():
+    health_pressure_level.set(1.0)
+    try:
+        assert is_resource_pressure_active_in_process(min_level=2) is False
+        assert is_resource_pressure_active_in_process(min_level=1) is True
+    finally:
+        health_pressure_level.set(0.0)
+
+
+def test_is_resource_pressure_active_in_process_fails_open_on_accessor_error():
+    """Same fail-open safety property as the HTTP version -- if the internal
+    prometheus_client value accessor is ever unavailable, this must return False
+    (not paused), never raise or silently wedge autotuning off."""
+    real_value = health_pressure_level._value
+    try:
+        health_pressure_level._value = None  # .get() on None raises AttributeError
+        assert is_resource_pressure_active_in_process() is False
+    finally:
+        health_pressure_level._value = real_value
 
 
 if __name__ == "__main__":

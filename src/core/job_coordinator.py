@@ -35,6 +35,7 @@ LOGGER = logging.getLogger("job_coordinator")
 
 LOCK_FILENAME = "scheduled_job_slot.json"
 CLAIM_FILENAME = "scheduled_job_slot.claim"
+PENDING_FILENAME = "scheduled_job_pending.json"
 # A job's budget counts ACTIVE time only (paused time excluded), so a job parked
 # forever -- e.g. its owner died while it was SIGSTOPped, leaving nothing to SIGCONT it
 # -- would never be reclaimed and would hold the slot forever. This wall-clock cap
@@ -53,6 +54,10 @@ def _lock_path(state_dir) -> Path:
 
 def _claim_path(state_dir) -> Path:
     return Path(state_dir) / CLAIM_FILENAME
+
+
+def _pending_path(state_dir) -> Path:
+    return Path(state_dir) / PENDING_FILENAME
 
 
 def is_pid_alive(pid) -> bool:
@@ -346,6 +351,74 @@ def active_minutes(slot: dict, now: Optional[float] = None) -> float:
     if slot.get("state") == "paused" and slot.get("paused_at"):
         paused += max(0.0, now - float(slot["paused_at"]))
     return max(0.0, now - started_at - paused) / 60.0
+
+
+def record_deferral_start(state_dir, job_name: str) -> float:
+    """Idempotently records now() as the first moment `job_name` was seen due but
+    deferred (pressure or mutex), persisted to disk so it survives a scheduler.py
+    restart -- returns the recorded first-seen timestamp (existing or freshly
+    written).
+
+    2026-09-28 root-cause fix: this used to be a plain in-memory dict local to
+    scheduler.py's main() (`pending_since`). soc.service restarts kill and relaunch
+    the scheduler daemon (pipeline.py's "Terminating scheduler daemon..." on every
+    shutdown), which wiped that dict -- so a job's starvation clock silently reset
+    to zero on every restart. For a job with MULTIPLE daily cron slots
+    (live_prune_weak_notices, 4x/day) that's rarely fatal: enough slots survive
+    between restarts to eventually accumulate past job_max_defer_minutes. For a
+    job with exactly ONE daily slot (live_prune, priority 1 -- the job that exists
+    specifically to stop unbounded evidence-table growth), it was fatal: live_prune
+    was silently deferred every single night for a week (09-21 through 09-28,
+    confirmed via state/scheduler.log and job_health.json) because restarts kept
+    resetting its clock back to "0.0 min so far" before it could ever reach the
+    60-minute starvation backstop. Persisting this to disk (matching every other
+    piece of crash-safety state this module already owns) closes that gap.
+
+    Best-effort like every other write in this module -- a lost race between two
+    callers just means one of two near-identical timestamps wins; this feeds a
+    backstop threshold, not a security decision, so that's harmless."""
+    path = _pending_path(state_dir)
+    try:
+        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        pending = {}
+    if job_name not in pending:
+        pending[job_name] = time.time()
+        try:
+            _atomic_write_json(path, pending)
+        except Exception:
+            pass
+    return float(pending[job_name])
+
+
+def get_deferred_minutes(state_dir, job_name: str) -> float:
+    """Minutes since record_deferral_start() first recorded `job_name` as deferred,
+    or 0.0 if it isn't currently recorded as deferred at all."""
+    path = _pending_path(state_dir)
+    try:
+        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return 0.0
+    first_seen = pending.get(job_name)
+    if first_seen is None:
+        return 0.0
+    return max(0.0, time.time() - float(first_seen)) / 60.0
+
+
+def clear_deferral(state_dir, job_name: str) -> None:
+    """Call once a previously-deferred job actually dispatches -- clears its
+    starvation clock so the next time it's deferred starts counting from zero."""
+    path = _pending_path(state_dir)
+    try:
+        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return
+    if job_name in pending:
+        del pending[job_name]
+        try:
+            _atomic_write_json(path, pending)
+        except Exception:
+            pass
 
 
 def reconcile_on_boot(state_dir) -> Optional[dict]:

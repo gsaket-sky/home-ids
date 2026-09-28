@@ -105,9 +105,6 @@ def main():
 
     # Track when a job was last run to prevent multiple executions within the same minute
     last_run = {}
-    # job_name -> timestamp it FIRST became due but was deferred (pressure or mutex) --
-    # the starvation backstop's own clock. Cleared once the job actually dispatches.
-    pending_since = {}
     # job_name -> {"proc": Popen, "priority": int, "pausable": bool, "paused": bool,
     # "result_fd": int|None, "killed": bool} -- every job THIS scheduler.py instance has
     # launched and not yet seen exit.
@@ -148,18 +145,21 @@ def main():
         """Runs launch_fn(popen_kwargs) (returning a Popen or None) only if
         admitted by BOTH the system-pressure gate and the job-priority mutex.
         Deferred jobs are retried every subsequent tick (not just their next cron
-        match) via pending_since, with a pressure-only starvation backstop -- the
-        mutex itself is never bypassed; a stuck mutex holder past its own budget is
-        instead reclaimed by job_coordinator.reconcile_on_boot(), called every tick
-        below, so starvation from a stuck occupant is closed safely without ever
-        risking a genuine double-run."""
+        match) via job_coordinator's persisted deferral-start record (2026-09-28:
+        moved off an in-memory dict here -- see record_deferral_start()'s own
+        docstring for why an in-memory clock silently defeated the backstop for
+        once-a-day jobs like live_prune across scheduler restarts), with a
+        pressure-only starvation backstop -- the mutex itself is never bypassed; a
+        stuck mutex holder past its own budget is instead reclaimed by
+        job_coordinator.reconcile_on_boot(), called every tick below, so starvation
+        from a stuck occupant is closed safely without ever risking a genuine
+        double-run."""
         max_defer = float(config.get("job_max_defer_minutes", 60))
-        first_seen = pending_since.get(job_name)
-        deferred_minutes = (time.time() - first_seen) / 60.0 if first_seen else 0.0
-        pressure_force = first_seen is not None and deferred_minutes >= max_defer
+        deferred_minutes = job_coordinator.get_deferred_minutes(state_dir, job_name)
+        pressure_force = deferred_minutes >= max_defer
 
         if not pressure_force and not resource_gate.may_admit_new_job(config):
-            pending_since.setdefault(job_name, time.time())
+            job_coordinator.record_deferral_start(state_dir, job_name)
             scheduler_metrics.record_deferral(job_name, "pressure")
             LOGGER.info(f"Deferring '{job_name}' -- system under pressure ({deferred_minutes:.1f} min so far).")
             return False
@@ -170,7 +170,7 @@ def main():
             )
 
         if not job_coordinator.peek_admission(state_dir, priority):
-            pending_since.setdefault(job_name, time.time())
+            job_coordinator.record_deferral_start(state_dir, job_name)
             scheduler_metrics.record_deferral(job_name, "slot")
             LOGGER.info(f"Deferring '{job_name}' -- slot held by a higher/equal-priority job ({deferred_minutes:.1f} min so far).")
             return False
@@ -211,7 +211,7 @@ def main():
                 pass
             if read_fd is not None:
                 os.close(read_fd)
-            pending_since.setdefault(job_name, time.time())
+            job_coordinator.record_deferral_start(state_dir, job_name)
             scheduler_metrics.record_deferral(job_name, "slot")
             return False
         if outcome.startswith(job_coordinator.PREEMPTED_PREFIX):
@@ -227,7 +227,7 @@ def main():
         running[job_name] = {"proc": proc, "priority": priority, "pausable": pausable, "paused": False,
                              "result_fd": read_fd, "killed": False}
         scheduler_metrics.set_state(job_name, scheduler_metrics.TASK_STATE_RUNNING)
-        pending_since.pop(job_name, None)
+        job_coordinator.clear_deferral(state_dir, job_name)
         return True
 
     while True:
