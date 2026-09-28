@@ -954,7 +954,7 @@ def _insert_confirmed_label_backtest_run(store: GraphStore, detail: dict) -> str
 
 
 def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: str, new_value: float,
-                          reason: str, evidence_detail: dict, device_id=None, device_type=None,
+                          reason: str, evidence_detail: dict, default: float, device_id=None, device_type=None,
                           now: float = None) -> None:
     """Routes ONE calibration decision through AutotuneEngine instead of writing
     directly to a flat file. Two things happen, in order, both best-effort (a
@@ -996,7 +996,7 @@ def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: s
         propose_run_id = _insert_confirmed_label_backtest_run(store, {"role": "proposal", **evidence_detail})
         result = engine.propose_change(
             parameter, new_value, reason=reason, device_id=device_id, device_type=device_type,
-            backtest_run_id=propose_run_id, now=now,
+            backtest_run_id=propose_run_id, now=now, default=default,
         )
         if not result.accepted:
             LOGGER.warning(f"[AUTOTUNE] propose_change rejected for {parameter} "
@@ -1115,6 +1115,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                     "uncorrected_count": len(uncorrected_uncertain_scores),
                     "rule": "calibrate_suppress_threshold",
                 },
+                default=config_default,
                 now=autotune_now,
             )
     except Exception as exc:
@@ -1157,6 +1158,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                     "uncorrected_count": len(uncorrected_confirmed_scores),
                     "rule": "calibrate_uncertain_threshold",
                 },
+                default=uncertain_config_default,
                 now=autotune_now,
             )
 
@@ -1182,7 +1184,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                         "corrected_count": len(dev_corrected), "uncorrected_count": len(dev_uncorrected),
                         "rule": "calibrate_uncertain_threshold",
                     },
-                    device_id=device_id, now=autotune_now,
+                    default=uncertain_global_current, device_id=device_id, now=autotune_now,
                 )
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE » GLOBAL] combined_uncertain_threshold calibration failed (non-fatal): {exc}")
@@ -1204,6 +1206,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                 device_evidence[device_id] = (len(dev_corrected), len(dev_uncorrected))
                 device_confirmed_counts[device_id] = fp_engine.get_confirmed_count(device_id)
                 dev_current = fp_engine.get_device_suppress_threshold(device_id)
+                dev_suppress_default = fp_engine.get_device_suppress_threshold_legacy_default(device_id)
                 new_value, reason = calibrate_suppress_threshold(
                     dev_corrected, dev_uncorrected,
                     current=dev_current, min_samples=AUTOTUNE_DEVICE_MIN_SAMPLES,
@@ -1219,6 +1222,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                                 "uncorrected_count": len(dev_uncorrected),
                                 "rule": "calibrate_suppress_threshold",
                             },
+                            default=dev_suppress_default,
                             device_id=device_id,
                             now=autotune_now,
                         )
@@ -1255,6 +1259,8 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                 )
                 arp_sweep_evidence[device_id] = (corrected_count, confirmed_count)
                 dev_current = fp_engine.get_device_arp_sweep_threshold(device_id, default=global_arp_sweep_default)
+                dev_arp_sweep_default = fp_engine.get_device_arp_sweep_threshold_legacy_default(
+                    device_id, global_arp_sweep_default)
                 new_value, reason = calibrate_arp_sweep_threshold(corrected_count, confirmed_count, dev_current)
                 arp_sweep_outcomes[device_id] = _classify_outcome(new_value, reason)
                 if new_value is not None:
@@ -1267,6 +1273,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                                 "confirmed_count": confirmed_count,
                                 "rule": "calibrate_arp_sweep_threshold",
                             },
+                            default=dev_arp_sweep_default,
                             device_id=device_id,
                             now=autotune_now,
                         )

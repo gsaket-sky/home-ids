@@ -85,14 +85,25 @@ def test_autonomy_autotuner_direction_labeled_correctly(graph_db):
     # _propose_tuning_change() formula against argus/autotune/engine.py's own
     # CURRENT _LESS_SENSITIVE_DIRECTION[...]=1 and max_step=0.05 gives
     # 0.745 -> 0.695 for a tightening step; (2) that matches this parameter's
-    # own plain-English _LESS_SENSITIVE_DIRECTION comment verbatim. NOTE (not
-    # yet resolved, flagged separately to the user, not silently assumed
-    # away): the ONE real threshold_history row on .94
-    # (old=0.745, new=0.795) shows an INCREASE for a row whose own reason
-    # text says "tightening" -- the opposite of what this verified-correct
-    # formula produces, and git history shows neither file has changed since
-    # that row was written. This fixture and this test assert the
-    # code-verified-correct direction, not the one real row's own value.
+    # own plain-English _LESS_SENSITIVE_DIRECTION comment verbatim.
+    #
+    # RESOLVED 2026-09-28 (console audit): the discrepancy this comment used to
+    # flag -- the ONE real threshold_history row on .94 at the time
+    # (old=0.745, new=0.795, an INCREASE despite its own "tightening" reason
+    # text) -- was root-caused, not a mystery left open. propose_change() used
+    # to independently re-derive old_value off TUNABLE_PARAMETERS' bare bounds
+    # midpoint (0.745) whenever nothing had ever been promoted for a scope yet,
+    # completely independent of whatever REAL semantic default (0.9 for this
+    # parameter) the caller itself used to compute new_value -- so a real -0.05
+    # tighten step computed off 0.9 (giving 0.85) got clamped against the wrong
+    # 0.745 baseline by _clamp_step() (0.85 - 0.745 = +0.105, over max_step,
+    # clamped UP to 0.745 + 0.05 = 0.795) instead of being stored as the
+    # genuine decrease it was. Fixed by threading the caller's own semantic
+    # default through propose_change()'s new `default` parameter -- see its own
+    # docstring and test_argus_autotune_engine.py's "`default` consistency"
+    # section for the regression test. This fixture/test's asserted direction
+    # was the correct one all along; it's what a fresh proposal now actually
+    # produces too, not just what it should produce.
     assert tightened["direction"] == "tightened"
     assert tightened["status"] == "promoted"
 

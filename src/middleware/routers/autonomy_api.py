@@ -31,11 +31,46 @@ from fastapi import APIRouter, Depends, Query
 
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
-from argus.autotune.engine import TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
+from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
 from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR
 from core.state_guard import StateManager
 from middleware.state_client import get_cached_state_manager
-from middleware.humanize import resolve_device_hostname
+from middleware.humanize import resolve_device_identity
+
+# Semantic (real-world) default for each of the 16 TUNABLE_PARAMETERS -- mirrors
+# each parameter's own forward generator (backtest_job.py's _XXX_DEFAULT
+# constants, population_prior_builder.py's _POOL_* constants), duplicated here
+# with a comment citing its source rather than imported directly: backtest_job.py
+# alone pulls in argus.synthetic.injector and other heavy transitive imports
+# (~5s+ import cost, confirmed by timing it), the wrong tradeoff for this
+# lightweight console/API subprocess. Same "duplicated literal + comment citing
+# the source of truth" convention those files already use for THEIR OWN
+# cross-file default duplication (e.g. backtest_job.py's own
+# _TUNE_DEFAULT_SENSITIVITY = 0.9  # matches decision/engine.py's own hardcoded
+# default). 2026-09-28 (console audit, user request: "update the console with
+# all 16 autotune parameter") -- used ONLY for /api/autonomy/parameters'
+# current-value display, never fed into an actual propose_change() decision, so
+# a display value drifting stale here (if a source default is ever changed
+# without updating this copy) can't corrupt a real autonomous tuning decision
+# the way AutotuneEngine.propose_change()'s own default-mismatch bug did.
+_PARAMETER_DEFAULTS: Dict[str, float] = {
+    "reputation_tier_suspicious_floor": 2.0,        # backtest_job.py's _REPUTATION_SUSPICIOUS_DEFAULT
+    "reputation_tier_high_floor": 4.0,               # backtest_job.py's _REPUTATION_HIGH_DEFAULT
+    "bocpd_hazard_rate": 1.0 / 500.0,                # backtest_job.py's _BOCPD_HAZARD_DEFAULT
+    "hard_stop_candidate_sensitivity": 0.9,          # backtest_job.py's _TUNE_DEFAULT_SENSITIVITY
+    "arp_sweep_unique_targets_threshold": 8.0,       # backtest_job.py's _ARP_SWEEP_DEFAULT_THRESHOLD
+    "fp_combined_suppress_threshold": 0.80,          # backtest_job.py's _FP_COMBINED_DEFAULT_THRESHOLD
+    "peer_deviation_multiplier": 3.0,                # backtest_job.py's _PEER_DEVIATION_MULTIPLIER_DEFAULT
+    "peer_deviation_min_absolute_count": 5.0,        # backtest_job.py's _PEER_DEVIATION_MIN_COUNT_DEFAULT
+    "combined_uncertain_threshold": 0.55,            # CONFIG's own fp_combined_uncertain_threshold default
+    "familiarity_trust_bar": 0.6,                    # backtest_job.py's _FAMILIARITY_TRUST_BAR_DEFAULT
+    "trust_cache_ttl_seconds": 14 * 86400.0,         # backtest_job.py's _TRUST_CACHE_TTL_DEFAULT
+    "reputation_propagation_ttl_seconds": 86400.0,   # backtest_job.py's _REPUTATION_PROPAGATION_TTL_DEFAULT
+    "pool_gaussian_kappa": 5.0,                      # population_prior_builder.py's _POOL_GAUSSIAN_KAPPA
+    "pool_gaussian_alpha": 10.0,                     # population_prior_builder.py's _POOL_GAUSSIAN_ALPHA
+    "pool_beta_total": 10.0,                         # population_prior_builder.py's _POOL_BETA_TOTAL
+    "pool_poisson_rate": 5.0,                        # population_prior_builder.py's _POOL_POISSON_RATE
+}
 
 router = APIRouter()
 
@@ -72,15 +107,28 @@ def _threshold_status(row: Dict[str, Any]) -> str:
     return "pending_canary"
 
 
-def _serialize_threshold_history(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _serialize_threshold_history(rows: List[Dict[str, Any]], sm) -> List[Dict[str, Any]]:
     out = []
     for row in rows:
         parameter = row.get("parameter", "")
         old_value = float(row.get("old_value") or 0.0)
         new_value = float(row.get("new_value") or 0.0)
+        # 2026-09-28 (console audit, user request: "Display always hostname and
+        # ip address instead of device id"): a global/category-scoped row's own
+        # device_id is None -- resolve_device_identity() falls back to
+        # "unattributed", same convention this file's own by_device grouping
+        # below already uses for a None device_id (console.html's own Autotuner
+        # Timeline table only ever renders GLOBAL rows anyway, filtered
+        # client-side on device_id/device_type both being falsy, so this
+        # field is inert there but still correctly resolved for any other
+        # consumer).
+        identity = resolve_device_identity(row.get("device_id"), sm)
         out.append({
             "change_id": row.get("change_id"),
             "device_id": row.get("device_id"),
+            "device_hostname": identity["hostname"],
+            "device_ip": identity["ip"],
+            "device_display": identity["display"],
             # 2026-09-16, per-device/category autotuning plan: a row now has AT
             # MOST ONE of device_id/device_type set -- both None means global.
             "device_type": row.get("device_type"),
@@ -99,13 +147,17 @@ def _serialize_threshold_history(rows: List[Dict[str, Any]]) -> List[Dict[str, A
     return out
 
 
-def _serialize_trust_grants(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _serialize_trust_grants(edges: List[Dict[str, Any]], sm) -> List[Dict[str, Any]]:
     out = []
     for e in edges:
         meta = e.get("metadata") or {}
         source = meta.get("source", "unknown")
+        identity = resolve_device_identity(e.get("src_id"), sm)
         out.append({
             "device_id": e.get("src_id"),
+            "device_hostname": identity["hostname"],
+            "device_ip": identity["ip"],
+            "device_display": identity["display"],
             "destination_id": e.get("dst_id"),
             "hypothesis": meta.get("hypothesis"),
             "source": source,
@@ -116,12 +168,16 @@ def _serialize_trust_grants(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     return out
 
 
-def _serialize_building_trust(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _serialize_building_trust(rows: List[Dict[str, Any]], sm) -> List[Dict[str, Any]]:
     out = []
     for row in rows:
         trust_value = float(row.get("trust_value") or 0.0)
+        identity = resolve_device_identity(row.get("device_id"), sm)
         out.append({
             "device_id": row.get("device_id"),
+            "device_hostname": identity["hostname"],
+            "device_ip": identity["ip"],
+            "device_display": identity["display"],
             "behavior_fingerprint": row.get("behavior_fingerprint"),
             "destination_class": row.get("destination_class"),
             "hypothesis": row.get("hypothesis_id"),
@@ -143,11 +199,43 @@ def get_autonomy(limit: int = Query(50, ge=1, le=200), token: str = Depends(veri
         trust_edges = store.get_edges(relation="trusts", limit_most_recent=limit)
         building_trust_rows = store.get_recent_composite_trust(limit)
 
+    sm = _load_state_manager()
     return {
-        "autotuner": _serialize_threshold_history(threshold_rows),
-        "trust_grants": _serialize_trust_grants(trust_edges),
-        "building_trust": _serialize_building_trust(building_trust_rows),
+        "autotuner": _serialize_threshold_history(threshold_rows, sm),
+        "trust_grants": _serialize_trust_grants(trust_edges, sm),
+        "building_trust": _serialize_building_trust(building_trust_rows, sm),
     }
+
+
+@router.get("/api/autonomy/parameters")
+def get_autonomy_parameters(token: str = Depends(verify_token)):
+    """All 16 TUNABLE_PARAMETERS at a glance -- current (global-tier) value,
+    shipped default, and bounds -- regardless of whether that parameter
+    happens to have a recent threshold_history row. 2026-09-28 (console
+    audit, user request: "update the console with all 16 autotune
+    parameter"): the Autotuner Timeline panel only ever shows parameters
+    that HAVE a proposal in threshold_history, so a parameter nothing has
+    triggered a change for yet (e.g. combined_uncertain_threshold, on a
+    quiet network) was invisible on the console even though it's live and
+    tunable."""
+    with open_store() as store:
+        engine = AutotuneEngine(store) if store is not None else None
+        out = []
+        for parameter in sorted(TUNABLE_PARAMETERS.keys()):
+            bounds = TUNABLE_PARAMETERS[parameter]
+            default = _PARAMETER_DEFAULTS.get(parameter)
+            current = engine.get_active_value(parameter, default=default) if engine is not None else default
+            out.append({
+                "parameter": parameter,
+                "current_value": current,
+                "default_value": default,
+                "is_at_default": (
+                    default is not None and current is not None and abs(current - default) < 1e-9
+                ),
+                "bounds": bounds,
+                "less_sensitive_direction": _LESS_SENSITIVE_DIRECTION.get(parameter, 1),
+            })
+    return {"parameters": out}
 
 
 def _load_state_manager() -> StateManager:
@@ -189,18 +277,21 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
         threshold_rows = store.get_recent_threshold_history(limit)
 
     sm = _load_state_manager()
-    grants = _serialize_trust_grants(trust_edges)
-    building = _serialize_building_trust(building_trust_rows)
-    autotuner = _serialize_threshold_history(threshold_rows)
+    grants = _serialize_trust_grants(trust_edges, sm)
+    building = _serialize_building_trust(building_trust_rows, sm)
+    autotuner = _serialize_threshold_history(threshold_rows, sm)
 
     by_device: Dict[str, Dict[str, Any]] = {}
     by_category: Dict[str, Dict[str, Any]] = {}
 
     def _bucket(device_id: str) -> Dict[str, Any]:
         if device_id not in by_device:
+            identity = resolve_device_identity(device_id, sm)
             by_device[device_id] = {
                 "device_id": device_id,
-                "hostname": resolve_device_hostname(device_id, sm),
+                "hostname": identity["hostname"],
+                "ip": identity["ip"],
+                "display": identity["display"],
                 "trust_grants": [],
                 "building_trust": [],
                 "autotuner": [],

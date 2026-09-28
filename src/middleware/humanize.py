@@ -119,6 +119,35 @@ def resolve_device_hostname(device_id: Optional[str], state_manager) -> str:
     return device_id or "unattributed"
 
 
+def resolve_device_identity(device_id: Optional[str], state_manager) -> Dict[str, Optional[str]]:
+    """Hostname + IP together, the SAME (hostname, client_ip) pair devices_api.py's
+    list_devices() already reads off StateManager -- added 2026-09-28 (console audit,
+    user request: "Display always hostname and ip address instead of device id")
+    since resolve_device_hostname() above only ever surfaced the hostname half, and
+    the autonomy console's raw device_id-only rows were the one console view this
+    hadn't reached yet.
+
+    Returns {"device_id", "hostname", "ip", "display": "<hostname> (<ip>)"}. `hostname`
+    keeps resolve_device_hostname()'s OWN never-None contract (falls back to device_id,
+    or "unattributed" for that one sentinel value) so existing callers/tests relying on
+    that fallback behavior are unaffected; `ip` is nullable (empty/unknown devices have
+    none), and `display` is always a ready-to-render "<hostname> (<ip>)" string (or just
+    the hostname when no IP is known) so console.html never needs its own per-view
+    fallback logic (same "server resolves it once, client just renders it" convention
+    this module's own docstring already establishes)."""
+    hostname = resolve_device_hostname(device_id, state_manager)
+    if not device_id or device_id == "unattributed":
+        return {"device_id": device_id, "hostname": hostname, "ip": None, "display": hostname}
+    ip: Optional[str] = None
+    if state_manager.has_device(device_id):
+        with state_manager.lock_device(device_id) as st:
+            raw_ip = getattr(st, "client_ip", None)
+            if raw_ip and raw_ip != "unknown":
+                ip = raw_ip
+    display = f"{hostname} ({ip})" if ip else hostname
+    return {"device_id": device_id, "hostname": hostname, "ip": ip, "display": display}
+
+
 def resolve_destination_info(destination_id: Optional[str], state_manager, geoip_engine) -> Dict[str, Any]:
     """Same destination-resolution logic mitigation/plain_explanation.py's
     Telegram narrative already uses (2026-09-22, user request: "destination ip,

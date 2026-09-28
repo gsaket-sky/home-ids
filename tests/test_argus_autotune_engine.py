@@ -91,6 +91,61 @@ if r_clamped.accepted:
           actual_step <= bounds["max_step"] + 1e-9, f"got step={actual_step}")
 
 # =============================================================================
+# `default` consistency (2026-09-28, console audit) -- a caller's own "current"
+# (read via get_active_value(parameter, default=SEMANTIC_DEFAULT)) must match
+# the old_value propose_change() itself stores, whenever nothing has ever been
+# promoted for this exact scope yet (the common first-proposal case). Before
+# this fix, propose_change() silently re-derived old_value off the bare
+# TUNABLE_PARAMETERS bounds midpoint instead, independent of whatever semantic
+# default the caller actually used -- live-found via hard_stop_candidate_
+# sensitivity (real default 0.9, bounds midpoint 0.745): a genuine -0.05
+# tighten step computed off 0.9 got clamped against the wrong 0.745 baseline
+# and stored as a +0.05 INCREASE, flipping the console's direction label
+# ("loosened") against the proposal's own "tightening" reason text, while ALSO
+# silently blowing through the max_step safety bound relative to the true
+# prior value. See AutotuneEngine.propose_change()'s own docstring.
+# =============================================================================
+_hs_param = "hard_stop_candidate_sensitivity"
+_hs_bounds = TUNABLE_PARAMETERS[_hs_param]
+_hs_semantic_default = 0.9  # matches backtest_job.py's own _TUNE_DEFAULT_SENSITIVITY
+_hs_bounds_midpoint = (_hs_bounds["min"] + _hs_bounds["max"]) / 2.0
+check("sanity: hard_stop_candidate_sensitivity's real default differs from its "
+      "bounds midpoint -- the exact precondition this bug needs to trigger",
+      abs(_hs_semantic_default - _hs_bounds_midpoint) > 1e-9)
+
+# A caller computing "current" the normal way, off the real semantic default,
+# with nothing yet promoted for this scope.
+_hs_current = engine.get_active_value(_hs_param, default=_hs_semantic_default)
+check("get_active_value: caller's own 'current' read uses the semantic default, "
+      "not the bounds midpoint, since nothing has been promoted yet",
+      _hs_current == _hs_semantic_default)
+
+_hs_intended_new_value = _hs_current - _hs_bounds["max_step"]  # a real tighten step
+r_default_consistency = engine.propose_change(
+    _hs_param, _hs_intended_new_value, "test -- tightening",
+    backtest_run_id="bt_pass_1", now=NOW, default=_hs_semantic_default,
+)
+check("propose_change: a first-ever proposal is accepted", r_default_consistency.accepted is True)
+if r_default_consistency.accepted:
+    hs_row = store._conn.execute(
+        "SELECT old_value, new_value FROM threshold_history WHERE change_id=?",
+        (r_default_consistency.change_id,),
+    ).fetchone()
+    check("propose_change: old_value stored matches the caller's own semantic "
+          "default (0.9), not the unrelated bounds midpoint (0.745)",
+          abs(hs_row["old_value"] - _hs_semantic_default) < 1e-9,
+          f"got old_value={hs_row['old_value']}")
+    check("propose_change: a real tighten step is stored as a DECREASE, matching "
+          "its own 'tightening' reason text -- not flipped into an increase by a "
+          "clamp computed against a mismatched fallback baseline",
+          hs_row["new_value"] < hs_row["old_value"],
+          f"got old_value={hs_row['old_value']}, new_value={hs_row['new_value']}")
+    check("propose_change: the applied step never exceeds max_step even when the "
+          "caller's default and the bounds midpoint disagree",
+          abs(hs_row["new_value"] - hs_row["old_value"]) <= _hs_bounds["max_step"] + 1e-9,
+          f"got step={hs_row['new_value'] - hs_row['old_value']}")
+
+# =============================================================================
 # Cooldown between proposals for the same parameter
 # =============================================================================
 r_cooldown = engine.propose_change("reputation_tier_suspicious_floor", bounds["min"] + 0.1, "second try, too soon",

@@ -341,7 +341,8 @@ class AutotuneEngine:
     def propose_change(self, parameter: str, new_value: float, reason: str,
                          device_id: Optional[str] = None, device_type: Optional[str] = None,
                          backtest_run_id: Optional[str] = None,
-                         snapshot_id: Optional[str] = None, now: Optional[float] = None) -> ProposalResult:
+                         snapshot_id: Optional[str] = None, now: Optional[float] = None,
+                         default: Optional[float] = None) -> ProposalResult:
         """Proposes a bounded-step change. `device_id` alone determines WHICH
         SCOPE this proposal actually writes to: global (both args None),
         category (device_type given, device_id absent), or device (device_id
@@ -358,6 +359,27 @@ class AutotuneEngine:
         lookup, treating a device with an already-tuned category as if that
         category didn't exist -- found and fixed while writing this same
         session's own test coverage, not a design that shipped untested.
+
+        `default` MUST be the same semantic default the caller itself used to
+        compute `new_value` (i.e. whatever it passed as `get_active_value(...,
+        default=X)`'s own X to derive "current"). BUGFIX (2026-09-28, console
+        audit): every caller across backtest_job.py/population_prior_builder.py/
+        train_fp_classifier.py computes "current" using a parameter's REAL
+        semantic default (e.g. hard_stop_candidate_sensitivity's 0.9, matching
+        decision/engine.py's own hardcoded default) -- but this method used to
+        independently re-derive old_value with a DIFFERENT, unrelated fallback
+        (the bare arithmetic midpoint of TUNABLE_PARAMETERS' min/max, 0.745 for
+        that same parameter) whenever nothing had ever been promoted for this
+        exact scope yet (the common case: a scope's FIRST-ever proposal). The
+        two defaults silently disagreeing fed a bogus old_value into
+        _clamp_step(), which clamps by the ARITHMETIC gap between old_value and
+        new_value -- so a real -0.05 tighten computed off 0.9 could be stored
+        as a +0.05 INCREASE off the wrong 0.745 baseline, flipping the direction
+        console readers see (and reuse's own `reason` text, fixed at proposal
+        time, never caught this because it doesn't depend on the arithmetic
+        result at all). Falls back to the old bounds-midpoint behavior only
+        when a caller still omits `default` -- every in-repo caller now passes
+        one; see Documentation/AUTOTUNE_DEFAULT_CONSISTENCY_FIX.md.
 
         Rejected outright (not silently clamped to a no-op) if: the parameter
         isn't on the allowlist, the cooldown since the last proposal for this
@@ -406,7 +428,13 @@ class AutotuneEngine:
             return ProposalResult(False, reason=f"backtest_run_id {backtest_run_id} did not pass")
 
         bounds = TUNABLE_PARAMETERS[parameter]
-        default_mid = (bounds["min"] + bounds["max"]) / 2.0
+        # BUGFIX (2026-09-28): default_mid (bare bounds-midpoint) used to be the
+        # ONLY fallback here, independent of whatever real semantic default the
+        # caller used for its own "current" read -- see this method's own
+        # docstring for the corruption that caused. `default`, when given by the
+        # caller, is used instead; default_mid survives only for a caller that
+        # still omits it.
+        default_mid = default if default is not None else (bounds["min"] + bounds["max"]) / 2.0
         # Full 3-tier fallback for old_value -- uses BOTH raw args (device_type
         # as a hint is exactly what lets a device proposal correctly inherit
         # its category's value here, not skip straight to global).

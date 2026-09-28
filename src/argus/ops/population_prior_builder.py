@@ -419,7 +419,7 @@ def _insert_pool_calibration_backtest_run(store: GraphStore, detail: dict, now: 
 def _propose_pool_pseudocount_change(autotune: AutotuneEngine, store: GraphStore, parameter: str,
                                         device_type: str, current: float, bounds: dict, direction: int,
                                         between_dispersion: float, within_dispersion: float,
-                                        n_contributors: int, now: float) -> None:
+                                        n_contributors: int, now: float, default: float) -> None:
     """Shared tighten/loosen decision for any one of the 4 pool_* parameters at one
     category scope -- see this module's own HONEST SCOPE NOTE above for the ratio
     this reads."""
@@ -449,7 +449,7 @@ def _propose_pool_pseudocount_change(autotune: AutotuneEngine, store: GraphStore
         store, {"parameter": parameter, "device_type": device_type, "ratio": ratio,
                  "n_contributors": n_contributors}, now)
     result = autotune.propose_change(parameter, new_value, reason=reason, device_type=device_type,
-                                        backtest_run_id=run_id, now=now)
+                                        backtest_run_id=run_id, now=now, default=default)
     if not result.accepted:
         LOGGER.warning("[AUTOTUNE] propose_change rejected for %s (device_type=%r): %s",
                          parameter, device_type, result.reason)
@@ -644,11 +644,14 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
                 pooled = _pool_gaussian(contributors, kappa=kappa, alpha=alpha)
                 if not tuning_paused:
                     between, within, n = _gaussian_dispersion(contributors)
-                    for param_name, current in (("pool_gaussian_kappa", kappa), ("pool_gaussian_alpha", alpha)):
+                    for param_name, current, param_default in (
+                        ("pool_gaussian_kappa", kappa, _POOL_GAUSSIAN_KAPPA),
+                        ("pool_gaussian_alpha", alpha, _POOL_GAUSSIAN_ALPHA),
+                    ):
                         _propose_pool_pseudocount_change(
                             autotune, store, param_name, device_type, current,
                             TUNABLE_PARAMETERS[param_name], _LESS_SENSITIVE_DIRECTION[param_name],
-                            between, within, n, now)
+                            between, within, n, now, default=param_default)
             elif model_kind == "beta":
                 beta_total = autotune.get_active_value("pool_beta_total", device_type=device_type,
                                                            default=_POOL_BETA_TOTAL)
@@ -658,7 +661,7 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
                     _propose_pool_pseudocount_change(
                         autotune, store, "pool_beta_total", device_type, beta_total,
                         TUNABLE_PARAMETERS["pool_beta_total"], _LESS_SENSITIVE_DIRECTION["pool_beta_total"],
-                        between, within, n, now)
+                        between, within, n, now, default=_POOL_BETA_TOTAL)
             elif model_kind == "poisson":
                 poisson_rate = autotune.get_active_value("pool_poisson_rate", device_type=device_type,
                                                              default=_POOL_POISSON_RATE)
@@ -668,7 +671,7 @@ def build_population_priors(store: GraphStore, now: Optional[float] = None) -> D
                     _propose_pool_pseudocount_change(
                         autotune, store, "pool_poisson_rate", device_type, poisson_rate,
                         TUNABLE_PARAMETERS["pool_poisson_rate"], _LESS_SENSITIVE_DIRECTION["pool_poisson_rate"],
-                        between, within, n, now)
+                        between, within, n, now, default=_POOL_POISSON_RATE)
             else:
                 continue
             _write_population_prior(

@@ -2205,12 +2205,7 @@ class AutonomousFPEngine:
         becomes the `default=` and is what's still returned until a real promotion
         exists (inert by construction, no threshold_history rows yet). Best-effort:
         any failure here must never block a suppression decision."""
-        with self._lock:
-            profile = self._device_fp_profiles.get(device_id or "")
-        if profile and "fp_combined_suppress_threshold" in profile:
-            legacy_value = float(profile["fp_combined_suppress_threshold"]["value"])
-        else:
-            legacy_value = self.combined_suppress_threshold
+        legacy_value = self.get_device_suppress_threshold_legacy_default(device_id)
         try:
             return self._get_autotune_engine().get_active_value(
                 "fp_combined_suppress_threshold", device_id=device_id, default=legacy_value,
@@ -2221,6 +2216,21 @@ class AutonomousFPEngine:
                 "using legacy value this cycle: %s", device_id, e,
             )
             return legacy_value
+
+    def get_device_suppress_threshold_legacy_default(self, device_id: Optional[str]) -> float:
+        """The exact `default=` get_device_suppress_threshold() feeds into its own
+        get_active_value() call above -- exposed separately (2026-09-28, console
+        audit) so train_fp_classifier.py's own AutotuneEngine.propose_change() call
+        can pass this SAME value as ITS `default`, instead of independently
+        re-deriving a different one. See AutotuneEngine.propose_change()'s own
+        docstring for the old_value/new_value corruption that a caller's "current"
+        and propose_change()'s own old_value fallback silently disagreeing used to
+        cause."""
+        with self._lock:
+            profile = self._device_fp_profiles.get(device_id or "")
+        if profile and "fp_combined_suppress_threshold" in profile:
+            return float(profile["fp_combined_suppress_threshold"]["value"])
+        return self.combined_suppress_threshold
 
     def _get_device_profile_value(self, device_id: Optional[str], key: str, default: float) -> float:
         """Shared read-path for every per-device learned threshold below -- all of them
@@ -2268,7 +2278,7 @@ class AutonomousFPEngine:
         same reasoning as get_device_suppress_threshold() above -- inert until
         train_fp_classifier.py (Phase C) promotes a value, and best-effort so a lookup
         failure never blocks the caller (falls back to the untouched legacy chain)."""
-        legacy_value = self._get_device_profile_value(device_id, "arp_sweep_unique_targets_threshold", default)
+        legacy_value = self.get_device_arp_sweep_threshold_legacy_default(device_id, default)
         try:
             return self._get_autotune_engine().get_active_value(
                 "arp_sweep_unique_targets_threshold", device_id=device_id, default=legacy_value,
@@ -2279,6 +2289,13 @@ class AutonomousFPEngine:
                 "using legacy value this cycle: %s", device_id, e,
             )
             return legacy_value
+
+    def get_device_arp_sweep_threshold_legacy_default(self, device_id: Optional[str], default: float) -> float:
+        """The exact `default=` get_device_arp_sweep_threshold() feeds into its own
+        get_active_value() call above -- exposed separately (2026-09-28, console
+        audit), same reasoning and same pairing with AutotuneEngine.propose_change()'s
+        own `default` parameter as get_device_suppress_threshold_legacy_default()."""
+        return self._get_device_profile_value(device_id, "arp_sweep_unique_targets_threshold", default)
 
     def get_device_conn_abuse_unique_ip_threshold(self, device_id: Optional[str], default: float) -> float:
         """BUGFIX (live audit): same per-device self-healing shape as

@@ -302,6 +302,7 @@ var state = {
   autonomyLoading: false, autonomyLoaded: false, autonomyLoadError: null, autonomyData: null,
   autonomyByDeviceLoading: false, autonomyByDeviceLoaded: false, autonomyByDeviceLoadError: null, autonomyByDeviceData: null,
   autonomyExpandedDeviceId: null, // 2026-09-16 per-device panel: which device's own grant/building-trust detail is expanded
+  autonomyParamsLoading: false, autonomyParamsLoaded: false, autonomyParamsLoadError: null, autonomyParamsData: null,
 
   huntMode: 'touching',
   huntDest: '',
@@ -651,6 +652,21 @@ async function loadAutonomyByDevice(){
     state.autonomyByDeviceLoadError = err.message || String(err);
   } finally {
     state.autonomyByDeviceLoading = false; render();
+  }
+}
+
+// 2026-09-28 (console audit, user request: "update the console with all 16
+// autotune parameter") -- separate load/state, same "one slow/failed panel
+// never blocks the others" pattern as loadAutonomyByDevice() above.
+async function loadAutonomyParams(){
+  state.autonomyParamsLoading = true; state.autonomyParamsLoadError = null; render();
+  try {
+    state.autonomyParamsData = await apiFetch('/api/autonomy/parameters');
+    state.autonomyParamsLoaded = true;
+  } catch (err) {
+    state.autonomyParamsLoadError = err.message || String(err);
+  } finally {
+    state.autonomyParamsLoading = false; render();
   }
 }
 
@@ -1445,6 +1461,48 @@ function statusBadge(status){
 }
 function fmtParamValue(v){ return (v == null) ? '—' : (Math.round(v*1000)/1000); }
 
+// 2026-09-28 (console audit, user request: "update the console with all 16
+// autotune parameter"): the Autotuner Timeline panel below only ever shows a
+// parameter that HAS a proposal in threshold_history -- a quiet parameter
+// nothing has ever triggered a change for (e.g. combined_uncertain_threshold
+// on a quiet network) was invisible even though it's live and tunable. This
+// panel lists all 16 from /api/autonomy/parameters unconditionally: current
+// (global-tier) value, shipped default, and bounds, regardless of history.
+function renderAutonomyParamsPanel(){
+  var headerRight = '<button class="btn btn-sm" onclick="app.reloadAutonomyParams()" '+(state.autonomyParamsLoading?'disabled':'')+'>'+(state.autonomyParamsLoading?'Loading…':'Refresh')+'</button>';
+  var header = '<div class="panel-header"><div class="panel-title">Tunable parameters (all 16)</div>'+headerRight+'</div>';
+
+  if (state.autonomyParamsLoadError) {
+    return '<div class="panel" style="margin-bottom:16px;">'+header+'<div class="panel-body"><div class="error-banner">Could not load tunable-parameter data: '+esc(state.autonomyParamsLoadError)+'.</div></div></div>';
+  }
+  if (state.autonomyParamsLoading && !state.autonomyParamsLoaded) {
+    return '<div class="panel" style="margin-bottom:16px;">'+header+'<div class="panel-body"><div class="empty-state">Loading tunable parameters…</div></div></div>';
+  }
+
+  var params = (state.autonomyParamsData || {}).parameters || [];
+  var rows = params.length
+    ? params.map(function(p){
+        var b = p.bounds || {};
+        var stepText = (b.max_step != null)
+          ? ('±'+fmtParamValue(b.max_step))
+          : ('+'+fmtParamValue(b.max_step_up)+' / -'+fmtParamValue(b.max_step_down));
+        var boundsText = fmtParamValue(b.min)+' – '+fmtParamValue(b.max)+' (step '+stepText+')';
+        var tunedBadge = p.is_at_default
+          ? '<span class="pill" style="color:'+SEV_HEX.UNKNOWN+';border-color:'+hexA(SEV_HEX.UNKNOWN,0.45)+';background:'+hexA(SEV_HEX.UNKNOWN,0.12)+'">At default</span>'
+          : '<span class="pill" style="color:'+SEV_HEX.ANOMALOUS+';border-color:'+hexA(SEV_HEX.ANOMALOUS,0.45)+';background:'+hexA(SEV_HEX.ANOMALOUS,0.12)+'">Tuned</span>';
+        return '<tr><td class="cell-mono">'+esc(p.parameter)+'</td>'
+          + '<td class="cell-mono">'+fmtParamValue(p.current_value)+'</td>'
+          + '<td class="cell-mono" style="color:var(--text-faint);">'+fmtParamValue(p.default_value)+'</td>'
+          + '<td class="cell-mono" style="font-size:11px;color:var(--text-dim);">'+esc(boundsText)+'</td>'
+          + '<td>'+tunedBadge+'</td></tr>';
+      }).join('')
+    : '<tr><td colspan="5"><div class="empty-state">No tunable-parameter data.</div></td></tr>';
+
+  return '<div class="panel" style="margin-bottom:16px;">'+header
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Every parameter the closed-loop autotuner is allowed to touch, whether or not it has ever actually proposed a change for it yet -- "Current" is the global-tier active value (device/category overrides, shown below, can differ). "Tuned" means it has drifted from its shipped default at the global tier.</div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Current</th><th>Shipped default</th><th>Bounds</th><th>Status</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
+}
+
 function renderAutonomyView(){
   var topbarHead = topbarWithRefresh('Autonomy', 'What Argus has changed on its own, and which direction -- the closed-loop autotuner\'s threshold history, and composite trust\'s auto-resolved corroboration grants. Nothing here needs a human tap; this is a record of what already happened autonomously, and what\'s still accumulating evidence toward a future auto-resolution.', 'reloadAutonomy', state.autonomyLoading);
 
@@ -1480,7 +1538,7 @@ function renderAutonomyView(){
 
   var trustRows = trustGrants.length
     ? trustGrants.map(function(row){
-        return '<tr><td class="cell-mono">'+esc(row.device_id||'')+'</td>'
+        return '<tr><td class="cell-mono" title="'+esc(row.device_id||'')+'">'+esc(row.device_display||row.device_id||'')+'</td>'
           + '<td class="cell-mono">'+esc(row.destination_id||'')+'</td>'
           + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
           + '<td><span class="tag">'+esc(row.source_label)+'</span></td>'
@@ -1493,7 +1551,7 @@ function renderAutonomyView(){
         var pct = Math.round((row.progress_fraction||0)*100);
         var bar = '<div style="width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;">'
           + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
-        return '<tr><td class="cell-mono">'+esc(row.device_id||'')+'</td>'
+        return '<tr><td class="cell-mono" title="'+esc(row.device_id||'')+'">'+esc(row.device_display||row.device_id||'')+'</td>'
           + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
           + '<td style="font-size:11.5px;">'+esc(row.destination_class||'')+' / '+esc(row.evidence_family||'')+'</td>'
           + '<td>'+bar+'<span class="cell-mono" style="font-size:11px;margin-left:6px;">'+pct+'%</span></td>'
@@ -1502,6 +1560,7 @@ function renderAutonomyView(){
     : '<tr><td colspan="5"><div class="empty-state">Nothing currently accumulating corroboration.</div></td></tr>';
 
   return topbarHead + '<div class="content">'
+    + renderAutonomyParamsPanel()
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autotuner history</div></div>'
     + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Global scope only -- these threshold changes apply to every device\'s decisions equally. Device- and category-scoped changes (a more targeted tuning tier, added 2026-09-16) show separately in "Per-device status" and "Per-category autotuner status" below.</div>'
     + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'+autotuneRows+'</tbody></table></div></div>'
@@ -1562,7 +1621,7 @@ function renderAutonomyByDevicePanel(){
     : devices.map(function(dev){
     var isExpanded = state.autonomyExpandedDeviceId === dev.device_id;
     var summaryRow = '<tr style="cursor:pointer;" onclick="app.toggleAutonomyDevice(\''+esc(dev.device_id)+'\')">'
-      + '<td><div class="cell-title">'+esc(dev.hostname)+'</div><div class="cell-mono" style="font-size:11px;color:var(--text-faint);">'+esc(dev.device_id)+'</div></td>'
+      + '<td title="'+esc(dev.device_id)+'"><div class="cell-title">'+esc(dev.hostname)+'</div><div class="cell-mono" style="font-size:11px;color:var(--text-faint);">'+esc(dev.ip||'—')+'</div></td>'
       + '<td class="cell-mono">'+dev.trust_grants_count+'</td>'
       + '<td class="cell-mono">'+dev.building_trust_count+'</td>'
       + '<td class="cell-mono">'+dev.autotuner_count+'</td>'
@@ -2302,6 +2361,7 @@ var app = {
     if (v === 'overview' && !state.overviewLoading) loadOverview();
     if (v === 'autonomy' && !state.autonomyLoading) loadAutonomy();
     if (v === 'autonomy' && !state.autonomyByDeviceLoading) loadAutonomyByDevice();
+    if (v === 'autonomy' && !state.autonomyParamsLoading) loadAutonomyParams();
   },
   selectDevice: function(id){
     state.activeView='deviceDetail'; state.selectedDeviceId=id;
@@ -2590,6 +2650,7 @@ var app = {
   reloadHealth: function(){ loadHealth(); },
   reloadAutonomy: function(){ loadAutonomy(); },
   reloadAutonomyByDevice: function(){ loadAutonomyByDevice(); },
+  reloadAutonomyParams: function(){ loadAutonomyParams(); },
   toggleAutonomyDevice: function(deviceId){
     state.autonomyExpandedDeviceId = (state.autonomyExpandedDeviceId === deviceId) ? null : deviceId;
     render();

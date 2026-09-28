@@ -326,7 +326,7 @@ def _propose_tuning_change(store: GraphStore, synthetic: Dict[str, Any], drift: 
     new_value, reason = decision
 
     result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason,
-                                     backtest_run_id=run_id, now=now)
+                                     backtest_run_id=run_id, now=now, default=_TUNE_DEFAULT_SENSITIVITY)
     return {"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
             "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value}
 
@@ -368,7 +368,7 @@ def _propose_scoped_tuning_changes(store: GraphStore, all_trials: List[Dict[str,
             continue
         new_value, reason = decision
         result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason, device_type=category,
-                                         backtest_run_id=run_id, now=now)
+                                         backtest_run_id=run_id, now=now, default=_TUNE_DEFAULT_SENSITIVITY)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value,
                           "device_type": category})
@@ -395,7 +395,8 @@ def _propose_scoped_tuning_changes(store: GraphStore, all_trials: List[Dict[str,
         # -- without it, old_value/trust-radius would incorrectly skip this
         # device's own category tier and compare straight against global.
         result = engine.propose_change(_TUNE_PARAMETER, new_value, reason=reason, device_id=device_id,
-                                         device_type=device_type, backtest_run_id=run_id, now=now)
+                                         device_type=device_type, backtest_run_id=run_id, now=now,
+                                         default=_TUNE_DEFAULT_SENSITIVITY)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _TUNE_PARAMETER, "proposed_new_value": new_value,
                           "device_id": device_id})
@@ -979,7 +980,8 @@ def _propose_reputation_floor_changes(store: GraphStore, drift: Dict[str, Any], 
         )
         if decision is not None:
             new_value, reason = decision
-            result = engine.propose_change(parameter, new_value, reason=reason, backtest_run_id=run_id, now=now)
+            result = engine.propose_change(parameter, new_value, reason=reason, backtest_run_id=run_id, now=now,
+                                              default=param_default)
             results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                               "parameter": parameter, "proposed_new_value": new_value})
 
@@ -996,7 +998,7 @@ def _propose_reputation_floor_changes(store: GraphStore, drift: Dict[str, Any], 
                 continue
             new_value, reason = decision
             result = engine.propose_change(parameter, new_value, reason=reason, device_type=category,
-                                              backtest_run_id=run_id, now=now)
+                                              backtest_run_id=run_id, now=now, default=param_default)
             results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                               "parameter": parameter, "proposed_new_value": new_value, "device_type": category})
 
@@ -1017,7 +1019,8 @@ def _propose_reputation_floor_changes(store: GraphStore, drift: Dict[str, Any], 
                 continue
             new_value, reason = decision
             result = engine.propose_change(parameter, new_value, reason=reason, device_id=device_id,
-                                              device_type=device_type, backtest_run_id=run_id, now=now)
+                                              device_type=device_type, backtest_run_id=run_id, now=now,
+                                              default=param_default)
             results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                               "parameter": parameter, "proposed_new_value": new_value, "device_id": device_id})
 
@@ -1139,7 +1142,7 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
     if decision is not None:
         new_value, reason = decision
         result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason,
-                                          backtest_run_id=run_id, now=now)
+                                          backtest_run_id=run_id, now=now, default=_BOCPD_HAZARD_DEFAULT)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value})
 
@@ -1158,7 +1161,7 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
             continue
         new_value, reason = decision
         result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason, device_type=category,
-                                          backtest_run_id=run_id, now=now)
+                                          backtest_run_id=run_id, now=now, default=_BOCPD_HAZARD_DEFAULT)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value,
                           "device_type": category})
@@ -1180,7 +1183,8 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
             continue
         new_value, reason = decision
         result = engine.propose_change(_BOCPD_HAZARD_PARAMETER, new_value, reason=reason, device_id=device_id,
-                                          device_type=device_type, backtest_run_id=run_id, now=now)
+                                          device_type=device_type, backtest_run_id=run_id, now=now,
+                                          default=_BOCPD_HAZARD_DEFAULT)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _BOCPD_HAZARD_PARAMETER, "proposed_new_value": new_value,
                           "device_id": device_id})
@@ -1305,7 +1309,8 @@ def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) 
             )
             result = engine.propose_change(_PEER_DEVIATION_MULTIPLIER_PARAMETER, candidate_mult, reason=reason,
                                               device_id=device_id, device_type=device_type,
-                                              backtest_run_id=run_id, now=now)
+                                              backtest_run_id=run_id, now=now,
+                                              default=_PEER_DEVIATION_MULTIPLIER_DEFAULT)
             results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                               "parameter": _PEER_DEVIATION_MULTIPLIER_PARAMETER, "proposed_new_value": candidate_mult,
                               "device_id": device_id, "device_type": device_type})
@@ -1327,7 +1332,8 @@ def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) 
             )
             result = engine.propose_change(_PEER_DEVIATION_MIN_COUNT_PARAMETER, candidate_count, reason=reason,
                                               device_id=device_id, device_type=device_type,
-                                              backtest_run_id=run_id, now=now)
+                                              backtest_run_id=run_id, now=now,
+                                              default=_PEER_DEVIATION_MIN_COUNT_DEFAULT)
             results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                               "parameter": _PEER_DEVIATION_MIN_COUNT_PARAMETER, "proposed_new_value": candidate_count,
                               "device_id": device_id, "device_type": device_type})
@@ -1436,7 +1442,8 @@ def _propose_familiarity_trust_bar_changes(store: GraphStore, run_id: str, now: 
         )
         result = engine.propose_change(_FAMILIARITY_TRUST_BAR_PARAMETER, candidate, reason=reason,
                                           device_id=device_id, device_type=device_type,
-                                          backtest_run_id=run_id, now=now)
+                                          backtest_run_id=run_id, now=now,
+                                          default=_FAMILIARITY_TRUST_BAR_DEFAULT)
         results.append({"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                           "parameter": _FAMILIARITY_TRUST_BAR_PARAMETER, "proposed_new_value": candidate,
                           "device_id": device_id, "device_type": device_type})
@@ -1530,7 +1537,8 @@ def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float)
                     f"tightened trust_cache_ttl_seconds from {current:.0f} to {new_value:.0f}."
                 )
                 result = engine.propose_change(_TRUST_CACHE_TTL_PARAMETER, new_value, reason=reason,
-                                                  backtest_run_id=run_id, now=now)
+                                                  backtest_run_id=run_id, now=now,
+                                                  default=_TRUST_CACHE_TTL_DEFAULT)
                 return [{"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                            "parameter": _TRUST_CACHE_TTL_PARAMETER, "proposed_new_value": new_value}]
     return []
@@ -1605,7 +1613,8 @@ def _propose_reputation_propagation_ttl_changes(store: GraphStore, run_id: str, 
                 f"to {new_value:.0f}."
             )
             result = engine.propose_change(_REPUTATION_PROPAGATION_TTL_PARAMETER, new_value, reason=reason,
-                                              backtest_run_id=run_id, now=now)
+                                              backtest_run_id=run_id, now=now,
+                                              default=_REPUTATION_PROPAGATION_TTL_DEFAULT)
             return [{"accepted": result.accepted, "change_id": result.change_id, "reason": result.reason,
                        "parameter": _REPUTATION_PROPAGATION_TTL_PARAMETER, "proposed_new_value": new_value}]
     return []
