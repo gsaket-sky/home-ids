@@ -23,6 +23,7 @@ import ipaddress
 import logging
 import json
 import time
+from functools import lru_cache
 from pathlib import Path
 
 try:
@@ -631,6 +632,7 @@ KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
     "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
 })
 
+@lru_cache(maxsize=4096)
 def is_local_or_multicast_destination(dest: str) -> bool:
     """True if `dest` is a multicast/link-local/loopback/reserved/unspecified IP, or
     an IPv4 subnet-directed-broadcast address (`x.x.x.255`) -- i.e. a LAN protocol
@@ -650,7 +652,22 @@ def is_local_or_multicast_destination(dest: str) -> bool:
     poisoned hundreds of times over by exactly this traffic shape (ff02::fb,
     224.0.0.22, 224.0.0.251 -- see that method's own docstring). Centralized here so
     the v13 cross-device-correlation/peer-deviation graph queries (`graph/store.py`)
-    can apply the same guard instead of re-deriving it a fourth time."""
+    can apply the same guard instead of re-deriving it a fourth time.
+
+    @lru_cache (2026-09-28, live root-cause investigation): a pure function of
+    `dest` alone (no time/state dependence -- an address's multicast/link-local/
+    etc. classification never changes), yet was being called fresh, re-parsing the
+    IP string via Python's ipaddress module every time, once per row, from
+    GraphStore.get_distinct_destination_count()'s per-device-per-cycle scan. A live
+    py-spy capture on .94 caught the pipeline's MainThread hot in exactly this call
+    (is_link_local -> _string_from_ip_int) while collector_lag_seconds climbed from
+    ~2s to 5-7s -- summed across the ~70 devices with enough same-type peers to
+    reach this path, ~8,400 device_destinations rows were being re-classified from
+    scratch every ~2s cycle, even though the same small set of protocol-group
+    addresses (mDNS/SSDP/ND multicast, subnet broadcasts) recurs across nearly
+    every device on the network. Same maxsize=4096 convention this codebase already
+    uses for the same class of fix (geoip.py's lookup()/lookup_asn()/
+    _timed_reverse_dns_status(), all @lru_cache'd pure functions of an IP)."""
     if not dest or dest == "unknown":
         return False
     try:
