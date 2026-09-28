@@ -344,10 +344,19 @@ check("THE CORE FIX: the actual classifier call now uses reputation_target, not 
 check("REGRESSION GUARD: the old call site passing top_domain directly to classify() "
       "is gone",
       "self.rep_classifier.classify(top_domain, vt_score=vt_risk" not in pipeline_src)
+# STALE-TEST FIX (2026-09-28): the single-string elif this originally checked for was
+# itself broadened by a later fix (commit a074dd2, "evidence-destination bleed") into a
+# 4-string tuple covering every reputation-tier explanation decision_engine.py can
+# produce (Confirmed Malicious IOC / Corroborated Reputation Signal / both Elevated
+# Reputation Signal variants), not just the verified-IOC case -- see that elif's own
+# SECURITY FIX comment in pipeline.py. The underlying behavior this check cares about
+# (reputation_target-based attribution, not target_malicious_domain) is unchanged and a
+# strict superset of what this test originally verified.
 check("THE FIX: the alert-building side also got a 'Confirmed Malicious IOC' branch "
-      "(matching decision_engine.py's exact tier-5 explanation string) so the alert "
-      "displays/records the real reputation_target, not target_malicious_domain",
-      'elif primary_sig_base == "Confirmed Malicious IOC":' in pipeline_src)
+      "(matching decision_engine.py's exact tier-5 explanation string, now broadened to "
+      "all four reputation-tier explanation strings) so the alert displays/records the "
+      "real reputation_target, not target_malicious_domain",
+      '"Confirmed Malicious IOC",' in pipeline_src and "reputation_target" in pipeline_src)
 check("THE FIX: that branch correctly routes an IP-shaped reputation_target to "
       "alert_dest_ip (not alert_target_domain) -- abuse_risk/vt_risk's IP-only "
       "signals produce an IP, not a domain",
@@ -602,8 +611,12 @@ check("SOURCE-GUARD: the DGA_BOTNET_C2 branch keys off primary_sig_base",
       'elif primary_sig_base == "DGA_BOTNET_C2":' in _pipeline_src)
 check("SOURCE-GUARD: the DNS_EVASION target-domain branch keys off primary_sig_base",
       'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):' in _pipeline_src)
+# STALE-TEST FIX (2026-09-28): see the matching comment above this same check earlier in
+# this file -- the single-string elif was broadened into a 4-string tuple by a later fix
+# (commit a074dd2). Checks the tuple form actually keys off primary_sig_base, not the
+# raw (potentially-suffixed) primary_sig, which is what this guard actually cares about.
 check("SOURCE-GUARD: the Confirmed Malicious IOC branch keys off primary_sig_base",
-      'elif primary_sig_base == "Confirmed Malicious IOC":' in _pipeline_src)
+      'elif primary_sig_base in (' in _pipeline_src and '"Confirmed Malicious IOC",' in _pipeline_src)
 check("SOURCE-GUARD: target_display's DNS_EVASION preference keys off primary_sig_base",
       "primary_sig_base in (\"DNS_EVASION\", \"DNS_ATTRIBUTION_GAP\", \"DNS_POLICY_BYPASS\") and alert_dest_ip and alert_dest_ip != \"unknown\"" in _pipeline_src)
 check("SOURCE-GUARD: the repeat-suppression cadence gate keys off primary_sig_base, "
