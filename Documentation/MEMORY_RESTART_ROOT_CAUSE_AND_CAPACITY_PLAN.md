@@ -1,5 +1,163 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
+**Status (2026-09-28, HANDOVER — read this first): user reported "since adding
+health manager, the script keeps getting restarted frequently" and separately
+"processing delay is climbing." Investigation found 4 SEPARATE real bugs (not
+one), all fixed, deployed, and live-verified on `.94` as of commit `906b47f`.
+**None of this saga is closed** — see "Open items for the next session" at the
+end of this entry before assuming anything below is finished.
+
+**Bug 1 — most restarts were never a bug.** Checked `journalctl` + sudo audit
+log for the Sep-27 evening restart flurry (11 restarts, some 6-9 min apart):
+every one was `sudo systemctl restart soc.service` run manually from this same
+dev PC (192.168.77.12) — confirmed via `sudo[...]: COMMAND=/usr/bin/systemctl
+restart soc.service` lines matching each restart's timestamp exactly. Same
+signature as the 09-23 diagnosis earlier in this file. Only ONE restart that
+day (10:56:28) was a genuine health_manager self-heal, and it worked exactly
+as designed (heartbeat stale 311s → CRITICAL → clean SIGTERM shutdown →
+systemd restart). health_manager itself is not misbehaving.
+
+**Bug 2 — real, found via py-spy: `sandbox.py`'s `ShadowEvaluator` did a
+synchronous HTTP self-scrape of its own `/metrics` endpoint, once per device,
+every ~2s main-loop cycle**, to check resource pressure before even looking at
+whether a canary was active. A live py-spy capture caught `MainThread` blocked
+inside that `urlopen()` call during a heartbeat-staleness incident; with 40+
+devices each independently scraping the same self-hosted endpoint (itself
+served by a thread competing for the same GIL), per-device socket timeouts
+could sum to multi-minute heartbeat staleness — this is what caused Bug 1's one
+real restart. Fixed: added `utils.is_resource_pressure_active_in_process()`
+(reads the Prometheus Gauge object directly, no socket) for this in-process
+call site; the 3 genuinely cross-process callers (`train_fp_classifier.py`,
+`population_prior_builder.py`, `backtest_job.py` — separate OS subprocesses)
+keep the original HTTP version unchanged. Commit `8844721`.
+
+**Bug 3 — found while chasing the user's separate "falling behind" report:
+`scripts/scheduler.py`'s starvation-backstop clock (`pending_since`) was a
+plain in-memory dict**, wiped every time `soc.service` restarts (which also
+kills/relaunches the scheduler daemon). `live_prune` — priority 1, the ONLY
+job that prunes `device_destinations`/evidence/decisions, one cron slot/day
+(03:15) — was deferred for "system under pressure" every single night since
+09-23 at "0.0 min so far", NEVER escalating, because a restart kept resetting
+the clock before it could reach the 60-min starvation backstop that's supposed
+to force-admit it regardless of pressure. `job_health.json` confirmed
+`live_prune`'s last real success was 09-21 — a full week silently skipped.
+Fixed: moved the clock into `job_coordinator.py`'s existing disk-persisted
+state (`record_deferral_start()`/`get_deferred_minutes()`/`clear_deferral()`),
+so a scheduler restart can no longer reset it. Commit `8844721` (same commit
+as Bug 2). **Manually force-ran `live_prune.py` once this session** (correct
+invocation: `cd .../SOC && venv/bin/python3 src/argus/ops/live_prune.py` — it
+silently no-ops if run from the wrong cwd, since `state_path` is resolved
+relative to cwd and errors are swallowed into `job_health.json` writes that
+themselves fail silently if the wrong `state/` dir gets created). Result:
+`device_destinations_deleted: 0` — that table wasn't actually bloated, so this
+specific fix's benefit is about the NEXT natural failure mode more than an
+immediate win. `orphaned_device_baselines_deleted: 2373` was real cleanup.
+
+**Bug 4 — the actual driver of "processing delay is climbing" (1.9s → 7s+
+over ~20 min, still climbing pre-fix): `GraphStore.get_distinct_destination_
+count()` (`src/argus/graph/store.py`), called once per device per cycle for
+every device with ≥3 same-type peers (`_PEER_DEVIATION_MIN_PEERS=3` in
+`live_engine.py`), fetches every `device_destinations` row for that device and
+Python-filters each one through `utils.is_local_or_multicast_destination()`
+(re-parses the string as an IP every single time).** Live query against `.94`'s
+real graph: 71 devices reach this path each cycle, summing to ~8,400 rows
+re-classified from scratch every ~2s cycle — a live, quantified instance of the
+"O(N²) peer query" gap already flagged in `SHIPPABILITY_AND_SCALE_PLAN.md`.
+Fixed: `@lru_cache(maxsize=4096)` on `is_local_or_multicast_destination()`
+(pure function of its string arg, same convention `geoip.py` already uses for
+the identical class of fix). Commit `906b47f`. **Investigated first**: a
+device (`52a469cfd274`, 5,436 distinct destinations, the single biggest
+outlier in the table) turned out to be a RED HERRING for this specific bug —
+its `known_ips_history` includes `192.168.77.94` (it's `.94`'s own host
+identity, Pi-hole/threat-intel background traffic attributed to itself as a
+tracked "device"), and `device_type=dns_server` with zero same-type peers on
+this network, so it never actually reaches the expensive path at all. Left
+as-is (see open items).
+
+**Also found, not yet fixed as its own thing but the direct write-side
+counterpart of Bug 4's read-side fix**: `GraphStore.record_device_
+destinations()` used to commit once per `upsert_device()` call PLUS once per
+`upsert_destination()` call PLUS a final commit (N+2 individual synchronous
+SQLite commits for a device with N destinations this cycle), never wrapped in
+this same file's own `self.transaction()` helper despite 3 other call sites
+already using it for exactly this reason. Fixed by wrapping the method body in
+`self.transaction()`. Commit `ed931eb`. Added a regression test using
+`sqlite3`'s trace callback (can't monkeypatch `sqlite3.Connection.commit`
+directly — it's a read-only C-extension attribute; had to count `COMMIT`
+statements via `set_trace_callback` instead — see
+`tests/test_argus_graph_store.py`'s tail).
+
+**Net result after all 4 fixes deployed** (verified via `/home/user/
+freeze_diagnostics/watcher.log` and `curl localhost:9105/metrics | grep
+collector_lag`): the freeze-watcher's heartbeat-staleness incidents (was
+firing every 30-90s continuously) stopped. `home_ids_collector_lag_seconds`
+stopped its unbounded climb and now fluctuates ~1.9-4.2s (avg ~3s) instead of
+climbing straight through 7s+ — real improvement, but still above the 2.0s
+`poll_interval` target, meaning there's at least one more contributor on the
+same hot path not yet fixed (see open items #1 below).
+
+## Open items for the next session
+
+1. **`get_devices_with_metadata_value()` (`store.py`) is the next suspect for
+   the residual ~3s average `collector_lag_seconds`.** Called from
+   `_inject_peer_deviation_evidence()` (`live_engine.py`) once per device per
+   cycle, it's documented as "a full table scan, parsed in Python rather than
+   a SQLite `json_extract()` query" over the ENTIRE `devices` table (152 rows
+   on `.94`, permanent by design — never pruned, only tombstoned on merge).
+   Same general shape as Bug 4 but not yet measured/fixed. The natural fix is
+   almost certainly caching the per-device-type peer list ONCE per cycle
+   (matching `ShadowEvaluator._refresh_if_stale()`'s existing pattern in
+   `sandbox.py`) instead of rebuilding it from scratch for every device that
+   shares that type. NOT yet investigated with the same rigor as Bug 4 (no
+   py-spy capture pinpointing it specifically) — confirm live before assuming.
+
+2. **`live_prune` has not yet had its first NATURAL (cron-triggered) success
+   since the Bug 3 fix deployed.** Its next real slot is tonight 03:15 (or,
+   per the fix's own design, the FOLLOWING night at latest if deferred once
+   more — the persisted clock should force-admit it by then regardless of
+   pressure). Check `state/scheduler.log` for `'live_prune' deferred ... min
+   ... admitting despite pressure (starvation backstop)` or a clean dispatch,
+   and confirm `job_health.json`'s `live_prune.last_success` updates on its
+   OWN (not from another manual SSH run) within 48h of 2026-09-28. If it's
+   STILL silently skipped after 2 more nights, the persisted-clock fix itself
+   has a bug — re-read `job_coordinator.py`'s `record_deferral_start()`/
+   `get_deferred_minutes()`/`clear_deferral()` and `scripts/scheduler.py`'s
+   `_try_dispatch()` before assuming the fix "should just work."
+
+3. **Device `52a469cfd274` (`.94`'s own host, `device_type=dns_server`,
+   5,436 distinct destinations) is architecturally messy but not urgent.**
+   The monitoring box is tracking its OWN operational traffic (threat-intel
+   refreshes, GeoIP/Tranco downloads, Pi-hole resolution) as if it were a
+   managed network device. Not causing live cost right now (0 same-type
+   peers → early return in `_inject_peer_deviation_evidence()`), but it's
+   dead weight in `device_destinations` (5,436 rows and growing forever,
+   since this device_type has no peers to ever trigger pruning-relevant
+   analysis) and conceptually wrong (compare to the existing `is_own_
+   registered_device()`/`safe_ips` exemption pattern already used elsewhere
+   for the household's own Fritzbox — `.94` itself has no equivalent
+   exemption). Low priority; flag if it resurfaces.
+
+4. **Standing rule, unchanged**: every SSH/deploy/restart action on `.94`
+   needs FRESH explicit confirmation each session — a prior session's "yes,
+   deploy" does not carry forward. This session got that confirmation
+   individually for each of the 3 restarts performed (commits `8844721`,
+   `ed931eb`, `906b47f`) plus the one manual `live_prune.py` run. Don't assume
+   continued authorization into a new session.
+
+5. **Verification toolkit used this session, for whoever continues**:
+   `ssh user@192.168.77.94` (key already set up, no `.19` involvement
+   needed here); `journalctl -u soc.service` for app + systemd-level events
+   (watch for the `oom`-in-`journalctl` `-i` grep false-positive from
+   "StudyR**oom**Galaxy"-style hostnames — grep case-sensitively or use a
+   tighter pattern); `/home/user/freeze_diagnostics/watcher.log` +
+   `incident_*.txt` (each has a full `py-spy dump` section — this is what
+   actually found Bugs 2 and 4, not guessing from logs alone);
+   `curl -s http://127.0.0.1:9105/metrics | grep collector_lag` for the
+   direct "is it falling behind" signal; `state/job_health.json` and
+   `state/scheduler.log` for per-job last-success/deferral history; `sudo
+   /home/user/myscripts/home-ids/venv/bin/py-spy dump --pid <MainPID>
+   --nonblocking` for a live (non-incident) snapshot.
+
 **Status (2026-09-23, real-data check-in): live `.94` RSS re-measured while
 building the new whole-stack disk budget governor (56 real devices, well past
 Phase 4's N=13/50/100 synthetic sweep below) — `soc.service` main-process RSS
