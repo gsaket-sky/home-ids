@@ -690,10 +690,13 @@ check("G3: an empty/None domain never crashes, returns ''",
 
 _h0 = _ft0 + 700
 
-# Seed two "iot" peers with a normal, LOW distinct-destination count (2 each) --
+# Seed three "iot" peers with a normal, LOW distinct-destination count (2 each) --
 # directly via the graph's real-traffic table, simulating their own prior traffic.
+# Three, not two: _PEER_DEVIATION_MIN_PEERS was raised 2 -> 3 (third-party review,
+# 2026-09-28) since a 2-peer average is one outlier away from meaningless.
 for peer_id, dests in (("p1a_peer1", ["p1.example.com", "p2.example.com"]),
-                        ("p1a_peer2", ["p3.example.com", "p4.example.com"])):
+                        ("p1a_peer2", ["p3.example.com", "p4.example.com"]),
+                        ("p1a_peer3", ["p5.example.com", "p6.example.com"])):
     _f_store.update_device_metadata(peer_id, {"device_type": "iot"}, timestamp=_h0)
     _f_store.record_device_destinations(peer_id, dests, timestamp=_h0)
 
@@ -715,7 +718,7 @@ check("H1: the synthetic evidence carries a lower confidence (0.6) -- an honest 
       peer_dev_hits and peer_dev_hits[0].confidence == 0.6)
 check("H1: the synthetic evidence's features name the real device_type/counts for audit",
       peer_dev_hits and peer_dev_hits[0].features.get("device_type") == "iot"
-      and peer_dev_hits[0].features.get("peer_count") == 2)
+      and peer_dev_hits[0].features.get("peer_count") == 3)
 check("H1: peer_deviation was NEVER written to the graph itself",
       not any(e.evidence_type == "peer_deviation" for e in _f_store.get_evidence_for_device("p1a_devN")))
 check("H1: this device's OWN device_type was persisted onto its graph metadata "
@@ -772,10 +775,19 @@ devQ_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h0 + 60, device=
                         value=10.0, confidence=0.9, independence_group="dns_behavior",
                         domain="cam-anomalous-5.example.com")]
 merged_Q1 = _capture_merged(devQ_ev, ReputationVector(domain="", tier=3), "p1a_devQ", _h0 + 60, device_type="camera")
-check("H2: REGRESSION GUARD -- only 1 real peer of this type (need >=2) means no "
+check("H2: REGRESSION GUARD -- only 1 real peer of this type (need >=3) means no "
       "statistically meaningful comparison, so no peer_deviation is injected even "
       "though the raw destination count is high",
       not any(e.evidence_type == "peer_deviation" for e in merged_Q1))
+
+# REGRESSION GUARD (third-party review, 2026-09-28): a 2-peer cohort -- enough
+# under the OLD min (2) but not the new one (3) -- must ALSO get no evidence.
+_f_store.update_device_metadata("p1a_devQ_peer2", {"device_type": "camera"}, timestamp=_h0 + 52)
+_f_store.record_device_destinations("p1a_devQ_peer2", ["q2.example.com"], timestamp=_h0 + 52)
+merged_Q2 = _capture_merged(devQ_ev, ReputationVector(domain="", tier=3), "p1a_devQ", _h0 + 61, device_type="camera")
+check("H2: REGRESSION GUARD -- exactly 2 real peers (the old minimum) is still "
+      "below the new min of 3, so no peer_deviation is injected",
+      not any(e.evidence_type == "peer_deviation" for e in merged_Q2))
 
 # --- H3: fail-safe -- a broken graph read never blocks the real decision ---
 _orig_get_store = live_engine._get_graph_store

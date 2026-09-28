@@ -478,6 +478,19 @@ class FeatureExtractor:
         query_variance = sum((v - mean_v) ** 2 for v in vals) / max(n_domains, 1)
 
         top_domain_ratio = max(decayed_weights.values(), default=0.0) / max(decayed_total, 1e-9)
+        # P2 FIX (third-party review, 2026-09-28): the domain actually DRIVING
+        # top_domain_ratio (and therefore the device-wide query_rate burst
+        # dns_behavior.py's dns_rate Evidence reports) was never tracked, only the
+        # ratio itself -- dns_rate Evidence had no .domain to attach, so
+        # AdvertisingBurstHypothesis's rep_vector.tier gate (see that class's own
+        # BUGFIX comment) was structurally a no-op: rep_vector always describes
+        # SOME destination, but dns_rate evidence never named one to compare it
+        # against, so _effective_rep_tier() could never actually verify the
+        # rep_vector was about the right destination. Same "real evidence-linked
+        # domain instead of an unrelated fallback" fix already shipped for
+        # top_entropy_domain/tunneling_domain_examples/suspicious_domain_examples
+        # above, applied to the one remaining case that never got it.
+        top_rate_domain = max(decayed_weights, key=decayed_weights.get, default="")
         new_domains = sum(1 for d in rw.domains if d not in state.seen_domains)
 
         subdomain_fanout_count = 0
@@ -525,6 +538,7 @@ class FeatureExtractor:
             "query_variance": query_variance,
             "events_per_second": n_events / max(window_seconds, 1),
             "top_domain_ratio": top_domain_ratio,
+            "top_rate_domain": top_rate_domain,
             "new_domains": new_domains,
             "deep_domains": deep_domains,
             "max_label_length": max_label_len,
@@ -567,7 +581,7 @@ class FeatureExtractor:
             "nxdomain_ratio": 0.0, "entropy_avg": 0.0, "suspicious_domains": 0,
             "suspicious_domain_examples": [],
             "total": 0, "query_variance": 0.0, "events_per_second": 0.0,
-            "top_domain_ratio": 0.0, "new_domains": 0, "deep_domains": 0,
+            "top_domain_ratio": 0.0, "top_rate_domain": "", "new_domains": 0, "deep_domains": 0,
             "max_label_length": 0, "max_label_domain": "", "top_entropy_domain": "", "dns_tunneling_domains": 0,
             "dns_tunneling_domain_examples": [], "nxdomain_tld_conc": 0.0,
             "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,

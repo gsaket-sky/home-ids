@@ -1524,6 +1524,32 @@ class AutonomousFPEngine:
             LOGGER.debug("embed_text() failed (non-fatal, alert_event just won't be searchable): %s", exc)
             return None
 
+    def get_stage3_vendor_similarity(self, domain: str, hostname: str = "") -> "tuple[float, str]":
+        """P1 FIX (third-party review, 2026-09-28): public entry point (same
+        precedent as embed_text() above) for a caller OUTSIDE this engine's own
+        evaluate() pipeline that needs the Stage 3 FastEmbed "does this domain's
+        text resemble a known-legitimate vendor pattern" similarity score.
+        ReputationClassifier.classify() (intelligence/reputation/classifier.py)
+        is the first such caller -- its is_cloud_cdn_provider_org() gate used to
+        trust ANY IP inside a shared cloud ASN as "known infrastructure" with no
+        way to tell a vendor's own service apart from an attacker's C2 domain
+        rented on the exact same infrastructure. This reuses this engine's own
+        already-loaded FastEmbed model (no second model load) instead of a
+        fresh one, and degrades exactly like this engine's own internal callers
+        do: "unknown"/empty/no-real-domain skips FastEmbed entirely (same
+        has_real_domain guard as evaluate() above) and returns (0.0, ...)
+        rather than a meaningless similarity score for a placeholder string;
+        FastEmbed not yet loaded falls back to the static rule-based matcher.
+        Always returns a real (similarity, label) pair, never None -- a caller
+        doesn't need to handle a third "not ready" case."""
+        has_real_domain = bool(domain) and domain.strip().lower() not in ("unknown", "null", "none", "")
+        if not has_real_domain:
+            return 0.0, "N/A (no resolved hostname/domain)"
+        embed_sim, embed_match = self._stage3_embed(domain, hostname or domain)
+        if embed_sim is None:
+            embed_sim, embed_match = self._stage3_rule_fallback(domain)
+        return embed_sim, embed_match
+
     def _stage3_embed(self, domain: str, hostname: str):
         """
         Compare the queried domain against pre-computed safe vendor embeddings.

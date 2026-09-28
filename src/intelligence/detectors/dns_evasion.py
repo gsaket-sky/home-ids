@@ -35,6 +35,29 @@ from typing import Dict, List, Optional, Set
 
 from utils import etld1, _is_cdn_or_cloud_domain, is_vpn_provider_org, is_cloud_cdn_provider_org, KNOWN_PUBLIC_DNS_RESOLVERS
 from intelligence.hypotheses.evidence import Evidence
+from metrics import dns_evasion_reverse_dns_timeout_outcomes_total
+
+# P1 FIX (third-party review, 2026-09-28): a reverse-DNS timeout used to be counted
+# (as "inconclusive") and the IP was then simply dropped -- gone, with no trace,
+# forever, even though "timed out under load" says nothing about whether the
+# connection is actually innocuous. This in-process dict is the retry queue: ip ->
+# consecutive timeout count. Deliberately keyed by ip alone, shared across every
+# device's audit -- reverse-DNS/ASN status is a property of the destination IP
+# itself, not of which device asked, so a timeout recorded auditing one device's
+# burst correctly counts toward the SAME ip's retry budget in another device's
+# burst too. No separate retry scheduler needed: dest_ips already comes from real,
+# ongoing connections, so an IP a device is still actually talking to naturally
+# reappears in its next capture burst and gets re-checked fresh then, same shape as
+# every other reactive-capture-driven re-evaluation in this module.  Cleared on a
+# conclusive answer (explained either way); after _MAX_REVERIFICATION_ATTEMPTS
+# consecutive timeouts with no conclusive answer, the ip is escalated into real
+# unexplained evidence instead of being silently dropped forever -- same
+# "attempts, then commit to an outcome" shape as mitigation/ips.py's own
+# _retry_queue/_dead_letter, at in-process scale (a module-lifetime dict, not a new
+# persisted file -- no new state file for what's fundamentally ephemeral, same as
+# live_engine.py's own _last_risk_score).
+_PENDING_REVERIFICATION: Dict[str, int] = {}
+_MAX_REVERIFICATION_ATTEMPTS = 3
 
 
 @dataclass
@@ -196,6 +219,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     doh_bypass_hits: List[str] = []
 
     inconclusive_timeouts = 0
+    exhausted_reverifications = 0
     for ip in audit.dest_ips:
         if _is_private_lan_ip(ip):
             continue
@@ -240,13 +264,31 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
             explained = _reverse_dns_explains(ip, audit.queried_domains, geoip_engine, ti_engine)
             if explained is None:
                 # Inconclusive (reverse-DNS timed out under load) -- not evidence of
-                # anything, must not be counted as "unexplained." Skip this IP
-                # entirely rather than silently treating "couldn't check" as
-                # "checked, suspicious."
-                inconclusive_timeouts += 1
-                continue
-            if explained:
-                continue
+                # anything on its own, so it must not be counted as "unexplained"
+                # immediately. Unlike the old behavior, it's not dropped either:
+                # queued in _PENDING_REVERIFICATION for a fresh check next time this
+                # IP shows up in a burst, up to _MAX_REVERIFICATION_ATTEMPTS times.
+                attempts = _PENDING_REVERIFICATION.get(ip, 0) + 1
+                if attempts < _MAX_REVERIFICATION_ATTEMPTS:
+                    _PENDING_REVERIFICATION[ip] = attempts
+                    inconclusive_timeouts += 1
+                    dns_evasion_reverse_dns_timeout_outcomes_total.labels(outcome="enqueued").inc()
+                    continue
+                # Retry budget exhausted: a timeout that keeps recurring across
+                # multiple bursts is no longer distinguishable from "genuinely
+                # can't be explained" -- it must not keep vanishing every cycle.
+                # Falls through to the same unexplained-connection handling below
+                # as any other unexplained IP (is_doh is always False here).
+                _PENDING_REVERIFICATION.pop(ip, None)
+                dns_evasion_reverse_dns_timeout_outcomes_total.labels(outcome="exhausted").inc()
+                exhausted_reverifications += 1
+            else:
+                if _PENDING_REVERIFICATION.pop(ip, None) is not None:
+                    # A later attempt got a conclusive answer for an IP that had
+                    # previously timed out -- the retry mechanism doing its job.
+                    dns_evasion_reverse_dns_timeout_outcomes_total.labels(outcome="resolved").inc()
+                if explained:
+                    continue
         unexplained.append(ip)
         if is_doh:
             policy_bypass_ips.append(ip)
@@ -312,8 +354,14 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     if doh_bypass_hits:
         note += f"; {len(doh_bypass_hits)} connection(s) are DNS-over-HTTPS to a known DoH provider (SNI-verified)"
     if inconclusive_timeouts:
-        note += (f"; {inconclusive_timeouts} additional connection(s) skipped -- reverse-DNS "
-                 f"timed out under load, inconclusive rather than counted as unexplained")
+        note += (f"; {inconclusive_timeouts} additional connection(s) queued for delayed "
+                 f"re-verification -- reverse-DNS timed out under load, inconclusive rather "
+                 f"than counted as unexplained this cycle")
+    if exhausted_reverifications:
+        note += (f"; {exhausted_reverifications} of the {len(unexplained)} counted above "
+                 f"never got a conclusive reverse-DNS answer after {_MAX_REVERIFICATION_ATTEMPTS} "
+                 f"attempts across separate bursts and were escalated to unexplained rather "
+                 f"than dropped")
 
     # VERSION 11 (P1, review #3/#4): a stable subtag distinguishing WHY this is
     # unexplained, matching threat_signals.py's provenance subtag convention.

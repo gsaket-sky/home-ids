@@ -752,7 +752,15 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
 # produces once live is what should validate or refute these, not a claim made
 # up front.
 _PEER_DEVIATION_WINDOW_SECONDS = 7 * 86400  # a week -- stable enough for a baseline, current enough to matter
-_PEER_DEVIATION_MIN_PEERS = 2  # need at least 2 OTHER same-type devices for a statistically meaningful average
+# P2 FOLLOW-UP (third-party review, 2026-09-28): raised from 2 -- a 2-peer cohort's
+# "average" is one outlier away from being meaningless (either peer alone swings it
+# 50%), and this heuristic is already flagged above as a genuinely new, unvalidated
+# one with no live tuning data. 3 is the smallest cohort where a single unusual peer
+# can no longer dominate the average outright. Below this, _inject_peer_deviation_
+# evidence() returns [] entirely (an automatic disable, not a confidence penalty --
+# there's no real signal to discount when the "cohort" itself isn't statistically
+# meaningful yet).
+_PEER_DEVIATION_MIN_PEERS = 3
 _PEER_DEVIATION_MULTIPLIER = 3.0  # this device's own count must be >= 3x its cohort's average
 _PEER_DEVIATION_MIN_ABSOLUTE_COUNT = 5  # avoid flagging trivial small-number swings (e.g. 1 -> 4 is "4x" but meaningless)
 

@@ -373,28 +373,26 @@ class MultiDeviceMLEngine:
     # ALSO blocked on this same synchronous joblib.dump() loop. A slow SD-card
     # write (contending with Zeek's own log writes, reactive packet captures, and
     # the graph db's WAL) now degrades to "this cycle's model save is skipped,
-    # retried in 60s" instead of freezing the whole pipeline. Same small local
-    # copy (not a cross-module import) as state_guard.py's own precedent.
+    # retried in 60s" instead of freezing the whole pipeline.
+    #
+    # P2 FOLLOW-UP (third-party review, 2026-09-28): the fix above still made the
+    # main loop BLOCK for up to 20s waiting on the background thread via t.join(
+    # timeout=...) before giving up -- an improvement over unbounded, but still
+    # real starvation every single 60s cycle whenever the disk is merely slow, not
+    # hung. save_models() below is now genuinely fire-and-forget for its normal
+    # periodic caller (pipeline.py step()'s 60s flush): it starts the background
+    # thread and returns immediately, no join at all. Only pipeline.py's stop()
+    # passes wait=True, for the same reason flush_to_disk() stays synchronous at
+    # shutdown -- durability of the FINAL save matters there in a way it doesn't
+    # for a save that'll just be superseded by next cycle's -- and even that wait
+    # stays bounded to _SAVE_IO_TIMEOUT_SECONDS, matching flush_to_disk()'s own
+    # shutdown precedent (an unbounded shutdown wait would reintroduce the exact
+    # hang-then-needs-SIGKILL failure mode this whole fix chain exists to avoid).
+    # self._save_thread tracks the one in-flight save (guarded by self._save_lock)
+    # so a slow save from a previous cycle is never joined by a new periodic call
+    # (would reintroduce the starvation) but IS joined by a shutdown call (so
+    # stop() can't return before the on-disk state is actually current).
     _SAVE_IO_TIMEOUT_SECONDS = 20.0
-
-    @staticmethod
-    def _bounded_io(fn, timeout: float):
-        result: dict = {}
-
-        def _target():
-            try:
-                result["value"] = fn()
-            except Exception as exc:
-                result["error"] = exc
-
-        t = threading.Thread(target=_target, daemon=True, name="ml_save_io")
-        t.start()
-        t.join(timeout=timeout)
-        if t.is_alive():
-            return None, True
-        if "error" in result:
-            raise result["error"]
-        return result.get("value"), False
 
     def __init__(self, model_dir: Optional[Any] = None, global_model_path: Optional[Any] = None, **kwargs):
         self._lock = threading.RLock()
@@ -408,6 +406,10 @@ class MultiDeviceMLEngine:
         # warmed-up model (13 files, ~15 MB) although each refits only every
         # _RETRAIN_N samples -- ~6% of the main loop's wall time spent waiting on it.
         self._persisted = {}
+        # Guards save_models()'s background-thread bookkeeping -- see that method's
+        # own docstring and _SAVE_IO_TIMEOUT_SECONDS's comment above.
+        self._save_lock = threading.Lock()
+        self._save_thread: Optional[threading.Thread] = None
         self.model_dir = Path(model_dir) if model_dir else None
         if self.model_dir:
             self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -516,7 +518,12 @@ class MultiDeviceMLEngine:
         joblib.dump(model, tmp)
         os.replace(tmp, path)
 
-    def save_models(self):
+    def save_models(self, wait: bool = False):
+        """Persists every warmed-up model whose in-memory object has changed since
+        its last save. Fire-and-forget by default (see _SAVE_IO_TIMEOUT_SECONDS's
+        comment) -- starts a background thread and returns immediately, never
+        blocking the caller. Pass wait=True (pipeline.py's stop() only) to block
+        until the save genuinely completes, bounded to _SAVE_IO_TIMEOUT_SECONDS."""
         if not self.model_dir:
             return
 
@@ -528,37 +535,50 @@ class MultiDeviceMLEngine:
             return True
 
         def _do_save():
-            saved_devs = 0
-            if self.global_model_path and self.global_engine.warmed_up:
-                _save_if_changed(self.global_engine.model, self.global_model_path)
+            try:
+                saved_devs = 0
+                if self.global_model_path and self.global_engine.warmed_up:
+                    _save_if_changed(self.global_engine.model, self.global_model_path)
 
-            with self._lock:
-                devices_snapshot = list(self.devices.items())
+                with self._lock:
+                    devices_snapshot = list(self.devices.items())
 
-            for dev_id, engine in devices_snapshot:
-                if engine.warmed_up and _save_if_changed(engine.model, self.model_dir / f"{dev_id}.pkl"):
-                    saved_devs += 1
-            return saved_devs
+                for dev_id, engine in devices_snapshot:
+                    if engine.warmed_up and _save_if_changed(engine.model, self.model_dir / f"{dev_id}.pkl"):
+                        saved_devs += 1
+                if saved_devs:
+                    LOGGER.info("Persisted %d changed Device ML model(s) to disk.", saved_devs)
+            except Exception as exc:
+                LOGGER.error("Failed to save ML models: %s", exc)
+            finally:
+                with self._save_lock:
+                    self._save_thread = None
 
-        try:
-            saved_devs, timed_out = self._bounded_io(_do_save, timeout=self._SAVE_IO_TIMEOUT_SECONDS)
-            if timed_out:
-                # See this class's own _SAVE_IO_TIMEOUT_SECONDS comment -- abandoning
-                # the write (rather than blocking the caller, which IS the main
-                # detection loop's own heartbeat thread) means this cycle's model
-                # save is simply skipped; the next successful 60s-later flush
-                # catches up. The abandoned write may still complete later on its
-                # own leaked daemon thread and silently finish on disk.
+        with self._save_lock:
+            in_flight = self._save_thread
+            if in_flight is None:
+                t = threading.Thread(target=_do_save, daemon=True, name="ml_save_io")
+                self._save_thread = t
+                t.start()
+            else:
+                t = in_flight
+                if not wait:
+                    LOGGER.debug(
+                        "Skipping this cycle's ML model save -- a previous "
+                        "background save is still running; the next periodic "
+                        "flush will catch up."
+                    )
+                    return
+
+        if wait:
+            t.join(timeout=self._SAVE_IO_TIMEOUT_SECONDS)
+            if t.is_alive():
                 LOGGER.error(
-                    "ML model save did not complete within %.0fs (likely a slow/"
-                    "stalled disk write) -- abandoning this save rather than "
-                    "blocking the pipeline's own main loop.", self._SAVE_IO_TIMEOUT_SECONDS,
+                    "ML model save did not complete within %.0fs at shutdown "
+                    "(likely a slow/stalled disk write) -- leaving it to finish "
+                    "on its own daemon thread; this save may be lost if the "
+                    "process exits before it does.", self._SAVE_IO_TIMEOUT_SECONDS,
                 )
-                return
-            if saved_devs:
-                LOGGER.info("Persisted %d changed Device ML model(s) to disk.", saved_devs)
-        except Exception as exc:
-            LOGGER.error("Failed to save ML models: %s[cite: 14, 22]", exc)
 
     def _verify_model_shape(self, model, expected_features: int = 11) -> bool:
         if hasattr(model, "n_features_in_"):

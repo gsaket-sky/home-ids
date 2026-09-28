@@ -52,7 +52,7 @@ try:
         np.random.rand(20, 11)
     )
     engine.warmed_up = True
-    registry.save_models()
+    registry.save_models(wait=True)
 
     model_path = registry.model_dir / f"{dev_id}.pkl"
     check("model file exists on disk before discard", model_path.exists())

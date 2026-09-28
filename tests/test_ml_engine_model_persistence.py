@@ -52,14 +52,14 @@ def _loaded_ids(tmp_path):
 
 
 def test_round_trip(tmp_path):
-    _registry_with(tmp_path, ["dev_a", "dev_b"]).save_models()
+    _registry_with(tmp_path, ["dev_a", "dev_b"]).save_models(wait=True)
     assert _loaded_ids(tmp_path) == {"dev_a", "dev_b"}
     assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_one_truncated_file_no_longer_drops_the_others(tmp_path):
     devices = ["dev_a", "dev_b", "dev_c", "dev_d"]
-    _registry_with(tmp_path, devices).save_models()
+    _registry_with(tmp_path, devices).save_models(wait=True)
     bad = tmp_path / "dev_b.pkl"
     data = bad.read_bytes()
     bad.write_bytes(data[: len(data) // 2])  # what a kill mid-write leaves behind
@@ -71,7 +71,7 @@ def test_one_truncated_file_no_longer_drops_the_others(tmp_path):
 
 
 def test_save_killed_mid_write_keeps_previous_model(tmp_path, monkeypatch):
-    _registry_with(tmp_path, ["dev_a"]).save_models()
+    _registry_with(tmp_path, ["dev_a"]).save_models(wait=True)
     good = (tmp_path / "dev_a.pkl").read_bytes()
 
     real_dump = ml_engine.joblib.dump
@@ -94,7 +94,7 @@ def test_save_killed_mid_write_keeps_previous_model(tmp_path, monkeypatch):
 
 
 def test_unreadable_global_model_does_not_block_device_models(tmp_path):
-    _registry_with(tmp_path, ["dev_a"]).save_models()
+    _registry_with(tmp_path, ["dev_a"]).save_models(wait=True)
     glob_path = tmp_path / "global.pkl"
     glob_path.write_bytes(b"not a model")
     reg = MultiDeviceMLEngine(model_dir=tmp_path, global_model_path=glob_path)

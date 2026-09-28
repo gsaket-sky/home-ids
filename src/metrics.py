@@ -322,6 +322,16 @@ reactive_capture_bytes_total = Counter("home_ids_reactive_capture_bytes_total", 
 reactive_capture_errors_total = Counter("home_ids_reactive_capture_errors_total", "Reactive-capture burst failures by stage", ["stage"])
 reactive_capture_last_burst_timestamp = Gauge("home_ids_reactive_capture_last_burst_timestamp", "Unix timestamp of the most recently completed reactive-capture burst")
 reactive_capture_dns_evasion_findings_total = Counter("home_ids_reactive_capture_dns_evasion_findings_total", "Total dns_evasion_anomaly findings produced across all devices by reactive-capture bursts")
+dns_evasion_reverse_dns_timeout_outcomes_total = Counter(
+    "home_ids_dns_evasion_reverse_dns_timeout_outcomes_total",
+    "P1 fix (third-party review, 2026-09-28): a reverse-DNS lookup that timed out during "
+    "a dns_evasion audit used to be silently dropped every time, with no record it ever "
+    "happened. Now queued in-process for delayed re-verification on a later capture burst "
+    "(outcome=enqueued), until it either resolves (outcome=resolved: a later attempt got a "
+    "conclusive explained/unexplained answer) or exhausts its retry budget (outcome="
+    "exhausted: escalated to real dns_evasion_anomaly evidence rather than vanishing forever)",
+    ["outcome"]
+)
 reactive_capture_suricata_findings_total = Counter("home_ids_reactive_capture_suricata_findings_total", "Total suricata_signature_match findings produced across all devices by batch-mode Suricata scans of reactive-capture burst pcaps")
 reactive_capture_stale_files_removed_total = Counter("home_ids_reactive_capture_stale_files_removed_total", "Orphaned capture files/directories removed by the periodic disk-safety sweep (process-crash recovery, not the normal per-burst cleanup path)")
 

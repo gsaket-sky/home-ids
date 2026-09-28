@@ -28,6 +28,14 @@ _RFC1918_NETWORKS = (
 def _is_rfc1918_private(addr) -> bool:
     return any(addr in net for net in _RFC1918_NETWORKS)
 
+
+# P1 FIX (third-party review, 2026-09-28): matches fp_engine.py's own
+# _DEFAULT_EMBED_SIMILARITY_THRESHOLD -- see classify()'s own comment on the
+# is_cloud_cdn_provider_org() gate below for why this specific value is reused
+# here rather than inventing a second, disagreeing bar for the same underlying
+# "does this domain's text look like a real vendor pattern" question.
+_CLOUD_CDN_AFPE_TRUST_THRESHOLD = 0.82
+
 @dataclass
 class ReputationVector:
     """`tier` is a reputation/context classification — "how much prior trust or suspicion
@@ -193,6 +201,34 @@ class ReputationClassifier:
                     tier = 2
                     break
 
+        # P1 FIX (third-party review, 2026-09-28): is_cloud_cdn_provider_org() only
+        # knows the destination's ASN OWNER, never the actual domain -- so it was a
+        # blanket pass for the entire ASN, including an attacker's own C2 domain
+        # simply rented on the same shared cloud infrastructure (AWS/GCP/Azure/
+        # DigitalOcean etc. are exactly where real-world C2 hosting concentrates,
+        # BECAUSE the ASN alone can't tell a vendor's own service apart from any
+        # other tenant's). A bare IP with no resolved domain (`addr is not None`,
+        # the same parse already done for the tier-0 RFC1918 check above) has no
+        # stronger per-domain signal available, so it keeps the ASN-only floor
+        # unchanged. When a real domain string IS available, this now also
+        # requires the CL-AFPE Stage 3 FastEmbed text-similarity score (afpe_score
+        # -- see pipeline.py's classify() call site for how this is now actually
+        # wired from fp_engine.py's own loaded embedding model, instead of the
+        # hardcoded 0.0 it used to always pass) to independently say this
+        # domain's own text resembles a real vendor pattern, before granting the
+        # protective tier-2 floor. A domain that merely resolves into a cloud ASN
+        # without a matching text pattern falls through to tier 3 (neutral)
+        # instead, where a real VT/TI/AbuseIPDB signal can still reach tier 4/5 --
+        # exactly the C2-hosted-on-legitimate-cloud-infra case this heuristic used
+        # to blanket-suppress regardless of evidence. "unknown"/"" get the same
+        # no-real-domain-text treatment as a bare IP -- this codebase's own
+        # standing sentinel for "no resolved hostname" (fp_engine.py/dns_evasion.py
+        # etc. all treat it identically), matching the exact live incidents this
+        # whole is_cloud_cdn_provider_org() floor was built for (149.154.166.110/
+        # 35.186.224.24 were both resolved via `reputation_target` == "unknown").
+        no_real_domain_text = addr is not None or domain in ("", "unknown")
+        cloud_cdn_trusted = is_cloud_cdn_provider_org(asn_owner) and (no_real_domain_text or afpe_score >= _CLOUD_CDN_AFPE_TRUST_THRESHOLD)
+
         # See _SAFE_ASN_OWNER_KEYWORDS' comment above: a known-legitimate service's own
         # infrastructure is tier 2 (known infrastructure) regardless of what a noisy
         # crowd-sourced abuse score says today -- checked BEFORE the confirmed_ioc/
@@ -214,12 +250,17 @@ class ReputationClassifier:
         # deterministic validator overrode Ollama's (correct) benign call traced back to
         # exactly this one gap. Same trust boundary this project has already accepted
         # elsewhere, just not previously applied here.
-        # BUGFIX (external architecture review, 2026-09-09): reads through
-        # is_known_safe_asn_owner() now (defined above) instead of re-deriving the
-        # same OR-of-two-lists check inline -- see that method's own docstring/BUGFIX
-        # comment for why (pipeline.py's reputation-Evidence-creation gate needed the
-        # identical answer and had no way to ask this classifier for it directly).
-        if tier == 3 and self.is_known_safe_asn_owner(asn_owner):
+        # BUGFIX (external architecture review, 2026-09-09): the keyword half of
+        # is_known_safe_asn_owner() (telegram/verisign -- single-purpose, dedicated
+        # infrastructure, not shared multi-tenant cloud) stays an unconditional
+        # floor, matching that method's own docstring/BUGFIX comment (pipeline.py's
+        # reputation-Evidence-creation gate needs the identical unconditional
+        # answer). Only the is_cloud_cdn_provider_org() half is now additionally
+        # gated by cloud_cdn_trusted above (see its own P1 FIX comment) -- the two
+        # halves no longer share one combined bar because their false-positive
+        # risk profiles are genuinely different.
+        keyword_match = any(kw in (asn_owner or "").lower() for kw in self._SAFE_ASN_OWNER_KEYWORDS)
+        if tier == 3 and (keyword_match or cloud_cdn_trusted):
             tier = 2
 
         # PHASE 8 FIX: a live alert for 149.154.166.110 (Telegram's own API infrastructure,

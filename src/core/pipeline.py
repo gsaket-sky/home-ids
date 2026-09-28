@@ -1818,7 +1818,28 @@ class EnginePipeline:
                     # target-scoped, computed above) is passed instead, so this tier
                     # classification is asked about the SAME destination it's actually
                     # classifying, not dest_ip's unrelated ownership.
-                    rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=0.0, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=reputation_target_asn_owner)
+                    #
+                    # P1 FIX (third-party review, 2026-09-28): afpe_score used to be
+                    # hardcoded to 0.0 here -- classify()'s own is_cloud_cdn_provider_org()
+                    # gate accepted this parameter but the ONE real production caller never
+                    # actually computed it, so CL-AFPE's Stage 3 text-embedding signal never
+                    # factored into a live reputation-tier decision at all. Only bothers
+                    # calling FastEmbed (reusing fp_engine.py's already-loaded model, no
+                    # second model load -- but still a real, non-trivial per-call cost, this
+                    # codebase's own hard-won lesson about main-loop latency) when
+                    # reputation_target_is_trusted_infra (computed just above) already says
+                    # this ASN would otherwise get the cloud/CDN floor -- classify() itself
+                    # only ever consults afpe_score in that exact same branch (see its own
+                    # P1 FIX comment), so skipping it here for the overwhelming common case
+                    # (an ordinary, non-cloud-ASN destination) changes no outcome and keeps
+                    # every other cycle exactly as cheap as before this fix.
+                    afpe_score = 0.0
+                    if self.fp_engine and reputation_target_is_trusted_infra:
+                        try:
+                            afpe_score, _ = self.fp_engine.get_stage3_vendor_similarity(reputation_target)
+                        except Exception:
+                            afpe_score = 0.0
+                    rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=afpe_score, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=reputation_target_asn_owner)
                 
                     # 3. Decision Engine
                     active_evidence = self.evidence_store.get_for_device(dev_id)
@@ -3980,7 +4001,7 @@ class EnginePipeline:
         LOGGER.info("Stopping Engine Pipeline...")
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
-        if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models()
+        if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models(wait=True)
         if getattr(self, "fp_engine", None): self.fp_engine.flush_device_fp_profiles()
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
 

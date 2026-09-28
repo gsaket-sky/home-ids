@@ -735,7 +735,7 @@ ratio-to-cohort-mean test:
 
 ```python
 _PEER_DEVIATION_WINDOW_SECONDS = 7 * 86400      # trailing 7 days
-_PEER_DEVIATION_MIN_PEERS = 2                   # need >=2 OTHER same-device_type devices
+_PEER_DEVIATION_MIN_PEERS = 3                   # need >=3 OTHER same-device_type devices (raised from 2, 2026-09-28 review)
 _PEER_DEVIATION_MULTIPLIER = 3.0                # this device's own count must be >=3x cohort avg
 _PEER_DEVIATION_MIN_ABSOLUTE_COUNT = 5          # ignore trivial small-number swings (1->4 is "4x" but meaningless)
 

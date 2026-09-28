@@ -21,7 +21,15 @@ class DNSBehaviorDetector:
                 value=rate,
                 confidence=min(1.0, rate / 500.0), # Caps at 500 qps for 1.0 confidence
                 independence_group="dns_behavior",
-                provenance="detector:dns_behavior:rate"
+                provenance="detector:dns_behavior:rate",
+                # P2 FIX (third-party review, 2026-09-28): domain=... attaches the
+                # real domain actually driving this rate burst (dns_features.py's
+                # new top_rate_domain), the same "real evidence-linked domain, not
+                # an unrelated fallback" fix already applied to dns_entropy above --
+                # see hypotheses/engine.py's AdvertisingBurstHypothesis for why a
+                # dns_rate Evidence with no .domain made its own rep_vector.tier
+                # gate a structural no-op.
+                domain=features.get("top_rate_domain") or None,
             ))
             
         # Entropy evidence
