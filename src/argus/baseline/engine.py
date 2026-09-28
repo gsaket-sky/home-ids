@@ -496,6 +496,31 @@ class BaselineEngine:
 
     # ---------------------------------------------------------- Gaussian/Beta/Poisson scoring
 
+    def peek_surprise(self, device_id: str, metric: str, model_kind: str,
+                        observation_args: Tuple, hour: int, now: Optional[float] = None) -> float:
+        """Read-only baseline-relative surprise (this engine's Student-t
+        z-score equivalent, replacing the legacy pipeline.py's calc_z()) for
+        `observation_args` against the CURRENT per-device/metric/hour
+        posterior -- unlike score_metric(), never calls tracker.observe() or
+        persists anything, so it's safe to call from a detection path that
+        runs BEFORE this cycle's real score_metric() update (ingest/daemon.py's
+        run_detection_cycle wiring, which needs a baseline-relative reading in
+        `features` -- e.g. outbound_bytes_z for threat_signals.py's
+        zeek_exfiltration detector -- before this same value is folded into
+        the posterior a few lines later in _score_baselines()). Returns 0.0
+        (the same "no signal yet" value score_metric()'s own surprise<=0.0
+        gate produces) if learning is paused or the dominant model exposes no
+        .surprise()."""
+        now = now if now is not None else time.time()
+        device_id = self.store.resolve_canonical_device_id(device_id)
+        if self.is_learning_paused(device_id, now):
+            return 0.0
+        tracker, _regime_id = self._load_tracker(device_id, metric, model_kind, hour, now=now)
+        dominant = tracker.dominant_model()
+        if not hasattr(dominant, "surprise"):
+            return 0.0
+        return dominant.surprise(*_surprise_args_for(model_kind, observation_args))
+
     def score_metric(self, device_id: str, metric: str, model_kind: str,
                        observation_args: Tuple, hour: int, now: Optional[float] = None) -> Optional[Evidence]:
         """Updates (device, metric, hour)'s BOCPD-wrapped posterior with one

@@ -72,11 +72,11 @@ check("pipeline.py's alert gate has been widened to include DecisionState.SUSPIC
 from core.state import DeviceState
 
 ESCALATION_BLOCK_SOURCE = '''\
-                if decision["state"] == DecisionState.SUSPICIOUS:
-                    if getattr(state, "suspicious_signature", "") == primary_sig and getattr(state, "suspicious_since", 0.0) > 0:
-                        persisted_for = now - state.suspicious_since
-                        escalation_threshold = float(self.config.get("suspicious_escalation_seconds", 600.0))
-                        if persisted_for >= escalation_threshold:'''
+                    if decision["state"] == DecisionState.SUSPICIOUS:
+                        if getattr(state, "suspicious_signature", "") == primary_sig and getattr(state, "suspicious_since", 0.0) > 0:
+                            persisted_for = now - state.suspicious_since
+                            escalation_threshold = float(self.config.get("suspicious_escalation_seconds", 600.0))
+                            if persisted_for >= escalation_threshold:'''
 check("pipeline.py's source still contains the exact Phase 2 escalation block this test mirrors "
       "(guards this test against silently drifting from the real shipped logic)",
       ESCALATION_BLOCK_SOURCE in pipeline_src)

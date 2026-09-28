@@ -4,6 +4,30 @@ from typing import Dict, Any, Optional
 
 from utils import is_cloud_cdn_provider_org
 
+# BUGFIX (found chasing test_phase36_review_regression.py's tier-4/5 golden case):
+# classify()'s own tier-0 check below uses is_link_local/is_loopback (both precise)
+# alongside stdlib IPv4Address/IPv6Address.is_private -- but stdlib's is_private is
+# NOT "RFC1918 home-network private," it's the much broader IANA special-purpose-
+# registry set, which also includes the RFC 5737 documentation ranges (192.0.2.0/24,
+# 198.51.100.0/24, 203.0.113.0/24), RFC 2544 benchmarking (198.18.0.0/15), and more.
+# A genuinely public, ordinary-internet destination IP that happens to land in one of
+# those reserved-but-not-private ranges (confirmed live via this test's own
+# 203.0.113.99 fixture) was wrongly forced to tier 0 ("external reputation doesn't
+# apply") before abuse_score/vt_score/ti_score ever got evaluated, masking a real weak-
+# vs-confirmed AbuseIPDB distinction entirely. Explicit RFC1918 (+ IPv6 unique-local)
+# networks only, matching this module's own documented tier-0 promise ("RFC1918") --
+# not stdlib's broader definition.
+_RFC1918_NETWORKS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),  # IPv6 unique local (the RFC1918 analogue)
+)
+
+
+def _is_rfc1918_private(addr) -> bool:
+    return any(addr in net for net in _RFC1918_NETWORKS)
+
 @dataclass
 class ReputationVector:
     """`tier` is a reputation/context classification — "how much prior trust or suspicion
@@ -149,7 +173,7 @@ class ReputationClassifier:
             addr = ipaddress.ip_address(domain)
         except ValueError:
             addr = None
-        if addr is not None and (addr.is_private or addr.is_link_local or addr.is_loopback):
+        if addr is not None and (_is_rfc1918_private(addr) or addr.is_link_local or addr.is_loopback):
             tier = 0
 
         # Check explicit tiers (boundary-safe matching — see _suffix_or_domain_match)

@@ -9,15 +9,19 @@ a 50-alert / 9-device DGA-shaped domain pattern (xkqz289dfj10dj-NNN.ru):
    parents the same way the existing tunneling_domains check already does.
 3. threat_signals.py: Evidence.domain (existed on the dataclass, never populated) is now
    set for dns_tunnel_v2's sub-signals, and the new subdomain-fanout evidence.
-4. ollama_soc.py: a multi-device spread guard withholds autonomous suppress/immunize
-   actions when the same signature is independently firing on several distinct devices
-   right now -- exactly the situation where a single-alert LLM call has no visibility
-   into the wider pattern and can (confirmed live, 1.0 confidence) call it benign wrongly.
+4. [RETIRED] ollama_soc.py's multi-device spread guard withheld autonomous suppress/
+   immunize actions when the same signature was independently firing on several distinct
+   devices right now. ollama_soc.py itself was deleted 2026-09-22 (commit 57c9c4a,
+   "consolidate Layer-3 LLM review onto live_llm_review.py") -- live_llm_review.py is
+   advisory/reporting-only by design (its own docstring: "an LLM verdict here does NOT
+   autonomously suppress or confirm anything," authority retired to argus/autotune/
+   engine.py + argus/cl_afpe/composite_trust.py), so this guard has no live equivalent
+   to test. Its checks (this file's former Test 6) were removed rather than pointed at a
+   replacement, since none exists.
 
 Not part of the pytest suite (no fixtures needed) -- run directly:
 `python3 test_phase20_alert_quality.py`.
 """
-import re
 import sys
 import time
 from pathlib import Path as _PathForSysPath
@@ -120,51 +124,8 @@ fanout_b = [e for e in ev5b if e.type == "dns_tunnel_v2" and "subdomain_fanout" 
 check("subdomain_fanout evidence does NOT fire below threshold (count=3)", len(fanout_b) == 0)
 
 
-# ── Test 6: ollama_soc.py multi-device suppress guard (source-level + mirror logic) ──
-ollama_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
-check("ollama_soc.py builds a signature -> distinct-device-count map",
-      "signature_device_counts" in ollama_soc_src)
-check("ollama_soc.py's guard is keyed on signature, not the exact (never-repeating) domain string",
-      "sig = payload.get(\"signature\"" in ollama_soc_src)
-check("ollama_soc.py checks device spread against a configurable threshold before suppressing",
-      "spread >= multi_device_suppress_guard" in ollama_soc_src)
-# BUGFIX (found while verifying G6/G7, pre-existing since before this session): this
-# regex was written against the guard's original inline-comparison shape
-# ("spread >= multi_device_suppress_guard:" immediately followed by an indented block
-# and "elif"), which stopped existing the moment Phase 49 refactored the check into
-# the should_still_withhold() function call -- confirmed the old pattern already
-# didn't match at commit 4d6630a (Phase 49's own commit), so this check has been
-# silently failing (bool(_guard_branch_match) False) since before any of this
-# session's changes, unrelated to them. Anchors on the actual should_still_withhold(
-# call instead, and on the real next branch (elif is_valid ... 'suppress'), both of
-# which are stable regardless of how many positional args the call itself takes.
-#
-# NOTE: an independent session fixed this same underlying bug in parallel (commit
-# 484f674, box/main) with a different regex anchored on the if-statement's closing
-# "):" instead -- also correct, kept here as a comment for provenance since both
-# approaches were reconciled to this one during the merge.
-_guard_branch_match = re.search(
-    r'if is_valid.*?should_still_withhold\(.*?\):\n(.*?)\n        elif is_valid',
-    ollama_soc_src, re.DOTALL,
-)
-check("a withheld suppress's branch does NOT set action_taken=True (so it's reconsidered next run)",
-      bool(_guard_branch_match) and 'action_taken"] = True' not in _guard_branch_match.group(1))
-
-
-def should_withhold_suppress(spread: int, guard_threshold: int, already_actioned: bool) -> bool:
-    """Mirrors the real decision in ollama_soc.py's main() loop."""
-    return (not already_actioned) and spread >= guard_threshold
-
-
-check("THE CORE FIX: a signature spread across 9 distinct devices (the real xkqz case) "
-      "withholds auto-suppress against the default guard of 3",
-      should_withhold_suppress(spread=9, guard_threshold=3, already_actioned=False) is True)
-check("a signature seen on only 1 device (the normal case) is NOT withheld",
-      should_withhold_suppress(spread=1, guard_threshold=3, already_actioned=False) is False)
-check("an already-actioned pattern is never re-withheld regardless of spread",
-      should_withhold_suppress(spread=9, guard_threshold=3, already_actioned=True) is False)
-check("spread exactly AT the threshold withholds (>=, not >)",
-      should_withhold_suppress(spread=3, guard_threshold=3, already_actioned=False) is True)
+# Test 6 (ollama_soc.py's multi-device suppress guard) removed -- see module docstring's
+# item 4: ollama_soc.py was deleted 2026-09-22 and the guard has no live equivalent.
 
 
 # ── Test 7: pipeline.py alert-text source guards (Phase 20 cosmetic + transparency fixes) ──

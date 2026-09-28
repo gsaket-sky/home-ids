@@ -22,10 +22,19 @@ release_device(). PHASE 14's own comment already states the intended principle -
 not just stop future alerts" -- but that principle was only half-implemented: a
 device that crossed the real-time risk_score>=9.0 tarpit bar BEFORE Ollama's later
 review validated the same pattern as benign stayed trapped indefinitely, with no
-autonomous path back out. Phase 62 closes that: both benign-confirmation branches
-(domain-immunize and the no-domain/IP-only fallback) now also call
+autonomous path back out. Phase 62 closed that: both benign-confirmation branches
+(domain-immunize and the no-domain/IP-only fallback) called
 ips_mitigator.release_device(device_id) -- a safe no-op if the device isn't
 currently contained, real containment release if it is.
+
+[RETIRED, Section B below] ollama_soc.py itself was deleted 2026-09-22 (commit 57c9c4a,
+"consolidate Layer-3 LLM review onto live_llm_review.py") -- its successor is
+advisory/reporting-only by design (live_llm_review.py's own docstring: "an LLM verdict
+here does NOT autonomously suppress or confirm anything," that authority retired to
+argus/autotune/engine.py + argus/cl_afpe/composite_trust.py, neither of which calls
+release_device()). Phase 62's specific benign-confirmation-releases-containment wiring
+has no live equivalent to test; Section B's checks were removed rather than pointed at
+a replacement.
 
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_phase62_tarpit_release_on_benign.py`
@@ -34,15 +43,10 @@ Sections:
   A. mitigation/ips.py -- tarpit subsystem genuinely exists and is decision-driven
      (source-level confirmation, so this test fails loudly if a future refactor
      removes what this phase's fix depends on)
-  B. Source-level wiring in ollama_soc.py -- release_device() called from BOTH
-     benign-confirmation branches; report lines mention the release when it happens;
-     the call is unconditional (safe no-op) not gated behind a pre-check that could
-     itself drift out of sync with ips.py's real containment state
 """
 import sys
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
-sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts"))
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -61,7 +65,6 @@ def check(name, cond, detail=""):
 
 
 _ips_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "mitigation" / "ips.py").read_text(encoding="utf-8")
-_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -89,32 +92,8 @@ check("release_device() ALSO releases router isolation and Pi-hole blocks in the
       and "self.unblock_domain(dom, reason=\"manual\")" in _ips_src)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: ollama_soc.py wiring
-# ═══════════════════════════════════════════════════════════════════════════════════
-print("\n--- Section B: ollama_soc.py wiring ---")
-
-check("release_device() is called from the DOMAIN-immunize branch",
-      _soc_src.count("device_released = ips_mitigator.release_device(device_id)") == 2)
-
-check("the domain-immunize branch's report line mentions the release when it happens",
-      'unblocked_note += " Also released this device from any active Layer-2 tarpit/router isolation."' in _soc_src)
-
-check("the no-domain/IP-only fallback branch's report line mentions the release "
-      "when it happens",
-      'released_note = " Also released this device from any active Layer-2 tarpit/router isolation." if device_released else ""' in _soc_src)
-
-check("the call is unconditional (not gated behind a separate 'is this device "
-      "currently contained' pre-check) -- release_device() is documented as a safe "
-      "no-op, so gating it here would just be a second, potentially-stale copy of "
-      "state ips.py already tracks authoritatively",
-      # crude but effective: the call line itself has no `if` guard immediately before it
-      "if ips_mitigator.release_device" not in _soc_src)
-
-check("both call sites happen INSIDE the benign+suppress+not-already-actioned branch "
-      "(same gating as every other action in that branch) -- not a new unconditional "
-      "path that could fire regardless of validator outcome",
-      _soc_src.count("device_released = ips_mitigator.release_device(device_id)") == 2)
+# Section B (ollama_soc.py wiring) removed -- see module docstring: ollama_soc.py was
+# deleted 2026-09-22 and this wiring has no live equivalent.
 
 print()
 if FAILURES:

@@ -171,6 +171,29 @@ class IngestDaemon:
         total_evidence = 0
         for device_ip in devices:
             dns_features = self.pihole_store.compute_features(device_ip, now=now)
+
+            # BUGFIX (found via test_argus_ingest_daemon.py): threat_signals.py's
+            # zeek_exfiltration detector reads features["outbound_bytes_z"] (a
+            # real, deliberately baseline-relative gate -- see that module's own
+            # BUGFIX comments on why an absolute-bytes-only check was rejected),
+            # but this daemon never populated that key at all -- it's a legacy
+            # core/pipeline.py EWMA-baseline feature this v13/argus rewrite never
+            # ported. Rather than reimplementing a second baseline tracker,
+            # reuses this SAME cycle's outbound_bytes reading against
+            # self.baseline_engine's already-live Gaussian "outbound_bytes"
+            # tracker (the one _score_baselines() below feeds every cycle) via
+            # peek_surprise() -- a read-only query against the posterior AS OF
+            # the end of the last cycle, deliberately called before (not after)
+            # _score_baselines()'s own score_metric() call folds this cycle's
+            # value into that same posterior.
+            outbound_bytes = self.extractor.get_features(device_ip).get("zeek_outbound_bytes")
+            outbound_bytes_z = 0.0
+            if outbound_bytes is not None:
+                outbound_bytes_z = self.baseline_engine.peek_surprise(
+                    device_ip, "outbound_bytes", "gaussian", (float(outbound_bytes),),
+                    time.localtime(now).tm_hour, now=now)
+            dns_features = {**dns_features, "outbound_bytes_z": outbound_bytes_z}
+
             evidence_items = run_detection_cycle(self.extractor, self.detector, device_ip,
                                                     dns_features=dns_features)
             for ev in evidence_items:

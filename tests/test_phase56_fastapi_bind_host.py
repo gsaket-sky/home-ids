@@ -31,7 +31,15 @@ Sections:
   A. Config defaults -- fastapi_bind_host exists, defaults to "127.0.0.1", is a
      restart-required (_STATIC_KEYS) key
   B. SOURCE-GUARD: main.py reads fastapi_bind_host from config and passes it (not a
-     hardcoded "127.0.0.1" literal) as uvicorn's --host
+     hardcoded "127.0.0.1" literal) as uvicorn's --host. UPDATED: the actual uvicorn
+     Popen call (and its own fastapi_bind_host read) was later extracted into
+     core/subprocess_launchers.py's start_fastapi_subprocess() (see that module's own
+     "BUGFIX (health manager)" comment in main.py) so HealthManager's own
+     restart_fastapi_subprocess recovery action could reuse the identical spawn logic
+     instead of a second copy -- main.py itself now only computes fastapi_bind_host for
+     its own startup log line/warning, the --host wiring itself lives in the extracted
+     function. This test's "--host" checks were re-pointed at subprocess_launchers.py
+     to match; confirmed live, not a regression (verified the wiring is intact there).
   C. SOURCE-GUARD: main.py warns when the bind host is opened up beyond loopback
   D. REGRESSION GUARD: every internal IPC caller still hardcodes 127.0.0.1 for its own
      outbound call (release_device.py, ips.py, alerts.py x4)
@@ -73,15 +81,19 @@ check("REGRESSION GUARD: fastapi_port is still a _STATIC_KEYS entry too, untouch
 # Section B & C: main.py source checks
 # ═══════════════════════════════════════════════════════════════════════════════════
 _main_src = (ROOT / "src" / "main.py").read_text(encoding="utf-8")
+# The actual uvicorn Popen call moved to core/subprocess_launchers.py's
+# start_fastapi_subprocess() (see this file's docstring, Section B) -- check the
+# --host wiring there, not in main.py, which only computes fastapi_bind_host now.
+_launchers_src = (ROOT / "src" / "core" / "subprocess_launchers.py").read_text(encoding="utf-8")
 
 check('THE CORE FIX: main.py reads fastapi_bind_host from config (CONFIG.get("fastapi_bind_host", "127.0.0.1"))',
       'CONFIG.get("fastapi_bind_host", "127.0.0.1")' in _main_src)
 check('THE CORE FIX: the uvicorn subprocess\'s "--host" arg is the fastapi_bind_host variable, '
       'not a hardcoded "127.0.0.1" string literal',
-      '"--host", fastapi_bind_host,' in _main_src)
+      '"--host", fastapi_bind_host,' in _launchers_src)
 check('REGRESSION GUARD: the OLD hardcoded literal ("--host", "127.0.0.1") is genuinely gone from '
       "the uvicorn Popen args, not just shadowed",
-      '"--host", "127.0.0.1",' not in _main_src)
+      '"--host", "127.0.0.1",' not in _main_src and '"--host", "127.0.0.1",' not in _launchers_src)
 check("THE CORE FIX: main.py logs a WARNING when the bind host is opened up beyond loopback "
       "(operator-visible, not a silent security-relevant config change)",
       'if fastapi_bind_host != "127.0.0.1":' in _main_src and "LOGGER.warning(" in _main_src)

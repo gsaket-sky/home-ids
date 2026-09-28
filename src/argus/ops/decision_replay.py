@@ -69,9 +69,21 @@ def get_decision_evidence(store: GraphStore, decision: Dict[str, Any]) -> List[E
 
 def _rep_from_evidence(evidence_list: List[Evidence]) -> Any:
     """Best-effort ReputationVector-like duck object -- see this module's own
-    top-of-file docstring for exactly what is and isn't recoverable."""
+    top-of-file docstring for exactly what is and isn't recoverable.
+
+    BUGFIX (found chasing test_argus_decision_replay.py's Section B): defaulted
+    to tier 0 when no 'reputation' evidence item is present. Since the Sept 15
+    reputation-tier fix (56b7953, "3 automated-learning gaps") widened every
+    attack hypothesis's trust-suppression check from eff_tier in (1, 2) to
+    (0, 1, 2), tier 0 now actively dampens attack scoring -- correct for a
+    VERIFIED local/RFC1918 destination, but this fallback fires for the much
+    more common "we simply have no reputation evidence to replay" case, which
+    classifier.py's own docstring documents as tier 3 ("unclassified -- neutral,
+    NOT malicious by default"), not tier 0. Defaulting to 0 here silently
+    dampened every replayed decision lacking reputation evidence, systematically
+    under-scoring real historical HIGH/CRITICAL verdicts back down to SUSPICIOUS."""
     rep_items = [e for e in evidence_list if e.evidence_type == "reputation"]
-    tier = int(max(rep_items, key=lambda e: e.confidence).value) if rep_items else 0
+    tier = int(max(rep_items, key=lambda e: e.confidence).value) if rep_items else 3
     return SimpleNamespace(
         tier=tier, verified_ioc=False, domain="", asn_owner="Unknown",
         vt_detection_ratio=0.0, ti_risk=0.0, abuse_risk=0.0,

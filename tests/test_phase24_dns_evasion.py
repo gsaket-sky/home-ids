@@ -487,7 +487,8 @@ check("a DoH bypass IP alongside a separate genuinely-unexplained IP still produ
 check("THE DEEPER FIX: alert_target_domain itself (the source field, not just the "
       "display variable) is now set to 'unknown' for DNS_EVASION -- no domain is "
       "attached where none exists, rather than the generic fallback leaking in",
-      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):\n                            alert_target_domain = "unknown"' in pipeline_src)
+      'elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):\n'
+      '                                alert_target_domain = "unknown"' in pipeline_src)
 
 
 if FAILURES:

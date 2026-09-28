@@ -339,18 +339,13 @@ check("all THREE _immunize_domain() call sites inside mark_false_positive() also
       "device_id=device_id and ttl_seconds=ttl_seconds",
       _fp_src.count("device_id=device_id,") >= 3 and _fp_src.count("ttl_seconds=ttl_seconds,") == 3)
 
-_soc_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "ollama_soc.py").read_text(encoding="utf-8")
-# PHASE 63b: the LLM's raw ttl_seconds now passes through
-# _apply_confidence_calibration() before reaching mark_false_positive() (a no-op,
-# returning it unchanged, until a confidence bucket has real calibration data -- see
-# test_phase63_hypothesis_independence.py's Section D) rather than being passed
-# literally -- check both halves of that chain instead of the old single literal call.
-check("ollama_soc.py captures the LLM's own ttl_seconds as raw_ttl",
-      'raw_ttl = response_json.get("ttl_seconds")' in _soc_src)
-check("...and threads the (possibly calibration-adjusted) result through to "
-      "mark_false_positive()",
-      "ttl_seconds=adjusted_ttl" in _soc_src
-      and "adjusted_ttl = _apply_confidence_calibration(raw_ttl, raw_confidence, calibrated_confidence)" in _soc_src)
+# PHASE 63b's ollama_soc.py raw_ttl/adjusted_ttl -> mark_false_positive() wiring
+# [RETIRED]: ollama_soc.py was deleted 2026-09-22 (commit 57c9c4a, "consolidate Layer-3
+# LLM review onto live_llm_review.py"). Its successor is advisory/reporting-only by
+# design and never calls mark_false_positive() at all (confirmed: no reference in
+# live_llm_review.py) -- that autonomous-correction authority moved to argus/autotune/
+# engine.py + argus/cl_afpe/composite_trust.py, neither of which threads an LLM-supplied
+# ttl_seconds through this same path. This check has no live equivalent and was removed.
 
 print()
 if FAILURES:
