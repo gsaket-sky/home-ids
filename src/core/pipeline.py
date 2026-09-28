@@ -42,7 +42,7 @@ from core.decision_engine import DecisionEngine, DecisionState
 from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggregation)
 from incident_key import incident_key as _incident_key
 from mitigation.alerts import AlertManager, AlertJSONWriter
-from mitigation.ips import IPSMitigator
+from mitigation.ips import IPSMitigator, CRITICAL_DEVICE_TYPES
 from mitigation.plain_explanation import build_plain_explanation
 from middleware.humanize import resolve_destination_info
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
@@ -1262,10 +1262,28 @@ class EnginePipeline:
                     # which address was "most recently active." known_ips_snapshot already
                     # exists for exactly this reason (see the PHASE 6 comment above); the
                     # same reasoning applies here, not just to Zeek feature aggregation.
-                    is_safe = (
+                    # SECURITY FIX (P2-1, third-party architecture review, 2026-09-28):
+                    # safe_ips is an operator-configured, IP-based allowlist -- trustworthy.
+                    # safe_host_patterns instead matches a self-reported hostname, which is
+                    # ultimately sourced from an unauthenticated client-declared value (Pi-hole's
+                    # network_addresses.name, populated from the client's own DHCP-request
+                    # hostname -- see dns_features.py/identity.py's hostname enrichment). An
+                    # attacker can set their own device's hostname to e.g. "nas" and match a
+                    # pattern with zero corroboration. is_safe (IP-or-hostname) stays fine as the
+                    # existing lower-stakes noise-reduction signal used elsewhere in this file
+                    # (decision-engine hard-stop suppression, arp-sweep infra-noise tagging) --
+                    # worst case there is suppressed noise, not blind trust. But it must never by
+                    # itself grant full autonomous-mitigation immunity or auto-release active
+                    # containment (ips.py's mitigate()) -- that requires the stronger,
+                    # operator-verified is_ip_verified_safe only. Same principle this codebase
+                    # already applies to device_type inference -- see identity.py's
+                    # apply_device_type()/device_type_is_override.
+                    is_ip_verified_safe = (
                         client_ip in safe_ips
                         or any(ip in safe_ips for ip in known_ips_snapshot)
-                        or (bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat))
+                    )
+                    is_safe = is_ip_verified_safe or (
+                        bool(hostname) and any(pat in hostname.lower() for pat in safe_patterns if pat)
                     )
 
                     # AUDIT FIX #4: Prune rolling.domains to the current window using domain_timestamps.
@@ -2272,7 +2290,27 @@ class EnginePipeline:
                             # unrelated bystander domain. reputation_target may be an IP
                             # (abuse_risk and part of vt_risk are IP-only signals) rather
                             # than a domain, so route it to whichever field actually fits.
-                            elif primary_sig_base == "Confirmed Malicious IOC":
+                            # SECURITY FIX (alert/evidence/decision-engine consistency audit,
+                            # 2026-09-28): "Confirmed Malicious IOC" is only ONE of four
+                            # explanation strings decision_engine.py's tier-4/tier-5 reputation
+                            # branches can produce (src/core/decision_engine.py's rep.tier==5/
+                            # rep.tier==4 branches; identical strings in src/argus/decision/
+                            # engine.py, the live default) -- "Corroborated Reputation Signal"
+                            # (tier5, corroborated-but-not-verified-IOC) and both "Elevated
+                            # Reputation Signal (Unconfirmed...)" variants (tier5-uncorroborated,
+                            # SUSPICIOUS -- alerts; tier4-unconfirmed, SUSPICIOUS -- alerts) had NO
+                            # branch here at all, so they silently fell through to
+                            # target_malicious_domain, the exact "unrelated bystander domain"
+                            # failure mode this whole attribution-fix pattern exists to close.
+                            # All four verdicts are driven by the SAME reputation computation
+                            # (ti_risk/abuse_risk/vt_risk above), so reputation_target is equally
+                            # valid for all of them, not just the verified_ioc case.
+                            elif primary_sig_base in (
+                                "Confirmed Malicious IOC",
+                                "Corroborated Reputation Signal",
+                                "Elevated Reputation Signal (Unconfirmed, Tier 5 Score)",
+                                "Elevated Reputation Signal (Unconfirmed)",
+                            ):
                                 try:
                                     ipaddress.ip_address(reputation_target)
                                     alert_dest_ip = reputation_target
@@ -2371,9 +2409,23 @@ class EnginePipeline:
                             # never sets .domain at all -- a genuine device-wide DNS-rate
                             # aggregate, no single destination to name, same "destination-less by
                             # design" shape as PEER_COHORT_DEVIATION above.
+                            # SECURITY FIX (P0-1, third-party architecture review, 2026-09-28):
+                            # dns_rate/dns_unique_ratio are genuine device-wide aggregates with no
+                            # single destination to name, but dns_entropy is different -- it's
+                            # also a window average, yet ONE specific domain's label is what
+                            # actually pushed that average over the threshold. dns_features.py now
+                            # tracks that domain (top_entropy_domain) and dns_behavior.py attaches
+                            # it to dns_entropy Evidence -- prefer it here, same pattern as
+                            # DNS_COVERT_TUNNELING/DGA_BOTNET_C2 above, falling back to "unknown"
+                            # only when genuinely absent (verdict driven by dns_rate/
+                            # dns_unique_ratio alone, which still have no single domain to name).
                             elif primary_sig_base == "DNS_TUNNELING":
                                 alert_dest_ip = "unknown"
                                 alert_target_domain = "unknown"
+                                for ev in active_evidence:
+                                    if ev.type == "dns_entropy" and ev.domain:
+                                        alert_target_domain = ev.domain
+                                        break
                             # DATA_EXFILTRATION/C2_BEACONING's own evidence (zeek_exfiltration/
                             # zeek_beaconing, detectors/threat_signals.py) has the SAME known gap
                             # v13/ops/live_engine.py's own _NEEDS_LAST_DEST_IP_FALLBACK already
@@ -2405,7 +2457,19 @@ class EnginePipeline:
                             # (target_ip) directly on the v1 evidence -- same simple pattern as
                             # the NETWORK_INTRUSION/ARP-spoofing/honeypot branches above, no
                             # winning_evidence needed.
-                            elif primary_sig_base in ("SIGNATURE_MATCHED_THREAT", "Confirmed Exploit/Malware Signature (Suricata)"):
+                            # SECURITY FIX (alert/evidence/decision-engine consistency audit,
+                            # 2026-09-28): "Confirmed Exploit/Malware Signature (Suricata,
+                            # Uncorroborated)" -- decision_engine.py's HIGH/alert-tier variant of
+                            # the same hard-stop, fired when a real severity=1 Suricata match
+                            # isn't independently corroborated -- was missing from this tuple, so
+                            # it fell through to the generic fallback exactly like the four
+                            # reputation-signal gaps just above. Same evidence
+                            # (suricata_signature_match), same attribution.
+                            elif primary_sig_base in (
+                                "SIGNATURE_MATCHED_THREAT",
+                                "Confirmed Exploit/Malware Signature (Suricata)",
+                                "Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)",
+                            ):
                                 for ev in active_evidence:
                                     if ev.type == "suricata_signature_match" and ev.domain:
                                         alert_dest_ip = ev.domain
@@ -2818,7 +2882,12 @@ class EnginePipeline:
                                         target_domain=alert_target_domain,
                                         risk_score=risk,
                                         lateral_threat=lateral_threat,
-                                        is_safe=is_safe,
+                                        # SECURITY FIX (P2-1): full autonomous-containment immunity
+                                        # (and auto-release of already-active tarpit/router isolation)
+                                        # must require the operator-verified is_ip_verified_safe, not
+                                        # the hostname-substring-inclusive is_safe -- see that flag's
+                                        # own definition comment above for why.
+                                        is_safe=is_ip_verified_safe,
                                         ti_engine=self.ti_engine,
                                         reason=primary_sig,
                                         fp_verdict=fp_verdict,
@@ -2881,11 +2950,29 @@ class EnginePipeline:
                                 # stops the honeypot hard-stop from firing on safe_ips devices at
                                 # all going forward; this fix covers every OTHER hard-stop/HIGH
                                 # path that could still reach this same contradiction.
+                                # SECURITY FIX (P0-2): ips.py's mitigate() now also holds back
+                                # autonomous router isolation/tarpit -- regardless of
+                                # interactive_blocking_enabled -- for CRITICAL_DEVICE_TYPES
+                                # (router/gateway/nas/smart_tv), so a heuristic false positive
+                                # can't fully isolate a household's core infrastructure with zero
+                                # human gate. Without also recognizing that hold here, a critical
+                                # device on the (default) interactive_blocking_enabled=False config
+                                # would show a silent "UNBLOCKED" status with no approval button --
+                                # nothing autonomously protecting it AND no way to act on it,
+                                # exactly the user-facing contradiction the PHASE 10 FIX above this
+                                # already exists to prevent for the other case. `not is_ip_verified_safe`,
+                                # not `not is_safe`: mitigate() itself now only early-returns (queuing
+                                # nothing) for the operator-verified is_ip_verified_safe -- see that
+                                # flag's own definition comment for why hostname-pattern-only safety
+                                # must not suppress this either.
                                 if (
-                                    bool(self.config.get("interactive_blocking_enabled", False))
+                                    (
+                                        bool(self.config.get("interactive_blocking_enabled", False))
+                                        or getattr(state, "device_type", "unknown") in CRITICAL_DEVICE_TYPES
+                                    )
                                     and "UNBLOCKED" in containment_status
                                     and (risk >= 8.5 or lateral_threat)
-                                    and not is_safe
+                                    and not is_ip_verified_safe
                                 ):
                                     containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
 

@@ -25,7 +25,14 @@ class DNSBehaviorDetector:
             ))
             
         # Entropy evidence
-        entropy = features.get("max_entropy", features.get("entropy_avg", 0.0))
+        # SECURITY FIX (P0-1, third-party architecture review, 2026-09-28): "max_entropy"
+        # was a dead feature key -- dns_features.py never populated it, so this .get()
+        # always silently fell through to entropy_avg anyway. Reads entropy_avg directly
+        # now; domain=... attaches the real domain whose label actually drove that
+        # average up (dns_features.py's new top_entropy_domain), so pipeline.py's alert
+        # attribution has a genuine evidence-linked domain to prefer instead of always
+        # falling back to "unknown" for a DNS_TUNNELING verdict.
+        entropy = features.get("entropy_avg", 0.0)
         if entropy > 4.0:
             ev_list.append(Evidence(
                 type="dns_entropy",
@@ -35,7 +42,8 @@ class DNSBehaviorDetector:
                 value=entropy,
                 confidence=min(1.0, (entropy - 4.0) / 1.5),
                 independence_group="dns_behavior",
-                provenance="detector:dns_behavior:entropy"
+                provenance="detector:dns_behavior:entropy",
+                domain=features.get("top_entropy_domain") or None,
             ))
             
         # Unique domains

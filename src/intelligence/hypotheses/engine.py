@@ -613,6 +613,24 @@ HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.update({
     "SIGNATURE_MATCHED_THREAT": SuricataSignatureHypothesis.RELEVANT_EVIDENCE_TYPES,
 })
 
+# SECURITY FIX (live alert audit, 2026-09-28): mirrors src/argus/hypotheses/engine.py's
+# HYPOTHESIS_ANCHOR_EVIDENCE_TYPES for this engine's own Gap-64 domain-linkage filter
+# (decision_engine.py) -- see that registry's own docstring for the full incident.
+# HYPOTHESIS_RELEVANT_EVIDENCE_TYPES mixes each hypothesis's REQUIRED evidence type
+# (what the verdict is actually about) with merely-corroborating types like
+# reputation, which can carry a real destination of its OWN -- letting a
+# corroborating item's own destination get unioned into "acceptable" purely by being
+# present, then trivially pass the very check meant to verify it's related to the
+# anchor. Only DATA_EXFILTRATION and C2_BEACONING have the vulnerable shape (a single
+# required type, plus a corroborating type -- reputation -- that carries a real,
+# independently-meaningful destination); every other hypothesis's RELEVANT_EVIDENCE_TYPES
+# is already exactly its required set, so defaulting to it here changes nothing for them.
+HYPOTHESIS_ANCHOR_EVIDENCE_TYPES: Dict[str, frozenset] = {
+    **HYPOTHESIS_RELEVANT_EVIDENCE_TYPES,
+    "DATA_EXFILTRATION": frozenset({"zeek_exfiltration"}),
+    "C2_BEACONING": frozenset({"zeek_beaconing"}),
+}
+
 
 class DeviceProfileBenignHypothesis(Hypothesis):
     """VERSION 10 (#9/#10, per-device benign profiles): device_type is a coarse

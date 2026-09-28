@@ -13,7 +13,7 @@ files), not dead code -- do not delete it.
 """
 from typing import List, Dict, Any, Optional
 from intelligence.hypotheses.evidence import Evidence, ATTACK_EVIDENCE_FAMILIES
-from intelligence.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+from intelligence.hypotheses.engine import HypothesisEngine, HYPOTHESIS_ANCHOR_EVIDENCE_TYPES
 from intelligence.reputation.classifier import ReputationVector
 
 def _safe_float(val: Any) -> float:
@@ -112,12 +112,24 @@ class DecisionEngine:
         # remove a source the evidence itself proves is unrelated, never one merely
         # lacking proof of relation. Monotonic: can only demote a verdict, never escalate
         # one -- same fail-safe direction Gap 1/G6 shipped live without a shadow period.
+        # SECURITY FIX (live alert audit, 2026-09-28): this used to read
+        # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES here -- the wrong registry, since it
+        # mixes each hypothesis's REQUIRED evidence type (what the verdict is
+        # actually about) with merely-corroborating types like reputation, which
+        # can carry a real domain of its OWN. That let a corroborating item's
+        # own domain get unioned into "acceptable" purely by being present, then
+        # trivially pass the very check below meant to verify it's related to
+        # the anchor -- confirmed live on a DATA_EXFILTRATION verdict
+        # "corroborated" by a reputation hit about a totally unrelated S3
+        # bucket. HYPOTHESIS_ANCHOR_EVIDENCE_TYPES (hypotheses/engine.py) is the
+        # narrower, correct registry -- see its own docstring for the full
+        # incident.
         winning_attack_name = hyp_results["attack"]["name"]
-        relevant_types = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(winning_attack_name)
+        anchor_types = HYPOTHESIS_ANCHOR_EVIDENCE_TYPES.get(winning_attack_name)
         hyp_domains = {
             e.domain for e in attack_evidence
-            if relevant_types and e.type in relevant_types and e.domain
-        } if relevant_types else set()
+            if anchor_types and e.type in anchor_types and e.domain
+        } if anchor_types else set()
         if hyp_domains:
             attack_evidence = [
                 e for e in attack_evidence

@@ -43,6 +43,25 @@ from metrics import (
 
 LOGGER = logging.getLogger("home_ids.ips")
 
+# SECURITY FIX (P0-2, third-party architecture review, 2026-09-28): mitigate() had no
+# device-criticality check at all before autonomously firing full-host containment
+# (Layer-2 tarpit / router isolation) -- a heuristic false positive on one of these
+# device_type classifications (utils.py's infer_device_type()) would isolate a
+# household's router, NAS, or TV with zero human gate, purely because risk_score
+# crossed the same threshold used for any other device. These device_type values are
+# reused as-is (utils.py already classifies "router"/"gateway"/"nas"/"smart_tv" from
+# hostname/vendor -- this doesn't invent a new taxonomy or hand-encode any household-
+# specific host, keeping with this project's network-agnostic-design standard) purely
+# to decide when to require the SAME interactive/Telegram-approval path
+# `interactive_blocking_enabled` already provides for every device, not to grant any
+# immunity -- lateral_threat (actual observed internal port-scan/lateral movement, the
+# one signal this file already treats as strong enough to override the operator-
+# release cooldown) still bypasses this exactly as it bypasses interactive_mode below.
+# Not underscore-prefixed: pipeline.py imports this too, so its own "queue an approval
+# button" decision (the containment_status rewrite in its main loop) can never drift
+# out of sync with what this file actually held back -- see that call site's comment.
+CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
+
 SCAPY_AVAILABLE = False
 try:
     from scapy.all import ARP, Ether, send, conf, IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr, sniff
@@ -592,6 +611,8 @@ class IPSMitigator:
         hostname = getattr(st, "hostname", "unknown")
         dev_id = getattr(st, "device_id", "unknown")
         mac_addr = getattr(st, "mac_address", "unknown")
+        device_type = str(getattr(st, "device_type", "unknown") or "unknown").lower()
+        is_critical_device = device_type in CRITICAL_DEVICE_TYPES
 
         # Fix bogus SHA256 MAC derivation bug: only format dev_id as MAC if it's not a SHA256 hash prefix
         if (not mac_addr or mac_addr == "unknown") and dev_id != "unknown":
@@ -691,8 +712,12 @@ class IPSMitigator:
         if router_enabled and (risk_score >= 8.5 or lateral_threat):
             if is_operator_released and not lateral_threat:
                 LOGGER.debug("🛡️ Router isolation suppressed for %s: Operator release cooldown active.", hostname)
-            elif interactive_mode and not lateral_threat:
-                LOGGER.info("🛡️ [INTERACTIVE MODE] Router isolation for %s queued for Telegram approval.", hostname)
+            elif (interactive_mode or is_critical_device) and not lateral_threat:
+                LOGGER.info(
+                    "🛡️ [%s] Router isolation for %s (device_type=%s) queued for Telegram approval.",
+                    "CRITICAL DEVICE" if is_critical_device and not interactive_mode else "INTERACTIVE MODE",
+                    hostname, device_type,
+                )
             elif mac_addr and mac_addr != "unknown":
                 # BUGFIX (2026-09-10, AUDIT_V14_REVIEW_RESPONSE.md §2.6): _isolate_device_router()
                 # is a real requests.post() to Fritz!Box (router_webhook_timeout_seconds,
@@ -730,8 +755,12 @@ class IPSMitigator:
         if tarpit_enabled and (SCAPY_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
             if is_operator_released and not lateral_threat:
                 LOGGER.debug("🛡️ Layer-2 Tarpit suppressed for %s: Operator release cooldown active.", client_ip)
-            elif interactive_mode and not lateral_threat:
-                LOGGER.info("🛡️ [INTERACTIVE MODE] Layer-2 Tarpit for %s queued for Telegram approval.", client_ip)
+            elif (interactive_mode or is_critical_device) and not lateral_threat:
+                LOGGER.info(
+                    "🛡️ [%s] Layer-2 Tarpit for %s (device_type=%s) queued for Telegram approval.",
+                    "CRITICAL DEVICE" if is_critical_device and not interactive_mode else "INTERACTIVE MODE",
+                    client_ip, device_type,
+                )
             else:
                 if not mac_addr or mac_addr == "unknown":
                     ips_errors_metric.labels(target_type="mac_unknown_tarpit").inc()

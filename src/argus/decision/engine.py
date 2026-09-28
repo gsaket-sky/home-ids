@@ -32,7 +32,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, List, Optional
 
 from argus.evidence.model import Evidence, NO_DESTINATION
-from argus.hypotheses.engine import HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, score_evidence
+from argus.hypotheses.engine import (
+    HypothesisEngine, HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, HYPOTHESIS_ANCHOR_EVIDENCE_TYPES, score_evidence,
+)
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
 from utils import ZEEK_NOTICE_EVIDENCE_TYPES, ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
@@ -319,12 +321,25 @@ class DecisionEngine:
         # attack_evidence, never add to it) and never touches destination-less
         # evidence (NO_DESTINATION items -- e.g. peer_deviation/
         # coordinated_targeting's own relevant evidence) either way.
+        # SECURITY FIX (live alert audit, 2026-09-28): this used to read
+        # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES here -- the wrong registry, since it
+        # mixes each hypothesis's REQUIRED evidence type (what the verdict is
+        # actually ABOUT) with merely-corroborating types like reputation, which
+        # can carry a real destination of its OWN. That let a corroborating
+        # item's own destination get unioned into "acceptable" purely by being
+        # present, then trivially pass the very check meant to verify it's
+        # related to the anchor -- confirmed live on a DATA_EXFILTRATION verdict
+        # "corroborated" by a reputation hit about a totally unrelated S3
+        # bucket. HYPOTHESIS_ANCHOR_EVIDENCE_TYPES (hypotheses/engine.py) is the
+        # narrower, correct registry -- see its own docstring for the full
+        # incident and why only DATA_EXFILTRATION/C2_BEACONING actually differ
+        # from HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.
         winning_attack_name = hyp_results["attack"]["name"]
-        relevant_types = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(winning_attack_name)
+        anchor_types = HYPOTHESIS_ANCHOR_EVIDENCE_TYPES.get(winning_attack_name)
         hyp_destinations = {
             e.destination_id for e in attack_evidence
-            if relevant_types and e.evidence_type in relevant_types and e.destination_id != NO_DESTINATION
-        } if relevant_types else set()
+            if anchor_types and e.evidence_type in anchor_types and e.destination_id != NO_DESTINATION
+        } if anchor_types else set()
         attack_evidence = [
             e for e in attack_evidence
             if e.destination_id == NO_DESTINATION or e.destination_id in hyp_destinations
@@ -490,6 +505,12 @@ class DecisionEngine:
         # domain-linkage stripping above only ever touches "reputation"-family items,
         # never peer_deviation/coordinated_targeting/zeek_exfiltration/zeek_beaconing,
         # so nothing Gap-64 would have stripped is reintroduced here either.
+        # relevant_types here is deliberately the FULL HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+        # (not the narrower anchor_types used for destination-linkage above) -- this is a
+        # display/reporting concern ("what evidence explains this verdict"), not the
+        # destination-anchoring correctness question anchor_types exists for, so it
+        # correctly still wants every relevant type, corroborating ones included.
+        relevant_types = HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.get(winning_attack_name)
         winning_evidence = [
             {"evidence_type": e.evidence_type, "destination_id": e.destination_id, "features": e.features,
              "value": e.value, "confidence": e.confidence}

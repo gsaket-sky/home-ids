@@ -837,6 +837,51 @@ HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.update({
 })
 
 
+# SECURITY FIX (live alert audit, 2026-09-28): decision/engine.py's Gap-64
+# destination-anchoring filter uses this registry to decide "which destination(s)
+# is the winning hypothesis actually about" -- HYPOTHESIS_RELEVANT_EVIDENCE_TYPES
+# is the wrong source for that question, because it mixes each hypothesis's
+# REQUIRED evidence type(s) (what required_satisfied gates on -- the type that
+# defines what the verdict is fundamentally ABOUT) with merely-corroborating
+# types (only ever consulted for strong_score, e.g. reputation/malicious_ja3/
+# malicious_ja4/zeek_beaconing-as-corroboration-for-Exfiltration). When a
+# corroborating type can itself carry a real, independently-meaningful
+# destination_id (reputation is the live example: added on ANY nonzero TI/VT/
+# AbuseIPDB hit ANYWHERE in the device's window, pipeline.py), that evidence's
+# own destination gets unioned into the "acceptable" set purely by being
+# present -- then trivially passes the very check meant to verify relatedness,
+# since its own destination is now a member of a set it contributed to itself.
+#
+# Confirmed live: a DATA_EXFILTRATION verdict (required evidence:
+# zeek_exfiltration, real destination an EC2 instance IP) reached HIGH via "2
+# independent evidence families" where the second family was a reputation hit
+# about a COMPLETELY unrelated S3 bucket domain the device merely also touched
+# that window -- exactly the unrelated-evidence-combination failure this whole
+# destination-anchoring mechanism exists to prevent, reintroduced one level up
+# via its own corroboration-type inputs.
+#
+# This registry is the fix: ONLY a hypothesis's required/anchor evidence
+# type(s) may define its accepted destination set. Every hypothesis whose
+# RELEVANT_EVIDENCE_TYPES is already exactly its required set (no separate
+# corroboration-only member capable of carrying an unrelated destination of its
+# own -- true for every hypothesis except the two below, since their other
+# corroborating types are either single-family-with-the-anchor already
+# [dns_unique_ratio/dns_rate], destination-less by construction [first_contact,
+# excluded from attack_evidence entirely via NON_ATTACK_FAMILIES], or
+# inherently multi-destination by design with no single anchor to narrow to
+# [arp_sweep] -- see ConnectionAbuseHypothesis's own REWORKED comment above)
+# is unaffected here: defaulting to HYPOTHESIS_RELEVANT_EVIDENCE_TYPES keeps
+# their existing, already-correct behavior unchanged. Only DATA_EXFILTRATION
+# and C2_BEACONING actually have the vulnerable shape (a single required type,
+# plus a corroborating type -- reputation -- that carries a real destination of
+# its own), so only those two are narrowed.
+HYPOTHESIS_ANCHOR_EVIDENCE_TYPES: Dict[str, FrozenSet[str]] = {
+    **HYPOTHESIS_RELEVANT_EVIDENCE_TYPES,
+    "DATA_EXFILTRATION": frozenset({"zeek_exfiltration"}),
+    "C2_BEACONING": frozenset({"zeek_beaconing"}),
+}
+
+
 class HypothesisEngine:
     def __init__(self):
         self.attack_hypotheses: List[Hypothesis] = [

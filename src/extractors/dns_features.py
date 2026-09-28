@@ -340,6 +340,19 @@ class FeatureExtractor:
 
         max_label_len = 0
         max_label_domain = ""
+        # SECURITY FIX (P0-1, third-party architecture review, 2026-09-28): entropy_avg
+        # below is a pure device-wide average across every domain in the window -- until
+        # now, the single domain that actually drove that average up was never tracked
+        # anywhere, unlike max_label_domain/tunneling_domain_examples/
+        # suspicious_domain_examples just above and below, which already keep the real
+        # example domain for their own evidence types. Without it, dns_behavior.py's
+        # dns_entropy Evidence had no .domain to attach at all, so a DNS_TUNNELING alert
+        # could only ever fall back to "unknown" (pipeline.py's own DNS_TUNNELING branch)
+        # even when one specific domain's high-entropy label was what actually tripped
+        # the threshold -- the same "real evidence-linked domain instead of an unrelated
+        # fallback" gap already fixed for dns_tunnel_v2/dns_dga_burst below.
+        top_entropy_value = 0.0
+        top_entropy_domain = ""
         tunneling_domains = 0
         tunneling_domain_examples = []
         suspicious_tld_count = 0
@@ -381,7 +394,11 @@ class FeatureExtractor:
             if base and base != domain and not _is_cdn_or_cloud_domain(domain) and not is_telemetry_domain(domain):
                 fanout_by_base[base].add(domain)
 
-            entropy_sum += entropy(sublabel)
+            sublabel_entropy = entropy(sublabel)
+            entropy_sum += sublabel_entropy
+            if sublabel_entropy > top_entropy_value:
+                top_entropy_value = sublabel_entropy
+                top_entropy_domain = domain
             # BUGFIX: suspicious_dga() itself only excludes CDN/cloud domains (see its own
             # docstring), not telemetry -- unlike tunneling_domains/fanout_by_base just
             # above, which already exclude both at this exact source. Without this, the
@@ -512,6 +529,7 @@ class FeatureExtractor:
             "deep_domains": deep_domains,
             "max_label_length": max_label_len,
             "max_label_domain": max_label_domain,
+            "top_entropy_domain": top_entropy_domain,
             "dns_tunneling_domains": tunneling_domains,
             "dns_tunneling_domain_examples": tunneling_domain_examples,
             "dns_txt_null_ratio": min(txt_null_count / max(len(rw.long_events), 1), 1.0),
@@ -550,7 +568,7 @@ class FeatureExtractor:
             "suspicious_domain_examples": [],
             "total": 0, "query_variance": 0.0, "events_per_second": 0.0,
             "top_domain_ratio": 0.0, "new_domains": 0, "deep_domains": 0,
-            "max_label_length": 0, "max_label_domain": "", "dns_tunneling_domains": 0,
+            "max_label_length": 0, "max_label_domain": "", "top_entropy_domain": "", "dns_tunneling_domains": 0,
             "dns_tunneling_domain_examples": [], "nxdomain_tld_conc": 0.0,
             "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,
             "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
