@@ -641,6 +641,17 @@ check("get_devices_with_metadata_value excludes a device of a DIFFERENT type",
 check("get_devices_with_metadata_value returns [] for a value nothing matches",
       store.get_devices_with_metadata_value("device_type", "camera") == [])
 
+# --- get_device_type_cohorts (2026-09-28, restart-cadence investigation open item #1:
+# the one-scan-groups-everything counterpart to get_devices_with_metadata_value()'s
+# one-scan-per-value, used by live_engine.py's own per-cycle cache) ---
+cohorts = store.get_device_type_cohorts()
+check("get_device_type_cohorts groups both real iot devices under 'iot'",
+      set(cohorts.get("iot", [])) == {"n2_dev_iot1", "n2_dev_iot2"}, f"got {cohorts.get('iot')}")
+check("get_device_type_cohorts groups the laptop under its own 'laptop' key, not iot's",
+      cohorts.get("laptop") == ["n2_dev_laptop1"])
+check("get_device_type_cohorts has no key at all for a device_type nothing has",
+      "camera" not in cohorts)
+
 # --- is_own_registered_device (2026-09-15, gap 3 of the "3 automated-learning gaps"
 # audit -- part C, the shared identity check both the reputation-tier fix and the
 # new local-origin auto-corroboration path build on) ---

@@ -192,9 +192,12 @@ def configure(graph_db_path: str, hardware_profile: Optional[str] = None) -> Non
     Omitting it (the default) leaves SQLite's own default cache_size untouched,
     identical to this function's behavior before this param existed."""
     global _GRAPH_DB_PATH, _GRAPH_HARDWARE_PROFILE, _graph_store
+    global _peer_cohort_cache, _peer_cohort_cache_refreshed_at
     _GRAPH_DB_PATH = graph_db_path
     _GRAPH_HARDWARE_PROFILE = hardware_profile
     _graph_store = None  # force re-init against the new path/profile on next use
+    _peer_cohort_cache = {}  # stale cohort data from the OLD store would otherwise survive the swap
+    _peer_cohort_cache_refreshed_at = 0.0
 
 
 def _get_graph_store() -> GraphStore:
@@ -202,6 +205,50 @@ def _get_graph_store() -> GraphStore:
     if _graph_store is None:
         _graph_store = GraphStore(_GRAPH_DB_PATH, hardware_profile=_GRAPH_HARDWARE_PROFILE)
     return _graph_store
+
+
+# Restart-cadence investigation follow-up (2026-09-28, open item #1 of
+# Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md): device_type ->
+# [device_ids], the same shape _inject_peer_deviation_evidence() below used to
+# ask GraphStore.get_devices_with_metadata_value() to recompute via a full
+# `devices` table scan EVERY call -- one scan per device evaluated per cycle,
+# for a cycle that visits every device. Cached here instead, TTL-refreshed
+# (matching ShadowEvaluator._refresh_if_stale()'s own pattern in
+# shadow/sandbox.py) as a defensive backstop, PLUS patched incrementally on
+# every write (see _record_own_device_type_in_cache() below) since this
+# module's own update_device_metadata() call is the ONLY writer of device_type
+# metadata anywhere in this codebase (confirmed by grep before this change) --
+# every real device patches itself in on its own turn, so by the end of one
+# full cycle the cache is exactly as complete as an uncached scan would have
+# been, just without N redundant table scans to get there. 60s TTL is well
+# above one full main-loop pass (~2-4s measured live on .94), so the backstop
+# rebuild only matters for the rare case device_type metadata changes some
+# OTHER way (e.g. a future merge/tombstone path) that the incremental patch
+# wouldn't see.
+_PEER_COHORT_CACHE_REFRESH_SECONDS = 60.0
+_peer_cohort_cache: Dict[str, List[str]] = {}
+_peer_cohort_cache_refreshed_at: float = 0.0
+
+
+def _refresh_peer_cohort_cache_if_stale(now: float) -> None:
+    global _peer_cohort_cache, _peer_cohort_cache_refreshed_at
+    if now - _peer_cohort_cache_refreshed_at >= _PEER_COHORT_CACHE_REFRESH_SECONDS:
+        _peer_cohort_cache = _get_graph_store().get_device_type_cohorts()
+        _peer_cohort_cache_refreshed_at = now
+
+
+def _record_own_device_type_in_cache(device_id: str, device_type: str) -> None:
+    """Keeps the cache in sync with the one write path that can change a
+    device's device_type (the update_device_metadata() call in
+    _inject_peer_deviation_evidence() immediately above this function's own
+    call site), without waiting for the next periodic rebuild."""
+    for existing_type, ids in _peer_cohort_cache.items():
+        if existing_type != device_type and device_id in ids:
+            ids.remove(device_id)
+            break
+    bucket = _peer_cohort_cache.setdefault(device_type, [])
+    if device_id not in bucket:
+        bucket.append(device_id)
 
 
 # BUGFIX (2026-09-16, third-party audit finding P0 -- unbounded WAL growth):
@@ -772,10 +819,10 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
     compares THIS device's own distinct-destination count (the last 7 days)
     against its cohort's average. Persists device_type onto this device's own
     graph metadata as a side effect (best-effort, mirrors how trust-anchor MAC
-    learning already persists onto device_metadata) so get_devices_with_
-    metadata_value() has something to group on -- the cohort naturally gets
-    more complete as more devices are evaluated over time, no separate backfill
-    job needed.
+    learning already persists onto device_metadata), also patching the module-
+    level _peer_cohort_cache (see that cache's own comment above) so it has
+    something to group on -- the cohort naturally gets more complete as more
+    devices are evaluated over time, no separate backfill job needed.
 
     HONEST STATUS, not hidden: this is a genuinely NEW anomaly heuristic, unlike
     coordinated_targeting/fingerprint_campaign/dga_seed_campaign (all reuse
@@ -807,7 +854,9 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
     try:
         store = _get_graph_store()
         store.update_device_metadata(device_id, {"device_type": device_type}, timestamp=ts)
-        peers = [d for d in store.get_devices_with_metadata_value("device_type", device_type) if d != device_id]
+        _refresh_peer_cohort_cache_if_stale(ts)
+        _record_own_device_type_in_cache(device_id, device_type)
+        peers = [d for d in _peer_cohort_cache.get(device_type, []) if d != device_id]
         if len(peers) < _PEER_DEVIATION_MIN_PEERS:
             return []
         since = ts - _PEER_DEVIATION_WINDOW_SECONDS

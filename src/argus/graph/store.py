@@ -1702,6 +1702,30 @@ class GraphStore:
                 out.append(r["device_id"])
         return out
 
+    def get_device_type_cohorts(self) -> Dict[str, List[str]]:
+        """Restart-cadence investigation follow-up (2026-09-28, open item #1 of
+        Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md): same
+        full-table-scan-in-Python rationale as get_devices_with_metadata_value()
+        above, but groups every device by its own metadata_json['device_type']
+        in ONE pass instead of requiring a separate scan per device_type.
+        live_engine.py's _inject_peer_deviation_evidence() was calling
+        get_devices_with_metadata_value() once per device per decision cycle --
+        for a cycle that visits every device, that's N redundant full scans of
+        this SAME table per cycle. This lets that caller do one scan per cycle
+        (cached, see that module's own _refresh_peer_cohort_cache_if_stale())
+        instead of one scan per device evaluated that cycle."""
+        rows = self._conn.execute("SELECT device_id, metadata_json FROM devices").fetchall()
+        out: Dict[str, List[str]] = {}
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+            except (TypeError, ValueError):
+                continue
+            device_type = meta.get("device_type")
+            if device_type:
+                out.setdefault(device_type, []).append(r["device_id"])
+        return out
+
     def is_own_registered_device(self, destination_id: str) -> bool:
         """True if `destination_id` is provably one of THIS network's own
         already-registered devices, not an unknown/external host -- part C of the

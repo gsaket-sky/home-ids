@@ -1,5 +1,38 @@
 # Memory-Driven Restarts: Root Cause + Capacity Planning Plan
 
+**Status (2026-09-28, open item #1 addressed): `get_devices_with_metadata_value()`
+(`store.py`) confirmed as a real per-cycle cost, same class as Bug 4 above --
+`_inject_peer_deviation_evidence()` (`live_engine.py`) called it once per device
+per cycle, each call a full `devices` table scan. Fixed per this doc's own
+suggested design: a new `GraphStore.get_device_type_cohorts()` groups every
+device by `device_type` in ONE scan; `live_engine.py` caches the result
+(`_peer_cohort_cache`), refreshed on a 60s TTL backstop (matching
+`ShadowEvaluator._refresh_if_stale()`'s pattern in `shadow/sandbox.py`) PLUS
+patched incrementally in-memory on every write -- confirmed via grep that
+`_inject_peer_deviation_evidence()`'s own `update_device_metadata()` call is
+the ONLY writer of `device_type` metadata anywhere in this codebase, so every
+real device patches itself into the cache on its own turn and the cache is
+exactly as complete as an uncached scan by the end of one full cycle. Cuts N
+redundant full-table-scans per cycle down to ~1. `get_devices_with_metadata_value()`
+itself is untouched (still used by `population_prior_builder.py` and
+`is_own_registered_device()`'s own docstring cross-reference) -- only this one
+per-cycle hot-path caller was changed.
+
+Tested: `tests/test_argus_graph_store.py` (new `get_device_type_cohorts()`
+checks), `tests/test_argus_live_engine.py` (new section H4 -- confirms the
+cache actually eliminates the scan end-to-end via a call-counting monkeypatch
+AND an `AssertionError`-raising stub on the now-unused
+`get_devices_with_metadata_value()` call site, plus correctness across two
+devices sharing one cache window, including the subtle case where the second
+device correctly sees the first as a peer since its write already committed --
+identical to what an uncached scan would also have seen at that point). Full
+`tests/test_real_world_alert_regression.py` suite also re-run, all passing
+(this touches an evidence-injection hot path). NOT yet deployed/verified live
+on `.94` -- per standing rule, needs fresh explicit confirmation before any
+SSH/restart action. Once deployed, re-check `collector_lag_seconds` against
+this doc's own 2.0s `poll_interval` target and the ~1.9-4.2s post-Bug-4
+baseline recorded below, to see how much of the residual gap this closes.
+
 **Status (2026-09-28, HANDOVER — read this first): user reported "since adding
 health manager, the script keeps getting restarted frequently" and separately
 "processing delay is climbing." Investigation found 4 SEPARATE real bugs (not
@@ -98,7 +131,9 @@ same hot path not yet fixed (see open items #1 below).
 
 ## Open items for the next session
 
-1. **`get_devices_with_metadata_value()` (`store.py`) is the next suspect for
+1. **ADDRESSED 2026-09-28 (see the status entry at the top of this doc) --
+   fixed via a per-cycle cache, not yet deployed/live-verified.**
+   `get_devices_with_metadata_value()` (`store.py`) is the next suspect for
    the residual ~3s average `collector_lag_seconds`.** Called from
    `_inject_peer_deviation_evidence()` (`live_engine.py`) once per device per
    cycle, it's documented as "a full table scan, parsed in Python rather than

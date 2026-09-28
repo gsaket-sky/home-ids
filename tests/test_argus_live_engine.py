@@ -800,6 +800,64 @@ check("H3: FAIL-SAFE -- a broken graph read for peer-deviation never raises out 
       "evaluate(), degrading to no synthetic peer_deviation evidence this cycle",
       not any(e.evidence_type == "peer_deviation" for e in merged_R1))
 
+# --- H4: the per-cycle cohort cache (2026-09-28, restart-cadence investigation open
+# item #1) actually eliminates the per-device full table scan, not just that the
+# cache primitive exists in isolation -- and stays correct while doing it ---
+live_engine._peer_cohort_cache = {}
+live_engine._peer_cohort_cache_refreshed_at = 0.0
+
+_h4_0 = _h0 + 200
+for peer_id, dests in (("p1a_h4_peer1", ["h4a.example.com", "h4b.example.com"]),
+                        ("p1a_h4_peer2", ["h4c.example.com", "h4d.example.com"]),
+                        ("p1a_h4_peer3", ["h4e.example.com", "h4f.example.com"])):
+    _f_store.update_device_metadata(peer_id, {"device_type": "router"}, timestamp=_h4_0)
+    _f_store.record_device_destinations(peer_id, dests, timestamp=_h4_0)
+_f_store.record_device_destinations(
+    "p1a_h4_devA", [f"h4-anom-{i}.example.com" for i in range(20)], timestamp=_h4_0 + 1)
+_f_store.record_device_destinations(
+    "p1a_h4_devB", [f"h4-anom2-{i}.example.com" for i in range(20)], timestamp=_h4_0 + 2)
+
+_h4_cohort_calls = []
+_orig_get_cohorts = _f_store.get_device_type_cohorts
+_f_store.get_device_type_cohorts = lambda: _h4_cohort_calls.append(1) or _orig_get_cohorts()
+_orig_get_by_value = _f_store.get_devices_with_metadata_value
+_f_store.get_devices_with_metadata_value = lambda *a, **kw: (_ for _ in ()).throw(
+    AssertionError("get_devices_with_metadata_value should no longer be called from "
+                    "the live per-cycle path -- the cache replaced it"))
+try:
+    h4a_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h4_0 + 10, device="p1a_h4_devA",
+                           value=10.0, confidence=0.9, independence_group="dns_behavior",
+                           domain="h4-anom-5.example.com")]
+    h4b_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_h4_0 + 11, device="p1a_h4_devB",
+                           value=10.0, confidence=0.9, independence_group="dns_behavior",
+                           domain="h4-anom2-5.example.com")]
+    merged_H4A = _capture_merged(h4a_ev, ReputationVector(domain="", tier=3), "p1a_h4_devA",
+                                   _h4_0 + 10, device_type="router")
+    merged_H4B = _capture_merged(h4b_ev, ReputationVector(domain="", tier=3), "p1a_h4_devB",
+                                   _h4_0 + 11, device_type="router")
+finally:
+    _f_store.get_device_type_cohorts = _orig_get_cohorts
+    _f_store.get_devices_with_metadata_value = _orig_get_by_value
+
+check("H4: two devices evaluated within the same TTL window trigger only ONE "
+      "devices-table scan (via get_device_type_cohorts), not one per device",
+      len(_h4_cohort_calls) == 1, f"got {len(_h4_cohort_calls)} calls")
+h4a_hits = [e for e in merged_H4A if e.evidence_type == "peer_deviation"]
+h4b_hits = [e for e in merged_H4B if e.evidence_type == "peer_deviation"]
+check("H4: correctness preserved under the cache -- devA (6 vs. peer avg 2) still "
+      "gets peer_deviation evidence", len(h4a_hits) == 1, f"got {[e.evidence_type for e in merged_H4A]}")
+check("H4: correctness preserved under the cache -- devA's cohort correctly excludes "
+      "itself, counting only the 3 real router peers (evaluated first, before its own "
+      "write is patched into the cache -- same as the pre-cache behavior, since its own "
+      "update_device_metadata() write happens, then it's excluded from its OWN peer list)",
+      h4a_hits and h4a_hits[0].features.get("peer_count") == 3)
+check("H4: correctness preserved under the cache -- devB, evaluated SECOND within the "
+      "same window, correctly sees devA (already patched into the cache by devA's own "
+      "evaluation moments earlier) as a 4th real peer -- identical to what an uncached, "
+      "always-fresh table scan would ALSO have seen at this point, since devA's write "
+      "already committed to the DB before devB's turn",
+      h4b_hits and h4b_hits[0].features.get("peer_count") == 4, f"got {[e.evidence_type for e in merged_H4B]}")
+
 _f_store.close()
 
 # --- I. Sheet 03a live wiring: reputation floors + hard_stop_candidate_sensitivity
