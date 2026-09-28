@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import sqlite3
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -228,6 +229,12 @@ class GraphStore:
     # short-lived GraphStore instances open_store() constructs, one per console
     # API request.
     _migrated_db_paths: set = set()
+    # Guards the check-then-migrate-then-cache sequence below: open_store() builds
+    # a fresh GraphStore per FastAPI request on a threadpool, so without this lock
+    # concurrent first-touch requests can all pass the "not yet migrated" check
+    # before any of them adds db_path to the cache, each then running
+    # _migrate_existing_db()'s executescript() concurrently against the same file.
+    _migration_lock = threading.Lock()
 
     def __init__(self, db_path: str, hardware_profile: Optional[str] = None):
         self.db_path = db_path
@@ -303,8 +310,10 @@ class GraphStore:
             # after a real schema change) pays this cost; every request after
             # that opens a plain, uncontended connection like the module
             # docstring always assumed.
-            self._migrate_existing_db()
-            GraphStore._migrated_db_paths.add(db_path)
+            with GraphStore._migration_lock:
+                if db_path not in GraphStore._migrated_db_paths:
+                    self._migrate_existing_db()
+                    GraphStore._migrated_db_paths.add(db_path)
 
     def _apply_schema(self) -> None:
         with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
