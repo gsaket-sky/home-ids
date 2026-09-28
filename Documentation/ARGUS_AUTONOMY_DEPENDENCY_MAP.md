@@ -608,6 +608,22 @@ ran `tests/test_argus_identity_resolver.py`, `tests/test_argus_live_identity.py`
 syntax check) confirmed no circular-import issue from the new
 `trust_anchors.py -> discovery.py` dependency.
 
+**Full ~136-file suite run (2026-09-28, per the plan's own explicit instruction
+for this specific phase -- the user was asked first and approved it)**: 126
+passed, 10 failed. Every one of the 10 failures was independently verified
+against a `git worktree` checkout of `5a7a07a` (this whole 13-phase effort's own
+session-start commit) and failed IDENTICALLY there -- confirming all 10 are
+pre-existing, unrelated to any of the 13 phases (none of the 10 failing test
+files were touched by any commit newer than 2026-09-21, well before this effort
+began). No new regression from this entire effort's work. The 10 pre-existing
+failures (`test_argus_decision_replay.py`, `test_argus_ingest_daemon.py`,
+`test_phase20_alert_quality.py`, `test_phase24_dns_evasion.py`,
+`test_phase2_escalation.py`, `test_phase36_review_regression.py`,
+`test_phase42_tier5_verified_ioc_split.py`, `test_phase52_scoped_trust_cache.py`,
+`test_phase56_fastapi_bind_host.py`, `test_phase62_tarpit_release_on_benign.py`)
+are flagged here for a future session to investigate, not fixed as part of this
+effort (out of scope).
+
 **This closes the full 13-phase 16-parameter autonomy-completion effort.** See
 `Documentation/CHANGELOG.md` for the per-phase release history (v16.7.0 through
 this phase's own tag) and this file's section 1 table for final per-parameter
