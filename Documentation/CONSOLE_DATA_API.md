@@ -23,6 +23,44 @@ populated from that same per-cycle decision). `GraphStore.get_devices_with_lates
 `StateManager`/`DeviceState` for identity fields (hostname, MAC, known_ips, ja4_seen,
 dhcp_fingerprint) — two different sources for one device, by design.
 
+## device_type must come from metadata_json, not the devices table column (found 2026-09-28)
+
+Found while investigating a user report of "unidentified devices in the console."
+`get_devices_with_latest_decision()`'s own SQL selected `d.device_type` straight from
+the `devices` table's column — but confirmed live, that column is essentially always
+empty (0 of 152 real devices on `.94` had it set). Nothing on the live per-cycle write
+path ever writes it; every real call site (`baseline/engine.py`, `cl_afpe/engine.py`,
+`live_engine.py`'s own `_inject_peer_deviation_evidence()`, etc.) calls `upsert_device()`
+with only `timestamp=`, never `device_type=`. The one real writer of the column is the
+periodic `population_prior_builder.py` batch job. The value every live device actually
+carries lives in `metadata_json['device_type']` instead, written via
+`update_device_metadata()` — the same field `get_devices_with_metadata_value()`/
+`get_device_type_cohorts()` already read from (see
+`Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md`'s open item #1 entry for
+that unrelated fix, found the same day).
+
+**Effect on the console**: `devices_api.py`'s `list_devices()`/`get_device_detail()`
+both fall through to this graph read only for a device that's aged out of
+`StateManager`'s own live identity cache. For a stale device, that meant `device_type`
+silently reverted to "unknown" in the console even when the graph had a real value on
+record — confirmed live for 3 real devices (`3225e9d4690a`/`c7ede3867502` tagged
+`"server"`, `d12bf8b7dd2b` tagged `"iot"`), all shown as "unknown" in `/api/devices`
+before this fix.
+
+**Fixed**: `get_devices_with_latest_decision()` now also selects `d.metadata_json`,
+parses it, and prefers `metadata_json['device_type']` over the column when both exist —
+the column stays as a fallback for `population_prior_builder.py`'s own writes.
+`display_label` has the identical "nothing populates it" gap (see
+`live_retro_hunter.py`'s own comment) but no `metadata_json` equivalent to recover it
+from, so it's left as-is — hostname resolution already has a working, separate source
+(`StateManager`) at the API layer regardless.
+
+Tested: `tests/test_argus_graph_store.py` (device_type sourced from metadata_json-only,
+column-only, neither, and both-present-metadata-wins cases), full
+`tests/test_devices_api.py` pytest suite (both console endpoints share this code path).
+Deployed and live-verified same session — `/api/devices` now correctly returns
+`server`/`server`/`iot` for the 3 devices above instead of `unknown`.
+
 ## Top 10 domains (all-time) is not implemented
 
 Deliberately, not an oversight. The Argus evidence graph only stores evidence-WORTHY
