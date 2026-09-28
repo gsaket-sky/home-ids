@@ -34,6 +34,17 @@ Phase 12 introduced before ever attempting a capture, with its own clear
 log reason when skipped for that cause specifically -- rather than being
 silently lumped in with an ordinary rate-limit deferral.
 
+Deployed and verified live: the full ~136-file test suite was run before
+this specific deploy (the broadest change of the whole effort), and every
+failure in it was independently confirmed to already exist before this
+effort began -- none were introduced by any of the 13 phases. After
+deploying, the safety guard's own real behavior was confirmed directly: the
+discovered gateway matched cleanly on the first real run, and the resulting
+device identity was verified to be the exact same one this network's router
+has used continuously since early September -- proving the cutover produced
+zero identity disruption for the one device every other device's own
+identity resolution can depend on.
+
 This closes the full 13-phase autonomy-completion effort: all 16 tunable
 parameters wired end to end with real generators, a real shadow-evaluation
 sandbox, behavioral cohorts, and a fully network-agnostic bootstrap path,
