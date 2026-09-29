@@ -116,6 +116,11 @@ class ZeekLogTailer:
                         self._json_err_count += 1
                         
                     self._pos = f.tell()
+                    # Persist progress periodically, not only at the end: a read
+                    # interrupted mid-backlog (restart/kill) must resume near where it
+                    # got to, not re-read the whole backlog from the last saved offset.
+                    if count and count % 5000 == 0:
+                        self._save_cursor()
                     
                 self._save_cursor()
         except OSError: pass
@@ -135,7 +140,48 @@ class ZeekCollector:
         self._available = False
         self._last_init_attempt = 0.0
         self._dropped_event_count = 0
+        self._reader_thread: Optional[threading.Thread] = None
+        self._reader_stop = threading.Event()
         self._init_tailers()
+
+    def start(self) -> None:
+        """Start the background reader. File reading + JSON parsing then happens on
+        this thread, continuously (events land within ~READER_INTERVAL_SECONDS of Zeek
+        writing them), and poll() only swaps the already-filled buffer -- so a
+        conn.log burst or backlog can never stall the main detection loop's heartbeat,
+        and no event is delayed or dropped by a budget. Without start(), poll() keeps
+        its original inline-read behavior."""
+        if self._reader_thread is not None and self._reader_thread.is_alive():
+            return
+        self._reader_stop.clear()
+        self._reader_thread = threading.Thread(target=self._reader_loop, name="zeek-reader", daemon=True)
+        self._reader_thread.start()
+
+    def stop(self) -> None:
+        self._reader_stop.set()
+
+    def _reader_running(self) -> bool:
+        return self._reader_thread is not None and self._reader_thread.is_alive()
+
+    def _poll_tailers(self) -> None:
+        with self._tailers_lock:
+            tailers = list(self._tailers.values())
+        for t in tailers:
+            t.poll()
+
+    def _reader_loop(self) -> None:
+        while not self._reader_stop.is_set():
+            try:
+                if not self._available:
+                    if time.time() - self._last_init_attempt > 10.0:
+                        self._init_tailers()
+                else:
+                    self._poll_tailers()
+            except Exception:
+                LOGGER.exception("Zeek reader thread iteration failed (continuing)")
+            self._reader_stop.wait(self.READER_INTERVAL_SECONDS)
+
+    READER_INTERVAL_SECONDS = 0.25
 
     def update_log_dir(self, new_dir: str) -> None:
         with self._tailers_lock:
@@ -210,16 +256,13 @@ class ZeekCollector:
                 self._dropped_event_count += 1
 
     def poll(self) -> list[dict]:
-        if not self._available:
-            if time.time() - self._last_init_attempt > 10.0:
-                self._init_tailers()
+        if not self._reader_running():
             if not self._available:
-                return []
-
-        with self._tailers_lock:
-            tailers = list(self._tailers.values())
-        for t in tailers:
-            t.poll()
+                if time.time() - self._last_init_attempt > 10.0:
+                    self._init_tailers()
+                if not self._available:
+                    return []
+            self._poll_tailers()
 
         with self._lock:
             e = self._events

@@ -1061,6 +1061,7 @@ class EnginePipeline:
             self.alert_manager.send("🚀 *Home IDS Network Security Engine Online*")
 
         self.running = True
+        self.zeek_collector.start()  # background Zeek file reading/parsing, off the main loop
         LOGGER.info("🟢 Pipeline loop active. Ingesting network telemetry...")
 
         while self.running:
@@ -1125,8 +1126,13 @@ class EnginePipeline:
 
         LOGGER.debug("Polled %d DNS rows, %d Zeek events", len(dns_rows), len(zeek_events))
 
-        for ze_event in zeek_events:
+        # A large burst is real work in progress, not a hang: keep the heartbeat fresh
+        # while ingesting so HealthManager doesn't kill a busy-but-progressing loop
+        # (whose restart would re-read the same backlog and stall again).
+        for _i, ze_event in enumerate(zeek_events):
             self.zeek_fx.ingest(ze_event)
+            if _i % 2000 == 1999:
+                HEARTBEATS.beat("pipeline_main_loop")
 
         # PHASE 21D trigger: a new, previously-unseen source IP contacted one of the
         # configured wired-probe devices this cycle -- fire one burst per cycle that has
