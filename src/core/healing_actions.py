@@ -20,9 +20,11 @@ sudo/systemctl call needed. restart_own_process() below sends itself SIGTERM
 sys.exit() from this background thread silently doesn't work at all) to reuse
 main.py's existing shutdown_handler.
 """
+import faulthandler
 import logging
 import os
 import signal
+import sys
 import threading
 import time
 from typing import Callable, Dict, Tuple, TYPE_CHECKING
@@ -146,6 +148,16 @@ def restart_own_process(hm: "HealthManager", component: str) -> Tuple[bool, str]
         "Health manager triggered a self-restart (component=%s, attempt=%d). %s.",
         component, backoff_attempt, action_detail,
     )
+    # Diagnostic for the recurring pipeline_main_loop freeze (4 heartbeat-stale
+    # restarts/24h on .94, log silent while stuck): dump every thread's Python stack
+    # to stderr (-> journal) BEFORE the process is killed, so the next freeze shows
+    # exactly which line the main loop was wedged on. Best-effort, never blocks the restart.
+    try:
+        LOGGER.critical("Thread stack dump before self-restart (component=%s):", component)
+        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+        sys.stderr.flush()
+    except Exception:
+        pass
     if not escalate:
         # Only needed ahead of a plain SIGTERM -- an escalated SIGKILL here is
         # already unconditional and immediate, nothing to fall back FROM.
