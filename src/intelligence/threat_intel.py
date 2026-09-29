@@ -2,7 +2,7 @@
 threat_intel.py – Threat intelligence enrichment engine.
 
 Consolidates IP/Domain reputation tracking, parses static and streaming feeds, 
-and integrates on-demand asynchronous VirusTotal/Abuse.ch lookup queues.
+and (only when the hidden `advanced_keyed_feeds` switch is on) the personal-use keyed feeds.
 
 RECENT FIXES:
 - FIXED (TRANCO BYPASS VECTOR): Separated `_static_allowlist` (parent-domain wildcard allowed) 
@@ -10,13 +10,14 @@ RECENT FIXES:
   (e.g., *.github.io, *.herokuapp.com) are no longer auto-exempted from blocking.
 - FIXED (FEED ISOLATION): Added per-feed tracking in `_refresh_all()`. Single feed errors 
   no longer erase active memory IOCs from other feeds.
-- FIXED (VT ERROR CACHING): Transient VirusTotal errors are cached with a short 60s TTL.
+- REMOVED (2026-09-29): VirusTotalClient -- VirusTotal's free terms forbid use in a commercial product.
 """
 import csv
 import gzip
 import ipaddress
 import json
 import logging
+import re
 import threading
 import time
 import heapq
@@ -28,10 +29,13 @@ from typing import Optional, Dict, Set
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-from metrics import pihole_gravity_queries_total, pihole_gravity_last_success_timestamp
+from metrics import (pihole_gravity_queries_total, pihole_gravity_last_success_timestamp,
+                     threat_intel_index_age_seconds, threat_intel_index_weight)
+from intelligence import ti_staleness
 
 from utils import etld1
 from intelligence import feed_health
+from intelligence.et_open_fetch import ETOpenUpdater
 from core.heartbeat import HEARTBEATS
 
 LOGGER = logging.getLogger("home_ids.ti")
@@ -43,16 +47,19 @@ _FEEDS = {
         "confidence": 0.95, "ttl": 3600
     },
     "urlhaus_hosts": {
+        "keyed": True,
         "url": "https://urlhaus.abuse.ch/downloads/hostfile/", 
         "type": "hostfile", "comment": "#", "tags": ["malware", "urlhaus_host"], 
         "confidence": 0.90, "ttl": 3600
     },
     "urlhaus_urls": {
+        "keyed": True,
         "url": "https://urlhaus.abuse.ch/downloads/csv_recent/", 
         "type": "csv_urls", "comment": "#", "url_col": 2, "tags": ["malware", "urlhaus_url"], 
         "confidence": 0.95, "ttl": 3600
     },
     "threatfox_iocs": {
+        "keyed": True,
         "url": "https://threatfox.abuse.ch/export/csv/recent/", 
         "type": "threatfox_csv", "comment": "#", "tags": ["threatfox"], 
         "confidence": 0.88, "ttl": 3600
@@ -61,13 +68,22 @@ _FEEDS = {
 
 _OTX_URL = "https://otx.alienvault.com/api/v1/pulses/subscribed?modified_since={since}"
 _TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
+_SSLBL_JA3_URL = "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
+_JA3_RE = re.compile(r"^[0-9a-f]{32}$")
 
 class ThreatIntel:
     def __init__(self, cache_dir: str = "state/ti_cache", otx_api_key: str = "", refresh_interval: int = 3600,
-                 pihole_api_url: str = "", pihole_api_password: str = "", pihole_search_api_path: str = "/api/search"):
+                 pihole_api_url: str = "", pihole_api_password: str = "", pihole_search_api_path: str = "/api/search",
+                 et_open_enabled: bool = True, advanced_feeds: bool = False):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.otx_api_key = otx_api_key
+        # Hidden advanced switch: OTX / URLhaus / ThreatFox need per-user keys and are free for
+        # PERSONAL use only, so a shipped unit leaves them off (Feodo + the local ET index remain).
+        self.advanced_feeds = bool(advanced_feeds)
+        self.otx_api_key = otx_api_key if self.advanced_feeds else ""
+        if self.advanced_feeds:
+            LOGGER.warning("advanced_keyed_feeds is ON: OTX/URLhaus/ThreatFox/AbuseIPDB free tiers are for "
+                           "personal, non-commercial use only. You are responsible for their terms.")
         self.refresh_interval = refresh_interval
         # BUGFIX (health manager, resource-pressure degradation): otx_api_key is a
         # _STATIC_KEYS entry (config.py) -- immune to the live config-override
@@ -104,6 +120,14 @@ class ThreatIntel:
         self._bad_urls:    dict[str, dict] = {}   
         self._bad_cidrs:   list[tuple]     = []   
         self.dynamic_ja3 = frozenset()
+        # JA3 hashes per source; dynamic_ja3 is always their union.
+        self._sslbl_ja3: frozenset = frozenset()
+        self._et_ja3: frozenset = frozenset()
+        # Local ET Open index (device-side fetch, no key/licence): see intelligence/et_open_fetch.py
+        self.et_open_enabled = bool(et_open_enabled)
+        self._et_updater: Optional[ETOpenUpdater] = ETOpenUpdater(self.cache_dir) if self.et_open_enabled else None
+        self._et_factor_cache = (0.0, 1.0)   # (computed_at, factor)
+        self._et_expired = False
 
         self._lock = threading.RLock()
         self._stats = {"ips": 0, "domains": 0, "urls": 0, "cidrs": 0, "last_refresh": "never"}
@@ -120,6 +144,7 @@ class ThreatIntel:
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
         self._load_cache()
+        self._load_et_local()
 
     def is_ready(self) -> bool:
         """PHASE 5 FIX (fail-open visibility): True once at least one feed refresh cycle
@@ -241,13 +266,13 @@ class ThreatIntel:
         with self._lock:
             if ip in self._bad_ips: 
                 LOGGER.debug("IP IOC Match (Direct): %s", ip)
-                return self._bad_ips[ip]
+                return self._decayed(self._bad_ips[ip])
             try:
                 addr = ipaddress.ip_address(ip)
                 for network, meta in self._bad_cidrs:
                     if addr in network: 
                         LOGGER.debug("IP IOC Match (CIDR %s): %s", network, ip)
-                        return meta
+                        return self._decayed(meta)
             except ValueError: 
                 pass
         return None
@@ -261,13 +286,15 @@ class ThreatIntel:
         with self._lock:
             if domain in self._bad_domains: 
                 LOGGER.debug("Domain IOC Match (Direct): %s", domain)
-                return self._bad_domains[domain]
+                return self._decayed(self._bad_domains[domain])
             parts = domain.split(".")
-            if len(parts) > 2:
-                parent = ".".join(parts[-2:])
-                if parent in self._bad_domains: 
+            # Every label-suffix with >= 2 labels, most specific first (ET has 3+-label indicators).
+            for i in range(1, len(parts) - 1):
+                parent = ".".join(parts[i:])
+                if parent in self._bad_domains:
                     LOGGER.debug("Domain IOC Match (Parent %s): %s", parent, domain)
-                    return {**self._bad_domains[parent], "matched_parent": True}
+                    hit = self._decayed(self._bad_domains[parent])
+                    return None if hit is None else {**hit, "matched_parent": True}
         return None
 
     def lookup_url(self, url: str) -> Optional[dict]:
@@ -320,38 +347,125 @@ class ThreatIntel:
     def _start_ja3_feed(self) -> None:
         time.sleep(15)
         LOGGER.debug("JA3 Feed refresh loop active.")
-        # BUGFIX: this used to fetch sslblacklist.csv, which is abuse.ch's *certificate*
-        # SHA1 blacklist (40-hex, col 1) -- never comparable to a JA3 MD5 (32-hex), so
-        # dynamic_ja3 was silently full of values that could never match. The JA3 list
-        # is ja3_fingerprints.csv (col 0 = ja3_md5). TLS verification is on (the
-        # default context); the fetch works with it, so CERT_NONE was never needed.
-        import re
-        import ssl
-        md5_re = re.compile(r"^[0-9a-f]{32}$")
         while True:
-            delay = 86400
             try:
-                ctx = ssl.create_default_context()
-                req = Request("https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv")
-                LOGGER.debug("Fetching JA3 fingerprint blacklist...")
-                with urlopen(req, timeout=10, context=ctx) as resp:
+                # Default context: certificate + hostname verification ON.
+                req = Request(_SSLBL_JA3_URL)
+                LOGGER.debug("Fetching SSLBL JA3 fingerprints...")
+                with urlopen(req, timeout=10) as resp:
                     lines = resp.read().decode('utf-8').splitlines()
                 new_ja3 = set()
                 for line in lines:
                     if not line or line.startswith('#'):
                         continue
-                    val = line.split(',')[0].strip().lower()
-                    if md5_re.match(val):
-                        new_ja3.add(val)
+                    h = line.split(',')[0].strip().lower()
+                    if _JA3_RE.match(h):
+                        new_ja3.add(h)
                 if new_ja3:
-                    self.dynamic_ja3 = frozenset(new_ja3)
-                    LOGGER.info("Successfully loaded %d JA3 fingerprints.", len(new_ja3))
-                else:
-                    LOGGER.warning("JA3 feed parsed to zero valid MD5 fingerprints; keeping previous set.")
-            except Exception as e:
+                    self._sslbl_ja3 = frozenset(new_ja3)
+                    self._rebuild_ja3()
+                    LOGGER.info("Successfully loaded %d SSLBL JA3 fingerprints.", len(new_ja3))
+            except Exception as e: 
                 LOGGER.error("JA3 Feed Refresh failed: %s", e)
-                delay = 3600
-            time.sleep(delay)
+            time.sleep(86400) 
+
+    def _rebuild_ja3(self) -> None:
+        self.dynamic_ja3 = self._sslbl_ja3 | (frozenset() if self._et_expired else self._et_ja3)
+
+    def _et_factor(self) -> float:
+        """Age-decay multiplier for ET Open hits (1.0 <=14 d, linear to 0.0 at 60 d); cached for 60 s."""
+        now = time.time()
+        at, f = self._et_factor_cache
+        if now - at < 60.0:
+            return f
+        age = ti_staleness.read_age_seconds(self.cache_dir, now)
+        f = ti_staleness.decay_factor(age)
+        self._et_factor_cache = (now, f)
+        if age is not None:
+            threat_intel_index_age_seconds.labels(source="et_open").set(age)
+        threat_intel_index_weight.labels(source="et_open").set(f)
+        expired = f <= 0.0
+        if expired != self._et_expired:
+            self._et_expired = expired
+            self._rebuild_ja3()
+        return f
+
+    def _decayed(self, meta: Optional[dict]) -> Optional[dict]:
+        """Apply staleness decay to ET Open hits; other feeds are untouched."""
+        if not meta or meta.get("source") != "et_open":
+            return meta
+        f = self._et_factor()
+        if f >= 1.0:
+            return meta
+        if f <= 0.0:
+            return None
+        return {**meta, "confidence": meta.get("confidence", 0.8) * f, "decayed": True}
+
+    def _apply_et_index(self, parsed) -> None:
+        """Convert a ParsedIOCs into the per-feed dicts (meta shape matches the other feeds)."""
+        ips = {ip: {**m, "malicious": True, "ip": ip} for ip, m in parsed.ips.items()}
+        domains = {d: {**m, "malicious": True, "domain": d} for d, m in parsed.domains.items()}
+        cidrs = []
+        for net_str, m in parsed.cidrs:
+            try:
+                cidrs.append((ipaddress.ip_network(net_str, strict=False), {**m, "malicious": True, "cidr": net_str}))
+            except ValueError:
+                continue
+        self._feed_ips["et_open"] = ips
+        self._feed_domains["et_open"] = domains
+        self._feed_urls["et_open"] = {}
+        self._feed_cidrs["et_open"] = cidrs
+        self._et_ja3 = frozenset(h.lower() for h in parsed.ja3)
+        self._rebuild_ja3()
+
+    def _load_et_local(self) -> None:
+        """Boot: load the last good ET index (independent of the 24 h combined-cache expiry)."""
+        if not self._et_updater:
+            return
+        try:
+            cur = self._et_updater.load_current()
+            if not cur:
+                return
+            self._apply_et_index(cur[0])
+            self._combine_feeds()
+            LOGGER.info("Loaded local ET Open index: %s", cur[0].counts())
+        except Exception as exc:
+            LOGGER.error("Failed to load local ET Open index: %s", exc)
+
+    def _refresh_et_open(self) -> None:
+        """Hourly hook; the updater gates itself to ~once a day (+jitter, back-off on errors)."""
+        if not self._et_updater:
+            return
+        self._et_factor_cache = (0.0, 1.0)   # force a fresh age reading after this cycle
+        try:
+            res = self._et_updater.update()
+            if res.status == "updated" and res.parsed is not None:
+                self._apply_et_index(res.parsed)
+                LOGGER.info("ET Open index updated: %s", res.parsed.counts())
+            if res.status in ("updated", "unchanged"):
+                feed_health.record_success("et_open")
+            elif res.status in ("error", "rejected", "rate_limited"):
+                feed_health.record_failure("et_open", res.detail or res.status, res.status)
+        except Exception as exc:
+            LOGGER.warning("ET Open refresh failed: %s", exc)
+            feed_health.record_failure("et_open", str(exc), feed_health.classify_url_error(exc))
+        self._et_factor()   # refresh age/weight gauges and JA3 expiry state
+
+    def _combine_feeds(self) -> None:
+        """Merge per-feed dicts into the lookup tables; on a clash the higher-confidence entry wins."""
+        def merge(dst: dict, src: dict) -> None:
+            for k, m in src.items():
+                old = dst.get(k)
+                if old is None or m.get("confidence", 0) >= old.get("confidence", 0):
+                    dst[k] = m
+        ips, domains, urls, cidrs = {}, {}, {}, []
+        for f_name in self._feed_ips:
+            merge(ips, self._feed_ips[f_name])
+            merge(domains, self._feed_domains.get(f_name, {}))
+            merge(urls, self._feed_urls.get(f_name, {}))
+            cidrs.extend(self._feed_cidrs.get(f_name, []))
+        with self._lock:
+            self._bad_ips, self._bad_domains, self._bad_urls, self._bad_cidrs = ips, domains, urls, cidrs
 
     def _refresh_tranco_trust_list(self) -> None:
         cache_file = self.cache_dir / "tranco_top10k.cache"
@@ -449,6 +563,8 @@ class ThreatIntel:
     def _refresh_all(self) -> None:
         LOGGER.info("Initiating intelligence feed update cycle...")
         for feed_name, feed in _FEEDS.items():
+            if feed.get("keyed") and not self.advanced_feeds:
+                continue
             feed_ips, feed_domains, feed_urls, feed_cidrs = {}, {}, {}, []
             try:
                 LOGGER.debug("Fetching feed: %s", feed_name)
@@ -497,18 +613,12 @@ class ThreatIntel:
                 LOGGER.warning("OTX Feed refresh failed: %s", exc)
                 feed_health.record_failure("otx", str(exc), feed_health.classify_url_error(exc))
 
-        combined_ips, combined_domains, combined_urls, combined_cidrs = {}, {}, {}, []
-        for f_name in self._feed_ips:
-            combined_ips.update(self._feed_ips[f_name])
-            combined_domains.update(self._feed_domains.get(f_name, {}))
-            combined_urls.update(self._feed_urls.get(f_name, {}))
-            combined_cidrs.extend(self._feed_cidrs.get(f_name, []))
-
+        self._refresh_et_open()
+        self._combine_feeds()
         with self._lock:
-            self._bad_ips = combined_ips
-            self._bad_domains = combined_domains
-            self._bad_urls = combined_urls
-            self._bad_cidrs = combined_cidrs
+            combined_ips, combined_domains = self._bad_ips, self._bad_domains
+            combined_urls, combined_cidrs = self._bad_urls, self._bad_cidrs
+        with self._lock:
             self._stats.update({
                 "ips": len(combined_ips), 
                 "domains": len(combined_domains), 
@@ -912,183 +1022,3 @@ class AbuseIPDB:
             if match:
                 LOGGER.debug("AbuseIPDB blacklist match for IP: %s", ip)
             return match
-
-class VirusTotalClient:
-    _BASE = "https://www.virustotal.com/api/v3"
-    _RATE_DELAY = 16.0
-    _DAILY_CAP = 950
-    
-    def __init__(self, api_key: str, cache_dir: Path):
-        self.api_key = api_key
-        self.cache_file = cache_dir / "vt_cache.json.gz"
-        self._cache = {}
-        self._queue = []
-        self._queued_items = set()
-        self._lock = threading.RLock()
-        self._last_req = 0.0
-        self._today_count = 0
-        self._today_date = ""
-        # BUGFIX (health manager, resource-pressure degradation): see ThreatIntel's
-        # own self.paused comment above -- virustotal_api_key is also _STATIC_KEYS.
-        self.paused = False
-
-        LOGGER.debug("VirusTotalClient wrapper initialized.")
-        self._load_cache()
-        if api_key: 
-            LOGGER.info("Starting VirusTotal async worker thread.")
-            threading.Thread(target=self._worker_loop, daemon=True, name="vt-worker").start()
-
-    def enqueue_domain(self, domain: str, priority: int = 5) -> None:
-        if self.paused or not self.api_key or not domain or domain == "unknown": 
-            return
-        k = f"domain:{domain}"
-        with self._lock:
-            if not self._is_cached(k) and k not in self._queued_items: 
-                if len(self._queued_items) >= 10000:
-                    return
-                self._queued_items.add(k)
-                heapq.heappush(self._queue, (priority, time.time(), "domain", domain))
-                LOGGER.debug("Enqueued domain for VT analysis: %s", domain)
-
-    def enqueue_ip(self, ip: str, priority: int = 5) -> None:
-        if self.paused or not self.api_key or not ip or ip == "unknown": return
-        try:
-            import ipaddress
-            if not ipaddress.ip_address(ip).is_global: return
-        except ValueError:
-            return
-        k = f"ip:{ip}"
-        with self._lock:
-            if not self._is_cached(k) and k not in self._queued_items: 
-                if len(self._queued_items) >= 10000:
-                    return
-                self._queued_items.add(k)
-                heapq.heappush(self._queue, (priority, time.time(), "ip", ip))
-                LOGGER.debug("Enqueued IP for VT analysis: %s", ip)
-
-    def get_result(self, ioc_type: str, value: str) -> dict | None:
-        k = f"{ioc_type}:{value}"
-        with self._lock:
-            e = self._cache.get(k)
-            if e and time.time() < e["expires"]: 
-                return e["result"]
-        return None
-
-    def is_malicious(self, ioc_type: str, value: str, threshold: int = 3) -> bool:
-        res = self.get_result(ioc_type, value)
-        return bool(res and res.get("last_analysis_stats", {}).get("malicious", 0) >= threshold)
-
-    def risk_contribution(self, ioc_type: str, value: str) -> float:
-        res = self.get_result(ioc_type, value)
-        if not res: 
-            return 0.0
-        s = res.get("last_analysis_stats", {})
-        total = sum(s.values()) or 1
-        return min(((s.get("malicious", 0) + s.get("suspicious", 0) * 0.5) / total) * 6.0, 4.0)
-
-    def _worker_loop(self) -> None:
-        LOGGER.debug("VirusTotal worker loop active.")
-        while True:
-            if time.time() < getattr(self, "_quota_exhausted_until", 0.0):
-                time.sleep(60)
-                continue
-                
-            item = None
-            with self._lock:
-                t = time.strftime("%Y-%m-%d")
-                if t != self._today_date: 
-                    self._today_count = 0
-                    self._today_date = t
-                if self._queue and self._today_count < self._DAILY_CAP:
-                    _, _, itype, val = heapq.heappop(self._queue)
-                    self._queued_items.discard(f"{itype}:{val}")
-                    item = (itype, val)
-                    
-            if item is None: 
-                time.sleep(5)
-                continue
-                
-            w = self._RATE_DELAY - (time.time() - self._last_req)
-            if w > 0: 
-                time.sleep(w)
-                
-            itype, val = item
-            try:
-                LOGGER.debug("Executing VT API query for %s: %s", itype, val)
-                res = self._query(itype, val)
-                k = f"{itype}:{val}"
-                with self._lock:
-                    cache_ttl = 86400 if res else 3600
-                    self._cache[k] = {"result": res, "expires": time.time() + cache_ttl}
-                    if res: self._today_count += 1
-                    if len(self._cache) > 2000: 
-                        del self._cache[next(iter(self._cache))]
-                self._save_cache()
-            except Exception as exc:
-                LOGGER.error("VirusTotal worker loop encountered an error: %s", exc)
-            finally: 
-                self._last_req = time.time()
-
-    def _query(self, ioc_type: str, value: str) -> dict:
-        u = f"{self._BASE}/domains/{value}" if ioc_type == "domain" else f"{self._BASE}/ip_addresses/{value}"
-        req = Request(u, headers={"x-apikey": self.api_key, "User-Agent": "home-ids/1.0"})
-        
-        max_retries = 3
-        last_exc = None
-        for attempt in range(max_retries):
-            try:
-                with urlopen(req, timeout=15) as r: 
-                    data = json.loads(r.read())
-                attrs = data.get("data", {}).get("attributes", {})
-                LOGGER.debug("VT API response success for %s", value)
-                feed_health.record_success("virustotal")
-                return {
-                    "last_analysis_stats": attrs.get("last_analysis_stats", {}), 
-                    "reputation": attrs.get("reputation", 0)
-                }
-            except URLError as e:
-                if hasattr(e, 'close'):
-                    e.close()
-                last_exc = e
-                if hasattr(e, 'code') and e.code == 429:
-                    LOGGER.warning("VT Rate limit hit (429). Daily quota likely exhausted.")
-                    self._quota_exhausted_until = time.time() + 3600
-                    time.sleep(5) # Give a small breather, but break immediately to rely on 1-hour negative cache
-                    break
-                elif isinstance(e.reason, TimeoutError) or "timeout" in str(e.reason).lower():
-                    LOGGER.warning("VT Connection timeout. Backing off (Attempt %d/%d).", attempt+1, max_retries)
-                    time.sleep(2 ** attempt)
-                    continue
-                LOGGER.error("VT Query failed conclusively for %s: %s", value, e)
-                break
-
-        if last_exc is not None:
-            feed_health.record_failure("virustotal", str(last_exc), feed_health.classify_url_error(last_exc))
-        return {}
-
-    def _is_cached(self, key: str) -> bool:
-        e = self._cache.get(key)
-        return bool(e and time.time() < e["expires"])
-
-    def _save_cache(self) -> None:
-        try:
-            with self._lock: 
-                d = dict(self._cache)
-            with gzip.open(self.cache_file, "wt", encoding="utf-8") as f: 
-                json.dump(d, f)
-            LOGGER.debug("VirusTotal cache flushed to disk.")
-        except Exception as exc: 
-            LOGGER.error("Failed to save VirusTotal cache: %s", exc)
-
-    def _load_cache(self) -> None:
-        if not self.cache_file.exists(): 
-            return
-        try:
-            with gzip.open(self.cache_file, "rt", encoding="utf-8") as f: 
-                data = json.load(f)
-            now = time.time()
-            with self._lock: 
-                self._cache = {k: v for k, v in data.items() if v.get("expires", 0) > now}
-            LOGGER.debug("VirusTotal cache loaded from disk.")
-        except Exception as exc: 
-            LOGGER.error("Failed to load VirusTotal cache: %s", exc)

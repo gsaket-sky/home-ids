@@ -125,13 +125,12 @@ else:
 
 print("\n[5] Testing Threat Intel API Integration & Format Changes...")
 try:
-    from intelligence.threat_intel import AbuseIPDB, VirusTotalClient
+    from intelligence.threat_intel import AbuseIPDB
     from pathlib import Path
     print("✅ Successfully imported Threat Intel API clients.")
     
     # Use config or fallback to hardcoded keys from GEMINI.md for the test
     abuse_key = os.environ.get("ABUSEIPDB_KEY") or cfg.get("static_requires_restart", {}).get("abuseipdb_api_key") or "REDACTED_ABUSEIPDB_KEY"
-    vt_key = os.environ.get("VIRUSTOTAL_KEY") or cfg.get("static_requires_restart", {}).get("virustotal_api_key") or "REDACTED_VIRUSTOTAL_KEY"
     
     cache_path = Path(os.path.join(os.path.dirname(__file__), '..', 'state'))
     print("  -> Testing AbuseIPDB live query (Checking for format changes)...")
@@ -141,21 +140,6 @@ try:
         print(f"     ✅ AbuseIPDB parsed successfully. Risk: {risk} (Expected: 0.0)")
     else:
         print("     ⚠️ Skipping AbuseIPDB: No API Key found.")
-        
-    print("  -> Testing VirusTotal live query (Checking for format changes)...")
-    if vt_key and len(vt_key) > 10:
-        vt = VirusTotalClient(vt_key, cache_dir=cache_path)
-        
-        # We need to manually query or use risk_contribution which might just queue it and return 0.0 if not cached.
-        # Let's directly call the internal query to check format parsing
-        res = vt._query("domain", "google.com")
-        if res:
-            risk = vt.risk_contribution("domain", "google.com")
-            print(f"     ✅ VirusTotal parsed successfully. Risk: {risk} (Expected: 0.0)")
-        else:
-            print("     ⚠️ VirusTotal query returned empty.")
-    else:
-        print("     ⚠️ Skipping VirusTotal: No API Key found.")
         
 except Exception as e:
     print(f"❌ API Integration Test Failed: {e}")

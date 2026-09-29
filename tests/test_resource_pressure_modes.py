@@ -123,7 +123,6 @@ class FakePipeline:
     def __init__(self):
         self.ti_engine = FakeClient()
         self.abuseipdb = FakeClient()
-        self.virustotal = FakeClient()
         self._health_pressure_poll_floor = None
 
 
@@ -285,7 +284,6 @@ def test_resource_pressure_level_pauses_ti_clients(hm):
     hm._apply_pressure_level(hm_module.RESOURCE_PRESSURE)
     assert hm.pipeline.ti_engine.paused is True
     assert hm.pipeline.abuseipdb.paused is True
-    assert hm.pipeline.virustotal.paused is True
 
 
 def test_normal_level_unpauses_ti_clients(hm):
@@ -293,7 +291,6 @@ def test_normal_level_unpauses_ti_clients(hm):
     hm._apply_pressure_level(hm_module.NORMAL)
     assert hm.pipeline.ti_engine.paused is False
     assert hm.pipeline.abuseipdb.paused is False
-    assert hm.pipeline.virustotal.paused is False
 
 
 def test_conservation_sets_config_overrides_via_live_channel(hm):

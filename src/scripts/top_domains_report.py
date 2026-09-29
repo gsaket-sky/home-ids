@@ -78,6 +78,7 @@ def generate_report():
     # Initialize Threat Intel engine (it will load cache from disk)
     ti_engine = ThreatIntel(
         cache_dir=str(Path(CONFIG.get("state_path")).parent / "ti_cache"),
+        advanced_feeds=bool(CONFIG.get("advanced_keyed_feeds", False)),
         otx_api_key=CONFIG.get("otx_api_key", "")
     )
     device_names = get_device_names()

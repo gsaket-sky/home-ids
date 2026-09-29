@@ -2,14 +2,13 @@
 merge_fragmented_devices.py - CLI utility to reconcile pre-existing device-identity
 fragmentation in state/ids_state.json.
 
-Background: DeviceIdentityManager.resolve_device_id() (core/identity.py) now retroactively
-merges a fragmented device_id going forward (see the fix landed alongside this script --
-_merge_orphan_if_fragmented(), StateManager.merge_into_canonical()), but that fix only
-catches fragmentation as it's DISCOVERED during live traffic processing. It does nothing
-for device_ids that were already fragmented in an existing state/ids_state.json BEFORE the
-fix landed -- a real, confirmed problem: a live scan of one production deployment found 24
-fragmented groups across 60 of its 88 tracked device_ids (see Documentation/
-DEVICE_IDENTITY_LIFECYCLE.md for the full root-cause writeup).
+Background: DeviceIdentityManager.resolve_device_id() (core/identity.py) retroactively
+merges a fragmented device_id going forward (see StateManager.merge_into_canonical()),
+but that fix only catches fragmentation as it's DISCOVERED during live traffic
+processing. It does nothing for device_ids that were already fragmented in an existing
+state/ids_state.json before that mechanism existed -- a real, confirmed problem on a
+live deployment (see Documentation/DEVICE_IDENTITY_LIFECYCLE.md for the full
+root-cause writeup).
 
 Groups device_ids that plausibly represent the SAME physical device (sharing a known IP,
 a resolved MAC address, or a non-generic hostname -- transitively, via union-find, so a

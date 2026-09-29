@@ -1,9 +1,9 @@
 """
-local_intel.py - Self-growing local confirmed-threat store (Phase 21D3).
+local_intel.py - Self-growing local confirmed-threat store.
 
 Once any device on this network is confirmed talking to a malicious destination --
 Stage-1 CONFIRMED_THREAT in fp_engine.py, or the same 2-independent-source HIGH/
-CRITICAL bar Phase A's Telegram gate uses (pipeline.py) -- that IOC is recorded here.
+CRITICAL bar the Telegram gate uses (pipeline.py) -- that IOC is recorded here.
 A DIFFERENT device connecting to the SAME IOC later gets an immediate hard-stop
 instead of re-earning 2 independent sources from scratch: the network gets
 collectively harder to compromise via the same infrastructure, the more it confirms.

@@ -111,21 +111,16 @@ check("ThreatIntel already runs feed refreshes in a background thread (_refresh_
       "_refresh_loop" in ti_source)
 
 try:
-    from intelligence.threat_intel import AbuseIPDB as _AbuseCls, VirusTotalClient as _VTCls
+    from intelligence.threat_intel import AbuseIPDB as _AbuseCls
     abuse_src = inspect.getsource(_AbuseCls)
-    vt_src = inspect.getsource(_VTCls)
 except Exception:
-    abuse_src = vt_src = ""
+    abuse_src = ""
 if abuse_src:
     check("AbuseIPDB client already uses an async enqueue + background worker pattern "
           "(enqueue_ip / _live_worker_loop), not a blocking main-loop call",
           "enqueue_ip" in abuse_src and "_live_worker_loop" in abuse_src)
-if vt_src:
-    check("VirusTotal client already uses an async enqueue + background worker pattern "
-          "(enqueue_domain / _worker_loop), not a blocking main-loop call",
-          "enqueue_domain" in vt_src and "_worker_loop" in vt_src)
-if not abuse_src and not vt_src:
-    print("[SKIP] AbuseIPDB/VirusTotal source checks — classes not importable in this sandbox")
+if not abuse_src:
+    print("[SKIP] AbuseIPDB source checks — classes not importable in this sandbox")
 
 print()
 if FAILURES:

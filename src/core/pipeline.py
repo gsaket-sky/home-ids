@@ -45,7 +45,7 @@ from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator, CRITICAL_DEVICE_TYPES
 from mitigation.plain_explanation import build_plain_explanation
 from middleware.humanize import resolve_destination_info
-from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
+from intelligence.threat_intel import ThreatIntel, AbuseIPDB
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
@@ -777,7 +777,8 @@ class EnginePipeline:
         self.geoip_engine = geoip_engine or GeoIPEngine(db_path=self.config.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")), asn_db_path=self.config.get("geoip_asn_db", ""))
 
         cache_dir = state_dir / "ti_cache"
-        abuse_key = self.config.get("abuseipdb_api_key", "")
+        # Hidden advanced switch (config-file only, default off): AbuseIPDB's free tier is personal-use only.
+        abuse_key = self.config.get("abuseipdb_api_key", "") if self.config.get("advanced_keyed_feeds", False) else ""
         self.abuseipdb = AbuseIPDB(api_key=abuse_key, cache_dir=cache_dir, refresh_interval=int(self.config.get("ti_refresh_interval", 3600)))
         self.abuseipdb.start_refresh_thread()
         if abuse_key:
@@ -785,14 +786,6 @@ class EnginePipeline:
             integration_status_metric.labels("abuseipdb").set(1)
         else:
             integration_status_metric.labels("abuseipdb").set(0)
-            
-        vt_key = self.config.get("virustotal_api_key", "")
-        self.virustotal = VirusTotalClient(api_key=vt_key, cache_dir=cache_dir)
-        if vt_key:
-            LOGGER.info("VirusTotal integration activated successfully.")
-            integration_status_metric.labels("virustotal").set(1)
-        else:
-            integration_status_metric.labels("virustotal").set(0)
             
         if self.ti_engine and self.ti_engine.otx_api_key:
             LOGGER.info("AlienVault OTX integration activated successfully.")
@@ -1507,31 +1500,15 @@ class EnginePipeline:
 
                 features["abuseipdb_risk"] = abuse_risk
 
+                # vt_risk: legacy name kept for feature/model-schema compatibility. VirusTotal was removed
+                # (2026-09-29); it now carries ONLY the honeypot signal (a honeypot target makes the
+                # external client inherently malicious).
                 vt_risk = 0.0
                 if dest_ip in honeypots:
-                    # Target is a honeypot; external client_ip is inherently malicious. Skip API quota waste.
                     vt_risk = 4.0
                     if vt_risk > _best_risk_seen:
                         _best_risk_seen = vt_risk
                         reputation_target = dest_ip
-                else:
-                    if _dest_ip_is_real_host:
-                        self.virustotal.enqueue_ip(dest_ip)
-                    if top_domain:
-                        self.virustotal.enqueue_domain(top_domain)
-                    vt_ip_risk = self.virustotal.risk_contribution("ip", dest_ip) if dest_ip else 0.0
-                    vt_domain_risk = self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
-                    if vt_ip_risk >= vt_domain_risk:
-                        vt_risk = vt_ip_risk
-                        vt_risk_source = dest_ip
-                    else:
-                        vt_risk = vt_domain_risk
-                        vt_risk_source = top_domain
-                    if vt_risk > 0:
-                        ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
-                        if vt_risk > _best_risk_seen:
-                            _best_risk_seen = vt_risk
-                            reputation_target = vt_risk_source
                 features["vt_risk"] = vt_risk
 
                 # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────

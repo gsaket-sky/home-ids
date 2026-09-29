@@ -389,6 +389,29 @@ class StateManager:
         with self._global_lock:
             return device_id in self._states
 
+    def remove_device(self, device_id: str) -> bool:
+        """WebUI Maintenance page's "Remove Device" action (PRODUCTIZATION_ROADMAP.md
+        Phase 4) -- permanently forgets a device's tracked profile: risk history,
+        suspicious_since state, everything DeviceState holds. Distinct from the existing
+        release/isolation-clearing methods, which unblock a device without erasing what's
+        been learned about it; this is the "the device is gone, stop tracking it
+        entirely" action, irreversible for that device's history. Also drops any
+        MAC/IP reverse-index entries pointing at it, so a stale index never resolves to a
+        pruned device_id (same defensive pattern get_device_id_for_mac/_ip already use).
+        Caller is responsible for the matching cleanup in the sibling JSON side files
+        (device_fp_profiles.json, fp_sigma_shifts.json, device_labels.json) -- this method
+        only owns in-memory/persisted StateManager state."""
+        with self._global_lock:
+            existed = device_id in self._states
+            self._states.pop(device_id, None)
+            for ip, mapped_id in list(self._ip_to_device_id.items()):
+                if mapped_id == device_id:
+                    del self._ip_to_device_id[ip]
+            for mac, mapped_id in list(self._mac_to_device_id.items()):
+                if mapped_id == device_id:
+                    del self._mac_to_device_id[mac]
+        return existed
+
     def migrate_device_id(self, old_id: str, new_id: str, ml_registry: Any = None) -> bool:
         """ml_registry is optional (default None) so existing callers keep working
         unchanged. When supplied, also migrates that device's per-device ML anomaly

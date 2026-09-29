@@ -8,20 +8,15 @@ for entries that should never have been recordable as "confirmed malicious":
     in config.yaml's safe_ips -- e.g. your own server/router, or IGMP/mDNS multicast
     addresses like 224.0.0.251 / ff02::fb.
   - Major cloud/CDN-provider-owned IPs (utils.is_cloud_cdn_provider_org()) -- e.g.
-    Apple Push (17.57.146.x), Facebook/Meta CDN, Google/AWS/Azure. BUGFIX
-    (2026-08-29): added after a live audit found these entries in the store despite
-    fp_engine.py's own write guard (_is_ip_protected_from_confirmed_intel) already
-    claiming to cover them -- the guard's keyword list (utils.py's
-    _CLOUD_CDN_ORG_KEYWORDS) was missing "apple"/"facebook" entirely, now fixed. This
-    category needs a live GeoIP ASN lookup (the store itself doesn't persist asn_owner
-    per entry -- record()/local_intel.py never stored it), unlike the two checks
-    above which are pure string/structural tests -- degrades gracefully (skips this
-    category, doesn't crash) if the ASN mmdb isn't configured/available.
+    Apple Push, Facebook/Meta CDN, Google/AWS/Azure. This category needs a live GeoIP
+    ASN lookup (the store itself doesn't persist asn_owner per entry -- record()/
+    local_intel.py never stored it), unlike the two checks above which are pure
+    string/structural tests -- degrades gracefully (skips this category, doesn't
+    crash) if the ASN mmdb isn't configured/available.
 
 fp_engine.py's record_confirmed_threat() and Stage-1 Check 7 already refuse to ever
-write or honor any of these three categories going forward (see the BUGFIX comments
-there) -- this tool exists for two ongoing reasons, not just the one-time historical
-cleanup:
+write or honor any of these three categories going forward -- this tool exists for two
+ongoing reasons, not just one-time historical cleanup:
   1. Those guards only protect entries ALREADY recognized as safe. A different,
      not-yet-recognized domain/IP could still get poisoned by some future bug --
      this gives you a way to audit the store on demand.

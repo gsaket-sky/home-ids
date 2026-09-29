@@ -97,6 +97,7 @@ def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
     ti = ThreatIntel(
         cache_dir=str(Path(state_dir) / "ti_cache"),
         otx_api_key=config.get("otx_api_key", ""),
+        advanced_feeds=bool(config.get("advanced_keyed_feeds", False)),
         refresh_interval=3600,
     )
     if refresh:

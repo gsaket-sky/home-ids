@@ -29,7 +29,7 @@ EVIDENCE_TYPE_LABELS = {
     "zeek_lateral_scan": ("Internal lateral movement / port scan", "This device made rapid connection attempts to many internal hosts or ports -- the pattern Zeek's own connection logs use to flag scanning."),
     "geofencing_violation": ("Geofencing policy violation", "This device contacted a destination in a country your geofencing_countries policy blocks outright."),
     "local_device_discovery": ("Local device discovery", "Routine LAN discovery traffic (ARP/mDNS-style) -- almost always benign, logged as evidence rather than treated as a threat."),
-    "reputation": ("Threat-intelligence reputation signal", "The destination's reputation score from VirusTotal/AbuseIPDB/OTX threat-intel feeds."),
+    "reputation": ("Threat-intelligence reputation signal", "The destination's reputation score from threat-intel feeds."),
     "dns_rate": ("Elevated DNS query rate", "This device is issuing DNS queries faster than its own learned baseline."),
     "dns_entropy": ("High DNS name entropy", "Queried domain names look more random than typical human/application traffic -- a DGA/tunneling indicator."),
     "dns_unique_ratio": ("High ratio of unique domains", "A high fraction of this device's DNS queries are for domains never seen before -- consistent with domain-generation-algorithm (DGA) traffic."),

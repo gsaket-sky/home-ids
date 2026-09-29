@@ -935,12 +935,12 @@ class HealthManager:
         idx = _PRESSURE_ORDER.index(level)
 
         # RESOURCE_PRESSURE+: pause TI enrichment (the only lever available --
-        # otx_api_key/abuseipdb_api_key/virustotal_api_key are all _STATIC_KEYS,
+        # otx_api_key/abuseipdb_api_key are _STATIC_KEYS,
         # immune to the live config-override channel; these are in-process flags
         # on the already-constructed client objects instead).
         pause_ti = idx >= _PRESSURE_ORDER.index(RESOURCE_PRESSURE)
         if self.pipeline is not None:
-            for attr in ("ti_engine", "abuseipdb", "virustotal"):
+            for attr in ("ti_engine", "abuseipdb"):
                 client = getattr(self.pipeline, attr, None)
                 if client is not None:
                     client.paused = pause_ti

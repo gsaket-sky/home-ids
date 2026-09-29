@@ -125,7 +125,7 @@ check("SOURCE-GUARD: setup_logging() builds a _SecretRedactingFormatter",
       "_redacting_formatter = _SecretRedactingFormatter(" in _main_src)
 check("SOURCE-GUARD: setup_logging() installs it on every root logger handler",
       "_handler.setFormatter(_redacting_formatter)" in _main_src)
-for _key in ("telegram_token", "otx_api_key", "abuseipdb_api_key", "virustotal_api_key",
+for _key in ("telegram_token", "otx_api_key", "abuseipdb_api_key",
              "pihole_api_password", "fritz_password", "fritz_api_token"):
     check(f"SOURCE-GUARD: {_key} is included in the redacted secret set",
           f'"{_key}"' in _main_src)

@@ -30,7 +30,7 @@ from metrics import (
     query_rate_baseline_mean_metric, query_rate_threshold_limit_metric,
     ndr_doh_bypass_metric, ndr_lateral_moves_metric, ndr_jitter_c2_metric,
     ndr_exfil_z_metric, ndr_delta_exfil_metric, abuseipdb_risk_metric,
-    virustotal_risk_metric, beaconing_volume_metric, jitter_cv_metric,
+    beaconing_volume_metric, jitter_cv_metric,
     zeek_status_metric, zeek_events_processed_metric, 
     ips_pihole_status, ips_router_status, ips_tarpit_status,
     ips_pihole_blocks_metric, ips_isolations_metric, ips_errors_metric,
@@ -78,7 +78,7 @@ _DEVICE_GAUGES = (
     query_rate_baseline_mean_metric, query_rate_threshold_limit_metric,
     ndr_doh_bypass_metric, ndr_lateral_moves_metric, ndr_jitter_c2_metric,
     ndr_exfil_z_metric, ndr_delta_exfil_metric, abuseipdb_risk_metric,
-    virustotal_risk_metric, beaconing_volume_metric, jitter_cv_metric,
+    beaconing_volume_metric, jitter_cv_metric,
     ndr_tcp_scan_metric, ndr_max_duration_metric, ndr_honeypot_hits_metric,
     ndr_arp_sweep_metric, ndr_dns_evasion_ratio_metric,
     # BUGFIX (live Prometheus snapshot audit): these 7 are set with the identical
@@ -390,7 +390,6 @@ class MetricsExporter:
             ti_risk_metric.labels(str_dev_id, str_host, str_type).set(ti_risk)
             ti_match_metric.labels(str_dev_id, str_host, str_type).set(ti_match)
             abuseipdb_risk_metric.labels(str_dev_id, str_host, str_type).set(abuse_risk)
-            virustotal_risk_metric.labels(str_dev_id, str_host, str_type).set(vt_risk)
 
             zeek_conn_count_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_conn_count", 0))
             zeek_new_ips_metric.labels(str_dev_id, str_host, str_type).set(features.get("zeek_new_ips", 0))

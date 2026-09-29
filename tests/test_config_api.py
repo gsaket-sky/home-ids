@@ -140,7 +140,7 @@ def test_get_config_excludes_secrets(isolated_overrides):
     response = config_api.get_config(token="test")
     keys = {row["key"] for row in response["rows"]}
     for secret_key in ("telegram_token", "fritz_password", "fritz_api_token", "otx_api_key",
-                       "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
+                       "abuseipdb_api_key", "pihole_api_password",
                        "telegram_chat_id"):
         assert secret_key not in keys
 

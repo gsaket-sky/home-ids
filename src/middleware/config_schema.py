@@ -221,7 +221,9 @@ CONFIG_SCHEMA = [
      "desc": "Allowlist of chat IDs permitted to send bot commands. Empty = allow from any chat that has the bot."},
 
     {"s": "threat_intel_and_ai", "k": "ti_refresh_interval", "t": "number", "def": 3600,
-     "desc": "How often OTX/AbuseIPDB/VirusTotal feeds refresh (hourly)."},
+     "desc": "How often the threat-intel feeds refresh (hourly)."},
+    {"s": "threat_intel_and_ai", "k": "et_open_enabled", "t": "bool", "def": True,
+     "desc": "Fetch the free Emerging Threats Open ruleset daily and use it as a local threat-indicator index."},
     {"s": "threat_intel_and_ai", "k": "ollama_url", "t": "string", "def": "",
      "desc": "Base URL of your local Ollama server for LLM-based alert triage/summaries."},
     {"s": "threat_intel_and_ai", "k": "ollama_model", "t": "string", "def": "llama3",

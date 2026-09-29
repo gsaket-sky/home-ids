@@ -148,7 +148,6 @@ ndr_jitter_c2_metric = Gauge("home_ids_beaconing_c2_count", "Highly uniform peri
 ndr_delta_exfil_metric = Gauge("home_ids_outbound_bytes_window", "Windowed outbound network payload bytes", _DEV_LABELS)
 ndr_exfil_z_metric = Gauge("home_ids_outbound_bytes_zscore", "Payload outbound bytes baseline deviation Z-score", _DEV_LABELS)
 abuseipdb_risk_metric = Gauge("home_ids_abuseipdb_risk", "AbuseIPDB reputation hazard severity", _DEV_LABELS)
-virustotal_risk_metric = Gauge("home_ids_virustotal_risk", "VirusTotal sandbox analysis hazard severity", _DEV_LABELS)
 beaconing_volume_metric = Gauge("home_ids_beaconing_volume_score", "Single-destination traffic concentration score", _DEV_LABELS)
 jitter_cv_metric = Gauge("home_ids_jitter_cv_score", "Timing uniformity coefficient of variation", _DEV_LABELS)
 ndr_tcp_scan_metric = Gauge("home_ids_zeek_s0_rej_count", "Rejected or unanswered TCP connection attempts (Port Scans)", _DEV_LABELS)
@@ -452,6 +451,8 @@ suricata_last_success_timestamp = Gauge("home_ids_suricata_last_success_timestam
 # same "turn organic usage into a graphable fact" approach as the Suricata metrics
 # above rather than a synthetic health ping.
 pihole_gravity_queries_total = Counter("home_ids_pihole_gravity_queries_total", "Cumulative Pi-hole gravity-list API lookups by outcome", ["outcome"])
+threat_intel_index_age_seconds = Gauge("home_ids_threat_intel_index_age_seconds", "Seconds since the last successful check of the local threat-intel index (ET Open); weight decays after 14 days, zero at 60", ["source"])
+threat_intel_index_weight = Gauge("home_ids_threat_intel_index_weight", "Current confidence multiplier applied to the local threat-intel index (1.0 fresh .. 0.0 expired)", ["source"])
 pihole_gravity_last_success_timestamp = Gauge("home_ids_pihole_gravity_last_success_timestamp", "Unix timestamp of the last successful (non-cached) Pi-hole gravity-list API response")
 # ===========================================================================
 # 2026-09-23: Argus-architecture observability (Documentation/ARGUS_OBSERVABILITY_PLAN.md)

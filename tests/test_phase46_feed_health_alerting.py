@@ -188,8 +188,6 @@ check("SOURCE-GUARD: the OTX refresh path records both success and failure",
       'feed_health.record_success("otx")' in _ti_src and 'feed_health.record_failure("otx"' in _ti_src)
 check("SOURCE-GUARD: AbuseIPDB._refresh() records both success and failure",
       'feed_health.record_success("abuseipdb")' in _ti_src and 'feed_health.record_failure("abuseipdb"' in _ti_src)
-check("SOURCE-GUARD: VirusTotalClient._query() records both success and failure",
-      'feed_health.record_success("virustotal")' in _ti_src and 'feed_health.record_failure("virustotal"' in _ti_src)
 
 
 print()

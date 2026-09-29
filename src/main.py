@@ -96,7 +96,7 @@ def setup_logging():
     # produced it. See _SecretRedactingFormatter's own docstring for why this is a
     # blanket fix rather than another one-off patch at a single call site.
     _secret_keys = (
-        "telegram_token", "otx_api_key", "abuseipdb_api_key", "virustotal_api_key",
+        "telegram_token", "otx_api_key", "abuseipdb_api_key",
         "pihole_api_password", "fritz_password", "fritz_api_token",
     )
     _secrets = [str(CONFIG.get(k, "")).strip() for k in _secret_keys]
@@ -235,6 +235,8 @@ def main():
         pihole_api_url=CONFIG.get("pihole_api_url", ""),
         pihole_api_password=CONFIG.get("pihole_api_password", ""),
         pihole_search_api_path=CONFIG.get("pihole_search_api_path", "/api/search"),
+        et_open_enabled=bool(CONFIG.get("et_open_enabled", True)),
+        advanced_feeds=bool(CONFIG.get("advanced_keyed_feeds", False)),
     )
     ti_engine.start_refresh_thread()
 

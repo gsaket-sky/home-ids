@@ -73,12 +73,12 @@ check("both ESP32 identities still tracked separately", sm2.has_device("esp_a") 
 
 # ── Test 3: candidate outside the time window (e.g. 2 hours idle) does not match ──
 sm3 = StateManager(state_path="/tmp/_phase4_test_state3.json")
-old3 = sm3.get_or_create("old_id_3", "192.168.1.60", "Family-PC",
+old3 = sm3.get_or_create("old_id_3", "192.168.1.60", "test-device-1",
                           dhcp_fingerprint={"vendor_class": "MSFT 5.0", "param_list": [1, 3, 6, 15], "user_class": ""})
 old3.dhcp_fingerprint = {"vendor_class": "MSFT 5.0", "param_list": [1, 3, 6, 15], "user_class": ""}
 old3.last_seen = time.time() - 7200  # 2 hours ago — outside default 1800s candidate window
 
-new3 = sm3.get_or_create("new_id_3", "192.168.1.61", "Family-PC",
+new3 = sm3.get_or_create("new_id_3", "192.168.1.61", "test-device-1",
                           dhcp_fingerprint={"vendor_class": "MSFT 5.0", "param_list": [1, 3, 6, 15], "user_class": ""})
 check("stale (2h-idle) candidate outside window is not merged", new3.device_id == "new_id_3")
 

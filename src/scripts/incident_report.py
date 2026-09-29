@@ -1,15 +1,15 @@
 """
-incident_report.py - VERSION 11 (P1, review #7/#8: "Alert != Observation != Incident").
+incident_report.py - "Alert != Observation != Incident."
 
 alerts.json is deliberately append-only, one line per qualifying cycle -- that's
 correct for CL-AFPE training data (scripts/train_fp_classifier.py) and must not
-change. But a human auditing the system by reading raw alerts.json (exactly what a
-third-party review of this file had to do by hand) sees "event / event / event /
-event" where the system's own model is really "ONE INCIDENT, N observations" --
-incident_key.py's incident_key() already exists and is already written into every
-alert as alert_payload["incident_id"] (pipeline.py), it just has no human-readable
-view. This script is that view: purely a read-only rollup over the existing training
-log, never writes to it, never feeds back into the pipeline.
+change. But a human auditing the system by reading raw alerts.json sees
+"event / event / event / event" where the system's own model is really "ONE
+INCIDENT, N observations" -- incident_key.py's incident_key() already exists and is
+already written into every alert as alert_payload["incident_id"] (pipeline.py), it
+just has no human-readable view. This script is that view: purely a read-only rollup
+over the existing training log, never writes to it, never feeds back into the
+pipeline.
 
 Usage:
     python3 src/scripts/incident_report.py [--hours 24] [--top 30] [--min-occurrences 1]
@@ -66,9 +66,9 @@ def _iter_alert_records(path: Path, since_ts: float):
 
 def _record_incident_key(rec: dict) -> str:
     """Prefers the incident_id already stamped onto the record at write time
-    (VERSION 10, pipeline.py) -- falls back to recomputing it from the record's own
-    fields for older records written before that existed, so this report works over
-    a file spanning both eras without a gap."""
+    (pipeline.py) -- falls back to recomputing it from the record's own fields for
+    older records written before that existed, so this report works over a file
+    spanning both eras without a gap."""
     existing = rec.get("incident_id")
     if existing:
         return str(existing)
@@ -87,9 +87,9 @@ def build_incidents(path: Path, since_ts: float) -> dict:
         entry = incidents.get(key)
         ts = float(rec.get("timestamp", 0.0) or 0.0)
         state = str(rec.get("decision_state") or rec.get("state") or "").upper()
-        # VERSION 11: alerts.json doesn't carry a bare "state" field directly on every
-        # schema version -- reasoning_trail's last line ("Verdict: STATE / action --
-        # ...") is the reliable source across versions when present.
+        # alerts.json doesn't carry a bare "state" field directly on every schema
+        # version -- reasoning_trail's last line ("Verdict: STATE / action -- ...")
+        # is the reliable source across versions when present.
         if not state:
             trail = rec.get("reasoning_trail") or []
             if trail:

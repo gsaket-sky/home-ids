@@ -4,15 +4,11 @@ and API-key-based integrations (Feodo Tracker, URLhaus, ThreatFox, AlienVault OT
 AbuseIPDB, VirusTotal), and sends a Telegram alert once a real outage (not a single
 transient blip) is detected.
 
-Prompted by a live incident (2026-08-29): feodotracker.abuse.ch started returning
-HTTP 503 "certificate has expired" (their own backend origin cert, confirmed via
-direct openssl/curl checks that the public-facing edge cert was fine -- entirely
-their infrastructure, nothing this codebase could ever fix). threat_intel.py's
-existing fetch functions already degrade gracefully on any failure (log a WARNING,
-fall back to the last cached response) but nothing tracked HOW LONG a feed had been
-down, and nothing told a human. This module is the fix: record success/failure per
-feed, and alert once a streak crosses a threshold -- distinguishing two genuinely
-different situations:
+threat_intel.py's fetch functions already degrade gracefully on any failure (log a
+WARNING, fall back to the last cached response) but nothing tracked HOW LONG a feed
+had been down, and nothing told a human. This module is the fix: record
+success/failure per feed, and alert once a streak crosses a threshold --
+distinguishing three genuinely different situations:
   - "external_infra": the provider's own server/network/cert is the problem. There is
     NOTHING to fix here -- alerts only after `_EXTERNAL_INFRA_ALERT_THRESHOLD`
     consecutive failures (filters out single blips), text explicitly says so, and
@@ -53,7 +49,6 @@ _CATEGORY_LABELS = {
 # need this; the free abuse.ch feeds (feodo/urlhaus/threatfox) never hit auth_expired.
 _CREDENTIAL_HELP = {
     "abuseipdb": ("ABUSEIPDB_KEY", "https://www.abuseipdb.com/account/api"),
-    "virustotal": ("VIRUSTOTAL_KEY", "https://www.virustotal.com/gui/my-apikey"),
     "otx": ("OTX_API_KEY", "https://otx.alienvault.com/api"),
 }
 
@@ -138,13 +133,12 @@ def record_failure(feed_name: str, error: str, category: str) -> None:
             "last_error": str(error), "category": category,
             "alerted_at": entry.get("alerted_at"), "last_success_ts": entry.get("last_success_ts"),
         }
-        # BUGFIX (2026-08-29, user catch): rate_limited (HTTP 429) must NEVER alert --
-        # hitting a free-tier daily/hourly cap is expected, routine behavior (this
-        # codebase's own AbuseIPDB/VirusTotal clients already size their own request
-        # volume against a _DAILY_CAP specifically because crossing the provider's
-        # real limit is a normal, self-resolving-at-the-next-reset condition, not an
-        # outage). Still recorded in state (useful for observability) -- just never
-        # sent to Telegram.
+        # rate_limited (HTTP 429) must NEVER alert -- hitting a free-tier daily/hourly
+        # cap is expected, routine behavior (this codebase's own AbuseIPDB/VirusTotal
+        # clients already size their own request volume against a _DAILY_CAP
+        # specifically because crossing the provider's real limit is a normal,
+        # self-resolving-at-the-next-reset condition, not an outage). Still recorded
+        # in state (useful for observability) -- just never sent to Telegram.
         should_alert = not already_alerted and category != "rate_limited" and (
             category == "auth_expired" or consecutive >= _EXTERNAL_INFRA_ALERT_THRESHOLD
         )

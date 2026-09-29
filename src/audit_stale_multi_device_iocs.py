@@ -18,8 +18,8 @@ within hours of each other, with reason=TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP (the
 self-reinforcing loop -- every hard-stop hit re-records the same entry, refreshing its
 TTL indefinitely). On a small home network, several DIFFERENT devices independently
 "confirming" the same obscure IP within a few hours is far more consistent with a
-shared SYSTEMIC bug (e.g. this session's reverse-DNS-lookup-pool-exhaustion storm, or
-the reputation-attribution bug where an unrelated domain/IP got blamed for a different
+shared SYSTEMIC bug (e.g. a reverse-DNS-lookup-pool-exhaustion storm, or a
+reputation-attribution bug where an unrelated domain/IP got blamed for a different
 domain's risk score) poisoning the store simultaneously across devices, than with a
 real coordinated multi-device compromise.
 
@@ -27,7 +27,7 @@ WHY THIS IS A REVIEW TOOL, NOT AN AUTO-CLEAN TOOL (unlike clean_confirmed_intel.
 =====================================================================================
 clean_confirmed_intel.py's criteria (is_telemetry_domain() / private-IP / safe_ips) are
 SAFE to bulk-auto-apply, because they're independently, structurally true regardless of
-context -- a domain either is Amazon's own infrastructure or it isn't. This pattern is
+context -- a domain either is known-safe infrastructure or it isn't. This pattern is
 different: "multiple devices confirmed the same IOC quickly" is *suggestive* of stale
 poisoning, not PROOF of it -- a genuine botnet/malware campaign hitting several devices
 on the same network would look identical. That's why --apply here requires you to name
@@ -41,14 +41,8 @@ Usage (from anywhere -- resolves the repo root and state file relative to this s
   2. Dry run (lists every IP entry matching the signature, changes nothing):
        python3 src/audit_stale_multi_device_iocs.py
   3. After reviewing, remove specific ones you've judged to be stale poisoning:
-       python3 src/audit_stale_multi_device_iocs.py --apply 62.245.131.134 52.214.227.89
+       python3 src/audit_stale_multi_device_iocs.py --apply 1.2.3.4 5.6.7.8
   4. Restart the service.
-
-Worked example from the incident that prompted this script (2026-08-22): 6 IPs removed
-this way -- 62.245.131.134 (35 confirmations/5 devices/14.3h old), 52.214.227.89
-(10/5/12.1h), 52.16.104.93 (8/4/17.2h), 62.245.139.72 (4/2/3.6h), 88.217.233.254
-(3/3/6.5h), 52.212.229.205 (2/2/18.1h) -- all predating that session's reverse-DNS-pool
-and reputation-attribution fixes.
 """
 import json
 import sys

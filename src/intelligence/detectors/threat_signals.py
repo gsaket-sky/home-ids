@@ -232,9 +232,10 @@ class ThreatSignalDetector:
         # ── Exfiltration byte bursts ─────────────────────────────────────────────────
         # BUGFIX (live audit): this had no destination-scope check at all -- purely raw
         # byte volume/z-score, regardless of where the bytes went. Confirmed live: a
-        # Samsung Smart Monitor's own local multicast group traffic (224.0.0.7:8001,
-        # AllShare/SmartView LAN discovery) tripped this 3x with z-scores in the
-        # thousands. Multicast/broadcast/private/loopback traffic (_is_local_dest(),
+        # smart-TV/monitor-class device's own local multicast group traffic (LAN
+        # discovery/casting protocols like DIAL/SmartView commonly use 224.0.0.x) tripped
+        # this 3x with z-scores in the thousands. Multicast/broadcast/private/loopback
+        # traffic (_is_local_dest(),
         # already defined above and already used by the beaconing check just below)
         # structurally cannot leave the LAN, so no volume of it can be exfiltration.
         outbound_z = float(features.get("outbound_bytes_z", 0.0) or 0.0)
@@ -340,8 +341,8 @@ class ThreatSignalDetector:
         # BUGFIX (live audit): this only ever looked at raw counts -- 165 rejected
         # connections across just 6 unique IPs (a 27x-repeat-per-IP shape, the OPPOSITE
         # of a scan's "many IPs, 1-2 attempts each" shape) scored identically to a real
-        # broad scan. Confirmed live: a Samsung Smart Monitor generated 245 CONNECTION_
-        # ABUSE alerts this way, correlated in the SAME cycles with 40-44% of its own
+        # broad scan. Confirmed live: a smart-TV/monitor-class device generated 245
+        # CONNECTION_ABUSE alerts this way, correlated in the SAME cycles with 40-44% of its own
         # DNS queries being Pi-hole-blocked and 51-67% NXDOMAIN -- i.e. its own name
         # resolution was substantially failing/blocked right then, the classic signature
         # of a device retrying now-unreachable/blocked endpoints, not probing new

@@ -28,7 +28,7 @@ This script acts as a mathematical unit test. It imports the internal AI classes
 This script acts as a live-fire drill. It does *not* import any internal python classes. Instead, it generates fake Zeek logs and directly injects them into the live log stream to test the end-to-end pipeline.
 
 - **What it does:**
-  - Creates 5 dummy IPs (`192.168.1.251` - `.255`).
+  - Creates 5 dummy IPs (`192.168.77.251` - `.255`).
   - Injects formatted malicious traffic (Honeypot hits, Geofencing violations, Threat Intel hits, Layer-2 MAC spoofing, and DGA DNS domains) into `/opt/zeek/logs/current/`.
   - Asserts that your running pipeline detected them and assigned a Risk Score of 10.0 in `state/alerts.json`.
   - Automatically triggers the FastAPI webhook to cleanly Un-Isolate the dummy IPs so your router doesn't get cluttered.

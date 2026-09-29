@@ -1,6 +1,6 @@
 """
-VERSION 10 (incident aggregation): collapses repeat Telegram notifications for the same
-ongoing incident (same device+target+signature, see incident_key.py) into: the first
+Incident aggregation: collapses repeat Telegram notifications for the same ongoing
+incident (same device+target+signature, see incident_key.py) into: the first
 occurrence, any severity escalation (SUSPICIOUS -> HIGH -> CRITICAL), and periodic
 "still ongoing" updates -- instead of a full Telegram alert every single time the
 existing per-device cadence gate (pipeline.py's `time_elapsed > 300 or ...` check)

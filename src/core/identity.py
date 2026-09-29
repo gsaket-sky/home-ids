@@ -22,6 +22,7 @@ from typing import Optional, List, Dict, Set, Any, Tuple
 from utils import sanitize_hostname, infer_device_type, get_mac_vendor
 from core.state_guard import StateManager
 from core.device_matching import AUTO_MERGE_CONFIDENCE
+from core.device_labels import get_label as get_confirmed_device_label
 from metrics import device_type_reclassifications_total
 
 LOGGER = logging.getLogger("home_ids.identity")
@@ -101,7 +102,7 @@ class DeviceIdentityManager:
         # GENERAL FIX (2026-08-27): the gateway special-case below only ever matched the
         # single configured gateway_ip literal (IPv4), so the same physical router's IPv6
         # link-local/ULA traffic still fragmented into a separate identity -- confirmed
-        # live via two independent "home-router" honeypot-hit incidents, one keyed by
+        # live via two independent router honeypot-hit incidents, one keyed by
         # 192.168.1.1 and one by an fe80:: address. Deliberately MAC-based rather than a
         # second hardcoded IP literal (which would need updating on every deployment, and
         # even on this one if the router's IPv6 address ever rotates) -- learned once from
@@ -546,6 +547,18 @@ class DeviceIdentityManager:
         device_id = getattr(state, "device_id", "")
         hostname = getattr(state, "hostname", "").lower()
 
+        # WebUI device-labeling (PRODUCTIZATION_ROADMAP.md Phase 4): an explicit user
+        # confirmation through the dashboard outranks config.yaml's bulk
+        # device_type_overrides list below -- a human looked at THIS specific device and
+        # said what it is, which is a higher-trust signal than a hostname-substring rule
+        # written for the whole network. mtime-cached read (device_labels.py), cheap to
+        # call every cycle.
+        confirmed_label = get_confirmed_device_label(device_id) if device_id else None
+        if confirmed_label:
+            state.device_type = confirmed_label
+            state.device_type_is_override = True
+            return
+
         if client_ip in overrides:
             state.device_type = overrides[client_ip]
             state.device_type_is_override = True
@@ -571,7 +584,7 @@ class DeviceIdentityManager:
         # infer_device_type("unknown") produced at cold-start ("laptop"), even after its
         # real hostname became known. Confirmed live: a router's canonical identity
         # (post device-identity-fragmentation-merge) still showed device_type="laptop"
-        # despite hostname="home-router" having been known for hours. Re-infer whenever
+        # despite the router's real hostname having been known for hours. Re-infer whenever
         # the CURRENT value isn't an explicit operator override (device_type_is_override
         # reused exactly for this distinction) instead of only when it's literally
         # unset -- a stable hostname always re-infers to the same classification, so

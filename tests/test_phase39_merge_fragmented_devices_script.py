@@ -88,7 +88,7 @@ check("(e) three-way transitive grouping (IP + MAC links) lands all three in ONE
 # Section B: pick_canonical() — the tie-break rule, matching the real production shape
 # (one member with mac+hostname, two orphans with neither)
 # ═══════════════════════════════════════════════════════════════════════════════════
-rich = {"device_id": "rich", "hostname": "home-router", "mac_address": "aa:bb:cc:dd:ee:13",
+rich = {"device_id": "rich", "hostname": "home_fritzbox", "mac_address": "aa:bb:cc:dd:ee:13",
         "device_type": "router", "known_ips": {IPV4, IPV6_LL, IPV6_ULA}, "last_seen": time.time()}
 orphan_old = {"device_id": "orphan_old", "hostname": "unknown", "mac_address": "unknown",
               "device_type": "laptop", "known_ips": {IPV6_LL}, "last_seen": time.time() - 86400 * 6}

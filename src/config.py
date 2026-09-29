@@ -36,8 +36,6 @@ _ENV_OVERRIDES = {
     "OTX_API_KEY":            "otx_api_key",
     "ABUSEIPDB_API_KEY":      "abuseipdb_api_key",
     "ABUSEIPDB_KEY":          "abuseipdb_api_key",
-    "VIRUSTOTAL_API_KEY":     "virustotal_api_key",
-    "VIRUSTOTAL_KEY":         "virustotal_api_key",
     "PIHOLE_API_PASSWORD":    "pihole_api_password",
     "PIHOLE_API_URL":         "pihole_api_url",
     "ROUTER_WEBHOOK_URL":     "router_webhook_url",
@@ -53,8 +51,8 @@ _STATIC_KEYS = {
     "metrics_port", "scheduler_metrics_port", "state_path", "model_path", "geoip_db", "geoip_asn_db", 
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
-    "abuseipdb_api_key", "virustotal_api_key", "pihole_api_password",
-    "fritz_password", "fritz_api_token", "fastapi_port", "fastapi_bind_host",
+    "abuseipdb_api_key", "pihole_api_password",
+    "fritz_password", "fritz_api_token", "fastapi_port", "fastapi_bind_host", "webui_port",
     "env_file"
 }
 # NOTE: "scheduled_tasks" was removed from this set (2026-08-17 config audit) — it was a
@@ -126,16 +124,21 @@ DEFAULT_CONFIG = {
     "geoip_db": "models/GeoLite2-City.mmdb",
     "geoip_asn_db": "",
     "ti_refresh_interval": 3600,
+    "et_open_enabled": True,
     "otx_api_key": "",
     "abuseipdb_api_key": "",
-    "virustotal_api_key": "",
+    # Hidden advanced switch (config.yaml only, not in the WebUI): enables the personal-use keyed feeds
+    # (OTX / AbuseIPDB / URLhaus / ThreatFox). Off in a shipped unit -- their free tiers forbid commercial use.
+    "advanced_keyed_feeds": False,
     "telegram_enabled": False,
     "telegram_token": "",
     "telegram_chat_id": "",
     "safe_ips": ["127.0.0.1", "192.168.1.1", "192.0.0.2"],
     "honeypot_ips": [],
     "safe_domains": [],       
-    "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "paperless", "fritz", "repeater"],
+    # Deployment-agnostic infrastructure-hostname keywords only -- add your own deployment's
+    # self-hosted app hostnames via config.yaml rather than baking one household's apps in.
+    "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "fritz", "repeater"],
     "ollama_url": "",         
     "ollama_model": "llama3", 
     # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are
@@ -189,6 +192,11 @@ DEFAULT_CONFIG = {
     "fritz_password": "",
     "fritz_api_token": "",
     "fastapi_port": 8010,          # AUDIT FIX #13: document fastapi_port in defaults
+    # WebUI service (PRODUCTIZATION_ROADMAP.md Phase 4) -- separate port/process from fastapi_port:
+    # that one is loopback-only trusted IPC, this one is bound 0.0.0.0 for LAN browser access.
+    "webui_port": 8011,
+    # Alert-only grace period for a brand-new install (core/onboarding.py); 0 disables it.
+    "onboarding_mode_days": 14,
     # SECURITY: which interface main.py's internal FastAPI/uvicorn IPC daemon binds to.
     # Defaults to loopback-only -- the isolate/release/block endpoints are powerful
     # hardware-control actions, so out of the box a compromised/malicious device
@@ -307,6 +315,11 @@ class LiveConfig:
         # is still in the file" apart from "this key was just removed" -- see
         # _load_overrides()'s own comment for why this matters across process boundaries.
         self._active_file_overrides: dict = {}
+
+        # WebUI-managed secrets (API keys entered in the setup wizard) load BEFORE .env: load_env_file()
+        # only sets os.environ[key] when unset, so whichever loads first wins. Same pipe as .env, so
+        # every key still lands in _STATIC_KEYS and needs a restart, exactly like a hand-edited .env.
+        load_env_file(self.file_path.parent / "state" / "webui_secrets.env")
 
         env_path = self.file_path.parent / self._config.get("env_file", ".env")
         load_env_file(env_path)

@@ -1,17 +1,17 @@
 """
 clear_stale_isolation.py - CLI utility to clear STALE router-isolation/tarpit bookkeeping
-for a device that was already manually released directly on the Fritzbox (or wherever),
+for a device that was already manually released directly on the router (or wherever),
 bypassing the IDS's own release path.
 
 The IDS's ips_state.json (router_isolated_devices, tarpit_targets, blocked_domains) is
 its OWN internal belief about what's currently contained -- populated only when the IDS
 itself performs a block/release action. It does not poll or reconcile against the
 router/Pi-hole's actual live state, so a manual out-of-band change (releasing a device
-directly in the Fritzbox admin UI, for example) leaves the IDS still believing the
+directly in the router's admin UI, for example) leaves the IDS still believing the
 device is isolated.
 
 Unlike release_device.py (mitigation/ips.py's release_device()), this tool does NOT:
-  - call the Fritzbox "unisolate" API (the device is already released there manually)
+  - call the router's "unisolate" API (the device is already released there manually)
   - touch blocked_domains at all -- release_device() unconditionally releases every
     Pi-hole domain block tied to the device too, which is wrong here if the device is
     still suspected compromised (its domain blocks may be the only thing left standing

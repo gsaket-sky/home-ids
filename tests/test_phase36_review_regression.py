@@ -256,7 +256,7 @@ check("REGRESSION GUARD: the SAME 63-char label length on a genuinely unrecogniz
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_f:
     fp_f = AutonomousFPEngine(config={}, state_dir=tmpdir_f)
     uncertain_alert = {
-        "device": {"id": "dev_f", "hostname": "paperless"},
+        "device": {"id": "dev_f", "hostname": "device1"},
         "network_context": {"queried_domain": "unknown", "destination_ip": "104.156.84.32"},
         "signature": "DNS_POLICY_BYPASS",
     }

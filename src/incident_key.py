@@ -1,11 +1,9 @@
 """
-VERSION 10 (incident aggregation): canonical "same ongoing incident" identity, shared
-between pipeline.py's real-time Telegram-volume gate (IncidentTracker, incident_tracker.py)
-and ollama_soc.py's offline batch grouping. Previously this key concept existed only
-inside ollama_soc.py (as `_cache_key`/`_target_for_key`), duplicated nowhere else --
-this module is the single source of truth both call sites now import, so "same incident"
-means the same thing whether it's being decided in real time or reconstructed after the
-fact from alerts.json.
+Canonical "same ongoing incident" identity, shared between pipeline.py's real-time
+Telegram-volume gate (IncidentTracker, core/incident_tracker.py) and ollama_soc.py's
+offline batch grouping. This is the single source of truth both call sites import, so
+"same incident" means the same thing whether it's being decided in real time or
+reconstructed after the fact from alerts.json.
 """
 from typing import Optional
 
@@ -13,8 +11,8 @@ from typing import Optional
 def target_for_key(destination_ip: Optional[str], queried_domain: Optional[str]) -> str:
     """Best available identifier for 'what was this alert about' -- prefers the
     resolved domain, falls back to the raw destination IP for connections with no DNS
-    resolution (e.g. the 149.154.166.110/Telegram case), matching the same fallback
-    pipeline.py's own alert-message target_display logic already uses."""
+    resolution, matching the same fallback pipeline.py's own alert-message
+    target_display logic already uses."""
     domain = (queried_domain or "").strip()
     if domain and domain != "unknown":
         return domain

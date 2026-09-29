@@ -41,6 +41,8 @@ from metrics import (
     ips_tarpit_activations_total,
 )
 
+from core.onboarding import is_onboarding_active
+
 LOGGER = logging.getLogger("home_ids.ips")
 
 # SECURITY FIX (P0-2, third-party architecture review, 2026-09-28): mitigate() had no
@@ -71,6 +73,46 @@ try:
     SCAPY_AVAILABLE = True
 except (ImportError, Exception):
     pass
+
+
+def check_pihole_health(config: Dict[str, Any], timeout: float = 3.0,
+                         session: Optional[Any] = None) -> "tuple[bool, str]":
+    """BUGFIX (live audit): real, on-demand Pi-hole reachability+auth check for the
+    boot-time Telegram status message -- previously that message either hardcoded
+    "Online" or never checked Pi-hole at all. Reuses the exact same endpoint/auth
+    _block_domain()'s desync check already exercises successfully in production, so a
+    green result here means blocking will actually work, not just that config values
+    are non-empty.
+
+    Module-level (not a method) so it can be called WITHOUT constructing a full
+    IPSMitigator -- that constructor starts the ARP-tarpit listener and the retry-worker
+    thread as side effects (see __init__ below), which is exactly wrong for a read-only
+    health check called from a process that isn't doing mitigation at all (the WebUI's
+    health panel, PRODUCTIZATION_ROADMAP.md Phase 4). IPSMitigator.check_pihole_health()
+    below is now a thin wrapper over this for existing callers."""
+    if not bool(config.get("ips_pihole_enabled", True)):
+        return False, "disabled in config (ips_pihole_enabled=false)"
+    api_url = config.get("pihole_api_url", "")
+    if not api_url:
+        return False, "pihole_api_url not configured"
+    api_path = config.get("pihole_api_path", "/api/domains")
+    api_password = config.get("pihole_api_password", "")
+    headers = {"sid": api_password} if api_password else {}
+    url = f"{api_url}{api_path}/deny/exact"
+    client = session or requests
+    try:
+        resp = client.get(url, headers=headers, timeout=timeout)
+    except Exception as exc:
+        return False, f"connection failed: {exc}"
+    if resp.status_code == 401:
+        return False, "authentication rejected (wrong pihole_api_password)"
+    if resp.status_code != 200:
+        return False, f"HTTP {resp.status_code}"
+    try:
+        resp.json()
+    except Exception:
+        return False, "response was not valid JSON (wrong pihole_api_path?)"
+    return True, "reachable, authenticated, real response"
 
 
 class IPSMitigator:
@@ -679,8 +721,30 @@ class IPSMitigator:
                     is_operator_released = True
                     break
 
+        # ONBOARDING GRACE PERIOD (PRODUCTIZATION_ROADMAP.md Phase 4): a brand-new
+        # network hasn't had time to build a real baseline yet, so every autonomous
+        # containment mechanism -- Pi-hole, router isolation, AND the Layer-2 tarpit --
+        # stays off regardless of decision_state while onboarding is active. Broader than
+        # PRODUCT_ARCHITECTURE.md's original two-mechanism sketch (ips_pihole_enabled/
+        # ips_router_enabled only) -- the tarpit is the single most disruptive mechanism
+        # here (it can genuinely break a real device's connectivity), so it would defeat
+        # the whole point of a "don't act on an unfamiliar network yet" grace period to
+        # leave it exempt. Detection/alerting/Telegram are completely unaffected -- this
+        # gates action only, same as every other per-mechanism toggle below.
+        onboarding_state_dir = str(Path(self.config.get("state_path", "state/ids_state.json")).parent)
+        onboarding_active = is_onboarding_active(self.config, onboarding_state_dir)
+        if onboarding_active:
+            LOGGER.debug(
+                "🕒 [ONBOARDING] Autonomous mitigation withheld for %s -- grace period "
+                "still active (alert-only).", hostname
+            )
+
         interactive_mode = bool(self.config.get("interactive_blocking_enabled", False))
-        pihole_enabled = bool(self.config.get("ips_pihole_enabled", True)) and bool(self.config.get("ips_enabled", True))
+        pihole_enabled = (
+            bool(self.config.get("ips_pihole_enabled", True))
+            and bool(self.config.get("ips_enabled", True))
+            and not onboarding_active
+        )
 
         # SEVERITY-GATED BLOCKING: a complete safe-domain list can never exist, so blocking
         # cannot rely on "not on the allowlist" as its bar — that blocks anything merely
@@ -708,7 +772,7 @@ class IPSMitigator:
                 else:
                     LOGGER.debug("Mitigation suppressed: %s is on the Global Trust/Safe list.", target_domain)
 
-        router_enabled = bool(self.config.get("ips_router_enabled", False))
+        router_enabled = bool(self.config.get("ips_router_enabled", False)) and not onboarding_active
         if router_enabled and (risk_score >= 8.5 or lateral_threat):
             if is_operator_released and not lateral_threat:
                 LOGGER.debug("🛡️ Router isolation suppressed for %s: Operator release cooldown active.", hostname)
@@ -750,7 +814,7 @@ class IPSMitigator:
                             client_ip=client_ip, mac_addr=mac_addr, hostname=hostname, dev_id=dev_id,
                             reason=f"IPv6 coverage for router isolation: {reason}")
 
-        tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True))
+        tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True)) and not onboarding_active
         is_sim = bool(self.config.get("simulation_mode", False))
         if tarpit_enabled and (SCAPY_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
             if is_operator_released and not lateral_threat:
@@ -888,33 +952,7 @@ class IPSMitigator:
         return f"{base}/{domain}" if domain else base
 
     def check_pihole_health(self, timeout: float = 3.0) -> "tuple[bool, str]":
-        """BUGFIX (live audit): real, on-demand Pi-hole reachability+auth check for the
-        boot-time Telegram status message -- previously that message either hardcoded
-        "Online" or never checked Pi-hole at all. Reuses the exact same endpoint/auth
-        this class's own _block_domain() desync check already exercises successfully in
-        production, so a green result here means blocking will actually work, not just
-        that config values are non-empty."""
-        if not bool(self.config.get("ips_pihole_enabled", True)):
-            return False, "disabled in config (ips_pihole_enabled=false)"
-        api_url = self.config.get("pihole_api_url", "")
-        if not api_url:
-            return False, "pihole_api_url not configured"
-        api_path = self.config.get("pihole_api_path", "/api/domains")
-        api_password = self.config.get("pihole_api_password", "")
-        headers = {"sid": api_password} if api_password else {}
-        try:
-            resp = self.session.get(self._pihole_domain_url(api_url, api_path), headers=headers, timeout=timeout)
-        except Exception as exc:
-            return False, f"connection failed: {exc}"
-        if resp.status_code == 401:
-            return False, "authentication rejected (wrong pihole_api_password)"
-        if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}"
-        try:
-            resp.json()
-        except Exception:
-            return False, "response was not valid JSON (wrong pihole_api_path?)"
-        return True, "reachable, authenticated, real response"
+        return check_pihole_health(self.config, timeout=timeout, session=self.session)
 
     def _block_domain(self, domain: str, hostname: str, device_ip: str, dev_id: str, reason: str = "") -> bool:
         ips_state = self.state_manager.get_ips_state()
