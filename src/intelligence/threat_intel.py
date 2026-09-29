@@ -320,27 +320,38 @@ class ThreatIntel:
     def _start_ja3_feed(self) -> None:
         time.sleep(15)
         LOGGER.debug("JA3 Feed refresh loop active.")
+        # BUGFIX: this used to fetch sslblacklist.csv, which is abuse.ch's *certificate*
+        # SHA1 blacklist (40-hex, col 1) -- never comparable to a JA3 MD5 (32-hex), so
+        # dynamic_ja3 was silently full of values that could never match. The JA3 list
+        # is ja3_fingerprints.csv (col 0 = ja3_md5). TLS verification is on (the
+        # default context); the fetch works with it, so CERT_NONE was never needed.
+        import re
+        import ssl
+        md5_re = re.compile(r"^[0-9a-f]{32}$")
         while True:
+            delay = 86400
             try:
-                import ssl
                 ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                req = Request("https://sslbl.abuse.ch/blacklist/sslblacklist.csv")
-                LOGGER.debug("Fetching JA3 SSL blacklist...")
+                req = Request("https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv")
+                LOGGER.debug("Fetching JA3 fingerprint blacklist...")
                 with urlopen(req, timeout=10, context=ctx) as resp:
                     lines = resp.read().decode('utf-8').splitlines()
-                    new_ja3 = {
-                        line.split(',')[1].strip() 
-                        for line in lines 
-                        if not line.startswith('#') and len(line.split(',')) >= 2
-                    }
-                    if new_ja3: 
-                        self.dynamic_ja3 = frozenset(new_ja3)
-                        LOGGER.info("Successfully loaded %d JA3 fingerprints.", len(new_ja3))
-            except Exception as e: 
+                new_ja3 = set()
+                for line in lines:
+                    if not line or line.startswith('#'):
+                        continue
+                    val = line.split(',')[0].strip().lower()
+                    if md5_re.match(val):
+                        new_ja3.add(val)
+                if new_ja3:
+                    self.dynamic_ja3 = frozenset(new_ja3)
+                    LOGGER.info("Successfully loaded %d JA3 fingerprints.", len(new_ja3))
+                else:
+                    LOGGER.warning("JA3 feed parsed to zero valid MD5 fingerprints; keeping previous set.")
+            except Exception as e:
                 LOGGER.error("JA3 Feed Refresh failed: %s", e)
-            time.sleep(86400) 
+                delay = 3600
+            time.sleep(delay)
 
     def _refresh_tranco_trust_list(self) -> None:
         cache_file = self.cache_dir / "tranco_top10k.cache"
