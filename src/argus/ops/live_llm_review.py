@@ -200,6 +200,9 @@ def _rep_tier_for(evidence_list) -> Optional[int]:
         return None
 
 
+from argus.ops.live_engine import _is_lan_destination  # noqa: E402
+
+
 def _inject_coordinated_targeting(store: GraphStore, window: RollingWindowView, device_id: str,
                                      evidence_list: List[Evidence], now: float) -> List[Evidence]:
     """Re-derives live_engine.py's own coordinated_targeting signal at REVIEW time,
@@ -218,6 +221,8 @@ def _inject_coordinated_targeting(store: GraphStore, window: RollingWindowView, 
             return evidence_list
         synthetic: List[Evidence] = []
         for dest in destinations:
+            if _is_lan_destination(dest):  # LAN hosts aren't a campaign target
+                continue
             others = window.devices_targeting(
                 dest, _COORDINATED_TARGETING_WINDOW_SECONDS, now=now, exclude_device_id=device_id,
             )

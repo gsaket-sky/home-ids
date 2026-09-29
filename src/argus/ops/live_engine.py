@@ -622,6 +622,24 @@ def _dga_shape_key(domain: str) -> str:
     return f"{len(label)}:{tld}:{charset_class}"
 
 
+_LAN_NETWORKS = tuple(ipaddress.ip_network(n) for n in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "169.254.0.0/16",
+    "224.0.0.0/4", "fc00::/7", "fe80::/10", "ff00::/8", "::1/128"))
+
+
+def _is_lan_destination(dest: str) -> bool:
+    """True for a literal RFC1918/loopback/link-local/multicast/ULA IP. Several
+    devices reaching one LAN host (a speaker, hub, router) is ordinary local
+    chatter, not a coordinated campaign against a shared external target -- so
+    coordinated_targeting skips these. Deliberately NOT ip.is_private, which also
+    covers documentation/reserved ranges. Non-IP values (domains) return False."""
+    try:
+        ip = ipaddress.ip_address(dest)
+    except ValueError:
+        return False
+    return any(ip.version == n.version and ip in n for n in _LAN_NETWORKS)
+
+
 def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
                                       fresh_evidence: Optional[List[Evidence]] = None,
                                       geoip_engine=None) -> List[Evidence]:
@@ -682,6 +700,8 @@ def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
             others = window.devices_targeting(
                 dest, _COORDINATED_TARGETING_WINDOW_SECONDS, now=ts, exclude_device_id=device_id,
             )
+            if others and _is_lan_destination(dest):
+                others = []
             if others and geoip_engine is not None:
                 try:
                     asn_info = geoip_engine.lookup_asn(dest)

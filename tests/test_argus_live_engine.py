@@ -413,6 +413,16 @@ check("F1: the THIRD device (3 total) to touch the SAME destination within the s
       "window DOES get coordinated_targeting evidence -- the cross-device correlation "
       "capability, now requiring a genuinely harder coincidence than 2 devices",
       len(coordinated_hits) == 1)
+
+# F1 (2026-09-29): a LAN destination touched by 3+ devices is local chatter (phone/speaker
+# pinging a hub), never coordinated_targeting -- real alert: 192.168.77.25 (Echo) pinged.
+for _i in range(3):
+    _lan_ev = [V1Evidence(type="dns_rate", source="dns", timestamp=_ft0 + 20 + _i, device=f"p1a_lan{_i}",
+                            value=10.0, confidence=0.9, independence_group="dns_behavior",
+                            domain="192.168.77.25")]
+    merged_lan = _capture_merged(_lan_ev, ReputationVector(domain="", tier=3), f"p1a_lan{_i}", _ft0 + 20 + _i)
+check("F1: 3+ devices touching a private/LAN IP get NO coordinated_targeting evidence",
+      not any(e.evidence_type == "coordinated_targeting" for e in merged_lan))
 check("F1: the synthetic evidence's value is the TOTAL device count (this one + 2 others = 3)",
       coordinated_hits and coordinated_hits[0].value == 3.0)
 check("F1: the synthetic evidence names both other devices in its features for audit",

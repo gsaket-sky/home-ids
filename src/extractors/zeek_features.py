@@ -370,6 +370,20 @@ class ZeekFeatureExtractor:
         except ValueError:
             return True
 
+    @staticmethod
+    def _is_discovery_target(ip_str: str) -> bool:
+        """Multicast, link-local or broadcast destinations (mDNS/SSDP/NDP/etc.). Nothing
+        answers these like a unicast host, so S0/REJ toward them is normal discovery
+        chatter, never a port-scan signal. Unlike _is_local_or_multicast(), private
+        unicast is NOT included -- a scan of a real LAN host must still count."""
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        return (ip.is_multicast or ip.is_link_local
+                or (ip.version == 4 and (ip == ipaddress.ip_address("255.255.255.255")
+                                         or str(ip).endswith(".255"))))
+
     def _is_safe_device(self, src: str) -> bool:
         if src in self.safe_ips:
             return True
@@ -661,9 +675,13 @@ class ZeekFeatureExtractor:
         
         conn_state = ev.get("conn_state")
         if conn_state: 
-            self._conn_states[src].append((ts, conn_state))
-            if conn_state in ("S0", "REJ") and dst_ip:
-                self._rejected_ips[src].append((ts, dst_ip))
+            # S0/REJ toward multicast/link-local/broadcast is discovery chatter (real
+            # alert: a phone's mDNS + LAN pings saturated the LGBM port-scan feature and
+            # drove its false-positive score to 0.5%) -- don't count it as a scan.
+            if not (conn_state in ("S0", "REJ") and self._is_discovery_target(dst_ip)):
+                self._conn_states[src].append((ts, conn_state))
+                if conn_state in ("S0", "REJ") and dst_ip:
+                    self._rejected_ips[src].append((ts, dst_ip))
                 
         if ev.get("duration") is not None and not self._is_local_or_multicast(dst_ip):
             try: self._conn_durations[src].append((ts, float(ev.get("duration"))))

@@ -583,3 +583,22 @@ up v15.4.0's per-device/category autotune work too, which had never reached `.94
 before this). Verified live: `device_type` column + index now exist on `.94`'s real
 graph db with zero errors; zero "v13 live engine raised" fallback log lines since
 restart; console API subprocess confirmed responding (`/docs` -> 200).
+
+## 2026-09-29 — LAN/multicast chatter no longer reads as an attack
+
+Real alert: a phone (Wi-Fi Calling/RCS DNS) ICMP-pinging a smart speaker was raised as
+HIGH `COORDINATED_TARGETING`. Two independent causes, both fixed:
+
+1. `coordinated_targeting` (live_engine.py `_inject_graph_derived_evidence`, and its
+   live_llm_review.py re-derivation) counted any destination 3+ devices touched,
+   including LAN hosts. Now skips RFC1918/loopback/link-local/multicast/ULA literals
+   (`_is_lan_destination`, explicit networks — not `ip.is_private`, which also matches
+   documentation ranges). Trade-off: several devices reaching one internal host no
+   longer fires this signal; `zeek_lateral_scan` still covers that.
+2. The CL-AFPE false-positive score was 0.5% because `zeek_s0_rej_count` (71) counted
+   S0/REJ to mDNS multicast/link-local/broadcast, saturating the LGBM port-scan feature.
+   `zeek_features.py` now ignores S0/REJ to those targets (`_is_discovery_target`).
+   Private unicast still counts, so real LAN scans stay detectable.
+
+For raw-IP/ICMP alerts (`queried_domain == "unknown"`) CL-AFPE uses the LGBM score
+alone (no FastEmbed), so polluted Zeek features flow straight into the verdict.
