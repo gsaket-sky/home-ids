@@ -1292,7 +1292,7 @@ class GraphStore:
                                     decision_id: Optional[str] = None, reason: Optional[str] = None,
                                     metadata: Optional[Dict[str, Any]] = None) -> str:
         """Write-only AUDIT MIRROR of a real containment action already taken by
-        src/mitigation/ips.py (Pi-hole block, Scapy tarpit, Fritz!Box router
+        src/mitigation/ips.py (Pi-hole block, Layer-2 tarpit, Fritz!Box router
         isolation, or a retry/dead-letter bookkeeping event) -- this method NEVER
         decides or performs the real action, it only records that ips.py already
         did, immediately after ips.py's own StateManager-backed dict write. Callers

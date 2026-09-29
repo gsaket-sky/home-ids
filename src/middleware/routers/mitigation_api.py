@@ -6,7 +6,7 @@ time any of it is reachable from the console UI itself.
 
 GET /api/mitigation/state is a pure read: it inspects StateManager.get_ips_state()
 directly rather than instantiating IPSMitigator, because that constructor spins up four
-background threads (retry worker, router-reconcile worker, ARP/NDP scapy sniff loops on
+background threads (retry worker, router-reconcile worker, ARP/NDP tarpit loops on
 raw sockets) as a side effect -- fine for the rare manual-action endpoints below (they
 already accept this cost, matching the existing `_ipc_*_logic` precedent), wrong for
 something hit on every console page load.

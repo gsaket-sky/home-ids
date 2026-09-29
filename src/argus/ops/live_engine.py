@@ -534,7 +534,7 @@ def write_supplementary_decision(device_id: str, timestamp: float, new_evidence_
     function instead does ONLY the plain graph write (new evidence + one decision
     row + hypothesis edges), with none of evaluate()'s read/injection side effects.
 
-    Found live 2026-09-22: a real geofencing HIGH alert (paperless/52a469cfd274,
+    Found live 2026-09-22: a real geofencing HIGH alert (document-server/device-hash,
     Russia-blocklisted destination) fired correctly to Telegram but was completely
     absent from the graph/console/Evidence-Graph/alert narrative, because the
     original re-evaluation path never set decision["_graph_decision_id"] at all

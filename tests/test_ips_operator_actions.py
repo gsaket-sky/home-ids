@@ -194,14 +194,14 @@ def test_arm_tarpit_for_dual_stack_coverage_respects_tarpit_disabled(mitigator):
     assert "10.0.0.5" not in mitigator._tarpit_active_targets
 
 
-def test_arm_tarpit_for_dual_stack_coverage_needs_scapy_or_simulation(mitigator, monkeypatch):
+def test_arm_tarpit_for_dual_stack_coverage_needs_l2_or_simulation(mitigator, monkeypatch):
     # Neither real scapy availability nor simulation_mode -- the same gate the
-    # pre-existing autonomous tarpit block in mitigate() already uses. SCAPY_AVAILABLE
+    # pre-existing autonomous tarpit block in mitigate() already uses. L2_AVAILABLE
     # (scapy package importable) is True in most CI/dev environments even without raw-
     # socket permission (a separate runtime check, see ips.py's own "no permission to
     # open a raw socket" warning) -- monkeypatch the module-level constant directly to
     # genuinely exercise the "unavailable" case rather than relying on the environment.
-    monkeypatch.setattr(ips_module, "SCAPY_AVAILABLE", False)
+    monkeypatch.setattr(ips_module, "L2_AVAILABLE", False)
     armed = mitigator._arm_tarpit_for_dual_stack_coverage(
         client_ip="10.0.0.5", mac_addr="aa:bb:cc:dd:ee:ff", hostname="host1", dev_id="dev1", reason="t")
     assert armed is False
@@ -229,7 +229,7 @@ def test_operator_isolate_router_also_arms_tarpit(mitigator, monkeypatch):
 def test_operator_isolate_router_message_stays_honest_when_tarpit_not_armed(mitigator, monkeypatch):
     # Neither simulation_mode nor real scapy availability -- router isolation still
     # succeeds, but the message must NOT falsely claim tarpit coverage.
-    monkeypatch.setattr(ips_module, "SCAPY_AVAILABLE", False)
+    monkeypatch.setattr(ips_module, "L2_AVAILABLE", False)
     monkeypatch.setattr(mitigator, "_isolate_device_router", lambda **kw: True)
     ok, reason = mitigator.operator_isolate_router("dev1", "10.0.0.5", "aa:bb:cc:dd:ee:ff", "host1")
     assert ok is True

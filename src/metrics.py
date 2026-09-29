@@ -95,7 +95,7 @@ integration_status_metric = Gauge("home_ids_integration_status", "Operational st
 # 🛡️ Split IPS Architecture Status & Telemetry
 ips_pihole_status = Gauge("home_ids_ips_pihole_status", "Pi-hole Mitigation operational state (1=active, 0=bypass)")
 ips_router_status = Gauge("home_ids_ips_router_status", "Router WAN Kill-Switch operational state (1=active, 0=bypass)")
-ips_tarpit_status = Gauge("home_ids_ips_tarpit_status", "Layer-2 Scapy ARP Tarpit operational state (1=active, 0=bypass)")
+ips_tarpit_status = Gauge("home_ids_ips_tarpit_status", "Layer-2 ARP/NDP Tarpit operational state (1=active, 0=bypass)")
 
 # PHASE 5 FIX (fail-open visibility): 1 once ThreatIntel has completed at least one
 # successful feed refresh, 0 while still cold-starting or if the refresh loop is failing.

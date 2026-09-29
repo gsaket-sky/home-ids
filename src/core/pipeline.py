@@ -1983,7 +1983,7 @@ class EnginePipeline:
                     # dest_ips rather than a second Zeek query -- best-effort, never
                     # blocks the real decision (record_device_traffic()'s own contract).
                     argus_live_engine.record_device_traffic(dev_id, dest_ips, now=now)
-                    # Alert-trace graph gap fix (found live 2026-09-22, real "paperless"
+                    # Alert-trace graph gap fix (found live 2026-09-22, real "document-server"
                     # geofencing alert missing from console/Evidence Graph): the
                     # geofencing re-evaluation below deliberately calls evaluate()
                     # without device_id, so it never sets decision["_graph_decision_id"]

@@ -166,7 +166,7 @@ DEFAULT_CONFIG = {
     "ips_enabled": True,           # Master switch for IPS
     "ips_pihole_enabled": True,    # Controls DNS Sinkholing
     "ips_router_enabled": False,   # Controls FastAPI Fritz!Box Hardware drop
-    "ips_tarpit_enabled": True,    # Controls Layer-2 Scapy ARP Spoofing
+    "ips_tarpit_enabled": True,    # Controls Layer-2 ARP Spoofing
     "interactive_blocking_enabled": False, # False = Autonomous Auto-Block, True = Require Telegram Approval
     "operator_release_cooldown_seconds": 3600.0, # 1-Hour Cooldown Period
     "pihole_api_url": "http://pihole",

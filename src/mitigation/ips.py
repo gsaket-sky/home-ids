@@ -8,7 +8,7 @@ RECENT FIXES:
   `threading.RLock()` (Reentrant Lock). This resolves a catastrophic pipeline freeze where `mitigate()` 
   acquired the lock to trigger `_unisolate_device_router()`, which then attempted to acquire the exact 
   same lock upon receiving an HTTP 202 success response, permanently deadlocking the main execution thread.
-- ADDED (DUAL-STACK IPv6 TARPIT): Upgraded the Scapy mitigation engine to sniff for IPv6 Neighbor Discovery 
+- ADDED (DUAL-STACK IPv6 TARPIT): Upgraded the mitigation engine to sniff for IPv6 Neighbor Discovery 
   Protocol (NDP) requests. Dynamically intercepts ICMPv6ND_NS (Neighbor Solicitation) packets and injects 
   spoofed ICMPv6ND_NA (Neighbor Advertisement) packets to blackhole IPv6 routing.
 - FIXED (HARDWARE MITIGATION BYPASS): Added dynamic MAC address reconstruction from `device_id`. 
@@ -64,15 +64,11 @@ LOGGER = logging.getLogger("home_ids.ips")
 # out of sync with what this file actually held back -- see that call site's comment.
 CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
 
-SCAPY_AVAILABLE = False
-try:
-    from scapy.all import ARP, Ether, send, conf, IPv6, ICMPv6ND_NS, ICMPv6ND_NA, ICMPv6NDOptDstLLAddr, sniff
-    conf.verb = 0
-    logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-    logging.getLogger("scapy").setLevel(logging.ERROR)
-    SCAPY_AVAILABLE = True
-except (ImportError, Exception):
-    pass
+# Layer-2 tarpit primitives are our own stdlib raw-socket code (mitigation/l2_raw.py), replacing scapy (GPL-2.0).
+# Linux-only, like the tarpit always was: AF_PACKET must exist. (Still needs root/CAP_NET_RAW at runtime.)
+import socket as _socket_mod
+from mitigation import l2_raw
+L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
 
 
 def check_pihole_health(config: Dict[str, Any], timeout: float = 3.0,
@@ -205,11 +201,11 @@ class IPSMitigator:
         ips_tarpit_status.set(1.0 if tarpit_enabled else 0.0)
 
         if not tarpit_enabled:
-            LOGGER.info("🛡️ Scapy ARP Tarpit subsystem disabled via configuration.")
+            LOGGER.info("🛡️ Layer-2 ARP/NDP Tarpit subsystem disabled via configuration.")
             return
 
-        if not SCAPY_AVAILABLE:
-            LOGGER.warning("⚠️ Scapy ARP Tarpit disabled: No module named 'scapy'")
+        if not L2_AVAILABLE:
+            LOGGER.warning("⚠️ Layer-2 Tarpit disabled: this platform has no AF_PACKET raw sockets (Linux only)")
             ips_tarpit_status.set(0.0)
             return
 
@@ -226,18 +222,17 @@ class IPSMitigator:
                                     _socket.SOCK_RAW, 0x0003 if hasattr(_socket, "AF_PACKET") else 0)
             probe.close()
         except PermissionError:
-            LOGGER.error("⚠️ Scapy ARP Tarpit disabled: no permission to open a raw socket "
+            LOGGER.error("⚠️ Layer-2 Tarpit disabled: no permission to open a raw socket "
                          "(needs root or CAP_NET_RAW).")
             ips_tarpit_status.set(0.0)
             return
         except Exception as exc:
-            LOGGER.error("⚠️ Scapy ARP Tarpit disabled: raw socket probe failed: %s", exc)
+            LOGGER.error("⚠️ Layer-2 Tarpit disabled: raw socket probe failed: %s", exc)
             ips_tarpit_status.set(0.0)
             return
 
         try:
-            conf.verb = 0
-            LOGGER.info("🛡️ Scapy RAW socket access verified. Layer-2 Dual-Stack (ARP & NDP) Tarpit module ARMED.")
+            LOGGER.info("🛡️ RAW socket access verified. Layer-2 Dual-Stack (ARP & NDP) Tarpit module ARMED.")
             self.tarpit_armed = True
 
             self._tarpit_thread = threading.Thread(target=self._arp_tarpit_loop, daemon=True, name="arp_tarpit_worker")
@@ -247,41 +242,39 @@ class IPSMitigator:
             self._ndp_tarpit_thread.start()
             
         except Exception as exc:
-            LOGGER.error("⚠️ Scapy Dual-Stack Tarpit bypassing. Lacks raw socket privileges: %s", exc)
+            LOGGER.error("⚠️ Dual-Stack Tarpit bypassing. Lacks raw socket privileges: %s", exc)
             ips_tarpit_status.set(0.0)
             self.tarpit_armed = False
 
     def _ndp_tarpit_loop(self) -> None:
-        def handle_ndp(pkt):
-            if pkt.haslayer(ICMPv6ND_NS) and pkt.haslayer(IPv6) and pkt.haslayer(Ether):
-                mac_src = pkt[Ether].src
-                
-                is_trapped = False
-                with self._lock:
-                    for meta in self._tarpit_active_targets.values():
-                        if meta.get("mac", "").lower() == mac_src.lower():
-                            is_trapped = True
-                            break
-                            
-                if is_trapped:
-                    target_ip = pkt[IPv6].src
-                    requested_ip = pkt[ICMPv6ND_NS].tgt
-                    bogus_mac = "00:11:22:33:44:55"
-                    
-                    dst_ip = target_ip if target_ip != "::" else "ff02::1"
-                    
-                    spoofed_pkt = (
-                        Ether(dst=mac_src, src=bogus_mac) /
-                        IPv6(dst=dst_ip, src=requested_ip) /
-                        ICMPv6ND_NA(tgt=requested_ip, R=1, S=1, O=1) /
-                        ICMPv6NDOptDstLLAddr(lladdr=bogus_mac)
-                    )
-                    send(spoofed_pkt, verbose=False)
-
+        """Answers a contained device's IPv6 Neighbor Solicitations with a forged advertisement.
+        Kernel-side BPF drops everything but NS frames, so Python only ever sees candidates."""
+        bogus_mac = "00:11:22:33:44:55"
         try:
-            sniff(filter="icmp6", prn=handle_ndp, store=0)
+            sock = l2_raw.open_raw()
+            l2_raw.attach_ns_filter(sock)
         except Exception as exc:
-            LOGGER.debug("NDP Tarpit sniffing exception: %s", exc)
+            LOGGER.debug("NDP Tarpit socket exception: %s", exc)
+            return
+        while True:
+            try:
+                frame, ifname = l2_raw.recv_frame(sock)
+                ns = l2_raw.parse_neighbor_solicitation(frame)
+                if not ns:
+                    continue
+                with self._lock:
+                    is_trapped = any(meta.get("mac", "").lower() == ns["eth_src"]
+                                     for meta in self._tarpit_active_targets.values())
+                if not is_trapped:
+                    continue
+                dst_ip = ns["ip_src"] if ns["ip_src"] != "::" else "ff02::1"
+                na = l2_raw.build_neighbor_advertisement(
+                    eth_src=bogus_mac, eth_dst=ns["eth_src"], ip_src=ns["target"], ip_dst=dst_ip,
+                    target=ns["target"], lladdr=bogus_mac)
+                l2_raw.send_frame(sock, ifname, na)
+            except Exception as exc:
+                LOGGER.debug("NDP Tarpit iteration exception: %s", exc)
+                time.sleep(0.5)
 
     def sync_state_from_manager(self) -> None:
         """Synchronizes in-memory IPS targets with disk state modified by external processes."""
@@ -557,7 +550,7 @@ class IPSMitigator:
             return False
         if not bool(self.config.get("ips_tarpit_enabled", True)):
             return False
-        if not (SCAPY_AVAILABLE or bool(self.config.get("simulation_mode", False))):
+        if not (L2_AVAILABLE or bool(self.config.get("simulation_mode", False))):
             return False
         if not client_ip or client_ip == "unknown" or not mac_addr or mac_addr == "unknown":
             return False
@@ -662,11 +655,11 @@ class IPSMitigator:
                 mac_addr = ":".join(dev_id[i:i+2] for i in range(0, 12, 2))
 
         # LATCHED CONTAINMENT PROTECTION:
-        # Full host containment (Scapy Layer-2 tarpit & Fritz!Box WAN isolation) cuts off 100% of network traffic.
+        # Full host containment (Layer-2 tarpit & Fritz!Box WAN isolation) cuts off 100% of network traffic.
         # As a result, feature query rates naturally decay to 0 over the 5-minute rolling window.
         # Automatically releasing hardware/tarpit isolation purely on zero-traffic decay creates an infinite flapping loop:
         # (ISOLATE -> 0 TRAFFIC -> DECAY TO 0 -> AUTO UNISOLATE -> C2 BEACON AGAIN -> RE-ISOLATE).
-        # Therefore, hardware router isolation and Scapy tarpits are LATCHED containment states:
+        # Therefore, hardware router isolation and Layer-2 tarpits are LATCHED containment states:
         # They are ONLY auto-released if the device is explicitly marked safe (is_safe=True via safe_ips/patterns)
         # or via an explicit operator un-isolation command.
         if is_safe:
@@ -816,7 +809,7 @@ class IPSMitigator:
 
         tarpit_enabled = bool(self.config.get("ips_tarpit_enabled", True)) and not onboarding_active
         is_sim = bool(self.config.get("simulation_mode", False))
-        if tarpit_enabled and (SCAPY_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
+        if tarpit_enabled and (L2_AVAILABLE or is_sim) and (risk_score >= 9.0 or lateral_threat):
             if is_operator_released and not lateral_threat:
                 LOGGER.debug("🛡️ Layer-2 Tarpit suppressed for %s: Operator release cooldown active.", client_ip)
             elif (interactive_mode or is_critical_device) and not lateral_threat:
@@ -834,7 +827,7 @@ class IPSMitigator:
                         if client_ip not in self._tarpit_active_targets:
                             if is_operator_released and lateral_threat:
                                 LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
-                            LOGGER.warning("High risk detected. Activating Scapy Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
+                            LOGGER.warning("High risk detected. Activating Layer-2 ARP/NDP Tarpit for IP %s (%s).", client_ip, mac_addr)
                             graph_action_id = self._mirror_containment(
                                 dev_id, action_type="tarpit", status="active",
                                 target=client_ip, reason=reason)
@@ -898,13 +891,13 @@ class IPSMitigator:
                           reason: str = "Operator-requested Layer-2 tarpit") -> "tuple[bool, str]":
         """Console 'Tarpit (Layer-2)' button -- see operator_isolate_router()'s docstring
         for why this bypasses mitigate()'s own autonomous-path gating. Purely local (no
-        network I/O of its own beyond scapy's background sniff threads, already running),
+        network I/O of its own beyond the tarpit's background threads, already running),
         so the whole registration stays under self._lock, same as mitigate()'s own tarpit
         path."""
         if not bool(self.config.get("ips_tarpit_enabled", True)):
             return False, "Tarpit is disabled in config (ips_tarpit_enabled=false)."
         if not self.tarpit_armed:
-            return False, "Tarpit subsystem isn't armed on this server (no scapy, or no raw-socket permission) -- see server logs."
+            return False, "Tarpit subsystem isn't armed on this server (no AF_PACKET support, or no raw-socket permission) -- see server logs."
         if not ip or ip == "unknown":
             return False, "No known IP address for this device -- the tarpit needs one."
         if not mac or mac == "unknown":
@@ -924,6 +917,12 @@ class IPSMitigator:
         return True, "Tarpitted (Layer-2 ARP/NDP)."
 
     def _arp_tarpit_loop(self) -> None:
+        bogus_mac = "00:11:22:33:44:55"
+        try:
+            sock = l2_raw.open_raw(l2_raw.ETH_P_ARP)
+        except Exception as exc:
+            LOGGER.debug("ARP Tarpit socket exception: %s", exc)
+            return
         while True:
             try:
                 gateway_ip = self.config.get("fritz_ip", "192.168.1.1")
@@ -931,8 +930,14 @@ class IPSMitigator:
                     targets = dict(self._tarpit_active_targets)
                 for ip, meta in targets.items():
                     mac = meta["mac"]
-                    pkt = Ether(dst=mac) / ARP(op=2, psrc=gateway_ip, pdst=ip, hwsrc="00:11:22:33:44:55")
-                    send(pkt, verbose=False)
+                    ifname = l2_raw.interface_for(ip)
+                    src_mac = l2_raw.interface_mac(ifname) if ifname else None
+                    if not (ifname and src_mac):
+                        LOGGER.debug("ARP Tarpit: no interface/MAC found for %s", ip)
+                        continue
+                    pkt = l2_raw.build_arp_reply(eth_src=src_mac, eth_dst=mac, sender_mac=bogus_mac,
+                                                 sender_ip=gateway_ip, target_mac=mac, target_ip=ip)
+                    l2_raw.send_frame(sock, ifname, pkt)
             except Exception as exc:
                 LOGGER.debug("ARP Tarpit iteration exception: %s", exc)
             time.sleep(2.0)
@@ -1380,7 +1385,7 @@ class IPSMitigator:
                         ips_tarpit_active.remove(target_dev, target_host, target_mac)
                     except Exception:
                         pass
-                    LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from Scapy Layer-2 Tarpit.", target_host, target_ip)
+                    LOGGER.info("✅ [RELEASE] Operator released device %s (%s) from Layer-2 Tarpit.", target_host, target_ip)
 
             for mac, meta in list(self._router_isolated_devices.items()):
                 if identifier in (mac, meta.get("ip"), meta.get("hostname"), meta.get("dev_id")):

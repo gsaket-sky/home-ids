@@ -5,7 +5,7 @@ hand-edited YAML.
 
 NETWORK-AGNOSTIC BY CONSTRUCTION ([[feedback_network_agnostic_design]]): every
 anchor found here comes from generic OS/network primitives -- psutil's own
-interface table, a real ARP request/reply via scapy, the kernel's own default-route
+interface table, the kernel's own neighbour table (ARP/NDP), the kernel's own default-route
 table -- never a household-specific rule, hardcoded IP range, or vendor name. This
 module has been run and verified against exactly one real network (this project's
 own test bed) but contains nothing specific to it; every constant here is a generic
@@ -19,10 +19,10 @@ Two roles are discovered:
     hardware and are never assumed).
   - "gateway": the LAN's default-route next-hop IP (read via the kernel's own
     routing table, `ip route show default` -- Linux-only, matching this project's
-    Pi/x86-Linux-only deployment target), resolved to a MAC via a real ARP
-    request/reply (scapy's `srp()`) -- the same generic L2 primitive
-    `mitigation/ips.py`'s own ARP tarpit already uses elsewhere in this codebase,
-    not a new dependency or a routing-table MAC guess.
+    Pi/x86-Linux-only deployment target), resolved to a MAC from the
+    kernel's neighbour table (`mitigation/l2_raw.py`'s neighbor_mac(), which nudges the
+    kernel to resolve the address if needed) -- no raw socket, no extra dependency, and
+    not a routing-table MAC guess.
 
 `discover()` NEVER writes to config.yaml or any live config path itself -- Phase 13
 (the actual cutover) is what makes its output authoritative. This phase ships the
@@ -87,17 +87,13 @@ def _default_gateway_ip() -> Optional[str]:
 
 
 def _arp_resolve_mac(ip: str, timeout: float = _ARP_TIMEOUT_SECONDS) -> Optional[str]:
-    """Real ARP request/reply for `ip`'s MAC -- the same generic scapy primitive
-    mitigation/ips.py's own L2 tarpit already depends on, used here for a genuine
-    request/reply round-trip (srp(), not that module's fire-and-forget send())."""
+    """MAC for `ip` from the kernel's neighbour table (resolved on demand). Same name and signature as the
+    old scapy ARP round-trip so callers and tests keep working; needs no raw-socket privileges."""
     try:
-        from scapy.all import ARP, Ether, srp
-        packet = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=ip)
-        answered, _unanswered = srp(packet, timeout=timeout, verbose=False)
-        for _sent, received in answered:
-            return received.hwsrc
+        from mitigation import l2_raw
+        return l2_raw.neighbor_mac(ip, timeout=timeout)
     except Exception:
-        LOGGER.exception("[DISCOVERY] ARP resolution failed for %s", ip)
+        LOGGER.exception("[DISCOVERY] neighbour lookup failed for %s", ip)
     return None
 
 

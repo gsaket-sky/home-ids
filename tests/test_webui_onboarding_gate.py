@@ -111,7 +111,7 @@ if FAILURES:
     sys.exit(1)
 else:
     print("\nAll onboarding-gate checks PASSED.")
-    # os._exit(), not sys.exit(): importing mitigation.ips pulls in scapy, which in
+    # os._exit(), not sys.exit(): importing mitigation.ips used to pull in scapy, which in
     # this dev environment (no real libpcap provider on Windows) leaves a lingering
     # non-daemon thread that blocks a normal interpreter shutdown -- pre-existing
     # scapy/environment behavior, unrelated to anything under test here. All checks

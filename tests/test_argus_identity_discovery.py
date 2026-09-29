@@ -3,7 +3,7 @@ Standalone runtime test for argus/identity/discovery.py -- Phase 10 of the
 16-parameter autonomy-completion effort (zero-site bootstrap B: auto-discovery).
 
 No real packet capture or network I/O in this file -- psutil.net_if_addrs(),
-subprocess.run() (the 'ip route' call), and scapy's srp() are all mocked.
+subprocess.run() (the 'ip route' call), and the neighbour-table lookup are all mocked.
 
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_argus_identity_discovery.py`
