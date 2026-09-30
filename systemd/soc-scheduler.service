@@ -1,4 +1,4 @@
-# Rendered from IDS_Product's systemd/ template by src/scripts/install_units.py and a host
+# Rendered from the systemd/ template by src/scripts/install_units.py and a host
 # profile (checkout, venv python, user/group, secrets file) -- edit the template or the
 # profile, not the installed copy. Host-specific additions (e.g. write access
 # to the Zeek log directory the prune jobs clean, extra groups) go into the generated drop-in
@@ -13,7 +13,7 @@
 # pushed the engine's shared cgroup past MemoryHigh and the kernel throttled the engine for
 # ~40 minutes per run.
 [Unit]
-Description=IDS_Product job scheduler
+Description=Home-IDS job scheduler
 Documentation=file://@ROOT@/Documentation/INSTALL.md
 After=network-online.target soc.service
 Wants=network-online.target

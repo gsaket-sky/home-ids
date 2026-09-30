@@ -1,4 +1,4 @@
-# Rendered from IDS_Product's systemd/ template by src/scripts/install_units.py and a host
+# Rendered from the systemd/ template by src/scripts/install_units.py and a host
 # profile (checkout, venv python, user/group, secrets file) -- edit the template or the
 # profile, not the installed copy. Host-specific additions (extra groups, paths, ordering) go into a generated drop-in
 # (soc.service.d/10-host.conf), never into this file. Native install path; the Docker stack
@@ -9,7 +9,7 @@
 # memory, no swap for the engine (swap caused long scheduling stalls instead of a clean
 # restart), health-manager self-restart relies on Restart=always.
 [Unit]
-Description=IDS_Product SOC engine
+Description=Home-IDS SOC engine
 Documentation=file://@ROOT@/Documentation/INSTALL.md
 After=network-online.target
 Wants=network-online.target
