@@ -544,18 +544,20 @@ capped to **[0, 4.0]**:
 abuse_risk = min((abuseConfidenceScore / 100.0) * 6.0, 4.0)
 # flat 4.0 if the IP matches the cached blacklist snapshot or a configured honeypot IP
 
-# VirusTotalClient.risk_contribution() -- threat_intel.py
-vt_risk = min(((malicious_count + suspicious_count * 0.5) / total_engines) * 6.0, 4.0)
-# flat 4.0 if the destination IP is a configured honeypot; takes max(ip_risk, domain_risk)
+# ti_risk_et_open -- ET Open index match (default, always on)
+ti_risk_et_open = confidence * 4.0   # confidence: C2 IPs 0.95, malware/C2 domains 0.90, JA3 0.90, others <0.5
 
-# ti_risk -- pipeline.py, curated feed match (Feodo/ThreatFox/OTX)
+# ti_risk -- curated feeds (Feodo/ThreatFox, or optional OTX/AbuseIPDB if advanced_keyed_feeds: true)
 ti_risk = confidence * 4.0   # confidence field from the matching feed entry, default 0.8
+
+# vt_risk (legacy name, only honeypot signal; VirusTotal itself removed 2026-09)
+vt_risk = 4.0 if configured_honeypot else 0.0
 ```
 
 **Combined into one number by a plain max, not a weighted sum:**
 
 ```python
-reputation_value = max(ti_risk, abuse_risk, vt_risk)
+reputation_value = max(ti_risk_et_open, ti_risk, abuse_risk, vt_risk)
 confidence = 0.95 if reputation_value >= 4.0 else 0.8
 ```
 
@@ -565,14 +567,7 @@ item is created, attributed to whichever specific domain/IP actually produced th
 never blended into a composite score; the worst single signal wins outright and the
 other two are discarded once the max is taken.
 
-**Caching/staleness** (all in `threat_intel.py`): AbuseIPDB and VirusTotal per-IOC
-results cache for **86400s (24h)** on a real hit, **3600s (1h)** on a failed/empty
-lookup (a negative cache, so a transient API outage doesn't get treated as "confirmed
-clean" for a full day). Curated static feeds (Feodo/ThreatFox/OTX) cache **3600s**
-each. Pi-hole's gravity-domain cache is **21600s (6h)**. VirusTotal's worker is rate-
-limited to one call per **16s** with a **950/day** cap; a transient VT error itself
-caches for only **60s** so an outage doesn't get treated as a long-lived negative
-result.
+**Caching/staleness** (all in `threat_intel.py`): ET Open index has **age-decay staleness** — full weight for ≤14 days since last successful check, linear falloff to zero weight at 60 days (applied at lookup, not on storage); indices from a 60-day-old copy have `ti_risk` weight multiplied by 0. AbuseIPDB and OTX (if keyed feeds are on) cache **3600s** per-IOC on hits, **1800s** on misses. Curated static feeds (Feodo/ThreatFox) cache **3600s** each. Pi-hole's gravity-domain cache is **21600s (6h)**.
 
 ---
 

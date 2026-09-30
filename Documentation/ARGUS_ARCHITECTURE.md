@@ -730,7 +730,7 @@ Note: the console **does** now ship a "Health" tab (`web/console.html`'s `render
 
 New: `src/core/heartbeat.py`, `src/core/backoff.py`, `src/core/subprocess_launchers.py`, `src/core/healing_actions.py`, `src/core/health_manager.py`, `src/middleware/routers/health_api.py`.
 
-Modified: `requirements.txt` (added `psutil>=5.9.0`), `config.yaml` (`health_manager:` category), `src/config.py` (`DEFAULT_CONFIG`), `src/middleware/config_schema.py` (`CONFIG_SCHEMA` rows), `src/main.py` (wiring + subprocess-launcher extraction + `reset_component_heartbeats()` at boot), `src/core/pipeline.py` (heartbeat calls + poll-floor read), `src/intelligence/threat_intel.py` (`.paused` flags on `ThreatIntel`/`AbuseIPDB`/`VirusTotalClient`), `src/scripts/scheduler.py` (heartbeat write), `src/middleware/main_api.py` (router + startup heartbeat task), `web/console.html` (Health tab).
+Modified: `requirements.txt` (added `psutil>=5.9.0`), `config.yaml` (`health_manager:` category), `src/config.py` (`DEFAULT_CONFIG`), `src/middleware/config_schema.py` (`CONFIG_SCHEMA` rows), `src/main.py` (wiring + subprocess-launcher extraction + `reset_component_heartbeats()` at boot), `src/core/pipeline.py` (heartbeat calls + poll-floor read), `src/intelligence/threat_intel.py` (`.paused` flags on `ThreatIntel`/`AbuseIPDB`), `src/scripts/scheduler.py` (heartbeat write), `src/middleware/main_api.py` (router + startup heartbeat task), `web/console.html` (Health tab). *(VirusTotalClient removed 2026-09-29)*
 
 Tests: `tests/test_heartbeat_registry.py`, `tests/test_recovery_backoff.py`, `tests/test_health_manager_state_machine.py`, `tests/test_resource_pressure_modes.py`, `tests/test_health_manager_healing_actions.py`, `tests/test_health_api.py`.
 
