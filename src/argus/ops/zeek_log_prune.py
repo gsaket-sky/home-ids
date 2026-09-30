@@ -81,9 +81,12 @@ def main() -> None:
         LOGGER.info("Removed %d Zeek log director(ies) older than %.0f days from %s%s",
                      len(deleted_dirs), retention_days, _ZEEK_LOGS_ROOT,
                      f" ({len(errors)} error(s))" if errors else "")
-        write_job_health(state_dir, "zeek_log_prune", time.time() - run_start,
-                          extra={"deleted_dirs": len(deleted_dirs), "retention_days": retention_days,
-                                 "errors": errors})
+        extra = {"deleted_dirs": len(deleted_dirs), "retention_days": retention_days, "errors": errors}
+        if errors:
+            # Retention not achieved -- report it as a failure, not a success with a footnote
+            # (on .94 every delete failed with "Read-only file system" for weeks, unnoticed).
+            extra["error"] = f"{len(errors)} directory(ies) past retention could not be removed: {errors[0]}"
+        write_job_health(state_dir, "zeek_log_prune", time.time() - run_start, extra=extra)
     except Exception as e:
         LOGGER.error("zeek_log_prune failed: %s", e, exc_info=True)
         write_job_health(state_dir, "zeek_log_prune", time.time() - run_start, extra={"error": str(e)})

@@ -1,0 +1,58 @@
+# Rendered from IDS_Product's systemd/ template by src/scripts/install_units.py and a host
+# profile (checkout, venv python, user/group, secrets file) -- edit the template or the
+# profile, not the installed copy. Host-specific additions (extra groups, paths, ordering) go into a generated drop-in
+# (soc.service.d/10-host.conf), never into this file. Native install path; the Docker stack
+# (docker/docker-compose.yml) is the primary one and applies the same limits.
+#
+# Settings follow the tuned live unit (2026-09, see
+# Documentation/PRODUCT_CAPACITY_AND_RESTART_RECONCILIATION.md): 3.5G hard / 2800M soft
+# memory, no swap for the engine (swap caused long scheduling stalls instead of a clean
+# restart), health-manager self-restart relies on Restart=always.
+[Unit]
+Description=IDS_Product SOC engine
+Documentation=file://@ROOT@/Documentation/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+# Don't restart-loop forever: more than 5 starts in 2 minutes stops the unit.
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+# Secrets (Telegram, Pi-hole, router, API token, optional feed keys) -- KEY=value lines,
+# mode 0600. Never as Environment= lines in a unit file.
+EnvironmentFile=-@ENV_FILE@
+ExecStart=@PYTHON@ @ROOT@/src/main.py
+
+# Raw sockets for the Layer-2 tarpit (mitigation/l2_raw.py) without running as root.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+
+# SIGTERM to the main process; it saves state and stops its helpers (<= ~30 s).
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=always
+RestartSec=10
+
+CPUQuota=40%
+MemoryHigh=2800M
+MemoryMax=3.5G
+MemorySwapMax=0
+Nice=10
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ids-engine
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=@ROOT@
+
+[Install]
+WantedBy=multi-user.target

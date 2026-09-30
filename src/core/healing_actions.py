@@ -192,6 +192,11 @@ def restart_fastapi_subprocess(hm: "HealthManager", component: str) -> Tuple[boo
 
 
 def restart_scheduler_subprocess(hm: "HealthManager", component: str) -> Tuple[bool, str]:
+    if str((hm.config or {}).get("scheduler_mode", "embedded")).lower() == "external":
+        # Its own service manager (systemd Restart= / compose restart:) restarts it;
+        # launching an embedded copy here would put jobs back in the engine's cgroup
+        # and run two schedulers against one job mutex.
+        return False, "scheduler runs as its own service (scheduler_mode: external) -- restart it there"
     old_proc = hm.scheduler_proc
     if old_proc is not None and old_proc.poll() is None:
         try:

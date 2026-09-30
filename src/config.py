@@ -267,13 +267,10 @@ DEFAULT_CONFIG = {
     "health_manager_rss_pressure_mb": 1024.0,
     "health_manager_rss_conservation_mb": 1536.0,
     "health_manager_rss_critical_mb": 1843.0,
-    "health_manager_swap_pressure_pct": 40.0,
     "health_manager_swap_conservation_pct": 60.0,
-    "health_manager_swap_critical_pct": 80.0,
     "health_manager_sysmem_pressure_pct": 75.0,
     "health_manager_min_available_mb": 512.0,
     "health_manager_critical_sustain_checks": 3,
-    "health_manager_recovery_confirm_seconds": 60.0,
     "health_manager_job_staleness_hours": 30.0,
 }
 

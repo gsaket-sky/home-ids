@@ -24,6 +24,30 @@ LOGGER = logging.getLogger("scheduler")
 # EACH OTHER, not just the 6 jobs below. Keep this string identical on both sides.
 TRAIN_FP_CLASSIFIER_JOB_NAME = "train_fp_classifier"
 
+# state/scheduler.log (embedded mode: this process's stdout, opened O_APPEND by
+# core/subprocess_launchers.py) used to grow without limit. Above the cap the current
+# file is copied to scheduler.log.1 (one generation) and truncated in place; with
+# O_APPEND the next write lands at the new end. External mode logs to the journal /
+# container log driver instead, so the file is simply absent there.
+SCHEDULER_LOG_CAP_BYTES = 10 * 1024 * 1024
+
+
+def _cap_scheduler_log(state_dir: Path, cap_bytes: int = SCHEDULER_LOG_CAP_BYTES) -> None:
+    path = state_dir / "scheduler.log"
+    try:
+        if not path.exists() or path.stat().st_size <= cap_bytes:
+            return
+        rotated = path.with_name(path.name + ".1")
+        with path.open("rb") as src, rotated.open("wb") as dst:
+            while True:
+                chunk = src.read(1024 * 1024)
+                if not chunk:
+                    break
+                dst.write(chunk)
+        os.truncate(path, 0)
+    except OSError as exc:
+        LOGGER.warning(f"Could not cap {path}: {exc}")
+
 
 def _flatten_config_categories(raw: dict) -> dict:
     """Mirror config.py's LiveConfig._load() flattening rule: merge every top-level
@@ -92,6 +116,18 @@ def main():
     config = load_config()  # already flat -- merged across every config.yaml category
     state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
 
+    # Started as its own service (systemd unit / compose `scheduler`) while config.yaml still
+    # says embedded: main.py is then running its own copy too, and both would dispatch every
+    # job. Idle instead of exiting (an exit would just be restarted in a loop) and re-check,
+    # so flipping the config to external is picked up without touching this service.
+    if os.environ.get("IDS_SCHEDULER_STANDALONE") == "1":
+        while str(config.get("scheduler_mode", "embedded")).lower() != "external":
+            LOGGER.warning("Standalone scheduler idle: config.yaml has scheduler_mode != external, so the "
+                           "engine runs its own embedded scheduler. Set scheduler_mode: external and restart "
+                           "the engine to hand scheduling to this service. Re-checking in 5 min.")
+            time.sleep(300)
+            config = load_config()
+
     # This daemon owns every job's lifecycle, so it serves those facts to Prometheus
     # itself (core/scheduler_metrics.py) instead of relaying them through files.
     scheduler_metrics.start(int(config.get("scheduler_metrics_port", 9106)))
@@ -141,7 +177,7 @@ def main():
                 LOGGER.info(f"Resumed previously-preempted job '{job_name}' (pid {info['proc'].pid}).")
 
     def _try_dispatch(job_name: str, priority: int, pausable: bool,
-                       max_runtime_minutes: float, launch_fn) -> bool:
+                       max_runtime_minutes: float, launch_fn, essential: bool = False) -> bool:
         """Runs launch_fn(popen_kwargs) (returning a Popen or None) only if
         admitted by BOTH the system-pressure gate and the job-priority mutex.
         Deferred jobs are retried every subsequent tick (not just their next cron
@@ -155,15 +191,22 @@ def main():
         from a stuck occupant is closed safely without ever risking a genuine
         double-run."""
         max_defer = float(config.get("job_max_defer_minutes", 60))
+        already_deferred = job_coordinator.is_deferred(state_dir, job_name)
         deferred_minutes = job_coordinator.get_deferred_minutes(state_dir, job_name)
         pressure_force = deferred_minutes >= max_defer
+        # Deferred jobs are retried every tick, so only the first deferral is logged at
+        # INFO -- otherwise every waiting job adds a line per minute to scheduler.log.
+        defer_log = LOGGER.debug if already_deferred else LOGGER.info
 
-        if not pressure_force and not resource_gate.may_admit_new_job(config):
+        # `essential` jobs (the prune/cleanup jobs whose work RELIEVES pressure) are
+        # never held back by the pressure gate -- deferring them under pressure is
+        # self-defeating. They still go through the job mutex below.
+        if not essential and not pressure_force and not resource_gate.may_admit_new_job(config):
             job_coordinator.record_deferral_start(state_dir, job_name)
             scheduler_metrics.record_deferral(job_name, "pressure")
-            LOGGER.info(f"Deferring '{job_name}' -- system under pressure ({deferred_minutes:.1f} min so far).")
+            defer_log(f"Deferring '{job_name}' -- system under pressure ({deferred_minutes:.1f} min so far).")
             return False
-        if pressure_force:
+        if pressure_force and not essential:
             LOGGER.warning(
                 f"'{job_name}' deferred {deferred_minutes:.1f} min by system pressure alone -- "
                 f"admitting despite pressure (starvation backstop). The job mutex itself is never bypassed."
@@ -172,7 +215,7 @@ def main():
         if not job_coordinator.peek_admission(state_dir, priority):
             job_coordinator.record_deferral_start(state_dir, job_name)
             scheduler_metrics.record_deferral(job_name, "slot")
-            LOGGER.info(f"Deferring '{job_name}' -- slot held by a higher/equal-priority job ({deferred_minutes:.1f} min so far).")
+            defer_log(f"Deferring '{job_name}' -- slot held by a higher/equal-priority job ({deferred_minutes:.1f} min so far).")
             return False
 
         # Result pipe (core/job_result_channel.py): the job's own numbers reach
@@ -238,6 +281,7 @@ def main():
         config = load_config()  # already flat -- merged across every config.yaml category
         state_dir = Path(config.get("state_path", "state/ids_state.json")).parent
 
+        _cap_scheduler_log(state_dir)
         _record_reclaim(job_coordinator.reconcile_on_boot(state_dir))  # general watchdog every tick, not just at boot -- see its own docstring
         _reap_and_resume()
         scheduler_metrics.scheduler_last_tick.set(time.time())
@@ -256,7 +300,8 @@ def main():
         # 1. Check legacy autotune
         if config.get("autotune_enabled", False):
             cron = config.get("autotune_schedule_cron", "0 3 * * *")
-            if check_cron(cron, now) and last_run.get("autotune") != now_str:
+            due = check_cron(cron, now) or job_coordinator.is_deferred(state_dir, TRAIN_FP_CLASSIFIER_JOB_NAME)
+            if due and last_run.get("autotune") != now_str:
                 script_path = scripts_dir / "train_fp_classifier.py"
                 priority = int(config.get("autotune_priority", 2))
                 pausable = bool(config.get("autotune_pausable", True))
@@ -275,7 +320,13 @@ def main():
         for script_name, cfg in scheduler_cfg.items():
             if cfg.get("enabled", False):
                 cron = cfg.get("cron", "0 0 * * *")
-                if check_cron(cron, now) and last_run.get(script_name) != now_str:
+                # BUGFIX (2026-09-30): a deferred job used to be retried only at its NEXT
+                # cron match -- a day later for a daily job -- despite _try_dispatch()'s
+                # docstring. On .94 that starved disk_budget_governor for 5 days and
+                # backtest_job forever (both due 03:30, one slot). An open deferral record
+                # now keeps the job due every tick until it actually dispatches.
+                due = check_cron(cron, now) or job_coordinator.is_deferred(state_dir, script_name)
+                if due and last_run.get(script_name) != now_str:
                     # BUGFIX: this used to always assume the job's config key IS the
                     # script's filename stem (f"{script_name}.py"). The "retrohunter" job
                     # key never matched the actual file (scripts/retro_hunter.py, with an
@@ -290,6 +341,7 @@ def main():
                     priority = int(cfg.get("priority", 5))
                     pausable = bool(cfg.get("pausable", False))
                     max_runtime = float(cfg.get("max_runtime_minutes", 30))
+                    essential = bool(cfg.get("essential", False))
 
                     if not script_path.exists():
                         LOGGER.error(
@@ -306,7 +358,7 @@ def main():
                         LOGGER.info(f"Triggering scheduled script: {script_path.name} (job='{script_name}') ...")
                         return subprocess.Popen([sys.executable, str(script_path)], start_new_session=True, **popen_kwargs)
 
-                    if _try_dispatch(script_name, priority, pausable, max_runtime, _launch):
+                    if _try_dispatch(script_name, priority, pausable, max_runtime, _launch, essential=essential):
                         last_run[script_name] = now_str
                         jobs_dispatched_this_tick += 1
 

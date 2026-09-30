@@ -291,7 +291,7 @@ def main() -> None:
                              "budget_gb": {
                                  "graph_db": graph_db_budget_gb, "zeek_logs": zeek_logs_budget_gb,
                                  "state_files": state_files_budget_gb,
-                                 "total": DEFAULT_TOTAL_BUDGET_GB,
+                                 "total": float(CONFIG.get("disk_budget_total_gb", DEFAULT_TOTAL_BUDGET_GB)),
                              }})
 
 

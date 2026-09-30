@@ -405,6 +405,18 @@ def get_deferred_minutes(state_dir, job_name: str) -> float:
     return max(0.0, time.time() - float(first_seen)) / 60.0
 
 
+def is_deferred(state_dir, job_name: str) -> bool:
+    """True while `job_name` has an open deferral record (it was due, was deferred,
+    and has not dispatched since) -- the scheduler keeps retrying such a job every
+    tick instead of waiting for its next cron match."""
+    path = _pending_path(state_dir)
+    try:
+        pending = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except Exception:
+        return False
+    return job_name in pending
+
+
 def clear_deferral(state_dir, job_name: str) -> None:
     """Call once a previously-deferred job actually dispatches -- clears its
     starvation clock so the next time it's deferred starts counting from zero."""

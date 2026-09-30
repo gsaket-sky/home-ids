@@ -32,6 +32,14 @@ service_ports:
   # [RESTART]
   metrics_port: 9105
 
+  # The Starter-tier WebUI (middleware/webui_api.py, PRODUCTIZATION_ROADMAP.md
+  # Phase 4) -- deliberately a SEPARATE port/process from fastapi_port above.
+  # That one is loopback-only trusted IPC; this one is bound 0.0.0.0 for LAN
+  # browser access and has its own session-cookie password auth (set on first
+  # visit). Visit http://<this-box's-LAN-IP>:8011 to open the dashboard.
+  # [RESTART]
+  webui_port: 8011
+
   # The scheduler daemon's own Prometheus /metrics port: scheduled-job runs, kills,
   # pauses, deferrals and each job's reported results (add it as a second scrape
   # target -- see INSTALL.md 4.2). [RESTART]
@@ -186,7 +194,6 @@ network_and_devices:
   # devices without excluding real threat signals (reputation/honeypot
   # evidence is never dampened). [LIVE]
   safe_host_patterns:
-    - paperless
     - repeater
     - pi-hole
     - pihole
@@ -204,33 +211,7 @@ network_and_devices:
   # (case-insensitive), first entry wins in file order -- pick a specific
   # pattern to avoid an unintended collision with an unrelated device sharing
   # part of the same name. [LIVE]
-  device_type_overrides:
-    LAPTOP-A1B2C3: laptop
-    lghometheater: smart_tv
-    DIR355BT: iot
-    family-pc: laptop
-    dreame: iot
-    Chromecast: iot
-    Watch: phone
-    # More specific pattern listed BEFORE the generic "Samsung" one below --
-    # first-match-wins, so this stops "Samsung" from incidentally also catching
-    # this Samsung Smart Monitor (its hostname contains "samsung" too). Same
-    # resulting classification either way (a Tizen smart monitor behaves like a
-    # smart_tv in practice -- apps, Netflix, discovery protocols), just now an
-    # intentional match instead of an accidental substring collision.
-    samsungsmartmonitor: smart_tv
-    Samsung: smart_tv
-    linux-server: server
-    Kindle: tablet
-    "192.168.1.3": nas
-    android_4: smart_tv
-    # Your Pi-hole/unbound resolver host -- device_type_overrides is the ONLY way to
-    # reach "verified infra" status (device_type_is_override=True), which is what
-    # pipeline.py's _INFRA_NOISY_TYPES gate requires before dampening this device's
-    # own DNS-evasion/connection-abuse noise; infer_device_type() alone can't get here
-    # since "paperless" doesn't match any of its pihole/unbound/adguard hostname
-    # keywords. [LIVE]
-    paperless: dns_server
+  device_type_overrides: {}
 
 
 # -----------------------------------------------------------------------------
@@ -573,9 +554,13 @@ geofencing:
 # threat_intel_and_ai — external threat-intel refresh + local Ollama LLM
 # -----------------------------------------------------------------------------
 threat_intel_and_ai:
-  # How often (seconds) OTX/AbuseIPDB/VirusTotal feeds refresh. Default 3600
-  # = hourly. (API keys themselves come from .env, not this file.) [LIVE]
+  # How often (seconds) the threat-intel feeds refresh. Default 3600
+  # = hourly. [LIVE]
   ti_refresh_interval: 3600
+  # ADVANCED (leave off on a shipped unit): enables the personal-use keyed feeds -- OTX, AbuseIPDB,
+  # URLhaus, ThreatFox -- using the keys from .env. Their free tiers forbid commercial use.
+  # Restart required. Not shown in the WebUI on purpose.
+  advanced_keyed_feeds: false
 
   # Base URL of your local Ollama server, used by scripts/ollama_soc.py (batch triage,
   # every 4h) and intelligence/ai_soc.py's DeterministicValidator for LLM-based alert
@@ -584,28 +569,9 @@ threat_intel_and_ai:
 
   # Ollama model name to use for those requests. [LIVE]
   ollama_model: llama3.1
-
-  # PHASE 11: how long a cached LLM verdict for a given "threat pattern" (device +
-  # destination + signature) stays valid before scripts/ollama_soc.py will query Ollama
-  # about it again. A live diagnostic run found single Ollama calls taking 14+ minutes
-  # under real CPU load on this hardware -- caching avoids re-paying that cost for a
-  # threat pattern that's still recurring. Default 604800 = 7 days. [LIVE]
-  ollama_cache_ttl_seconds: 604800.0
-
-  # PHASE 11: hard cap on FRESH Ollama calls per scheduled ollama_soc.py run (cache hits
-  # don't count against this). Keeps one unusually noisy day from turning a 4-hourly job
-  # into an hours-long one -- at up to ~15 minutes worst-case per call (the request
-  # timeout), 8 calls is at most ~120 minutes, comfortably inside the 4h gap to the next
-  # run. Alerts beyond this cap are deferred to the next scheduled run, prioritized by
-  # which threat pattern repeated most often this run. [LIVE]
-  # BUGFIX (2026-08-27): raised from 3 -- the scheduler.py cron entry for this job had
-  # drifted to once/day (see scheduled_jobs.scheduler.ollama_soc below, now corrected
-  # back to the 4-hourly cadence this comment and ollama_soc.py's own code already
-  # assumed) while this cap stayed sized for a single daily run against a day's worth of
-  # traffic. Live data: 839 alerts / 163 distinct patterns in one 24h window, only 3 of
-  # which got a fresh LLM verdict -- the other 160 were deferred and re-evaluated against
-  # a rolling 24h window every subsequent run, rather than ever actually draining.
-  ollama_max_queries_per_run: 8
+  # (ollama_cache_ttl_seconds / ollama_max_queries_per_run removed 2026-09-30: their only
+  # reader, scripts/ollama_soc.py, is gone; argus/ops/live_llm_review.py uses its own
+  # built-in per-run cap.)
 
 
 # -----------------------------------------------------------------------------
@@ -616,6 +582,15 @@ threat_intel_and_ai:
 # controls. This section is the master switches + response POLICY only.
 # -----------------------------------------------------------------------------
 ips_mitigation:
+  # Alert-only grace period for a brand-new install (core/onboarding.py,
+  # PRODUCTIZATION_ROADMAP.md Phase 4): while active, Pi-hole/router/tarpit
+  # actions are withheld regardless of decision_state -- detection and
+  # Telegram alerts are completely unaffected. Ends automatically after this
+  # many days, or immediately via the WebUI's "Activate Protection Now"
+  # button. 0 disables onboarding mode entirely (useful for dev/advanced
+  # installs that don't want a grace period at all). [LIVE]
+  onboarding_mode_days: 14
+
   # Global kill switch for all active response (Pi-hole sinkhole, router
   # isolation, ARP tarpit). false = detection-only, nothing gets blocked.
   # [LIVE]
@@ -723,7 +698,7 @@ reactive_capture:
   # deployment to actually fire capture bursts (Phase D's triggers below are wired and
   # live-verified as of this session, see zeek_scripts/local-arp-log.zeek's deployment
   # notes and this phase's commit message). [LIVE]
-  reactive_capture_enabled: true
+  reactive_capture_enabled: false  # PRODUCT DEFAULT: off until enabled by the setup wizard (PRODUCTIZATION_ROADMAP.md Phase 5)
 
   # The ONE shared aggressiveness knob (Phase D design): every trigger below draws
   # from this single hourly budget instead of a per-trigger-type cooldown, since a
@@ -830,7 +805,7 @@ reactive_capture:
   # a real binary and a ruleset you manage yourself (e.g. `suricata-update --etopen`
   # with a trimmed "security"/"balanced" policy, not the full noisy feed), and
   # (3) set this to true. [LIVE]
-  reactive_capture_suricata_enabled: true
+  reactive_capture_suricata_enabled: false  # PRODUCT DEFAULT: off until enabled by the setup wizard (PRODUCTIZATION_ROADMAP.md Phase 5)
 
   # Max seconds to let one batch scan run before giving up on it (non-fatal --
   # the burst's Zeek/DNS-evasion findings are unaffected either way). A burst pcap
@@ -933,12 +908,17 @@ telegram:
 # -----------------------------------------------------------------------------
 job_admission_max_pressure_tier: resource_pressure  # normal/resource_pressure/conservation/critical -- a NEW job may start at or below this tier
 job_max_defer_minutes: 60  # a job denied the slot for longer than this force-runs anyway (starvation backstop)
+# embedded = main.py starts scheduler.py as its child (old behavior; every job then runs
+# inside the engine's own cgroup/container memory limit). external = scheduler.py runs as
+# its own service with its own limit (systemd/soc-scheduler.service, or the compose
+# `scheduler` service) -- recommended: a heavy job can then never throttle the engine.
+# [RESTART]
+scheduler_mode: embedded
 scheduled_jobs:
-  # Weekly/nightly retrain of the false-positive LightGBM classifier
-  # (scripts/train_fp_classifier.py) — this one is NOT in the `scheduler`
-  # dict below, it has its own dedicated enable/cron pair. Fires at 3am.
-  # Shares the coordinator job name "train_fp_classifier" with fp_engine.py's own
-  # boot-triggered weekly retrain -- both invoke the literal same script. [LIVE]
+  # Daily retrain of the false-positive classifier (scripts/train_fp_classifier.py) — this
+  # one is NOT in the `scheduler` dict below, it has its own dedicated enable/cron pair.
+  # Fires at 3am. When enabled, the scheduler owns training; fp_engine.py's in-engine
+  # weekly loop then only hot-reloads the new model. [LIVE]
   autotune_enabled: true
   autotune_schedule_cron: "0 3 * * *"
   autotune_priority: 2
@@ -949,7 +929,10 @@ scheduled_jobs:
   # (string), priority (int), pausable (bool), max_runtime_minutes (int), and an
   # optional "script" override if the job's key doesn't match its own filename
   # (needed for retro_hunter — see CONFIG_AUDIT_REPORT.md's Phase 7 note on why
-  # that override exists).
+  # that override exists). A job that was due but deferred (pressure or a busy slot)
+  # is retried every minute until it runs, not only at its next cron time.
+  # `essential: true` (cleanup jobs whose work RELIEVES pressure) skips the pressure
+  # gate entirely; it still waits for the job slot.
   scheduler:
     # v16: the sole Layer-3 LLM review job -- scripts/ollama_soc.py (and
     # intelligence/ai_soc.py, its own dedicated validator) retired the same
@@ -1001,6 +984,7 @@ scheduled_jobs:
       priority: 1  # highest urgency -- unbounded evidence-table growth is a real, already-seen failure mode without it
       pausable: false  # wraps its whole ~120s SELECT+chunked-DELETE in ONE transaction -- SIGSTOP risks holding the write lock past the live engine's own 10s busy_timeout
       max_runtime_minutes: 30
+      essential: true
 
     # Disk-budget governor (2026-09-23, explicit user requirement: total disk usage
     # must never exceed a hard ceiling -- see disk_budget_governor.py's own module
@@ -1016,6 +1000,7 @@ scheduled_jobs:
       priority: 1
       pausable: false  # same reasoning as live_prune -- SIGSTOP mid-trim risks holding the write lock
       max_runtime_minutes: 20
+      essential: true
 
     # Data-lifecycle retuning (2026-09-20) -- split out of live_prune above onto
     # its own tight cadence: zeek_notice_weak's documented 12h retention was only
@@ -1029,6 +1014,7 @@ scheduled_jobs:
       priority: 2
       pausable: false  # not yet individually audited for transaction-wrapping like live_prune.py -- default conservative until reviewed
       max_runtime_minutes: 15
+      essential: true
 
     # v16: the sole retro-hunt job -- scripts/retro_hunter.py retired the same
     # release once its findings/local-intel-store activity stayed flat across
@@ -1093,6 +1079,7 @@ scheduled_jobs:
       priority: 4
       pausable: false  # not yet individually audited for transaction-wrapping -- default conservative until reviewed
       max_runtime_minutes: 20
+      essential: true
 
     # Release 15, closed-loop autotuning architecture, Sheet 02 -- nightly
     # backtest (tests/test_real_world_alert_regression.py's real-incident
@@ -1187,7 +1174,6 @@ cl_afpe_engine: v_current
 #   TELEGRAM_TOKEN, TELEGRAM_CHAT_ID           → Telegram bot credentials
 #   OTX_API_KEY                                → AlienVault OTX
 #   ABUSEIPDB_KEY (or ABUSEIPDB_API_KEY)       → AbuseIPDB
-#   VIRUSTOTAL_KEY (or VIRUSTOTAL_API_KEY)     → VirusTotal
 #   PIHOLE_API_PASSWORD, PIHOLE_API_URL        → Pi-hole admin API
 #   FRITZ_USER, FRITZ_PASS                     → Fritz!Box TR-064 login
 #   API_SECRET_TOKEN                           → this app's own webhook auth token

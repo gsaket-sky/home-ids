@@ -3187,7 +3187,27 @@ class AutonomousFPEngine:
         """
         job_coordinator.reconcile_on_boot(self._state_dir)  # this thread's own boot -- reclaim any orphan that survived a prior main.py restart
         time.sleep(120.0)  # Wait 2 minutes after boot before checking
+        onnx_path = self._model_dir() / "fp_classifier.onnx"
+        loaded_mtime = onnx_path.stat().st_mtime if onnx_path.exists() else 0.0
         while True:
+            # BUGFIX (2026-09-30, .94 freeze): with autotune_enabled the scheduler
+            # daemon already runs this same trainer daily (job "train_fp_classifier").
+            # Launching it from HERE as well put a ~2 GB child inside the live engine's
+            # own cgroup/container memory limit two minutes after every boot; on .94
+            # that throttled the engine for 40 min per run and, via the resulting
+            # self-restarts, looped for hours. The scheduler owns training in that case;
+            # this thread only hot-reloads the model once a new file appears.
+            if self.config.get("autotune_enabled", False):
+                try:
+                    mtime = onnx_path.stat().st_mtime if onnx_path.exists() else 0.0
+                    if mtime > loaded_mtime:
+                        loaded_mtime = mtime
+                        self._load_lgbm_model()
+                        LOGGER.info("✅ [FP ENGINE] Model retrained by the scheduler hot-reloaded.")
+                except Exception as exc:
+                    LOGGER.error("❌ Failed to hot-reload the retrained model: %s", exc, exc_info=True)
+                time.sleep(600.0)
+                continue
             try:
                 last_retrain_file = self._state_dir / "models" / ".last_retrain"
                 now = time.time()

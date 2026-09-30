@@ -1,6 +1,5 @@
 # Home-IDS Core Dependencies
 prometheus_client>=0.17.0
-scapy>=2.5.0
 lightgbm>=3.3.5
 onnxruntime>=1.15.0
 fastembed>=0.2.0
@@ -15,30 +14,27 @@ tldextract>=3.4.0    # utils.etld1() / fp_engine._extract_base_domain() import t
                      # public-suffix-aware base-domain extraction; without it, domain
                      # auto-immunization fails closed (silently inert) per the Phase 0 fix
 
-# Found missing from this file during a full import-vs-requirements audit this
-# session -- all four are genuinely imported (not transitive-only), so `pip install -r`
-# alone was never actually sufficient to run this codebase before now:
+# Ported from home_ids @ 216e5e6 (v12.5.0) -- audited as genuinely imported (not
+# transitive-only), so `pip install -r` alone was never actually sufficient to run
+# this codebase before now:
 skl2onnx>=1.15.0     # scripts/train_fp_classifier.py's ONNX export AND
                      # fp_engine.py's _generate_placeholder_lgbm() (first-boot model)
 geoip2>=4.7.0        # intelligence/geoip.py -- City/ASN MaxMind database lookups
 joblib>=1.3.0        # intelligence/ml_engine.py
 urllib3>=1.26.0      # mitigation/alerts.py imports urllib3.util.retry.Retry directly
                      # (not just relying on it transitively via requests)
+manuf>=1.1.5         # utils.get_mac_vendor() -- identity.py's apply_device_type();
+                     # bundles Wireshark's maintained OUI database, offline lookup,
+                     # update=False default so no network call at startup
 
 # Added 2026-08-17 for the config.json -> config.yaml migration:
 pyyaml>=6.0          # config.py / scripts/scheduler.py / scripts/ollama_soc.py /
                       # scripts/retro_hunter.py read config.yaml
 
-# Added 2026-09-14 for core/health_manager.py's resource-pressure state machine
-# (RSS/system-memory/swap monitoring) -- zero prior usage of psutil anywhere in this
-# codebase before this. See Documentation/ARGUS_ARCHITECTURE.md#7-health-manager.
-psutil>=5.9.0
-
-# Added 2026-08-29: infer_device_type()'s mac_vendor parameter existed but no caller
-# ever populated it -- utils.get_mac_vendor() wires it up via manuf (bundles
-# Wireshark's maintained OUI database, pure offline lookup, update=False default so no
-# network call at startup, same offline-first pattern as geoip2/tldextract above).
-manuf>=1.1.5          # utils.get_mac_vendor() -- identity.py's apply_device_type()
+# Added for the WebUI service (PRODUCTIZATION_ROADMAP.md Phase 4) -- middleware/webui_api.py:
+jinja2>=3.1.0         # server-rendered templates, no Node/build-step frontend
+itsdangerous>=2.1.0   # starlette.middleware.sessions.SessionMiddleware's signed session cookie
+python-multipart>=0.0.9  # FastAPI file-upload form parsing (Teleporter import, manual .mmdb upload)
 # PHASE 13 cleanup: ruamel.yaml removed -- it existed only for ollama_soc.py's old
 # save_config_key() (comment-preserving round-trip writes to safe_host_patterns), which
 # was itself removed in Phase 9 (that write target was always wrong -- safe_host_patterns
@@ -49,3 +45,6 @@ manuf>=1.1.5          # utils.get_mac_vendor() -- identity.py's apply_device_typ
 # anymore -- autonomous adjustments live in state/config_overrides.json and
 # state/device_fp_profiles.json instead (see config.py's LiveConfig._load_overrides()
 # and fp_engine.py's per-device profiles).
+
+# added by sync: dependency introduced upstream (home_ids)
+psutil>=5.9.0

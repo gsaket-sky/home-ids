@@ -1,0 +1,54 @@
+# Rendered from IDS_Product's systemd/ template by src/scripts/install_units.py and a host
+# profile (checkout, venv python, user/group, secrets file) -- edit the template or the
+# profile, not the installed copy. Host-specific additions (e.g. write access
+# to the Zeek log directory the prune jobs clean, extra groups) go into the generated drop-in
+# soc-scheduler.service.d/10-host.conf.
+#
+# Runs scripts/scheduler.py (prune, disk governor, classifier retrain, LLM review, ...) in
+# its OWN cgroup with its own memory limit. Requires `scheduler_mode: external` in
+# config.yaml: main.py then starts no embedded scheduler, and this service idles until the
+# setting is present (IDS_SCHEDULER_STANDALONE), so two schedulers never dispatch the same jobs.
+#
+# Why (found live 2026-09-30): as a child of the engine, a ~2 GB train_fp_classifier run
+# pushed the engine's shared cgroup past MemoryHigh and the kernel throttled the engine for
+# ~40 minutes per run.
+[Unit]
+Description=IDS_Product job scheduler
+Documentation=file://@ROOT@/Documentation/INSTALL.md
+After=network-online.target soc.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+EnvironmentFile=-@ENV_FILE@
+Environment=IDS_SCHEDULER_STANDALONE=1
+ExecStart=@PYTHON@ @ROOT@/src/scripts/scheduler.py
+Restart=always
+RestartSec=10
+# Jobs run in their own sessions: stop them together with the scheduler.
+KillMode=control-group
+TimeoutStopSec=30
+
+# Batch work: below the engine in CPU/IO priority, bounded memory. 1G covers the trainer's
+# measured 0.55 GB peak after the 2026-09-30 bounded-read fix; re-measure the other jobs on
+# the target hardware before lowering it.
+CPUQuota=40%
+MemoryHigh=900M
+MemoryMax=1G
+Nice=15
+IOSchedulingClass=idle
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ids-scheduler
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=@ROOT@
+
+[Install]
+WantedBy=multi-user.target

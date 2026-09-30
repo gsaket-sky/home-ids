@@ -326,7 +326,18 @@ def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: d
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except Exception:
         existing = {}
-    entry = {"last_success": time.time(), "duration_seconds": duration_seconds}
+    now = time.time()
+    if job_result_status(extra) == "error":
+        # BUGFIX (2026-09-30): a failed run used to stamp last_success too, so a job failing
+        # every night looked healthy forever (.94: zeek_log_prune could not delete anything
+        # for weeks -- read-only filesystem -- while job_health showed daily "success").
+        # Keep the previous success time so the health manager's staleness check fires.
+        previous = existing.get(job_name) or {}
+        entry = {"duration_seconds": duration_seconds, "last_failure": now}
+        if previous.get("last_success"):
+            entry["last_success"] = previous["last_success"]
+    else:
+        entry = {"last_success": now, "duration_seconds": duration_seconds}
     if extra:
         entry.update(extra)
     existing[job_name] = entry

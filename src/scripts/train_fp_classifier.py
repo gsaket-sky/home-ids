@@ -57,7 +57,9 @@ import os
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
+from typing import Iterator
 
 # Ensure src/ directory is in Python path for standalone CLI execution
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -164,34 +166,56 @@ def _resolve_alert_input_paths(state_dir: Path) -> list[Path]:
     return [configured] if configured == fallback else [configured, fallback]
 
 
-def _read_alert_docs(path: Path) -> list[dict]:
+def _iter_alert_docs(path: Path) -> Iterator[dict]:
+    """Yields the alert stream's dict entries one at a time.
+
+    BUGFIX (2026-09-30, .94 freeze investigation): this used to read the whole file
+    into one string, then splitlines() it (a second full copy), then keep every
+    parsed doc in a list -- ~1.3 GB RSS for .94's 275 MB / 87k-line alerts.json, done
+    three times per run (load_dataset() + both calibration collectors). Inside
+    soc.service's cgroup that pushed engine + trainer past MemoryHigh, and the kernel
+    throttled the live engine for ~40 minutes per run. Streaming line by line keeps
+    memory flat; callers that only need the tail bound it themselves (a deque).
+    The legacy JSON-array format (first non-blank character '[') still needs a full
+    parse, so it keeps the old behavior."""
     if not path.exists():
-        return []
-    raw = path.read_text(encoding="utf-8", errors="ignore").strip()
-    if not raw:
-        return []
-
-    # Try JSON array first
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            return [d for d in parsed if isinstance(d, dict)]
-    except json.JSONDecodeError:
-        pass
-
-    # Fallback JSONL
-    docs = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            doc = json.loads(line)
+        return
+    with path.open("r", encoding="utf-8", errors="ignore") as fh:
+        first = ""
+        while True:
+            ch = fh.read(1)
+            if not ch or not ch.isspace():
+                first = ch
+                break
+        if not first:
+            return
+        fh.seek(0)
+        if first == "[":
+            try:
+                parsed = json.load(fh)
+            except json.JSONDecodeError:
+                return
+            if isinstance(parsed, list):
+                yield from (d for d in parsed if isinstance(d, dict))
+            return
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                doc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
             if isinstance(doc, dict):
-                docs.append(doc)
-        except json.JSONDecodeError:
-            continue
-    return docs
+                yield doc
+
+
+def _read_alert_docs(path: Path, tail: int = None) -> list[dict]:
+    """List form of _iter_alert_docs(); `tail` keeps only the last N entries (bounded
+    memory -- the same result as slicing [-N:] off the full list)."""
+    if tail is None:
+        return list(_iter_alert_docs(path))
+    return list(deque(_iter_alert_docs(path), maxlen=tail))
 
 
 def _extract_payload(doc: dict) -> dict:
@@ -353,7 +377,7 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
             if limit is not None:
                 query += " LIMIT ?"
                 params.append(limit)
-            for row in store._conn.execute(query, params).fetchall():
+            for row in store._conn.execute(query, params):  # iterate, don't fetchall(): bounded memory
                 try:
                     payload = json.loads(row["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
@@ -368,7 +392,16 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
     return docs
 
 
-def _collect_calibration_evidence(state_dir: Path) -> tuple:
+def _read_calibration_muted_docs(state_dir: Path) -> list:
+    """The 90-day fp_suppression_log window all three calibration collectors share --
+    run_threshold_calibration() reads it once and passes it to each (each collector
+    still reads it itself when called standalone)."""
+    return _read_muted_docs_from_graph(
+        state_dir, since=time.time() - _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS,
+    )
+
+
+def _collect_calibration_evidence(state_dir: Path, muted_docs: list = None) -> tuple:
     """Independently re-reads alerts.json + the graph's fp_suppression_log entries
     (same sources load_dataset() uses, via the same helpers) to build threshold-
     calibration evidence, both pooled (global) and grouped by device (per-device).
@@ -409,9 +442,8 @@ def _collect_calibration_evidence(state_dir: Path) -> tuple:
       per_device_corrected / per_device_uncorrected: the same two lists, grouped by
         device_id, for the per-device calibration pass.
     """
-    muted_docs = _read_muted_docs_from_graph(
-        state_dir, since=time.time() - _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS,
-    )
+    if muted_docs is None:
+        muted_docs = _read_calibration_muted_docs(state_dir)
 
     corrected_fp_scores = []
     per_device_corrected = {}
@@ -437,10 +469,9 @@ def _collect_calibration_evidence(state_dir: Path) -> tuple:
     uncorrected_uncertain_scores = []
     per_device_uncorrected = {}
     for path in _resolve_alert_input_paths(state_dir):
-        docs = _read_alert_docs(path)
-        if not docs:
-            continue
-        for doc in docs:
+        seen_any = False
+        for doc in _iter_alert_docs(path):
+            seen_any = True
             payload = _extract_payload(doc)
             if payload.get("type") != "ids_alert":
                 continue
@@ -455,7 +486,8 @@ def _collect_calibration_evidence(state_dir: Path) -> tuple:
             uncorrected_uncertain_scores.append(float(conf))
             device_id = payload.get("device", {}).get("id", "unknown")
             per_device_uncorrected.setdefault(device_id, []).append(float(conf))
-        break  # mirrors load_dataset()'s own "first non-empty source wins" priority order
+        if seen_any:
+            break  # mirrors load_dataset()'s own "first non-empty source wins" priority order
 
     return corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected
 
@@ -539,7 +571,7 @@ AUTOTUNE_UNCERTAIN_SAFETY_MARGIN = 0.02  # stays this far below the highest corr
 AUTOTUNE_UNCERTAIN_ABSOLUTE_FLOOR = 0.30  # matches TUNABLE_PARAMETERS' own bound for this parameter
 
 
-def _collect_uncertain_calibration_evidence(state_dir: Path) -> "tuple[list, list, dict, dict]":
+def _collect_uncertain_calibration_evidence(state_dir: Path, muted_docs: list = None) -> "tuple[list, list, dict, dict]":
     """Same shape/sourcing as _collect_calibration_evidence() (same muted_docs +
     alerts.json sources, same 90-day lookback), but for the DIFFERENT population
     combined_uncertain_threshold's own boundary needs:
@@ -552,9 +584,8 @@ def _collect_uncertain_calibration_evidence(state_dir: Path) -> "tuple[list, lis
       NEVER corrected -- genuine standing threats. Safety ceiling: refuse to lower
       the boundary if any of these sits at/below the highest corrected score (the
       same ambiguous-overlap refusal calibrate_suppress_threshold() applies)."""
-    muted_docs = _read_muted_docs_from_graph(
-        state_dir, since=time.time() - _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS,
-    )
+    if muted_docs is None:
+        muted_docs = _read_calibration_muted_docs(state_dir)
 
     corrected_confirmed_scores = []
     per_device_corrected = {}
@@ -577,10 +608,9 @@ def _collect_uncertain_calibration_evidence(state_dir: Path) -> "tuple[list, lis
     uncorrected_confirmed_scores = []
     per_device_uncorrected = {}
     for path in _resolve_alert_input_paths(state_dir):
-        docs = _read_alert_docs(path)
-        if not docs:
-            continue
-        for doc in docs:
+        seen_any = False
+        for doc in _iter_alert_docs(path):
+            seen_any = True
             payload = _extract_payload(doc)
             if payload.get("type") != "ids_alert":
                 continue
@@ -595,7 +625,8 @@ def _collect_uncertain_calibration_evidence(state_dir: Path) -> "tuple[list, lis
             uncorrected_confirmed_scores.append(float(conf))
             device_id = payload.get("device", {}).get("id", "unknown")
             per_device_uncorrected.setdefault(device_id, []).append(float(conf))
-        break  # mirrors _collect_calibration_evidence()'s own "first non-empty source wins"
+        if seen_any:
+            break  # mirrors _collect_calibration_evidence()'s own "first non-empty source wins"
 
     return corrected_confirmed_scores, uncorrected_confirmed_scores, per_device_corrected, per_device_uncorrected
 
@@ -657,7 +688,7 @@ def calibrate_uncertain_threshold(corrected_confirmed_scores: list, uncorrected_
     return candidate, reason
 
 
-def _collect_connection_abuse_corrections(state_dir: Path) -> dict:
+def _collect_connection_abuse_corrections(state_dir: Path, muted_docs: list = None) -> dict:
     """PHASE 21D3 ('enable per device tuning'): independently scans the graph's
     fp_suppression_log entries for CONNECTION_ABUSE-signature corrections (covers
     arp_sweep evidence among others), grouped by device -- separate from
@@ -666,9 +697,8 @@ def _collect_connection_abuse_corrections(state_dir: Path) -> dict:
     confidence-score distribution that function computes (arp_sweep has no comparable
     0-1 confidence score to calibrate against). Returns {device_id: corrected_count}."""
     counts: dict = {}
-    muted_docs = _read_muted_docs_from_graph(
-        state_dir, since=time.time() - _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS,
-    )
+    if muted_docs is None:
+        muted_docs = _read_calibration_muted_docs(state_dir)
     for doc in muted_docs:
         if doc.get("type") not in _FP_CORRECTION_TYPES:
             continue
@@ -1074,8 +1104,11 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         return
 
     try:
+        # One read of the shared 90-day window for all three collectors below (was three
+        # separate full LIKE scans of the decisions table).
+        calibration_muted_docs = _read_calibration_muted_docs(state_dir)
         corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected = \
-            _collect_calibration_evidence(state_dir)
+            _collect_calibration_evidence(state_dir, muted_docs=calibration_muted_docs)
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] Failed to collect calibration evidence (non-fatal): {exc}")
         _write_autotune_relay_stats(state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence,
@@ -1132,7 +1165,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     try:
         (corrected_confirmed_scores, uncorrected_confirmed_scores,
          per_device_uncertain_corrected, per_device_uncertain_uncorrected) = \
-            _collect_uncertain_calibration_evidence(state_dir)
+            _collect_uncertain_calibration_evidence(state_dir, muted_docs=calibration_muted_docs)
         uncertain_evidence = (len(corrected_confirmed_scores), len(uncorrected_confirmed_scores))
 
         # 0.55 matches fp_engine.py's own _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD (not
@@ -1236,7 +1269,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     # calibrate_arp_sweep_threshold()'s docstring for why a count threshold needs a
     # bidirectional rule instead of calibrate_suppress_threshold()'s one-directional one.
     try:
-        connection_abuse_corrections = _collect_connection_abuse_corrections(state_dir)
+        connection_abuse_corrections = _collect_connection_abuse_corrections(state_dir, muted_docs=calibration_muted_docs)
         # Union with the suppress-threshold device set above so a device that ONLY ever
         # had CONNECTION_ABUSE evidence (no UNCERTAIN-verdict alerts at all) still gets
         # considered, not just devices already touched by the pass above.
@@ -1375,13 +1408,13 @@ def load_dataset(state_dir: Path) -> tuple:
     # 1. Threat samples from configured alert stream path (fallback to state/alerts.json)
     alert_docs = []
     for path in _resolve_alert_input_paths(state_dir):
-        docs = _read_alert_docs(path)
+        docs = _read_alert_docs(path, tail=MAX_REAL_SAMPLES_PER_CLASS)
         if docs:
             alert_docs = docs
-            LOGGER.info("Using threat training source: %s (%d docs)", path, len(docs))
+            LOGGER.info("Using threat training source: %s (last %d docs)", path, len(docs))
             break
 
-    for doc in alert_docs[-MAX_REAL_SAMPLES_PER_CLASS:]:
+    for doc in alert_docs:
         payload = _extract_payload(doc)
         # BUGFIX (non-alert stream contamination): alerts.json isn't exclusively real
         # alert records — scripts/ollama_soc.py appends `type="ollama_transparency"`

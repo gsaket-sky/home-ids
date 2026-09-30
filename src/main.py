@@ -291,7 +291,15 @@ def main():
     # as the FastAPI daemon above -- shared with HealthManager's restart_scheduler_subprocess
     # recovery action. PHASE 9 FIX's log-piping behavior (previously explained here inline)
     # is preserved verbatim inside that shared helper.
-    scheduler_proc, scheduler_log_file = subprocess_launchers.start_scheduler_subprocess()
+    # scheduler_mode "external" (2026-09-30): the scheduler runs as its own service
+    # (systemd unit / compose service) with its OWN memory limit, so a heavy job
+    # (train_fp_classifier ~2 GB) can never throttle this engine inside a shared
+    # cgroup -- the .94 freeze. "embedded" keeps the old child-process behavior.
+    if str(CONFIG.get("scheduler_mode", "embedded")).lower() == "external":
+        LOGGER.info("Scheduler runs as its own service (scheduler_mode: external) -- not launching it here.")
+        scheduler_proc, scheduler_log_file = None, None
+    else:
+        scheduler_proc, scheduler_log_file = subprocess_launchers.start_scheduler_subprocess()
 
     LOGGER.debug("Starting Health Manager (watchdog + resource-pressure degradation)...")
     health_manager = HealthManager(
