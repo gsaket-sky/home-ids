@@ -48,8 +48,16 @@ check("device inserted with correct fields", row["display_label"] == "Test Devic
 
 store.upsert_device("dev1", timestamp=200.0)
 row2 = store._conn.execute("SELECT * FROM devices WHERE device_id='dev1'").fetchone()
+# Flash wear (2026-10-02): last_seen only advances when it is LAST_SEEN_RESOLUTION_SECONDS (300) old
+check("re-upserting within 5 min leaves the row untouched (no page write)",
+      row2["first_seen"] == 100.0 and row2["last_seen"] == 100.0)
+store.upsert_device("dev1", timestamp=500.0)
+row2 = store._conn.execute("SELECT * FROM devices WHERE device_id='dev1'").fetchone()
 check("re-upserting a device updates last_seen without clobbering first_seen",
-      row2["first_seen"] == 100.0 and row2["last_seen"] == 200.0)
+      row2["first_seen"] == 100.0 and row2["last_seen"] == 500.0)
+store.upsert_device("dev1", timestamp=50.0)
+check("last_seen never moves backwards",
+      store._conn.execute("SELECT last_seen FROM devices WHERE device_id='dev1'").fetchone()[0] == 500.0)
 check("re-upserting a device without a label doesn't clobber the existing one",
       row2["display_label"] == "Test Device")
 

@@ -203,7 +203,7 @@ _utils_mod.tldextract = _orig_tldextract  # restore
 from intelligence.threat_intel import ThreatIntel
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
-    ti = ThreatIntel(cache_dir=tmpdir2)
+    ti = ThreatIntel(cache_dir=tmpdir2, tranco_enabled=True)  # Tranco is opt-in since 2026-10-01
     ti._tranco_ranks = {"google.com": 1, "example.com": 54321}
 
     check("get_tranco_rank() returns the real rank for a ranked domain",

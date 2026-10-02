@@ -49,6 +49,7 @@ _CATEGORY_LABELS = {
 # need this; the free abuse.ch feeds (feodo/urlhaus/threatfox) never hit auth_expired.
 _CREDENTIAL_HELP = {
     "abuseipdb": ("ABUSEIPDB_KEY", "https://www.abuseipdb.com/account/api"),
+    "virustotal": ("VIRUSTOTAL_KEY", "https://www.virustotal.com/gui/my-apikey"),
     "otx": ("OTX_API_KEY", "https://otx.alienvault.com/api"),
 }
 

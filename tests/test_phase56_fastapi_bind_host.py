@@ -128,7 +128,11 @@ _auth_src = (ROOT / "src" / "middleware" / "auth.py").read_text(encoding="utf-8"
 check('REGRESSION GUARD: verify_token() still bypasses the token check only for '
       '("127.0.0.1", "::1", "localhost") -- this becomes the ONLY protection once '
       "fastapi_bind_host=0.0.0.0, so it must not have silently drifted",
-      'if client_host in ("127.0.0.1", "::1", "localhost"):' in _auth_src)
+      # STALE-TEST FIX (2026-10-01): the loopback bypass gained "and not via_proxy" after this
+      # test was written (2026-09-30, console.sky -- nginx-proxied requests always arrive FROM
+      # 127.0.0.1, so trusting bare loopback there let any LAN caller skip auth). That's a
+      # strictly stricter check, not a drift away from safety -- updated the literal match.
+      'if client_host in ("127.0.0.1", "::1", "localhost") and not via_proxy:' in _auth_src)
 check("REGRESSION GUARD: verify_token() still rejects a remote request outright when no "
       "fritz_api_token is configured at all (never silently allow-all on the LAN)",
       "API token required for remote access" in _auth_src)

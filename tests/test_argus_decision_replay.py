@@ -49,7 +49,7 @@ NOW = time.time()
 # --- A. get_decision_evidence ---
 store_a = GraphStore(str(TMPDIR / "a.db"))
 ev1 = Evidence(device_id="dev_a", destination_id="evil.example.com",
-                evidence_type="zeek_lateral_scan", independence_family="network_behavior",
+                evidence_type="dns_dga_burst", independence_family="dns_behavior",
                 timestamp=NOW - 100, source="zeek", value=1.0)
 ev2 = Evidence(device_id="dev_a", destination_id="evil.example.com",
                 evidence_type="malicious_ja3", independence_family="tls_fingerprint",
@@ -65,7 +65,7 @@ resolved_evidence = decision_replay.get_decision_evidence(store_a, {"decision_id
 check("A: get_decision_evidence resolves exactly the 2 real evidence items via the "
       "decision's own 'supports' edges", len(resolved_evidence) == 2)
 check("A: the resolved evidence is the REAL evidence, not a placeholder",
-      {e.evidence_type for e in resolved_evidence} == {"zeek_lateral_scan", "malicious_ja3"})
+      {e.evidence_type for e in resolved_evidence} == {"dns_dga_burst", "malicious_ja3"})
 
 # A decision with no supports edges at all (e.g. pre-A14) -- correctly returns []
 decision_id_no_edges = store_a.insert_decision(

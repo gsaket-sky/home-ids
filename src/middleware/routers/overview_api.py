@@ -39,6 +39,8 @@ Three data sources:
 """
 import json
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict
@@ -83,6 +85,72 @@ _ALERT_VOLUME_MAX_SCAN_BYTES = 40 * 1024 * 1024
 _ALERT_VOLUME_MAX_DAYS = 14
 
 
+# The summary scrapes the engine's own /metrics (~2.5s of engine CPU) and scans alerts.json; the console polls it
+# often, so results are reused for a short time. Set to 0 to disable (tests do).
+_SUMMARY_CACHE_TTL_SECONDS = 30.0
+_summary_cache: Dict[Any, "tuple[float, Any]"] = {}
+_summary_cache_lock = threading.Lock()
+
+
+# The "since restart" counters come from a scrape that costs the engine ~4-5 s of CPU and needs no freshness,
+# so the scrape is reused 4x longer than the rest of the summary (0 when the summary cache is disabled).
+_SCRAPE_CACHE_TTL_FACTOR = 4
+_SCRAPE_TIMEOUT_SECONDS = 30.0   # /metrics takes 4-7 s when the engine is busy; 3 s made the console report "could not reach"
+_SCRAPE_STALE_OK_SECONDS = 900.0  # a failed scrape falls back to the last good totals for this long
+
+
+_refreshing: set = set()
+
+
+def _store(key, value) -> None:
+    with _summary_cache_lock:
+        if len(_summary_cache) > 16:
+            _summary_cache.clear()
+        _summary_cache[key] = (time.monotonic(), value)
+
+
+def _cached(key, fn, ttl_factor=1):
+    """Stale-while-revalidate (2026-10-02, owner: "too slow"): a fresh entry is returned as is; a stale one is ALSO
+    returned at once while one background thread recomputes it -- the alert-log scan takes ~9 s inside the busy engine
+    process, and the console should never wait for it. Only the very first call (nothing cached) computes inline.
+    With the cache disabled (TTL 0, tests) every call computes inline as before."""
+    now = time.monotonic()
+    ttl = _SUMMARY_CACHE_TTL_SECONDS * ttl_factor
+    with _summary_cache_lock:
+        hit = _summary_cache.get(key)
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        stale_ok = hit is not None and ttl > 0
+        start = stale_ok and key not in _refreshing
+        if start:
+            _refreshing.add(key)
+    if stale_ok:
+        if start:
+            def _refresh():
+                try:
+                    _store(key, fn())
+                except Exception as exc:
+                    LOGGER.warning("overview cache refresh for %r failed: %s", key, exc)
+                finally:
+                    with _summary_cache_lock:
+                        _refreshing.discard(key)
+            threading.Thread(target=_refresh, name="overview-refresh", daemon=True).start()
+        return hit[1]
+    value = fn()
+    _store(key, value)
+    return value
+
+
+def warm_cache() -> None:
+    """Fills the summary cache in the background at API start, so the console's first Overview is instant too."""
+    def _warm():
+        try:
+            get_overview_summary("")
+        except Exception as exc:
+            LOGGER.debug("overview warm-up failed: %s", exc)
+    threading.Thread(target=_warm, name="overview-warm", daemon=True).start()
+
+
 def _scrape_counters() -> "tuple[Dict[str, float], bool]":
     """Returns (totals, scrape_ok). scrape_ok is True whenever the HTTP GET
     and parsing both succeeded -- deliberately NOT the same thing as "totals
@@ -104,7 +172,7 @@ def _scrape_counters() -> "tuple[Dict[str, float], bool]":
     the metrics endpoint" warning was firing for a false reason."""
     port = int(CONFIG.get("metrics_port", 9105))
     try:
-        resp = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=3)
+        resp = requests.get(f"http://127.0.0.1:{port}/metrics", timeout=_SCRAPE_TIMEOUT_SECONDS)
         resp.raise_for_status()
     except Exception as exc:
         LOGGER.debug("Failed to scrape local /metrics: %s", exc)
@@ -325,12 +393,18 @@ def _per_device_tuning_summary() -> Dict[str, Any]:
 
 @router.get("/api/overview/summary")
 def get_overview_summary(token: str = Depends(verify_token)) -> dict:
-    counters_raw, scrape_ok = _scrape_counters()
+    counters_raw, scrape_ok = _cached("scrape", _scrape_counters, _SCRAPE_CACHE_TTL_FACTOR)
+    now = time.monotonic()
+    with _summary_cache_lock:
+        if scrape_ok:
+            _summary_cache["scrape_last_good"] = (now, counters_raw)
+        elif (good := _summary_cache.get("scrape_last_good")) and now - good[0] < _SCRAPE_STALE_OK_SECONDS:
+            counters_raw, scrape_ok = good[1], True   # slightly old beats "0, not actually zero"
     security = {label: counters_raw.get(metric, 0.0) for metric, label in _SECURITY_COUNTER_NAMES.items()}
     self_healing = {label: counters_raw.get(metric, 0.0) for metric, label in _SELF_HEALING_COUNTER_NAMES.items()}
 
     alerts_path = Path(CONFIG.get("alert_json_path", "state/alerts.json"))
-    stats = _alert_stats(alerts_path)
+    stats = _cached(("stats", str(alerts_path)), lambda: _alert_stats(alerts_path))
 
     # alerts_triaged lives in `security` alongside the Prometheus-sourced
     # counters for display purposes, but comes from the SAME alert-log scan as

@@ -133,7 +133,7 @@ check("tier-5 + verified_ioc=True -> Confirmed Malicious IOC, CRITICAL",
       r_verified["decision_path"] == "tier5_confirmed" and r_verified["state"] == DecisionState.CRITICAL)
 
 r_corroborated = engine.evaluate(
-    [ev("malicious_ja3", timestamp=NOW - 5), ev("zeek_notice_medium", timestamp=NOW - 5)],
+    [ev("malicious_ja3", timestamp=NOW - 5), ev("dns_dga_burst", timestamp=NOW - 5)],
     rep(5, verified_ioc=False), now=NOW,
 )
 check("tier-5, not verified, but corroborated by 2 independent families (tls_fingerprint "
@@ -175,7 +175,7 @@ check("a lateral scan ALONE (one family only) hard-escalates the hypothesis's ow
       and r_high_single_source["state"] == DecisionState.SUSPICIOUS)
 
 r_high = engine.evaluate(
-    [ev("zeek_lateral_scan", value=1), ev("malicious_ja3", value=1)], rep(3), now=NOW,
+    [ev("zeek_lateral_scan", value=1), ev("dns_dga_burst", value=1)], rep(3), now=NOW,
 )
 check("a lateral-scan-driven attack hypothesis WITH genuine two-family corroboration "
       "(network_behavior + tls_fingerprint) reaches HIGH via the hypothesis_high path",
@@ -491,7 +491,7 @@ check("REGRESSION GUARD: a MEDIUM-tier zeek_notice on the same destination still
       "normally (only weak is excluded) -- confirms this is a tier-specific fix, not a "
       "blanket zeek_notice exclusion",
       any(w["evidence_type"] == "zeek_notice_medium" for w in r_medium_notice["attack_evidence"])
-      and r_medium_notice["independent_sources"] == 2,
+      and r_medium_notice["independent_sources"] == 1,  # B6: JA3 + notice are both Zeek-derived = one source
       f"got attack_evidence={r_medium_notice['attack_evidence']} independent_sources={r_medium_notice['independent_sources']}")
 
 # BUGFIX regression (live audit, 2026-09-10): the bare "zeek_notice" evidence_type

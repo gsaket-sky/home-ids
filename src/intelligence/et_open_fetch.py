@@ -116,6 +116,17 @@ class ETOpenUpdater:
     def load_current(self) -> Optional[Tuple[ParsedIOCs, dict]]:
         return load_index(self.index_path)
 
+    def _index_usable(self) -> bool:
+        """The cached index exists AND this code can read it (an older schema counts as missing, so it is rebuilt
+        instead of being reported 'already installed')."""
+        try:
+            mtime = self.index_path.stat().st_mtime
+        except OSError:
+            return False
+        if getattr(self, "_usable_memo", (None, None))[0] != mtime:
+            self._usable_memo = (mtime, self.load_current() is not None)
+        return self._usable_memo[1]
+
     def age_seconds(self) -> Optional[float]:
         """Seconds since the last SUCCESSFUL check (fresh download or confirmed unchanged), else None."""
         last = self._state().get("last_success")
@@ -126,7 +137,7 @@ class ETOpenUpdater:
         t = self.now()
         if t < float(st.get("next_allowed", 0)):
             return False
-        if not self.index_path.exists():
+        if not self._index_usable():
             return True
         return t >= float(st.get("next_due", 0))
 
@@ -147,7 +158,7 @@ class ETOpenUpdater:
         version = body.decode("utf-8", "replace").strip() if code == 200 else ""
         if code != 200 or not version:
             return self._fail(st, t, f"version check HTTP {code}")
-        if version == st.get("version") and self.index_path.exists() and not force:
+        if version == st.get("version") and self._index_usable() and not force:
             self._succeed(st, t, version=version)
             return UpdateResult("unchanged", f"version {version} already installed")
 
@@ -155,7 +166,7 @@ class ETOpenUpdater:
         data = None
         last_err = "no url"
         for url in self.rules_urls:
-            headers = {"If-None-Match": st["etag"]} if st.get("etag") and self.index_path.exists() and not force else {}
+            headers = {"If-None-Match": st["etag"]} if st.get("etag") and self._index_usable() and not force else {}
             try:
                 code, hdrs, body = self.http_get(url, headers, self.timeout)
             except Exception as exc:

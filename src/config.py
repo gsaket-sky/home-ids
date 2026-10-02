@@ -36,6 +36,10 @@ _ENV_OVERRIDES = {
     "OTX_API_KEY":            "otx_api_key",
     "ABUSEIPDB_API_KEY":      "abuseipdb_api_key",
     "ABUSEIPDB_KEY":          "abuseipdb_api_key",
+    "ABUSECH_AUTH_KEY":       "abusech_auth_key",
+    "MAXMIND_LICENSE_KEY":    "maxmind_license_key",
+    "VIRUSTOTAL_API_KEY":     "virustotal_api_key",
+    "VIRUSTOTAL_KEY":         "virustotal_api_key",
     "PIHOLE_API_PASSWORD":    "pihole_api_password",
     "PIHOLE_API_URL":         "pihole_api_url",
     "ROUTER_WEBHOOK_URL":     "router_webhook_url",
@@ -51,7 +55,7 @@ _STATIC_KEYS = {
     "metrics_port", "scheduler_metrics_port", "state_path", "model_path", "geoip_db", "geoip_asn_db", 
     "pihole_db", "zeek_log_dir", "alert_json_path", "alert_json_max_bytes", 
     "max_device_states", "telegram_token", "telegram_chat_id", "otx_api_key",
-    "abuseipdb_api_key", "pihole_api_password",
+    "abuseipdb_api_key", "virustotal_api_key", "abusech_auth_key", "maxmind_license_key", "pihole_api_password",
     "fritz_password", "fritz_api_token", "fastapi_port", "fastapi_bind_host", "webui_port",
     "env_file"
 }
@@ -61,6 +65,34 @@ _STATIC_KEYS = {
 # "cron", optional "script"}), polled by scripts/scheduler.py, plus autotune_schedule_cron
 # for the weekly retrain job. See DEFAULT_CONFIG below.
 
+_IPS_MECHANISM_KEYS = ("ips_pihole_enabled", "ips_router_enabled", "ips_tarpit_enabled")
+_ips_master_switch_warned = False
+
+
+def enforce_ips_master_switch(config: dict) -> None:
+    """`ips_enabled: false` is the documented global kill switch for ALL active response
+    (Pi-hole sinkhole, router isolation, Layer-2 tarpit). It used to be checked in two places
+    only, while the mitigator armed each mechanism from its own per-mechanism key -- and the
+    IDS_IPS_*_ENABLED environment variables (shipped as `true` in the Docker env template)
+    override config.yaml -- so `ips_enabled: false` did not stop the tarpit or router isolation
+    (found 2026-09-30 in the .19 rehearsal). Enforced here, after YAML and env are merged, so no
+    later source can re-enable a mechanism while the master switch is off. Turning the master
+    switch back on re-applies the values set in config.yaml / the environment on the next reload
+    (they differ from the forced ones). A mechanism that only has its built-in default stays off
+    until the next restart -- deliberately the fail-safe direction: nothing is armed that the
+    operator did not explicitly configure."""
+    global _ips_master_switch_warned
+    if bool(config.get("ips_enabled", True)):
+        _ips_master_switch_warned = False
+        return
+    forced = [k for k in _IPS_MECHANISM_KEYS if config.get(k)]
+    for k in _IPS_MECHANISM_KEYS:
+        config[k] = False
+    if forced and not _ips_master_switch_warned:
+        _ips_master_switch_warned = True
+        LOGGER.warning("ips_enabled is false: forcing %s off (all active response disabled).", ", ".join(forced))
+
+
 def apply_env_overrides(config: dict) -> None:
     for env_key, cfg_key in _ENV_OVERRIDES.items():
         val = os.environ.get(env_key)
@@ -69,6 +101,7 @@ def apply_env_overrides(config: dict) -> None:
                 config[cfg_key] = val.strip().lower() in ("1", "true", "yes", "on")
             else:
                 config[cfg_key] = val
+    enforce_ips_master_switch(config)
 
 def load_env_file(env_path: Path) -> None:
     if not env_path.exists():
@@ -127,6 +160,24 @@ DEFAULT_CONFIG = {
     "et_open_enabled": True,
     "otx_api_key": "",
     "abuseipdb_api_key": "",
+    "virustotal_api_key": "",
+    "abusech_auth_key": "",       # URLhaus / ThreatFox Auth-Key (with advanced_keyed_feeds)
+    "maxmind_license_key": "",    # optional: the customer's own MaxMind key (city-level GeoIP download)
+    # GeoIP (2026-10-01): iptoasn.com, public domain, downloaded weekly by the engine. MaxMind files at geoip_db /
+    # geoip_asn_db are still preferred when present (bring-your-own, city-level detail).
+    "geoip_iptoasn_enabled": True,
+    # Domain popularity (2026-10-01): learned on this network (intelligence/local_popularity.py). Tranco is off by
+    # default -- one of its inputs is non-commercial-licensed; turning it on is a personal-use choice.
+    "local_popularity_enabled": True,
+    "tranco_enabled": False,
+    "geoip_iptoasn_path": "state/geoip/ip2asn-combined.tsv.gz",
+    "geoip_iptoasn_refresh_days": 7,
+    # Paid/opt-in reputation services (owner decision 2026-10-01): implemented, OFF by default. Their free tiers
+    # forbid commercial use, so a customer turns them on with their OWN key in the web UI's advanced settings.
+    # Both toggles are live (config-override channel); the API keys are static secrets (restart).
+    "abuseipdb_enabled": False,
+    "abuseipdb_blacklist_refresh_hours": 8,   # free plan: ~5 blacklist downloads/day -- 8 h leaves room for restarts
+    "virustotal_enabled": False,
     # Hidden advanced switch (config.yaml only, not in the WebUI): enables the personal-use keyed feeds
     # (OTX / AbuseIPDB / URLhaus / ThreatFox). Off in a shipped unit -- their free tiers forbid commercial use.
     "advanced_keyed_feeds": False,

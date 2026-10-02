@@ -20,6 +20,9 @@ from collections import OrderedDict
 from typing import Optional, List, Dict, Set, Any, Tuple
 
 from utils import sanitize_hostname, infer_device_type, get_mac_vendor
+
+# Pi-hole query statuses that mean "blocked" (same set as extractors/dns_features.py's BLOCKED).
+_PIHOLE_BLOCKED_STATUSES = frozenset({1, 4, 5, 6, 7, 8, 10})
 from core.state_guard import StateManager
 from core.device_matching import AUTO_MERGE_CONFIDENCE
 from core.device_labels import get_label as get_confirmed_device_label
@@ -362,6 +365,12 @@ class DeviceIdentityManager:
                 self.apply_device_type(locked_state, type_overrides)
 
             active_device_ids.add(dev_id)
+
+            # Domain popularity learned on this network (replaces Tranco). Blocked queries are not learned:
+            # ad/tracker lists must never become "popular, therefore trusted".
+            popularity = getattr(self, "popularity", None)
+            if popularity is not None and row.get("status") not in _PIHOLE_BLOCKED_STATUSES:
+                popularity.observe(dev_id, row.get("domain", ""), row.get("timestamp"))
 
         return list(active_device_ids)
 

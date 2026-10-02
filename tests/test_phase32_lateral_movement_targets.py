@@ -335,9 +335,8 @@ check("THE CORE FIX: the ti_risk IP lookup updates reputation_target to dest_ip 
 check("THE CORE FIX: abuse_risk (always IP-sourced when nonzero) updates "
       "reputation_target to dest_ip when it exceeds the running best",
       _has_statements("if abuse_risk > _best_risk_seen:", "_best_risk_seen = abuse_risk", "reputation_target = dest_ip"))
-check("THE CORE FIX: vt_risk tracks whether its max came from the IP or domain "
-      "contribution, and updates reputation_target to whichever one actually won",
-      "if vt_ip_risk >= vt_domain_risk:" in pipeline_src and "vt_risk_source = dest_ip" in pipeline_src and "vt_risk_source = top_domain" in pipeline_src)
+# (removed 2026-10-01: the vt_risk IP-vs-domain source tracking asserted here went away with VirusTotal;
+# vt_risk is now a legacy-named feature that only mirrors the local-intel match.)
 check("THE CORE FIX: the actual classifier call now uses reputation_target, not the "
       "raw top_domain",
       "self.rep_classifier.classify(reputation_target, vt_score=vt_risk" in pipeline_src)

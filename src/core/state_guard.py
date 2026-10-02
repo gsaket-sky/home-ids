@@ -8,6 +8,7 @@ RECENT FIXES:
 - ADDED (LOGGING): Debug events tracked at lock acquisitions, migrations, and flushes.
 """
 
+import hashlib
 import json
 import logging
 import threading
@@ -18,6 +19,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional, Dict, List, Any
 
+from core import state_store
 from core.state import DeviceState
 from core.device_matching import (
     dhcp_fingerprint_match,
@@ -73,6 +75,21 @@ class StateManager:
         # one-tap Telegram [Revoke] button. Same persistence pattern as _ips_state —
         # rides along with the existing flush_to_disk/load_from_disk machinery.
         self._action_ledger: Dict[str, Dict[str, Any]] = {}
+        # A2 (2026-10-01): the ledger is ~89% of ids_state.json on .94 (1,344 published-alert entries carrying full
+        # alert payloads, 5.2 of 5.8 MB) and re-encoding all of it on every flush was one of the engine's largest
+        # GIL costs. Entries are written once and only change on revoke, so each entry's JSON is cached by
+        # action_id; every mutation drops the affected key (or the whole cache when the ledger is replaced), and a
+        # flush encodes only the entries it has not seen before.
+        self._ledger_entry_json: Dict[str, str] = {}
+        self.flushes_skipped_unchanged = 0
+        # Flash wear (checklist §K): state lives in SQLite rows (core/state_store.py); this remembers a digest of every
+        # row as it is on disk, so a flush writes only rows whose JSON changed. _ledger_dirty lists the ledger entries
+        # (re-)encoded since the last flush -- the only ones that can differ from disk.
+        self._disk_digest: Dict[str, Dict[str, bytes]] = {"devices": {}, "ledger": {}, "kv": {}}
+        self._ledger_dirty: set = set()
+        self._flush_lock = threading.Lock()
+        self._legacy_json_pending = False
+        self.rows_written_last_flush = 0
         # PHASE 6 (cross-address-family identity correlation): MAC address -> canonical
         # device_id. A MAC address is protocol-family-agnostic (captured at L2), unlike
         # `client_ip`-anchored device_id resolution, which was blind to the fact that the
@@ -697,6 +714,7 @@ class StateManager:
         re-deriving features from scratch — the Telegram round-trip only carries a short
         action_id string, not the alert body itself."""
         with self._global_lock:
+            self._ledger_entry_json.pop(action_id, None)
             self._action_ledger[action_id] = {
                 "type": action_type, "target": target, "device_id": device_id, "hostname": hostname,
                 "timestamp": time.time(), "expires_at": time.time() + ttl_seconds, "revoked": False,
@@ -712,6 +730,7 @@ class StateManager:
                 return None
             entry["revoked"] = True
             entry["revoked_at"] = time.time()
+            self._ledger_entry_json.pop(action_id, None)
             return dict(entry)
 
     def get_action(self, action_id: str) -> Optional[Dict[str, Any]]:
@@ -728,6 +747,7 @@ class StateManager:
                        if not e.get("revoked") and e.get("expires_at", 0) < now]
             for aid in expired:
                 del self._action_ledger[aid]
+                self._ledger_entry_json.pop(aid, None)
         if expired:
             LOGGER.debug("Pruned %d expired action-ledger entries.", len(expired))
         return len(expired)
@@ -825,54 +845,90 @@ class StateManager:
                 del self._ip_to_device_id[client_ip]
             LOGGER.warning("StateManager reached max capacity (%d). Evicted LRU device: %s", self.max_devices, evicted_id)
 
-    def load_from_disk(self, alpha: float = 0.05) -> int:
-        if not self.state_path.exists():
-            LOGGER.info("No existing state file found at %s. Starting fresh store.", self.state_path)
-            self.load_historical_ledger()
-            return 0
+    @staticmethod
+    def _digest(text: str) -> bytes:
+        return hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
 
+    def _apply_snapshot(self, data: Dict[str, Any], alpha: float) -> None:
+        """Replaces the in-memory state with a snapshot in the ids_state.json shape. Caller holds _global_lock."""
+        self._states.clear()
+
+        devices_data = data.get("devices", data) if isinstance(data, dict) and "devices" in data else data
+        if isinstance(data, dict) and "ips_state" in data:
+            self._ips_state = data["ips_state"]
+        if isinstance(data, dict) and "action_ledger" in data:
+            self._action_ledger = data["action_ledger"] or {}
+            self._ledger_entry_json.clear()
+        if isinstance(data, dict) and "merge_redirects" in data:
+            # BUGFIX (identity-merge race, handover 2026-09-20): must survive a
+            # restart -- otherwise a soc.service bounce would forget every
+            # discarded id and re-open the exact resurrection window this map
+            # exists to close.
+            self._merge_redirects = OrderedDict(data["merge_redirects"] or {})
+
+        for dev_id, d in devices_data.items():
+            if dev_id in ("ips_state", "action_ledger", "merge_redirects"):
+                continue
+            st = DeviceState.from_dict(d, alpha=alpha)
+            self._states[dev_id] = st
+
+        self._prune_lru_capacity()
+
+        # PHASE 6: _mac_to_device_id is a derived index (not its own persisted
+        # source of truth) — rebuild it from each DeviceState's own mac_address
+        # field, which IS persisted. Simpler and avoids yet another split-brain
+        # surface for the IPC-subprocess reconcile path to worry about.
+        self._mac_to_device_id.clear()
+        for dev_id, st in self._states.items():
+            mac = getattr(st, "mac_address", "unknown")
+            if mac and mac != "unknown":
+                self._mac_to_device_id[mac] = dev_id
+
+    def load_from_disk(self, alpha: float = 0.05, ledger: bool = True) -> int:
+        """Loads the SQLite state (core/state_store.py); without a database yet, an existing ids_state.json -- it is
+        migrated by the next flush. ledger=False skips the action ledger (most of the data) for read-only views; such
+        an instance never flushes."""
         try:
-            LOGGER.debug("Reading state snapshot from %s", self.state_path)
-            raw_text = self.state_path.read_text(encoding="utf-8")
-            data = json.loads(raw_text)
-            
+            self._read_only = not ledger
+            rows = state_store.read_rows(self.state_path, tables=("devices", "ledger", "kv") if ledger else ("devices", "kv"))
+            if rows is not None and not ledger:
+                rows["ledger"] = {}
+            legacy = state_store.legacy_json_path(self.state_path)
+            if rows is None and not legacy.exists():
+                LOGGER.info("No existing state found at %s. Starting fresh store.", self.state_path)
+                self.load_historical_ledger()
+                return 0
+
+            if rows is not None:
+                kv = {k: json.loads(v) for k, v in rows["kv"].items()}
+                data = {"devices": {k: json.loads(v) for k, v in rows["devices"].items()},
+                        "action_ledger": {k: json.loads(v) for k, v in rows["ledger"].items()},
+                        "ips_state": kv.get("ips_state") or {}, "merge_redirects": kv.get("merge_redirects") or {}}
+                source = state_store.db_path_for(self.state_path)
+            else:
+                LOGGER.debug("Reading legacy state snapshot from %s", legacy)
+                data = json.loads(legacy.read_text(encoding="utf-8"))
+                source = legacy
+
             with self._global_lock:
-                self._states.clear()
-                
-                devices_data = data.get("devices", data) if isinstance(data, dict) and "devices" in data else data
-                if isinstance(data, dict) and "ips_state" in data:
-                    self._ips_state = data["ips_state"]
-                if isinstance(data, dict) and "action_ledger" in data:
-                    self._action_ledger = data["action_ledger"] or {}
-                if isinstance(data, dict) and "merge_redirects" in data:
-                    # BUGFIX (identity-merge race, handover 2026-09-20): must survive a
-                    # restart -- otherwise a soc.service bounce would forget every
-                    # discarded id and re-open the exact resurrection window this map
-                    # exists to close.
-                    self._merge_redirects = OrderedDict(data["merge_redirects"] or {})
+                self._apply_snapshot(data, alpha)
+                with self._flush_lock:
+                    if rows is not None:
+                        # What is on disk now: the next flush writes only rows that differ from it.
+                        self._disk_digest = {t: {k: self._digest(v) for k, v in rows[t].items()}
+                                             for t in ("devices", "ledger", "kv")}
+                        self._ledger_entry_json.update(rows["ledger"])
+                        self._ledger_dirty.clear()
+                        self._legacy_json_pending = False
+                    else:
+                        self._disk_digest = {"devices": {}, "ledger": {}, "kv": {}}
+                        self._ledger_dirty = set(self._action_ledger)
+                        self._legacy_json_pending = True
 
-                for dev_id, d in devices_data.items():
-                    if dev_id in ("ips_state", "action_ledger", "merge_redirects"):
-                        continue
-                    st = DeviceState.from_dict(d, alpha=alpha)
-                    self._states[dev_id] = st
-
-                self._prune_lru_capacity()
-
-                # PHASE 6: _mac_to_device_id is a derived index (not its own persisted
-                # source of truth) — rebuild it from each DeviceState's own mac_address
-                # field, which IS persisted. Simpler and avoids yet another split-brain
-                # surface for the IPC-subprocess reconcile path to worry about.
-                self._mac_to_device_id.clear()
-                for dev_id, st in self._states.items():
-                    mac = getattr(st, "mac_address", "unknown")
-                    if mac and mac != "unknown":
-                        self._mac_to_device_id[mac] = dev_id
-            
             self.load_historical_ledger()
-                    
+
             loaded_count = len(self._states)
-            LOGGER.info("Successfully loaded baselines for %d devices and IPS state from %s", loaded_count, self.state_path)
+            LOGGER.info("Successfully loaded baselines for %d devices and IPS state from %s", loaded_count, source)
             return loaded_count
         except Exception as exc:
             LOGGER.error("Failed to load state store from %s: %s", self.state_path, exc)
@@ -917,8 +973,11 @@ class StateManager:
         return result.get("value"), False
 
     def flush_to_disk(self) -> bool:
+        if getattr(self, "_read_only", False):
+            LOGGER.error("StateManager loaded without the action ledger (read-only view) -- refusing to flush")
+            return False
         try:
-            LOGGER.debug("Acquiring global lock to initiate state file persistence.")
+            LOGGER.debug("Acquiring global lock to initiate state persistence.")
             with self._global_lock:
                 devices_snapshot = {}
                 graph_metadata_snapshot = {}
@@ -935,51 +994,102 @@ class StateManager:
                         # collect-under-lock/IO-outside-lock convention (see
                         # mitigation/ips.py's release_device() for the same pattern).
                         graph_metadata_snapshot[dev_id] = state.to_graph_metadata()
+                kv_json = {"ips_state": json.dumps(self._ips_state, separators=(",", ":")),
+                           "merge_redirects": json.dumps(dict(self._merge_redirects), separators=(",", ":"))}
+                # A2: per-entry JSON cache (see __init__). Misses -- normally the one or two alerts published since
+                # the last flush -- are encoded here, under the lock, so a concurrent revoke can never leave a stale
+                # string in the cache; the full first flush after a restart is the only large one.
+                entry_cache = self._ledger_entry_json
+                ledger_json: Dict[str, str] = {}
+                for aid, entry in self._action_ledger.items():
+                    js = entry_cache.get(aid)
+                    if js is None:
+                        js = json.dumps(entry, separators=(",", ":"))
+                        entry_cache[aid] = js
+                        self._ledger_dirty.add(aid)
+                    ledger_json[aid] = js
+                if len(entry_cache) > 2 * len(self._action_ledger) + 100:
+                    for stale in [k for k in entry_cache if k not in self._action_ledger]:
+                        del entry_cache[stale]
+                ledger_dirty, self._ledger_dirty = self._ledger_dirty, set()
 
-                full_snapshot = {
-                    "ips_state": self._ips_state,
-                    "devices": devices_snapshot,
-                    "action_ledger": dict(self._action_ledger),
-                    "merge_redirects": dict(self._merge_redirects),
-                }
+            def _write_changed_rows():
+                # json.dumps(), not json.dump(): CPython only uses its C encoder for one-shot encoding.
+                dev_json = {k: json.dumps(v, separators=(",", ":")) for k, v in devices_snapshot.items()}
+                with self._flush_lock:
+                    if not state_store.db_path_for(self.state_path).exists():
+                        # Database removed underneath us (or never written): everything is "changed".
+                        self._disk_digest = {"devices": {}, "ledger": {}, "kv": {}}
+                    disk = self._disk_digest
+                    dev_new = {k: self._digest(v) for k, v in dev_json.items()}
+                    dev_changed = {k: dev_json[k] for k, d in dev_new.items() if disk["devices"].get(k) != d}
+                    dev_deleted = [k for k in disk["devices"] if k not in dev_json]
+                    led_changed = {}
+                    for aid in ledger_json:
+                        if aid in disk["ledger"] and aid not in ledger_dirty:
+                            continue
+                        d = self._digest(ledger_json[aid])
+                        if disk["ledger"].get(aid) != d:
+                            led_changed[aid] = (ledger_json[aid], d)
+                    led_deleted = [a for a in disk["ledger"] if a not in ledger_json]
+                    kv_new = {k: self._digest(v) for k, v in kv_json.items()}
+                    kv_changed = {k: kv_json[k] for k, d in kv_new.items() if disk["kv"].get(k) != d}
+                    n = len(dev_changed) + len(dev_deleted) + len(led_changed) + len(led_deleted) + len(kv_changed)
+                    if n == 0 and not self._legacy_json_pending:
+                        # Flash wear: nothing changed since the last write -> no write at all.
+                        self.flushes_skipped_unchanged += 1
+                        return 0
+                    state_store.write_changes(self.state_path, dev_changed, dev_deleted,
+                                              {k: v for k, (v, _) in led_changed.items()}, led_deleted, kv_changed)
+                    for k in dev_changed:
+                        disk["devices"][k] = dev_new[k]
+                    for k in dev_deleted:
+                        disk["devices"].pop(k, None)
+                    for k, (_, d) in led_changed.items():
+                        disk["ledger"][k] = d
+                    for k in led_deleted:
+                        disk["ledger"].pop(k, None)
+                    for k in kv_changed:
+                        disk["kv"][k] = kv_new[k]
+                    if self._legacy_json_pending:
+                        legacy = state_store.legacy_json_path(self.state_path)
+                        try:
+                            if legacy.exists():
+                                legacy.replace(legacy.with_name(legacy.name + ".pre-sqlite"))
+                        except OSError as exc:
+                            LOGGER.warning("Migrated state to SQLite but could not rename %s: %s", legacy, exc)
+                        self._legacy_json_pending = False
+                        LOGGER.info("State migrated from %s to %s", legacy, state_store.db_path_for(self.state_path))
+                    return n
 
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self.state_path.with_suffix(".tmp")
-
-            def _write_and_replace():
-                # json.dumps(), not json.dump(): CPython only uses its C encoder for
-                # one-shot encoding; the streaming json.dump() runs the pure-Python
-                # encoder -- ~3x slower on .94's 5.7 MB snapshot (0.49 s vs 0.16 s
-                # alone, several seconds under live load), all of it holding the GIL
-                # while the main detection loop waits on this thread.
-                payload = json.dumps(full_snapshot, separators=(",", ":"))
-                with open(tmp_path, "w", encoding="utf-8") as f:
-                    f.write(payload)
-                tmp_path.replace(self.state_path)
-
-            _, timed_out = self._bounded_io(_write_and_replace, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)
+            written, timed_out = self._bounded_io(_write_changed_rows, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)
             if timed_out:
-                # tmp_path.replace() never ran (or hasn't yet, on the abandoned
-                # thread) -- self.state_path is untouched, so a concurrent reader
-                # never sees a partial/corrupt file. The abandoned write may still
-                # complete later on its own leaked thread and silently finish the
-                # replace after the fact; that's fine (same file, same content it
-                # would have written promptly).
+                # The transaction either commits on the abandoned thread (and updates the row digests there) or
+                # never does -- the database is never left half-written.
+                with self._global_lock:
+                    self._ledger_dirty |= ledger_dirty
                 LOGGER.error(
                     "StateManager flush to %s did not complete within %.0fs (likely "
                     "a kernel-level I/O stall under memory pressure) -- abandoning "
                     "this flush attempt rather than blocking the caller.",
-                    self.state_path, self._FLUSH_IO_TIMEOUT_SECONDS,
+                    state_store.db_path_for(self.state_path), self._FLUSH_IO_TIMEOUT_SECONDS,
                 )
                 return False
 
-            LOGGER.info("StateManager flushed state snapshot (%d devices, IPS state) to %s", len(devices_snapshot), self.state_path)
+            self.rows_written_last_flush = written or 0
+            if written:
+                LOGGER.info("StateManager flushed %d changed row(s) (%d devices in memory) to %s", written,
+                            len(devices_snapshot), state_store.db_path_for(self.state_path))
+            else:
+                LOGGER.debug("StateManager flush: nothing changed")
 
             if self._graph_store is not None:
                 self._mirror_graph_metadata(graph_metadata_snapshot)
 
             return True
         except Exception as exc:
+            with self._global_lock:
+                self._ledger_dirty |= locals().get("ledger_dirty", set())
             LOGGER.error("Failed to flush state store to %s: %s", self.state_path, exc)
             return False
 
@@ -991,7 +1101,7 @@ class StateManager:
         history to the rest of a device's cold identity/audit fields (hostname,
         device_type, confirmed_threat_count, fp_count, etc.). Deliberately never
         read back on any hot path -- flush_to_disk()'s local DeviceState/
-        ids_state.json write above stays the sole, unchanged, in-memory-then-disk
+        state write above stays the sole, unchanged, in-memory-then-disk
         source of truth for everything this class does; this call happens strictly
         AFTER that write succeeds, and a failure here (a single device's graph
         write, or the whole loop) never affects flush_to_disk()'s own return
@@ -1013,11 +1123,19 @@ class StateManager:
         device baselines or re-loading all 5000 device profiles.
         """
         try:
-            if not self.state_path.exists():
-                return False
-            raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-            disk_ips = raw.get("ips_state", {})
-            disk_ledger = raw.get("action_ledger", {})
+            rows = state_store.read_rows(self.state_path, tables=("kv", "ledger"))
+            if rows is not None:
+                disk_ips = json.loads(rows["kv"].get("ips_state", "{}"))
+                ledger_raw = rows["ledger"]
+                disk_ledger = {k: json.loads(v) for k, v in ledger_raw.items()}
+            else:
+                legacy = state_store.legacy_json_path(self.state_path)
+                if not legacy.exists():
+                    return False
+                raw = json.loads(legacy.read_text(encoding="utf-8"))
+                disk_ips = raw.get("ips_state", {})
+                disk_ledger = raw.get("action_ledger", {})
+                ledger_raw = None
             if not disk_ips and not disk_ledger:
                 return False
             with self._global_lock:
@@ -1032,6 +1150,14 @@ class StateManager:
                 # copy and silently lose the revoke.
                 if disk_ledger:
                     self._action_ledger = disk_ledger
+                    self._ledger_entry_json.clear()
+                    if ledger_raw is not None:
+                        with self._flush_lock:
+                            self._ledger_entry_json.update(ledger_raw)
+                            self._disk_digest["ledger"] = {k: self._digest(v) for k, v in ledger_raw.items()}
+                            self._ledger_dirty.clear()
+                    else:
+                        self._ledger_dirty = set(disk_ledger)
             LOGGER.info("🔄 IPS state reconciled from disk after external IPC release signal.")
             return True
         except Exception as exc:

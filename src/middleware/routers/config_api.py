@@ -208,7 +208,8 @@ def get_config(token: str = Depends(verify_token)):
             "suggested_default": row["def"], "options": row.get("options"),
             "value": value, "restart_required": restart_required, "editable": editable,
             "overridden": override_entry is not None,
-            "baseline": override_entry["baseline"] if override_entry else None,
+            # .get(): an entry without a baseline (web UI switches before 2026-10-02) must not take the page down
+            "baseline": override_entry.get("baseline") if override_entry else None,
             "set_by": override_entry.get("set_by") if override_entry else None,
             "set_at": override_entry.get("set_at") if override_entry else None,
         }

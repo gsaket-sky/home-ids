@@ -501,7 +501,9 @@ def _append_burst_history(out_dir: Path, record: dict) -> None:
     this codebase."""
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        history_path = out_dir / "reactive_capture_history.jsonl"
+        # Kept NEXT TO the scratch directory, not in it: in Docker the scratch directory is a RAM disk (flash wear --
+        # bursts are ~40 MB of pcap each), and this summary must survive reboots.
+        history_path = out_dir.parent / "reactive_capture_history.jsonl"
         rotate_jsonl_if_oversized(history_path)
         with open(history_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
@@ -629,11 +631,20 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
     burst_source_ips: set = set()
     capture_ts = time.time()
     suricata_evidence_by_device: Dict[str, list] = {}
+    # A6 (2026-10-01): Suricata used to run once PER RADIO, and every run loads the full ruleset (~48k ET Open
+    # rules, ~90-100 s and ~600 MB on .94) before reading a single packet -- two radios meant paying that twice
+    # per burst. Each radio's converted pcap now goes into one per-burst directory and Suricata reads the whole
+    # directory in a single run (`-r <dir>`, pcap-file mode): one rule load, identical rules, identical packets.
+    # The directory lives under out_dir, which docker-compose mounts at the same path in the capture-worker.
+    suricata_pcap_dir = out_dir / f"suricata_pcaps_{int(capture_ts)}"
+    suricata_pcaps: List[Path] = []
 
     for iface, avm_path in raw_pcaps.items():
-        std_path = avm_path.with_suffix(".std.pcap")
+        std_path = (suricata_pcap_dir / f"{iface}.pcap") if suricata_enabled else avm_path.with_suffix(".std.pcap")
+        if suricata_enabled:
+            suricata_pcap_dir.mkdir(parents=True, exist_ok=True)
         scratch: Optional[Path] = None
-        suricata_scratch: Optional[Path] = None
+        keep_for_suricata = False
         try:
             try:
                 n_records = avm_pcap_to_standard(avm_path, std_path)
@@ -658,51 +669,68 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
             for etype, n in counts.items():
                 summary["zeek_event_counts"][etype] = summary["zeek_event_counts"].get(etype, 0) + n
 
-            # VERSION 11 (P2, Suricata follow-up): batch scan of the SAME std_path
-            # Zeek just reprocessed -- runs and exits within this one loop iteration,
-            # nothing left running afterward. Non-fatal: a scan failure here never
-            # aborts the rest of the burst (same defensive style as everything else
-            # in this loop).
+            # Queued for the single per-burst Suricata run below. Only radios whose pcap Zeek could read go in,
+            # same as before (a pcap Zeek chokes on must not take the other radio's scan down with it).
             if suricata_enabled:
-                try:
-                    suricata_scratch = out_dir / f"suricata_scratch_{iface}_{int(time.time())}"
-                    iface_findings = run_suricata_and_attribute(
-                        std_path, suricata_scratch, suricata_bin, suricata_rules_path,
-                        state_manager, capture_ts, timeout=suricata_timeout,
-                        memory_limit_mb=suricata_memory_limit_mb,
-                        cgroup_isolate=suricata_cgroup_isolate,
-                        cpu_quota_percent=suricata_cpu_quota_percent,
-                    )
-                    for dev_id, ev_list in iface_findings.items():
-                        suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
-                    suricata_scan_total.labels(outcome="success").inc()
-                    suricata_last_success_timestamp.set(time.time())
-                    # BUGFIX (2026-09-15, console/health audit -- user report: health only
-                    # shows Suricata's binary/rules-file presence, never whether a scan
-                    # actually ran recently). suricata_last_success_timestamp above is a
-                    # Prometheus gauge -- real telemetry, but health_manager.py reads JSON
-                    # state files, not its own metrics endpoint, so this never reached the
-                    # console. write_component_heartbeat() is the SAME cross-process
-                    # mechanism already wired for backtest_job earlier this session --
-                    # reused here, not reinvented.
-                    write_component_heartbeat(out_dir.parent, "suricata_scan", extra={"outcome": "completed"})
-                except Exception as exc:
-                    LOGGER.error("Suricata batch scan failed for %s (non-fatal): %s", iface, exc)
-                    summary["errors"].append(f"{iface}: suricata scan failed -- {exc}")
-                    reactive_capture_errors_total.labels(stage="suricata_scan").inc()
-                    suricata_scan_total.labels(outcome="error").inc()
-                    # Deliberately NOT writing a heartbeat here: write_component_heartbeat()
-                    # always stamps last_heartbeat=now unconditionally (see its own
-                    # docstring/body), so calling it on a FAILURE would wrongly refresh the
-                    # "recently active" signal during a failure streak -- masking exactly
-                    # the problem this whole feature exists to surface. Only a genuine
-                    # completed scan (above) counts, so health_manager's own recency check
-                    # means "time since last SUCCESSFUL scan," not "time since last attempt."
+                suricata_pcaps.append(std_path)
+                keep_for_suricata = True
         finally:
             if delete_after_ingest:
-                _cleanup_burst_files(avm_path, std_path, scratch)
-                if suricata_scratch is not None and suricata_scratch.exists():
-                    shutil.rmtree(suricata_scratch, ignore_errors=True)
+                # The converted pcap stays until the shared Suricata run has read it.
+                _cleanup_burst_files(avm_path, None if keep_for_suricata else std_path, scratch)
+            elif suricata_enabled and not keep_for_suricata:
+                # A pcap that failed conversion/Zeek must not sit in the shared scan directory, even when raw
+                # files are being kept -- Suricata would read it along with the good ones.
+                try:
+                    std_path.unlink()
+                except OSError:
+                    pass
+
+    # VERSION 11 (P2, Suricata follow-up) / A6: one batch scan over every radio's pcap from this burst -- runs and
+    # exits here, nothing left running afterward. Non-fatal: a scan failure never aborts the rest of the burst.
+    if suricata_enabled and suricata_pcaps:
+        suricata_scratch = out_dir / f"suricata_scratch_{int(capture_ts)}"
+        try:
+            findings = run_suricata_and_attribute(
+                suricata_pcap_dir, suricata_scratch, suricata_bin, suricata_rules_path,
+                state_manager, capture_ts,
+                # Same total time budget as the per-radio runs had between them.
+                timeout=suricata_timeout * len(suricata_pcaps),
+                memory_limit_mb=suricata_memory_limit_mb,
+                cgroup_isolate=suricata_cgroup_isolate,
+                cpu_quota_percent=suricata_cpu_quota_percent,
+            )
+            for dev_id, ev_list in findings.items():
+                suricata_evidence_by_device.setdefault(dev_id, []).extend(ev_list)
+            suricata_scan_total.labels(outcome="success").inc()
+            suricata_last_success_timestamp.set(time.time())
+            # BUGFIX (2026-09-15, console/health audit -- user report: health only
+            # shows Suricata's binary/rules-file presence, never whether a scan
+            # actually ran recently). suricata_last_success_timestamp above is a
+            # Prometheus gauge -- real telemetry, but health_manager.py reads JSON
+            # state files, not its own metrics endpoint, so this never reached the
+            # console. write_component_heartbeat() is the SAME cross-process
+            # mechanism already wired for backtest_job earlier this session --
+            # reused here, not reinvented.
+            write_component_heartbeat(out_dir.parent, "suricata_scan",
+                                      extra={"outcome": "completed", "pcaps": len(suricata_pcaps)})
+        except Exception as exc:
+            LOGGER.error("Suricata batch scan failed for this burst (non-fatal): %s", exc)
+            summary["errors"].append(f"suricata scan failed -- {exc}")
+            reactive_capture_errors_total.labels(stage="suricata_scan").inc()
+            suricata_scan_total.labels(outcome="error").inc()
+            # Deliberately NOT writing a heartbeat here: write_component_heartbeat()
+            # always stamps last_heartbeat=now unconditionally (see its own
+            # docstring/body), so calling it on a FAILURE would wrongly refresh the
+            # "recently active" signal during a failure streak -- masking exactly
+            # the problem this whole feature exists to surface. Only a genuine
+            # completed scan (above) counts, so health_manager's own recency check
+            # means "time since last SUCCESSFUL scan," not "time since last attempt."
+        finally:
+            if delete_after_ingest:
+                shutil.rmtree(suricata_scratch, ignore_errors=True)
+    if suricata_enabled and delete_after_ingest:
+        shutil.rmtree(suricata_pcap_dir, ignore_errors=True)
 
     # BUGFIX (2026-09-16, third-party audit finding P0 -- Pi-hole "isolation
     # storm"): health_manager.py sets this override to False the moment
@@ -726,11 +754,16 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
             summary["errors"].append(f"dns_evasion_audit: {exc}")
             reactive_capture_errors_total.labels(stage="dns_evasion_audit").inc()
     else:
-        LOGGER.info(
-            "Skipping DNS-evasion audit for this burst -- Pi-hole polling is "
-            "currently unhealthy, so DNS query history can't be trusted as "
-            "ground truth right now (health_manager.py's pihole_poll signal)."
-        )
+        # A4: the key can be off for more than one reason -- say which, instead of always blaming Pi-hole.
+        reason = "operator setting"
+        try:
+            path = getattr(config, "_overrides_path", None)
+            entry = json.loads(path.read_text(encoding="utf-8")).get("dns_evasion_audit_enabled") if path and path.exists() else None
+            if isinstance(entry, dict) and entry.get("reason"):
+                reason = f"{entry.get('set_by', 'override')}: {entry['reason']}"
+        except Exception:
+            pass
+        LOGGER.info("Skipping DNS-evasion audit for this burst -- dns_evasion_audit_enabled is off (%s).", reason)
 
     if suricata_evidence_by_device and evidence_store is not None:
         for dev_id, ev_list in suricata_evidence_by_device.items():
@@ -782,6 +815,11 @@ class ReactiveCaptureDispatcher:
         # a trigger that finds a burst already in flight, exactly like a budget-exhausted
         # trigger, and refunds the budget slot it consumed since it never actually ran.
         self._burst_lock = threading.Lock()
+        # Owner request 2026-10-01: "[DEFERRED] ... max_bursts_per_hour (6) reached" was logged for every trigger,
+        # every cycle, burying everything else. Each KIND of deferral is now logged at most once per
+        # _DEFERRAL_LOG_INTERVAL_SECONDS (with the number of repeats in between); repeats go to DEBUG. The
+        # reactive_capture_bursts_total counter still counts every single deferral.
+        self._deferral_log: dict = {}
         # Set by _check_disk_budget(), read by try_dispatch()'s own deferred-outcome
         # logging -- avoids re-deriving (or double-computing/side-effecting via a
         # second prune pass) the same disk-budget verdict twice per call.
@@ -830,6 +868,13 @@ class ReactiveCaptureDispatcher:
 
         budget = int(config.get("reactive_capture_max_scratch_bytes", 0) or _DEFAULT_SCRATCH_BUDGET_BYTES)
         out_dir = Path(config.get("reactive_capture_scratch_dir", "state/reactive_capture"))
+        # Flash wear (2026-10-02): in Docker the scratch directory is a size-capped RAM disk. Never budget for more
+        # than two thirds of the filesystem it is on, so the oldest pcaps are pruned well before a burst could fail
+        # for lack of space -- whatever the configured byte budget says.
+        try:
+            budget = min(budget, int(shutil.disk_usage(out_dir).total * 2 / 3)) if out_dir.exists() else budget
+        except OSError:
+            pass
         if not out_dir.exists():
             reactive_capture_scratch_bytes.set(0)
             reactive_capture_degraded.set(0)
@@ -943,6 +988,20 @@ class ReactiveCaptureDispatcher:
             self._count += 1
             return True
 
+    _DEFERRAL_LOG_INTERVAL_SECONDS = 900.0
+
+    def _log_deferral(self, kind: str, msg: str, *args) -> None:
+        now = time.time()
+        last, repeats = self._deferral_log.get(kind, (0.0, 0))
+        if now - last >= self._DEFERRAL_LOG_INTERVAL_SECONDS:
+            if repeats:
+                msg += f" ({repeats} more deferral(s) of this kind in the last {int((now - last) // 60)} min)"
+            LOGGER.info(msg, *args)
+            self._deferral_log[kind] = (now, 0)
+        else:
+            LOGGER.debug(msg, *args)
+            self._deferral_log[kind] = (last, repeats + 1)
+
     def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str, state_manager=None,
                       evidence_store=None, geoip_engine=None, ti_engine=None, fp_engine=None) -> bool:
         """Attempts to fire one capture burst asynchronously. Returns True if
@@ -960,7 +1019,8 @@ class ReactiveCaptureDispatcher:
         feed."""
         if not self._check_and_consume_budget(config):
             if not get_router_adapter(config).capture_supported:
-                LOGGER.info(
+                self._log_deferral(
+                    "unsupported_router",
                     "[DEFERRED] reactive capture is unsupported by the configured router "
                     "adapter (router_type=%r) -- AVM-format capture requires a Fritz!Box, "
                     "deferring trigger '%s' permanently for this configuration.",
@@ -971,7 +1031,7 @@ class ReactiveCaptureDispatcher:
             if config.get("reactive_capture_enabled", False) and self._disk_degraded:
                 # _check_disk_budget() already logged the detailed ERROR-level reason;
                 # this is just the trigger-level [DEFERRED] record for this outcome.
-                LOGGER.info("[DEFERRED] reactive-capture scratch-dir disk budget is degraded, "
+                self._log_deferral("disk_budget", "[DEFERRED] reactive-capture scratch-dir disk budget is degraded, "
                             "deferring trigger '%s' -- will be reconsidered once space frees up.",
                             trigger_reason)
                 reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred_disk_budget").inc()
@@ -983,20 +1043,21 @@ class ReactiveCaptureDispatcher:
                     count_exhausted = self._count >= max_per_hour
                     bytes_exhausted = max_bytes_per_hour > 0 and self._bytes_captured >= max_bytes_per_hour
                 if bytes_exhausted and not count_exhausted:
-                    LOGGER.info("[DEFERRED] reactive_capture_max_bytes_per_hour (%d bytes) reached "
+                    self._log_deferral("bytes_budget", "[DEFERRED] reactive_capture_max_bytes_per_hour (%d bytes) reached "
                                 "(%d bytes captured so far this window), deferring trigger '%s' -- "
                                 "will be reconsidered once the hourly window resets.",
                                 max_bytes_per_hour, self._bytes_captured, trigger_reason)
                     reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred_bytes_budget").inc()
                 else:
-                    LOGGER.info("[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
+                    self._log_deferral("burst_budget", "[DEFERRED] reactive_capture_max_bursts_per_hour (%d) reached, "
                                 "deferring trigger '%s' -- will be reconsidered once the hourly "
                                 "window resets.", max_per_hour, trigger_reason)
                     reactive_capture_bursts_total.labels(trigger_reason=trigger_reason, outcome="deferred").inc()
             return False
 
         if not self._burst_lock.acquire(blocking=False):
-            LOGGER.info(
+            self._log_deferral(
+                "concurrent",
                 "[DEFERRED] a reactive-capture burst is already in progress -- deferring trigger "
                 "'%s' (the router's radio capture is a single shared resource; concurrent bursts "
                 "corrupt each other's output). Not counted against the hourly budget.",

@@ -27,7 +27,9 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-COMPONENT_HEARTBEAT_FILENAME = "component_heartbeat.json"
+from core.runtime_paths import runtime_dir
+
+COMPONENT_HEARTBEAT_FILENAME = "component_heartbeat.json"   # in runtime_dir(): RAM in Docker
 
 
 class HeartbeatRegistry:
@@ -90,7 +92,7 @@ def write_component_heartbeat(state_dir, component: str, extra: Optional[dict] =
     against one shared file, same last-write-wins acceptance as
     utils.write_job_health() (these are low-frequency writes, once per ~10s at
     most, from a small fixed set of known writers)."""
-    path = Path(state_dir) / COMPONENT_HEARTBEAT_FILENAME
+    path = runtime_dir(state_dir) / COMPONENT_HEARTBEAT_FILENAME
     try:
         existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     except Exception:
@@ -123,7 +125,7 @@ def reset_component_heartbeats(state_dir) -> None:
     with a clean slate -- HeartbeatRegistry-style "never beaten yet" is
     already a safe no-op (see health_manager.py's _evaluate_heartbeat_component),
     it's specifically a STALE-but-present entry that was the problem."""
-    path = Path(state_dir) / COMPONENT_HEARTBEAT_FILENAME
+    path = runtime_dir(state_dir) / COMPONENT_HEARTBEAT_FILENAME
     try:
         if path.exists():
             path.unlink()
@@ -132,7 +134,7 @@ def reset_component_heartbeats(state_dir) -> None:
 
 
 def read_component_heartbeats(state_dir) -> Dict[str, Dict[str, Any]]:
-    path = Path(state_dir) / COMPONENT_HEARTBEAT_FILENAME
+    path = runtime_dir(state_dir) / COMPONENT_HEARTBEAT_FILENAME
     if not path.exists():
         return {}
     try:

@@ -21,6 +21,7 @@ import threading
 import time
 import concurrent.futures
 from collections import defaultdict, deque
+from intelligence import ja3_provenance
 from pathlib import Path
 from typing import Callable, Optional, Dict
 
@@ -37,6 +38,13 @@ DOH_SNIS = {"cloudflare-dns.com", "dns.google", "dns.quad9.net"}
 LATERAL_PORTS = frozenset([22, 445, 3389, 5900, 23])
 
 
+# Substring markers of a DNS line sent to the mDNS multicast groups (matches flat and nested Zeek JSON).
+_MDNS_MARKERS = ('resp_h":"224.0.0.251"', 'resp_h":"ff02::fb"')
+_MDNS_KEEP_EVERY = 50
+_YIELD_EVERY_LINES = 500
+_YIELD_SECONDS = 0.003
+
+
 class ZeekLogTailer:
     def __init__(self, path: Path, event_type: str, callback: Callable[[str, dict], None], state_dir: Path):
         self.path = path
@@ -45,8 +53,10 @@ class ZeekLogTailer:
         self._pos = 0
         self._inode = None
         self._json_err_count = 0
+        self._mdns_seen = 0
         
-        self.cursor_path = state_dir / f"zeek_cursor_{self.event_type}.json"
+        from core.runtime_paths import runtime_dir   # rewritten every few seconds: RAM in Docker (flash wear)
+        self.cursor_path = runtime_dir(state_dir) / f"zeek_cursor_{self.event_type}.json"
         self._load_cursor()
         
         if self._inode is None:
@@ -83,6 +93,7 @@ class ZeekLogTailer:
 
     def poll(self) -> int:
         count = 0
+        lines_read = 0
         if not self.path.exists(): return 0
         try:
             stat = self.path.stat()
@@ -97,6 +108,11 @@ class ZeekLogTailer:
                     line = f.readline()
                     if not line:
                         break
+                    # Yield the GIL regularly: catching up on a backlog (after a restart) is pure Python work that
+                    # otherwise starves the main detection loop, whose many short sqlite calls each wait for the GIL.
+                    lines_read += 1
+                    if lines_read % _YIELD_EVERY_LINES == 0:
+                        time.sleep(_YIELD_SECONDS)
                     
                     # ARCHITECTURAL FIX: Prevent JSONDecodeError cascades from partial lines.
                     # If the line doesn't end with a newline, Zeek hasn't finished flushing it to disk.
@@ -108,6 +124,14 @@ class ZeekLogTailer:
                         self._pos = f.tell()
                         continue
                         
+                    # mDNS multicast (a single chatty client can emit thousands of lines/s) is noise to every
+                    # downstream consumer; skip the JSON parse for it and let 1 in N through as a presence signal.
+                    if self.event_type == "dns" and any(m in clean_line for m in _MDNS_MARKERS):
+                        self._mdns_seen += 1
+                        if self._mdns_seen % _MDNS_KEEP_EVERY:
+                            self._pos = f.tell()
+                            continue
+
                     try:
                         self.callback(self.event_type, json.loads(clean_line))
                         count += 1
@@ -279,12 +303,28 @@ class ZeekCollector:
 
 
 class ZeekFeatureExtractor:
-    _MALICIOUS_JA3 = frozenset(["e7d705a3286e19ea42f587b6207263db", "6734f37431670b3ab4292b8f60f29984", "36f7277af969b30647d1de5e8c4e6b08", "a0e9f5d64349fb13191bc781f81f42e1", "72a589da586844d7f0818ce684948eea", "c12f54a3f91dc7bafd92cb59fe009a35", "a2fb5534f0b5a8de1c21d8fc4efb3f95", "3b5074b1b5d032e5620f69f9159a2983", "b386946a5a3b9a6e0f78f7c6b9d1c9a0"])
-    _MALICIOUS_JA4 = frozenset(["t13d1516h2_8daaf6152771_a0b271d46eb3", "t13d1715h2_8daaf6152771_b1218ebf4b00", "t12d190800_b9f67a21658b_000000000000"])
+    # B3 (2026-10-01): the 8 hashes that used to be hard-coded here had no recorded origin and none of them is listed by
+    # abuse.ch SSLBL or ET Open (checked against the live feeds on .94), and one earlier entry was a stock Windows hash.
+    # Left empty: fingerprints now come only from the live, attributable feeds (SSLBL, ET Open) via ti_engine.dynamic_ja3.
+    _MALICIOUS_JA3 = frozenset()
+    # B3: emptied too. Two of the three entries carried 8daaf6152771, the cipher-suite hash of ordinary Chrome-family
+    # clients (the same hash as a normal browser in tests/test_identity_reconcile_dhcp_ja4_signal.py), and none had a source.
+    _MALICIOUS_JA4 = frozenset()
+    # A5: services every LAN client uses on the wired devices (the IDS host runs Pi-hole) -- not a probe.
+    # DNS, DHCP server/client, NTP, NetBIOS name service, mDNS, and ICMP (ping).
+    DEFAULT_WIRED_PROBE_IGNORE_SERVICES = (53, 67, 68, 123, 137, 5353, "icmp")
+    # 3b5074b1b5d032e5620f69f9159a2983 was removed from _MALICIOUS_JA3 (2026-10-01): it is the stock Windows
+    # 10 / Server 2019 / 2022 TLS stack (ET sid 2058285-2058288 use it only together with a specific SNI).
+    #
+    # A JA3 identifies a TLS client LIBRARY. One that reaches this many different servers from the same device is
+    # the device's ordinary TLS stack (browser/OS), whatever a blocklist says about the hash -- a dedicated implant
+    # talks to a handful of its own servers. Past this many distinct server names the hash stops counting as evidence.
+    _JA3_COMMON_STACK_MIN_SERVERS = 5
     _SUSPICIOUS_PORTS = frozenset([4444, 4445, 8888, 9999, 1337, 31337, 6667, 6697, 1080, 3128, 5353])
     _EXCLUDED_HONEYPOT_PORTS = frozenset([137, 138, 139, 1900, 5353])
     
-    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None, lateral_ports: set = None):
+    def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None, lateral_ports: set = None, wired_probe_ignore_sources: set = None,
+                 wired_probe_ignore_services=None, wired_probe_warmup_seconds: float = 0.0):
         # BUGFIX (live audit): was a fixed 5-port module-level constant (LATERAL_PORTS)
         # -- a real attacker isn't limited to SSH/SMB/RDP/VNC/Telnet, and extending
         # coverage to a new port used to require a code change/deploy. Config-driven,
@@ -300,12 +340,20 @@ class ZeekFeatureExtractor:
         # (DNS_ATTRIBUTION_GAP). Same 1000-entry cap and update site as _new_ips.
         self._dest_ports = defaultdict(dict)
         self._ja3_hits = defaultdict(lambda: deque(maxlen=100))
+        # (device ip, ja3) -> distinct server names seen with it. Kept across reset_all(): "this hash reaches many
+        # servers" is a lasting fact about the device's stack, not a per-window one. Bounded.
+        self._ja3_servers: dict = {}
+        self._ja3_common_stack: set = set()
+        ja3_provenance.set_source("builtin", {h: "built-in list (origin not recorded)" for h in self._MALICIOUS_JA3})
         self._ja4_hits = defaultdict(lambda: deque(maxlen=100))
         self._http_uas = defaultdict(dict)
         self._notices = defaultdict(lambda: deque(maxlen=100))
         self._susp_ports = defaultdict(lambda: deque(maxlen=500))
         self._http_reqs = defaultdict(dict)
         self._outbound_bytes = defaultdict(lambda: deque(maxlen=5000))
+        # P0 (architecture review 2026-10-02): (ts, dst_ip, bytes) so exfiltration evidence can name the
+        # destination that actually received the bytes, not the device's most recent connection.
+        self._outbound_by_dst = defaultdict(lambda: deque(maxlen=5000))
         self._doh_bypass_uids = defaultdict(dict)
         # SNI-verified DoH hits only (real DOH_SNIS hostname match, e.g. "dns.google"),
         # separate from _doh_bypass_uids above which also counts the port+IP heuristic
@@ -336,6 +384,18 @@ class ZeekFeatureExtractor:
         # new detector needed beyond this membership check. Consume-once queue, same
         # pattern as StateManager.pop_last_reidentify_ambiguous().
         self.wired_probe_ips = wired_probe_ips if wired_probe_ips is not None else set()
+        # A5: sources that routinely talk to the wired devices (the sensor host's own Prometheus/backup jobs, known
+        # infrastructure) -- they must not count as a "new source" worth a capture burst.
+        self.wired_probe_ignore_sources = wired_probe_ignore_sources if wired_probe_ignore_sources is not None else set()
+        # A5 (second pass, 2026-10-01): the IDS host is itself a wired-probe device AND the LAN's DNS server, so every
+        # client doing DNS -- and every phone that rotates its IPv6 privacy address -- was a "new source" (21 sources
+        # on udp/53 in one conn.log on .94). Infrastructure services on the wired devices don't count, and sources
+        # seen during a warm-up after start are learned silently (the known-source set is in memory, so every
+        # restart used to fire a burst). Entries: ints (tcp/udp destination port) and/or "icmp".
+        services = self.DEFAULT_WIRED_PROBE_IGNORE_SERVICES if wired_probe_ignore_services is None else wired_probe_ignore_services
+        self._wired_probe_ignore_ports = {int(x) for x in services if str(x).isdigit()}
+        self._wired_probe_ignore_icmp = any(str(x).lower() == "icmp" for x in services)
+        self._wired_probe_warmup_until = time.time() + float(wired_probe_warmup_seconds or 0.0)
         self._known_sources_per_wired_ip = defaultdict(set)
         self._new_wired_probe_sources = []
         # PHASE 21-LGBM-EXTEND: the most recent dns_evasion.py blind-spot-audit
@@ -385,13 +445,28 @@ class ZeekFeatureExtractor:
                 try: nets.append(ipaddress.ip_network(net, strict=False))
                 except ValueError: pass
         self._home_nets = nets
+        self._home_ip_memo = {}
+
+    # A2 (2026-10-01): called for both ends of every Zeek event (and again from _enrich_ptr); building an
+    # ipaddress object each time was ~9% of the engine's GIL time on .94. A home network has a few hundred distinct
+    # addresses, so the answer is memoised per string (bounded; reset when the subnets change).
+    _HOME_IP_MEMO_MAX = 20000
 
     def _is_home_ip(self, ip: str) -> bool:
         if not ip: return False
+        memo = self._home_ip_memo
+        hit = memo.get(ip)
+        if hit is not None:
+            return hit
         try:
             addr = ipaddress.ip_address(ip)
-            return any(addr in net for net in self._home_nets)
-        except ValueError: return False
+            result = any(addr in net for net in self._home_nets)
+        except ValueError:
+            result = False
+        if len(memo) >= self._HOME_IP_MEMO_MAX:
+            memo.clear()
+        memo[ip] = result
+        return result
 
     def is_home_ip(self, ip: str) -> bool:
         """Public wrapper for _is_home_ip() -- lets callers outside this module (e.g.
@@ -467,6 +542,25 @@ class ZeekFeatureExtractor:
             return host if host not in (None, "pending", "unknown") else None
         return None
 
+    def _outbound_top_destination(self, ips) -> dict:
+        """The destination that received most of this device's outbound bytes in the window, and its share.
+        P0 (architecture review 2026-10-02): exfiltration evidence used to be attributed to `last_dest_ip` -- the
+        device's most RECENT connection, often unrelated to the transfer -- so one IP collected evidence from
+        traffic it never received, corrupting the decision engine's per-destination corroboration. A destination
+        is only named when it clearly dominates (>= 50 % of the bytes); a transfer spread over many destinations
+        gets none rather than a wrong one."""
+        per_dst: Dict[str, int] = {}
+        for ip in ips:
+            for _ts, dst, b in self._outbound_by_dst.get(ip, []):
+                per_dst[dst] = per_dst.get(dst, 0) + b
+        total = sum(per_dst.values())
+        if not total:
+            return {"zeek_outbound_top_dest": "unknown", "zeek_outbound_top_dest_share": 0.0}
+        dst, b = max(per_dst.items(), key=lambda kv: kv[1])
+        share = b / total
+        return {"zeek_outbound_top_dest": dst if share >= 0.5 else "unknown",
+                "zeek_outbound_top_dest_share": round(share, 3)}
+
     def get_last_connection_meta(self, device_ip: str) -> dict:
         return self._last_connection_meta.get(device_ip, {
             "last_dest_ip": "unknown", "last_dest_port": 0, "dominant_protocol": "unknown", "zeek_outbound_bytes": 0
@@ -500,6 +594,7 @@ class ZeekFeatureExtractor:
         prune_tuple_deque_dict(self._lateral_moves)
         prune_deque_dict(self._susp_ports)
         prune_tuple_deque_dict(self._outbound_bytes)
+        prune_tuple_deque_dict(self._outbound_by_dst)
         prune_tuple_deque_dict(self._conn_states)
         prune_tuple_deque_dict(self._conn_durations)
         prune_tuple_deque_dict(self._rejected_ips)
@@ -672,11 +767,12 @@ class ZeekFeatureExtractor:
         if etype == "conn":
             if self.wired_probe_ips:
                 dst = event.get("id.resp_h", "")
-                if dst in self.wired_probe_ips:
+                if dst in self.wired_probe_ips and src not in self.wired_probe_ignore_sources                         and not self._is_wired_probe_infra_service(event):
                     known = self._known_sources_per_wired_ip[dst]
                     if src not in known:
                         known.add(src)
-                        self._new_wired_probe_sources.append((dst, src))
+                        if time.time() >= self._wired_probe_warmup_until:
+                            self._new_wired_probe_sources.append((dst, src))
                         if len(self._new_wired_probe_sources) > 200:  # safety valve, not expected in practice
                             self._new_wired_probe_sources = self._new_wired_probe_sources[-200:]
             self._process_conn(src, event)
@@ -758,6 +854,8 @@ class ZeekFeatureExtractor:
         
         if not self._is_local_or_multicast(dst_ip):
             self._outbound_bytes[src].append((ts, orig_bytes))
+            if orig_bytes and dst_ip:
+                self._outbound_by_dst[src].append((ts, dst_ip, orig_bytes))
 
     def _process_dns(self, ev: dict) -> None:
         query, answers = ev.get("query"), ev.get("answers", [])
@@ -802,6 +900,15 @@ class ZeekFeatureExtractor:
             out.update(self._doh_sni_hits.get(ip, {}).keys())
         return out
 
+    def _is_wired_probe_infra_service(self, event: dict) -> bool:
+        proto = str(event.get("proto", "")).lower()
+        if proto == "icmp":
+            return self._wired_probe_ignore_icmp
+        try:
+            return int(event.get("id.resp_p", -1)) in self._wired_probe_ignore_ports
+        except (TypeError, ValueError):
+            return False
+
     def pop_new_wired_probe_sources(self) -> list:
         """Consume-once accessor for PHASE 21D's wired-device-probe trigger. Returns
         [(wired_ip, new_source_ip), ...] for any first-time-seen source since the last
@@ -820,6 +927,28 @@ class ZeekFeatureExtractor:
             return
         self._dns_evasion_ratio[ip] = max(0.0, min(1.0, float(ratio)))
 
+    def _is_common_ja3_stack(self, src: str, ja3: str, server_name: str) -> bool:
+        """True once `ja3` has been seen from `src` with _JA3_COMMON_STACK_MIN_SERVERS different server names: it is
+        then the device's own TLS library, not an implant. Earlier hits of that hash in the current window are
+        withdrawn so they stop counting as zeek_ja3_malicious."""
+        key = (src, ja3)
+        if key in self._ja3_common_stack:
+            return True
+        if len(self._ja3_servers) > 5000:   # bounded: devices x hashes is small, but never unbounded
+            self._ja3_servers.clear()
+        servers = self._ja3_servers.setdefault(key, set())
+        name = (server_name or "").strip().lower()
+        if name and len(servers) < 64:
+            servers.add(name)
+        if len(servers) < self._JA3_COMMON_STACK_MIN_SERVERS:
+            return False
+        self._ja3_common_stack.add(key)
+        if src in self._ja3_hits:
+            self._ja3_hits[src] = deque((h for h in self._ja3_hits[src] if h.get("ja3") != ja3), maxlen=100)
+        LOGGER.info("JA3 %s seen from %s with %d different servers -- treated as that device's ordinary TLS stack, "
+                    "not malware evidence", ja3, src, len(servers))
+        return True
+
     def _process_ssl(self, src: str, ev: dict) -> None:
         ja3, ja4, ts = ev.get("ja3", ""), ev.get("ja4", ""), ev.get("ts", time.time())
         is_malicious_ja3, is_malicious_ja4 = False, False
@@ -836,6 +965,8 @@ class ZeekFeatureExtractor:
         # target -- previously only dest_port was captured, so a NETWORK_INTRUSION
         # alert built from this evidence had nothing evidence-linked to attach and fell
         # back to pipeline.py's generic "last connection" fallback.
+        if is_malicious_ja3 and self._is_common_ja3_stack(src, ja3, ev.get("server_name", "")):
+            is_malicious_ja3 = False
         if is_malicious_ja3: self._ja3_hits[src].append({"ja3": ja3, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
         if is_malicious_ja4: self._ja4_hits[src].append({"ja4": ja4, "server": ev.get("server_name", ""), "ts": ts, "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
 
@@ -996,6 +1127,7 @@ class ZeekFeatureExtractor:
             "zeek_susp_ports": sum(len(self._susp_ports.get(ip, [])) for ip in ips),
             "zeek_http_ua_count": sum(len(self._http_uas.get(ip, {})) for ip in ips),
             "zeek_outbound_bytes": sum(b for ip in ips for t, b in self._outbound_bytes.get(ip, [])),
+            **self._outbound_top_destination(ips),
             "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
             "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),
             "zeek_lateral_unique_targets": len(lateral_targets),
@@ -1047,7 +1179,7 @@ class ZeekFeatureExtractor:
         return alerts
 
     def reset_all(self) -> None:
-        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
+        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
     def reset_client(self, client_ip) -> None:
@@ -1057,6 +1189,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
                 if ip in d:
                     del d[ip]

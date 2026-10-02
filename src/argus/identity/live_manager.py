@@ -126,6 +126,14 @@ class LiveIdentityManager(DeviceIdentityManager):
         super().__init__(state_manager, config)
         self._graph_store = graph_store
         self._trust_anchors = trust_anchors or {}
+        # A2 (2026-10-01): resolve_device_id() runs once per Zeek/DNS event. Profiling .94 showed the gateway's
+        # events each doing a graph WRITE (_learn_anchor_mac) and every other event a graph READ per anchor
+        # (_get_learned_anchor_macs) -- a large share of the detection loop's CPU. Both are now cached in-process.
+        self._learned_macs_cache: Optional[Dict[str, str]] = None
+        self._learned_macs_cache_at = 0.0
+        self._learned_written: Dict[str, str] = {}
+
+    _LEARNED_MACS_TTL_SECONDS = 60.0
 
     def _get_learned_anchor_macs(self) -> Dict[str, str]:
         """Best-effort: a graph failure here degrades to 'no learned anchor MACs yet
@@ -133,6 +141,9 @@ class LiveIdentityManager(DeviceIdentityManager):
         v13 graph-read's fail-safe direction."""
         if self._graph_store is None or not self._trust_anchors:
             return {}
+        now = time.monotonic()
+        if self._learned_macs_cache is not None and now - self._learned_macs_cache_at < self._LEARNED_MACS_TTL_SECONDS:
+            return self._learned_macs_cache
         result = {}
         try:
             for role in self._trust_anchors:
@@ -142,6 +153,8 @@ class LiveIdentityManager(DeviceIdentityManager):
                     result[role] = learned
         except Exception as e:
             LOGGER.warning("Failed to read learned anchor MACs from graph: %s", e)
+            return result  # not cached: retry on the next call
+        self._learned_macs_cache, self._learned_macs_cache_at = result, now
         return result
 
     def _learn_anchor_mac(self, role: str, mac: str) -> None:
@@ -151,10 +164,14 @@ class LiveIdentityManager(DeviceIdentityManager):
         one-shot opportunity)."""
         if self._graph_store is None:
             return
+        if self._learned_written.get(role) == mac:
+            return  # already persisted -- the gateway produces thousands of events a minute
         try:
             self._graph_store.update_device_metadata(
                 _anchor_device_id(role), {"learned_mac": mac, "role": role},
             )
+            self._learned_written[role] = mac
+            self._learned_macs_cache = None  # re-read on next use
         except Exception as e:
             LOGGER.warning("Failed to persist learned MAC for anchor %r: %s", role, e)
 

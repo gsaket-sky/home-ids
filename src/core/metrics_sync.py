@@ -157,6 +157,7 @@ class MetricsExporter:
         # the unbounded-label-leak bug this file was already patched for once
         # (see the killchain_phase_metric comment on _DEVICE_GAUGES above).
         self._metric_keys_cache: Dict[int, set] = {}
+        self._last_purge_sig: Dict[str, tuple] = {}     # device -> (host, top domains) at its last label purge
 
     def begin_metrics_cycle(self) -> None:
         """Call once per detection cycle, before exporting any device's
@@ -167,10 +168,23 @@ class MetricsExporter:
         cached = self._metric_keys_cache.get(id(metric))
         if cached is not None:
             return cached
-        keys = set()
-        for mf in metric.collect():
-            for sample in mf.samples:
-                keys.add(tuple(sample.labels[l] for l in metric._labelnames))
+        # A2 (2026-10-01): a labelled prometheus_client metric keeps its children in `_metrics`, keyed by the
+        # label-value tuple in `_labelnames` order -- exactly the key built below from collect(). Reading the keys
+        # directly skips building every sample (all buckets of every child), which profiling on .94 showed as a
+        # steady share of the engine's CPU. collect() stays as the fallback for anything without that attribute.
+        children = getattr(metric, "_metrics", None)
+        if isinstance(children, dict):
+            lock = getattr(metric, "_lock", None)
+            if lock is not None:
+                with lock:
+                    keys = set(children.keys())
+            else:
+                keys = set(children.keys())
+        else:
+            keys = set()
+            for mf in metric.collect():
+                for sample in mf.samples:
+                    keys.add(tuple(sample.labels[l] for l in metric._labelnames))
         self._metric_keys_cache[id(metric)] = keys
         return keys
 
@@ -315,8 +329,19 @@ class MetricsExporter:
             if hasattr(state, "rolling") and hasattr(state.rolling, "domains"):
                 top_domains = [domain for domain, count in state.rolling.domains.most_common(3)]
                 
-            self._purge_stale_device_labels(str_dev_id, str_host)
-            self._purge_stale_domain_labels(str_dev_id, str_host, top_domains)
+            # Stale labels only appear when a device's hostname / top domains change, so the (expensive, scans every
+            # gauge's keys) purge runs only then -- not on every device every cycle.
+            purge_sig = (str_host, tuple(top_domains))
+            last_sig = self._last_purge_sig.get(str_dev_id)
+            if last_sig != purge_sig:
+                # A2: every device gauge carries the hostname, but only top_domain_risk carries domains -- a
+                # chatty device's top-3 domains change most cycles, its hostname almost never.
+                if last_sig is None or last_sig[0] != str_host:
+                    self._purge_stale_device_labels(str_dev_id, str_host)
+                self._purge_stale_domain_labels(str_dev_id, str_host, top_domains)
+                if len(self._last_purge_sig) > 10000:
+                    self._last_purge_sig.clear()
+                self._last_purge_sig[str_dev_id] = purge_sig
             
             for dom in top_domains:
                 top_domain_risk_metric.labels(str_dev_id, str_host, str_type, dom).set(ml_score)

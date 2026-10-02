@@ -1229,8 +1229,15 @@ class AutonomousFPEngine:
         # If the device is using a malware TLS stack, this is a definitive threat signal.
         ja3 = int(features.get("zeek_ja3_malicious", 0) or 0)
         ja4 = int(features.get("zeek_ja4_malicious", 0) or 0)
-        if ja3 > 0 or ja4 > 0:
-            triggers.append(f"Malicious TLS fingerprint (JA3={ja3}, JA4+={ja4} hits)")
+        # B1 (2026-10-01): a fingerprint names a TLS client library, not an actor, so on its own it is
+        # weighted evidence (still counted by the hypothesis engine), not a verdict. It becomes a hard
+        # stop only together with a second, independent indicator on the same alert (any threat-intel
+        # or AbuseIPDB score for the destination).
+        if (ja3 > 0 or ja4 > 0) and (
+            float(features.get("ti_risk", 0.0) or 0.0) > 0.0
+            or float(features.get("abuseipdb_risk", 0.0) or 0.0) >= 1.0
+        ):
+            triggers.append(f"Malicious TLS fingerprint (JA3={ja3}, JA4+={ja4} hits) corroborated by reputation data")
             LOGGER.debug("[Stage 1] %s: Malicious TLS (JA3=%d, JA4=%d)", hostname, ja3, ja4)
 
         # Check 4: Honeypot access
@@ -2407,12 +2414,22 @@ class AutonomousFPEngine:
         except Exception:
             LOGGER.error("Failed to save device FP profiles.", exc_info=True)
 
-    def flush_device_fp_profiles(self) -> None:
+    # Flash wear (2026-10-02): the whole profiles file (~280 KB on .94) was rewritten on every one-minute state flush
+    # whenever any device's baseline moved -- ~400 MB a day. Baselines are slow running averages, so periodic saves
+    # are at most every 10 minutes (plus shutdown); explicit profile changes still save at once.
+    PROFILE_FLUSH_INTERVAL_SECONDS = 600.0
+
+    def flush_device_fp_profiles(self, force: bool = False) -> None:
         """Persists baseline observations recorded since the last save. Called on the
-        pipeline's periodic state-flush cadence and at shutdown -- see
+        pipeline's periodic state-flush cadence (throttled, see above) and at shutdown (force=True) -- see
         record_device_baseline_observation() for why it no longer saves itself."""
-        if getattr(self, "_device_fp_profiles_dirty", False):
-            self._save_device_fp_profiles()
+        if not getattr(self, "_device_fp_profiles_dirty", False):
+            return
+        now = time.time()
+        if not force and now - getattr(self, "_profiles_flushed_at", 0.0) < self.PROFILE_FLUSH_INTERVAL_SECONDS:
+            return
+        self._profiles_flushed_at = now
+        self._save_device_fp_profiles()
 
     def discard_device_profile(self, device_id: str, reason: str = "merge") -> bool:
         """Drops a device's learned FP-calibration profile (suppress/arp-sweep/conn-abuse/

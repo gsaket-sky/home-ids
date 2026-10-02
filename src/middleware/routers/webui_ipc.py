@@ -40,7 +40,7 @@ _RUNNABLE_SCRIPTS = {
     # Ops-hygiene scripts (maintenance panel's "Preview"/"Apply")
     "audit_stale_multi_device_iocs": ("audit_stale_multi_device_iocs.py", True),
     "clean_confirmed_intel": ("clean_confirmed_intel.py", True),
-    "clear_stale_isolation": ("clear_stale_isolation.py", True),
+    # clear_stale_isolation.py is not here: it needs a device argument (CLI only); Release on Devices covers it.
     "identify_corrupted_training_rows": ("identify_corrupted_training_rows.py", True),
     "release_wrongly_blocked_domains": ("release_wrongly_blocked_domains.py", True),
     "merge_fragmented_devices": ("merge_fragmented_devices.py", True),

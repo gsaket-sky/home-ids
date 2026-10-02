@@ -347,7 +347,8 @@ AUTOTUNE_ABSOLUTE_FLOOR = 0.60    # never auto-suppress below this regardless of
 _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS = 90 * 86400.0
 
 
-def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int = None) -> list:
+def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int = None,
+                                 strict: bool = False) -> list:
     """Graph-backed replacement for reading every line of the old
     state/autonomous_muted.jsonl -- queries `decisions` for rows carrying a
     raw_payload_json.fp_suppression_log (written live by fp_engine.py's
@@ -364,31 +365,64 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
     calibration-evidence callers use this instead of an unbounded scan.
     `limit` (optional): most-recent-N only, matching load_dataset()'s own
     pre-existing MAX_REAL_SAMPLES_PER_CLASS cap on the old file's tail."""
-    docs = []
-    try:
-        store = _get_graph_store(state_dir)
+    if not strict:
         try:
-            query = "SELECT raw_payload_json FROM decisions WHERE raw_payload_json LIKE '%fp_suppression_log%'"
-            params: list = []
-            if since is not None:
-                query += " AND timestamp >= ?"
-                params.append(since)
-            query += " ORDER BY timestamp DESC"
-            if limit is not None:
-                query += " LIMIT ?"
-                params.append(limit)
-            for row in store._conn.execute(query, params):  # iterate, don't fetchall(): bounded memory
-                try:
-                    payload = json.loads(row["raw_payload_json"] or "{}")
-                except (TypeError, ValueError):
-                    continue
-                entry = payload.get("fp_suppression_log")
-                if isinstance(entry, dict):
-                    docs.append(entry)
-        finally:
-            store.close()
-    except Exception as exc:
-        LOGGER.warning(f"[AUTOTUNE] Could not read fp_suppression_log entries from the graph: {exc}")
+            return _read_muted_docs_once(state_dir, since, limit)
+        except Exception as exc:
+            LOGGER.warning(f"[AUTOTUNE] Could not read fp_suppression_log entries from the graph: {exc}")
+            return []
+    # strict (model training): a failed read must NOT look like "no false positives" -- that
+    # trained a threat-only model over the good one (found 2026-09-30: "database is locked"
+    # while other jobs held the graph). Retry a busy database, then fail loudly.
+    if not (Path(state_dir) / "v13_graph.db").exists():
+        return []  # fresh install: no graph yet is a legitimately empty history, not a failure
+    last: Exception = None
+    for attempt in range(1, GRAPH_READ_ATTEMPTS + 1):
+        try:
+            return _read_muted_docs_once(state_dir, since, limit)
+        except Exception as exc:
+            last = exc
+            busy = "locked" in str(exc).lower() or "busy" in str(exc).lower()
+            LOGGER.warning(f"[AUTOTUNE] graph read failed (attempt {attempt}/{GRAPH_READ_ATTEMPTS}): {exc}")
+            if not busy:
+                break  # not a transient lock: waiting will not help
+            if attempt < GRAPH_READ_ATTEMPTS:
+                time.sleep(GRAPH_READ_RETRY_SECONDS)
+    raise GraphReadError(f"could not read fp_suppression_log from the graph: {last}")
+
+
+# A locked graph is normally another job's short write; the trainer has a 40 min budget.
+GRAPH_READ_ATTEMPTS = 6
+GRAPH_READ_RETRY_SECONDS = 30.0
+
+
+class GraphReadError(Exception):
+    """The graph could not be read (as opposed to being read and containing nothing)."""
+
+
+def _read_muted_docs_once(state_dir: Path, since: float = None, limit: int = None) -> list:
+    docs = []
+    store = _get_graph_store(state_dir)
+    try:
+        query = "SELECT raw_payload_json FROM decisions WHERE raw_payload_json LIKE '%fp_suppression_log%'"
+        params: list = []
+        if since is not None:
+            query += " AND timestamp >= ?"
+            params.append(since)
+        query += " ORDER BY timestamp DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(limit)
+        for row in store._conn.execute(query, params):  # iterate, don't fetchall(): bounded memory
+            try:
+                payload = json.loads(row["raw_payload_json"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            entry = payload.get("fp_suppression_log")
+            if isinstance(entry, dict):
+                docs.append(entry)
+    finally:
+        store.close()
     return docs
 
 
@@ -1401,7 +1435,7 @@ def load_dataset(state_dir: Path) -> tuple:
 
     # Read the graph's fp_suppression_log entries FIRST so their dedup keys are
     # available while filtering the alerts.json threat stream below.
-    muted_docs = _read_muted_docs_from_graph(state_dir, limit=MAX_REAL_SAMPLES_PER_CLASS)
+    muted_docs = _read_muted_docs_from_graph(state_dir, limit=MAX_REAL_SAMPLES_PER_CLASS, strict=True)
 
     corrected_keys = {_alert_dedup_key(_extract_payload(d)) for d in muted_docs}
 
@@ -1475,7 +1509,11 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
     directory on both sides or a retrained model is silently never picked up)."""
     if model_dir is None:
         model_dir = Path(CONFIG.get("model_path", "models/ids_model.pkl")).parent
-    X, y, stats = load_dataset(state_dir)
+    try:
+        X, y, stats = load_dataset(state_dir)
+    except GraphReadError as exc:
+        LOGGER.error("❌ Retrain aborted, existing model kept unchanged: %s", exc)
+        return False
     LOGGER.info(
         "Dataset loaded: %d accepted real samples | threat accepted/rejected=%d/%d "
         "(skipped as corrected FPs=%d, skipped as non-alert transparency logs=%d) | "

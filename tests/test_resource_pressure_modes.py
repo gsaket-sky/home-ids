@@ -319,6 +319,36 @@ def test_deescalating_from_conservation_clears_overrides_and_poll_floor(hm):
     assert hm.pipeline.ti_engine.paused is True
 
 
+def _write_overrides(hm, entries):
+    hm.config._overrides_path.write_text(json.dumps(entries), encoding="utf-8")
+    hm.config._load_overrides()
+
+
+def test_stale_conservation_overrides_from_a_previous_run_are_cleared_at_start(hm, fake_psutil, monkeypatch):
+    # A restart during CONSERVATION leaves the overrides on disk while the new process starts at NORMAL;
+    # with no level change they used to stay forever (live on .94, 2026-09-30).
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: None)
+    _write_overrides(hm, {k: {"value": False, "baseline": True, "set_at": 1.0, "set_by": "health_manager",
+                              "reason": "resource pressure"} for k in hm_module._CONSERVATION_OVERRIDE_KEYS})
+    fake_psutil.state.update(rss_mb=100, sysmem_pct=10, swap_pct=0, available_mb=8000)
+    hm._evaluate_resource_pressure()
+    assert hm._pressure_state == hm_module.NORMAL
+    on_disk = json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))
+    for key in hm_module._CONSERVATION_OVERRIDE_KEYS:
+        assert key not in on_disk
+        assert hm.config.get(key) is True
+
+
+def test_operator_override_of_a_conservation_key_is_left_alone(hm, fake_psutil, monkeypatch):
+    monkeypatch.setattr(hm, "_cgroup_memory_pct", lambda: None)
+    key = hm_module._CONSERVATION_OVERRIDE_KEYS[0]
+    _write_overrides(hm, {key: {"value": False, "baseline": True, "set_at": 1.0, "set_by": "console"}})
+    hm._evaluate_resource_pressure()
+    on_disk = json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))
+    assert on_disk[key]["set_by"] == "console"
+    assert hm.config.get(key) is False
+
+
 # --- sustained-CRITICAL self-restart -----------------------------------------------
 
 def test_single_critical_spike_does_not_restart(hm, fake_psutil, monkeypatch):
@@ -608,3 +638,35 @@ def test_is_resource_pressure_active_in_process_fails_open_on_accessor_error():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# --- A4 (2026-10-01): the Pi-hole-driven DNS-evasion-audit override -------------------
+
+def test_stale_dns_audit_override_from_a_previous_run_is_cleared_on_first_check(hm):
+    # Live on .94: Pi-hole polling blipped, the override was written, the engine restarted, and the new process
+    # (starting at "not disabled") never saw a change to act on -- the audit stayed off with Pi-hole healthy.
+    _write_overrides(hm, {"dns_evasion_audit_enabled": {"value": False, "baseline": True, "set_at": 1.0,
+                                                        "set_by": "health_manager", "reason": "resource pressure"}})
+    hm._component_state["pihole_poll"] = {"state": hm_module.HEALTHY}
+    hm._reconcile_dns_evasion_audit()
+    on_disk = json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))
+    assert "dns_evasion_audit_enabled" not in on_disk
+    assert hm.config.get("dns_evasion_audit_enabled") is True
+
+
+def test_dns_audit_override_records_the_real_reason_and_clears_on_recovery(hm):
+    hm._component_state["pihole_poll"] = {"state": hm_module.DEGRADED}
+    hm._reconcile_dns_evasion_audit()
+    entry = json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))["dns_evasion_audit_enabled"]
+    assert entry["value"] is False and entry["reason"] == "Pi-hole polling unhealthy"
+    hm._component_state["pihole_poll"] = {"state": hm_module.HEALTHY}
+    hm._reconcile_dns_evasion_audit()
+    assert "dns_evasion_audit_enabled" not in json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))
+
+
+def test_operator_dns_audit_override_is_left_alone(hm):
+    _write_overrides(hm, {"dns_evasion_audit_enabled": {"value": False, "baseline": True, "set_at": 1.0,
+                                                        "set_by": "console"}})
+    hm._component_state["pihole_poll"] = {"state": hm_module.HEALTHY}
+    hm._reconcile_dns_evasion_audit()
+    assert json.loads(hm.config._overrides_path.read_text(encoding="utf-8"))["dns_evasion_audit_enabled"]["set_by"] == "console"

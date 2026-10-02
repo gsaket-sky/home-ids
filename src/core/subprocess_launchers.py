@@ -80,6 +80,10 @@ def start_fastapi_subprocess(config) -> Tuple[Optional[subprocess.Popen], Option
                 "--host", fastapi_bind_host,
                 "--port", str(fastapi_port),
                 "--app-dir", src_dir,
+                # Flash wear (2026-10-02): one line per request, mostly the health manager's own polls every few
+                # seconds -- never read, but appended to state/fritz_webhook.log on the SD card all day. Errors and
+                # tracebacks are still logged.
+                "--no-access-log",
             ],
             stdout=log_file,
             stderr=subprocess.STDOUT,

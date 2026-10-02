@@ -20,7 +20,7 @@ def fetched_feeds(**kw):
     with tempfile.TemporaryDirectory() as d:
         ti = ThreatIntel(cache_dir=d, et_open_enabled=False, **kw)
         seen = []
-        ti._fetch_with_cache = lambda url, cache_file, ttl, feed_name="": seen.append(feed_name) or None
+        ti._fetch_with_cache = lambda url, cache_file, ttl, feed_name="", auth_key="": seen.append(feed_name) or None
         ti._fetch_otx = lambda ips, domains: seen.append("otx")
         ti._refresh_all()
         return ti, seen
@@ -36,13 +36,16 @@ check("advanced: all four feeds fetched", set(seen) == {"feodo_ips", "urlhaus_ho
 check("advanced: OTX key honoured", ti.otx_api_key == "secret")
 
 check("config default is off", DEFAULT_CONFIG.get("advanced_keyed_feeds") is False)
-check("VirusTotalClient is gone", not hasattr(ti_mod, "VirusTotalClient"))
-check("virustotal_api_key no longer a config default", "virustotal_api_key" not in DEFAULT_CONFIG)
+# 2026-10-01 (owner decision): VirusTotal and AbuseIPDB are back as implemented-but-OFF services with their own
+# web-UI toggles (tests/test_optional_reputation_services.py); advanced_keyed_feeds now covers OTX/URLhaus/ThreatFox.
+check("VirusTotalClient exists again (off by default)", hasattr(ti_mod, "VirusTotalClient"))
+check("virustotal and abuseipdb default to off", DEFAULT_CONFIG.get("virustotal_enabled") is False
+      and DEFAULT_CONFIG.get("abuseipdb_enabled") is False)
 
 pipe_src = (_P(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
-check("pipeline gates AbuseIPDB key on the switch", 'if self.config.get("advanced_keyed_feeds", False) else ""' in pipe_src)
+check("pipeline gates AbuseIPDB on its own live toggle", 'enabled_fn=lambda: bool(self.config.get("abuseipdb_enabled", False))' in pipe_src)
 check("pipeline keeps the honeypot signal in vt_risk", "if dest_ip in honeypots:\n                    vt_risk = 4.0" in pipe_src)
-check("pipeline no longer references virustotal", "virustotal" not in pipe_src.replace("VirusTotal was removed", ""))
+check("pipeline gates VirusTotal on its own live toggle", 'enabled_fn=lambda: bool(self.config.get("virustotal_enabled", False))' in pipe_src)
 
 print()
 if FAILURES:

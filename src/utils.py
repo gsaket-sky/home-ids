@@ -610,6 +610,12 @@ _CLOUD_CDN_ORG_KEYWORDS = frozenset({
     # when checked.
     "ibm cloud", "softlayer", "vultr", "choopa", "constant company", "leaseweb",
     "scaleway", "contabo",
+    # 2026-10-01 (iptoasn.com replaces MaxMind as the shipped GeoIP source): iptoasn names an AS by its registry
+    # HANDLE ("AMAZON-02", "GOOGLE", "MICROSOFT-CORP-MSN-AS-BLOCK", "APPLE-ENGINEERING", "ORACLE-BMC-31898",
+    # Scaleway's "Online SAS") where MaxMind used the company name, so 6 of the 20 canary providers in
+    # tests/test_phase45_cloud_cdn_vpn_org_canary.py went unrecognised. Handle forms added; the company-name
+    # entries above stay for MaxMind files a customer supplies.
+    "amazon-", "google", "microsoft-corp", "apple-", "oracle-bmc", "online sas",
 })
 
 def is_cloud_cdn_provider_org(org_name: str) -> bool:
@@ -806,6 +812,13 @@ def classify_zeek_notice(note_type: str) -> str:
     if note_type in ZEEK_NOTICE_TIER_STRONG:
         return "strong"
     if note_type in ZEEK_NOTICE_TIER_WEAK:
+        return "weak"
+    # B5 (2026-10-01): an unlisted protocol-oddity ("weird:*") is a parser/capture observation, not an
+    # attack technique -- a Windows laptop produced ~37 weird:QUIC_* notices per 12 minutes that fed
+    # NETWORK_INTRUSION as "medium". Only the explicitly listed medium weirds above keep that tier.
+    if note_type in ZEEK_NOTICE_TIER_MEDIUM:
+        return "medium"
+    if note_type.startswith("weird:"):
         return "weak"
     return "medium"
 

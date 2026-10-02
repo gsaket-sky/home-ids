@@ -267,10 +267,16 @@ class FeatureExtractor:
         if features.get("beaconing_c2_count", 0) > 0 or features.get("beaconing_c2_1h", 0) > 0 or features.get("suspicious_domains", 0) > 5 or features.get("suspicious_tld_ratio", 0.0) > 0.20:
             return "SUSPECTED_C2"
             
-        if features.get("zeek_lateral_moves", 0) > 0 or features.get("zeek_s0_rej_count", 0) > 20:
+        # B7 (2026-10-01): one connection to one host (a NAS share, a single SSH login) is not lateral
+        # movement; same distinct-target bar the hard-stop uses (fp_engine, lateral_movement_unique_targets).
+        if (features.get("zeek_lateral_moves", 0) > 0 and features.get("zeek_lateral_unique_targets", 0) >= 2) \
+                or features.get("zeek_s0_rej_count", 0) > 20:
             return "SUSPECTED_LATERAL"
-            
-        if features.get("nxdomain_ratio", 0.0) > 0.4 or features.get("zeek_susp_ports", 0) > 0:
+
+        # B8: an NXDOMAIN ratio is only meaningful with enough queries behind it (a laptop that asked
+        # five questions and got two NXDOMAINs is not scanning).
+        if (features.get("nxdomain_ratio", 0.0) > 0.4 and features.get("total", 0) >= 20) \
+                or features.get("zeek_susp_ports", 0) > 0:
             return "SUSPECTED_RECON"
             
         return "NORMAL"
@@ -336,6 +342,10 @@ class FeatureExtractor:
         deep_domains = 0
         beaconing_c2_count = 0
         beaconing_c2_1h = 0
+        # P0 (architecture review 2026-10-02): the domains whose query timing was periodic -- beaconing evidence is
+        # attributed to them instead of the device's last TCP connection.
+        beaconing_c2_domains: list = []
+        beaconing_c2_1h_domains: list = []
         min_jitter_cv = 999.0
 
         max_label_len = 0
@@ -447,17 +457,21 @@ class FeatureExtractor:
                     min_jitter_cv = min(min_jitter_cv, cv)
                     if cv < 0.35:
                         beaconing_c2_count += 1
+                        if len(beaconing_c2_domains) < 3:
+                            beaconing_c2_domains.append(domain)
 
         # 1-Hour Long-Term Periodicity Evaluation (Catches low-and-slow 5-30 min C2 beacons)
         long_domain_timestamps = defaultdict(list)
         for ev in rw.long_events:
-            ev_ts, ev_dom = ev[0], ev[1]
-            parts = ev_dom.split(".")
-            if len(parts) >= 2 and parts[-1] in _SUSPICIOUS_TLDS:
-                suspicious_tld_count += 1
             if len(ev) >= 4 and ev[3] in _TXT_NULL_QTYPES:
                 txt_null_count += 1
-            long_domain_timestamps[ev_dom].append(ev_ts)
+            long_domain_timestamps[ev[1]].append(ev[0])
+        # A2 (2026-10-01): the TLD check used to split every event of the last hour, per device, per cycle (the
+        # single hottest line in the engine's profile on .94). Same count, one rpartition per UNIQUE domain:
+        # "has a dot and its last label is a suspicious TLD", once for each of its events.
+        for ev_dom, ts_list in long_domain_timestamps.items():
+            if "." in ev_dom and ev_dom.rpartition(".")[2] in _SUSPICIOUS_TLDS:
+                suspicious_tld_count += len(ts_list)
 
         for domain, t_list in long_domain_timestamps.items():
             if len(t_list) >= 4 and domain not in state.seen_domains and not is_telemetry_domain(domain) and not _is_cdn_or_cloud_domain(domain):
@@ -468,6 +482,8 @@ class FeatureExtractor:
                     cv = math.sqrt(var_delta) / mean_delta
                     if cv < 0.35:
                         beaconing_c2_1h += 1
+                        if len(beaconing_c2_1h_domains) < 3:
+                            beaconing_c2_1h_domains.append(domain)
 
         n_domains   = len(rw.domains)
         avg_entropy = entropy_sum / max(n_domains, 1)
@@ -551,6 +567,8 @@ class FeatureExtractor:
             "nxdomain_tld_conc": nxdomain_tld_conc,
             "beaconing_c2_count": beaconing_c2_count,
             "beaconing_c2_1h": beaconing_c2_1h,
+            "beaconing_c2_domains": beaconing_c2_domains,
+            "beaconing_c2_1h_domains": beaconing_c2_1h_domains,
             "min_jitter_cv": min_jitter_cv if min_jitter_cv != 999.0 else 0.0,
             "subdomain_fanout_count": subdomain_fanout_count,
             "subdomain_fanout_domain": subdomain_fanout_domain,
@@ -586,6 +604,7 @@ class FeatureExtractor:
             "dns_tunneling_domain_examples": [], "nxdomain_tld_conc": 0.0,
             "dns_txt_null_ratio": 0.0, "suspicious_tld_ratio": 0.0,
             "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
+            "beaconing_c2_domains": [], "beaconing_c2_1h_domains": [],
             "subdomain_fanout_count": 0, "subdomain_fanout_domain": "", "fanout_label_entropy": 0.0,
             "killchain_phase": "NORMAL", "markov_anomaly": 0.0
         }

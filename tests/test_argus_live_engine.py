@@ -84,9 +84,9 @@ r_vcurrent = vcurrent_engine.evaluate(list(two_family_ev), ReputationVector(doma
 r_v13 = live_engine.evaluate(list(two_family_ev), ReputationVector(domain="evil.example.com", tier=3))
 check("B: v-current's live verdict on this real two-family case stays SUSPICIOUS (as documented, A10)",
       r_vcurrent["state"] == "SUSPICIOUS" and r_vcurrent["decision_path"] == "hypothesis_suspicious")
-check("B: the adapter's v13 verdict on the SAME evidence reaches HIGH -- the exact behavior "
-      "this fast cutover is choosing to adopt now (finer independence-family split)",
-      r_v13["state"] == "HIGH" and r_v13["decision_path"] == "hypothesis_high")
+check("B: since 2026-10-01 (open item B6) two Zeek-derived families count as ONE independent source, so v13 "
+      "agrees with v-current here: SUSPICIOUS, not HIGH",
+      r_v13["state"] == "SUSPICIOUS" and r_v13["decision_path"] == "hypothesis_suspicious")
 
 
 # --- C. zeek_exfiltration/zeek_beaconing fallback_context split ---
@@ -100,9 +100,19 @@ check("C: zeek_exfiltration with no features at all doesn't crash -- falls back 
 r_with_dest = live_engine.evaluate(
     exfil_ev, ReputationVector(domain="", tier=3), features={"last_dest_ip": "203.0.113.50"},
 )
-check("C: zeek_exfiltration WITH features['last_dest_ip'] gets a real destination attached "
-      "via fallback_context, mirroring src/v13/ingest/sources.py's own A2 behavior exactly",
-      "state" in r_with_dest)
+check("C: zeek_exfiltration with features['last_dest_ip'] still evaluates", "state" in r_with_dest)
+# P0 (architecture review 2026-10-02): last_dest_ip is the device's most RECENT connection, not the one that fired --
+# destination-less evidence is no longer stamped with it (it cross-contaminated every such item in the batch).
+_converted = live_engine._convert_active_evidence(exfil_ev, {"last_dest_ip": "203.0.113.50"})
+from argus.evidence.model import NO_DESTINATION as _NO_DEST  # noqa: E402
+check("C (P0): destination-less zeek_exfiltration keeps NO_DESTINATION -- never last_dest_ip",
+      len(_converted) == 1 and _converted[0].destination_id == _NO_DEST, str([e.destination_id for e in _converted]))
+_two = live_engine._convert_active_evidence(
+    exfil_ev + [V1Evidence(type="zeek_beaconing", source="zeek", timestamp=now, device="d2", value=1.0,
+                           confidence=0.7, independence_group="zeek_network", domain="c2.example")],
+    {"last_dest_ip": "203.0.113.50"})
+check("C (P0): evidence in the same batch keeps its own destination; nothing is attributed to last_dest_ip",
+      sorted(e.destination_id for e in _two) == sorted([_NO_DEST, "c2.example"]), str([e.destination_id for e in _two]))
 
 r_sentinel = live_engine.evaluate(
     exfil_ev, ReputationVector(domain="", tier=3), features={"last_dest_ip": "unknown"},
@@ -206,8 +216,8 @@ check("E: cycle 1's decision was actually written to the graph",
 # which would only hand live_engine THIS cycle's new detector output, not cycle 1's
 # already-handled evidence). Cycle 1's lateral_scan evidence is NOT included here --
 # the only way this reaches HIGH is if evaluate() pulls it back in from the graph.
-ja3_ev = [V1Evidence(type="malicious_ja3", source="zeek", timestamp=_t0 + 60, device="devA",
-                       value=1.0, confidence=0.9, independence_group="zeek_network")]
+ja3_ev = [V1Evidence(type="dns_dga_burst", source="pihole", timestamp=_t0 + 60, device="devA",
+                       value=1.0, confidence=0.9, independence_group="dns_behavior")]
 r2 = live_engine.evaluate(ja3_ev, ReputationVector(domain="", tier=3), features={},
                              device_id="devA", now=_t0 + 60)
 check("E: cycle 2's OWN fresh evidence alone (just malicious_ja3) would also only be one "

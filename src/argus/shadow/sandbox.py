@@ -159,6 +159,10 @@ def evaluate_candidate_shadow(store: GraphStore, change_id: str, parameter: str,
     return agree
 
 
+_SHADOW_EVAL_MIN_INTERVAL_SECONDS = 60.0
+_SHADOW_EVAL_MAX_TRACKED = 5000
+
+
 class ShadowEvaluator:
     """One instance per process, matching every other module-level singleton in
     this codebase (e.g. live_engine.py's own _autotune_engine/_baseline_engine).
@@ -169,6 +173,7 @@ class ShadowEvaluator:
         self.store = store
         self._active_canaries: List[Dict[str, Any]] = []
         self._cache_refreshed_at: float = 0.0
+        self._last_eval: Dict[str, float] = {}      # device_id -> last shadow evaluation (bounded, see _SHADOW_EVAL_MAX_TRACKED)
 
     def _refresh_if_stale(self, now: float) -> None:
         if now - self._cache_refreshed_at >= _ACTIVE_CANARIES_REFRESH_SECONDS:
@@ -222,6 +227,17 @@ class ShadowEvaluator:
                         break
             if candidate is None:
                 return
+
+            # A shadow comparison is a full second evaluate(); one sample per device per interval is plenty for a
+            # canary that lasts hours, and it was ~30% of the engine loop when run every cycle.
+            key = device_id or ""
+            last = self._last_eval.get(key)
+            if last is not None and now - last < _SHADOW_EVAL_MIN_INTERVAL_SECONDS:
+                return
+            if len(self._last_eval) >= _SHADOW_EVAL_MAX_TRACKED:
+                cutoff = now - _SHADOW_EVAL_MIN_INTERVAL_SECONDS
+                self._last_eval = {k: t for k, t in self._last_eval.items() if t >= cutoff}
+            self._last_eval[key] = now
 
             evaluate_candidate_shadow(
                 self.store, candidate["change_id"], candidate["parameter"], candidate["new_value"],

@@ -771,8 +771,12 @@ class ClAfpeEngine:
         # Check 3: malicious TLS fingerprint.
         ja3 = int(features.get("zeek_ja3_malicious", 0) or 0)
         ja4 = int(features.get("zeek_ja4_malicious", 0) or 0)
-        if ja3 > 0 or ja4 > 0:
-            triggers.append(f"Malicious TLS fingerprint (JA3={ja3}, JA4+={ja4} hits)")
+        # B1: fingerprint alone = weighted evidence; hard stop only with a second reputation indicator.
+        if (ja3 > 0 or ja4 > 0) and (
+            float(features.get("ti_risk", 0.0) or 0.0) > 0.0
+            or float(features.get("abuseipdb_risk", 0.0) or 0.0) >= 1.0
+        ):
+            triggers.append(f"Malicious TLS fingerprint (JA3={ja3}, JA4+={ja4} hits) corroborated by reputation data")
 
         # Check 4: honeypot access.
         honeypot = int(features.get("zeek_honeypot_hits", 0) or 0)

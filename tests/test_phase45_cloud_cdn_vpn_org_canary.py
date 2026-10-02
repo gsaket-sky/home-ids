@@ -47,7 +47,13 @@ def check(name, cond, detail=""):
 from utils import is_cloud_cdn_provider_org, is_vpn_provider_org
 from intelligence.geoip import GeoIPEngine
 
-_MODELS_DIR = _PathForSysPath(__file__).resolve().parent.parent / "models"
+# MaxMind's licence forbids shipping the .mmdb files, so they are never in this repo. Use the first place that has
+# them: IDS_GEOIP_DIR, this repo's models/, the Docker data tree, or a sibling home_ids checkout (dev layout).
+import os as _os
+_REPO = _PathForSysPath(__file__).resolve().parent.parent
+_CANDIDATES = ([_PathForSysPath(_os.environ["IDS_GEOIP_DIR"])] if _os.environ.get("IDS_GEOIP_DIR") else []) + [
+    _REPO / "models", _REPO / "docker" / "data" / "ids" / "models", _REPO.parent / "home_ids" / "models"]
+_MODELS_DIR = next((d for d in _CANDIDATES if (d / "GeoLite2-ASN.mmdb").is_file()), _REPO / "models")
 _CITY_DB = str(_MODELS_DIR / "GeoLite2-City.mmdb")
 _ASN_DB = str(_MODELS_DIR / "GeoLite2-ASN.mmdb")
 

@@ -49,6 +49,18 @@ def _is_local_dest(ip: str) -> bool:
         return False
 
 
+_LOCAL_NAME_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal", ".fritz.box", ".localdomain")
+
+
+def _is_local_name(name) -> bool:
+    """A LAN-internal name or address (mDNS/router names, private IPs) -- periodic queries for these are device
+    housekeeping, not command-and-control."""
+    if not name:
+        return False
+    n = str(name).lower().rstrip(".")
+    return _is_local_dest(n) or n.endswith(_LOCAL_NAME_SUFFIXES) or "." not in n
+
+
 class ThreatSignalDetector:
     def detect(self, device: str, features: Dict[str, Any], top_domain: Optional[str] = None,
                arp_sweep_threshold: int = 8, conn_abuse_unique_ip_threshold: int = 5,
@@ -240,8 +252,13 @@ class ThreatSignalDetector:
         # structurally cannot leave the LAN, so no volume of it can be exfiltration.
         outbound_z = float(features.get("outbound_bytes_z", 0.0) or 0.0)
         outbound_bytes = float(features.get("zeek_outbound_bytes", 0.0) or 0.0)
-        exfil_dest_ip = str(features.get("last_dest_ip", "unknown") or "unknown")
+        # P0 (architecture review 2026-10-02): the destination that actually received the bytes
+        # (ZeekFeatureExtractor._outbound_top_destination), not last_dest_ip -- the device's most recent connection,
+        # which pinned a transfer to an unrelated IP. None when no single destination dominates: no destination is
+        # better than a wrong one for the decision engine's per-destination corroboration.
+        exfil_dest_ip = str(features.get("zeek_outbound_top_dest", "unknown") or "unknown")
         is_local_exfil_dest = _is_local_dest(exfil_dest_ip)
+        exfil_domain = exfil_dest_ip if exfil_dest_ip != "unknown" else None
         if is_local_exfil_dest:
             pass
         elif outbound_z > 5.0 and outbound_bytes > 2500000:
@@ -265,12 +282,12 @@ class ThreatSignalDetector:
             conf = 0.5 if is_vendor_cloud_api else 0.9
             add("zeek_exfiltration", outbound_z, conf, "zeek_network",
                 f"massive burst Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
-                domain=exfil_dest_ip)
+                domain=exfil_domain)
         elif outbound_z > 3.5 and outbound_bytes > 250000 and not is_telemetry:
             conf = 0.35 if is_vendor_cloud_api else 0.6
             add("zeek_exfiltration", outbound_z, conf, "zeek_network",
                 f"elevated Z={outbound_z:.2f} bytes={int(outbound_bytes)}",
-                domain=exfil_dest_ip)
+                domain=exfil_domain)
         # BUGFIX (external architecture review, 2026-09-09): this branch used to fire
         # on raw absolute volume alone, with NO reference to the device's own
         # baseline at all -- unlike the two branches above it, which both gate on
@@ -292,14 +309,18 @@ class ThreatSignalDetector:
             conf = 0.25 if is_vendor_cloud_api else 0.55
             add("zeek_exfiltration", outbound_bytes, conf, "zeek_network",
                 f"absolute volume bytes={int(outbound_bytes)} Z={outbound_z:.2f}",
-                domain=exfil_dest_ip)
+                domain=exfil_domain)
 
         # ── C2 beaconing periodicity ──────────────────────────────────────────────────
         beacon_c2_1h = float(features.get("beaconing_c2_1h", 0.0) or 0.0)
         beacon_tdr = float(features.get("beacon_tdr", 0.0) or 0.0)
         beacon_total = float(features.get("beacon_total", 0.0) or 0.0)
         c2_jitter = float(features.get("beaconing_c2_count", 0.0) or 0.0)
-        last_dest_ip = str(features.get("last_dest_ip", "unknown") or "unknown")
+        # P0 (architecture review 2026-10-02): beaconing is found in DNS query timing per domain
+        # (dns_features.py), so the evidence names those domains -- not last_dest_ip, the device's most recent TCP
+        # connection, which had nothing to do with the periodic queries. None when no domain is known.
+        slow_beacon_domain = next(iter(features.get("beaconing_c2_1h_domains") or []), None)
+        jitter_beacon_domain = next(iter(features.get("beaconing_c2_domains") or []), None)
 
         # BUGFIX (v13 full-architecture plan, Phase 9): domain= added to all three
         # branches below, same reasoning as zeek_exfiltration above -- last_dest_ip
@@ -324,18 +345,18 @@ class ThreatSignalDetector:
         if beacon_c2_1h > 0 and not is_telemetry:
             add("zeek_beaconing", beacon_c2_1h, 0.7, "zeek_network",
                 f"low-and-slow c2 periodicity {int(beacon_c2_1h)} sequences",
-                subtag="low_and_slow", domain=last_dest_ip)
+                subtag="low_and_slow", domain=slow_beacon_domain)
         elif beacon_tdr > 0.75 and beacon_total >= 15:
             conf = min(1.0, beacon_tdr) * (0.1 if is_telemetry else 1.0)
             if conf > 0:
                 add("zeek_beaconing", beacon_tdr, conf, "zeek_network",
                     f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}",
-                    subtag="persistent_single_target", domain=last_dest_ip)
-        elif c2_jitter > 0 and not is_telemetry and not _is_local_dest(last_dest_ip):
+                    subtag="persistent_single_target", domain=None)
+        elif c2_jitter > 0 and not is_telemetry and not _is_local_name(jitter_beacon_domain):
             conf = 0.3 if outbound_bytes == 0 else 0.55
             add("zeek_beaconing", c2_jitter, conf, "zeek_network",
                 f"uniform check-in jitter {int(c2_jitter)} hits",
-                subtag="uniform_jitter", domain=last_dest_ip)
+                subtag="uniform_jitter", domain=jitter_beacon_domain)
 
         # ── TCP connection abuse / port scan ─────────────────────────────────────────
         # BUGFIX (live audit): this only ever looked at raw counts -- 165 rejected

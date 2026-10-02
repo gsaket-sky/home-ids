@@ -32,6 +32,7 @@ from urllib.error import URLError
 from metrics import (pihole_gravity_queries_total, pihole_gravity_last_success_timestamp,
                      threat_intel_index_age_seconds, threat_intel_index_weight)
 from intelligence import ti_staleness
+from intelligence import ja3_provenance
 
 from utils import etld1
 from intelligence import feed_health
@@ -71,10 +72,24 @@ _TRANCO_URL = "https://tranco-list.eu/top-1m.csv.zip"
 _SSLBL_JA3_URL = "https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv"
 _JA3_RE = re.compile(r"^[0-9a-f]{32}$")
 
+_SSLBL_MAX_AGE_DAYS = 365
+
+
+def _sslbl_listing_is_stale(last_seen: str, now: Optional[float] = None) -> bool:
+    """True when an SSLBL row's last-seen date (YYYY-MM-DD) is older than _SSLBL_MAX_AGE_DAYS.
+    An unparseable date is kept (fail towards detection, as before)."""
+    try:
+        seen = time.mktime(time.strptime(last_seen[:10], "%Y-%m-%d"))
+    except (ValueError, TypeError):
+        return False
+    return ((now if now is not None else time.time()) - seen) > _SSLBL_MAX_AGE_DAYS * 86400
+
+
 class ThreatIntel:
     def __init__(self, cache_dir: str = "state/ti_cache", otx_api_key: str = "", refresh_interval: int = 3600,
                  pihole_api_url: str = "", pihole_api_password: str = "", pihole_search_api_path: str = "/api/search",
-                 et_open_enabled: bool = True, advanced_feeds: bool = False):
+                 et_open_enabled: bool = True, advanced_feeds: bool = False, tranco_enabled: bool = False,
+                 abusech_auth_key: str = ""):
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         # Hidden advanced switch: OTX / URLhaus / ThreatFox need per-user keys and are free for
@@ -140,6 +155,13 @@ class ThreatIntel:
         })
         self._tranco_top10k: Set[str] = set()
         self._tranco_ranks: Dict[str, int] = {}
+        # Tranco is OFF by default (2026-10-01): one of its inputs is CC BY-NC, so it cannot ship. Its two jobs are
+        # done by intelligence/local_popularity.py (bound by the pipeline as self.local_popularity).
+        self.tranco_enabled = bool(tranco_enabled)
+        # abuse.ch (URLhaus / ThreatFox) requires an Auth-Key on every download since 2025; it was never sent, so the
+        # keyed feeds could not work even with advanced_keyed_feeds on (found 2026-10-02). Sent only to those feeds.
+        self.abusech_auth_key = (abusech_auth_key or "").strip()
+        self.local_popularity = None
         self.fp_engine = None  # Bound dynamically by pipeline at boot
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
@@ -174,6 +196,14 @@ class ThreatIntel:
             # 1. Exact match check against static allowlist OR Tranco top 10k
             if domain in self._static_allowlist or domain in self._tranco_top10k:
                 LOGGER.debug("Allowlist match (Exact): %s", domain)
+                return True
+
+            # 1b. Learned on this network (replaces Tranco): established names, exact match only -- and never when the
+            # name itself carries a direct, strong threat-list hit. A learned list can be poisoned (malware several
+            # devices contact daily), so it may only shield a popular name from suffix matches and weak indicators.
+            lp = self.local_popularity
+            if lp is not None and lp.is_established(domain) and not self._strong_direct_ioc(domain):
+                LOGGER.debug("Allowlist match (learned popularity): %s", domain)
                 return True
                 
             # 2. Parent domain match check against curated _static_allowlist OR dynamic trust cache
@@ -238,7 +268,8 @@ class ThreatIntel:
 
         try:
             url = f"{self.pihole_api_url.rstrip('/')}{self.pihole_search_api_path}/{domain}"
-            headers = {"sid": self.pihole_api_password} if self.pihole_api_password else {}
+            from mitigation import pihole_auth   # Pi-hole v6 needs a login, not a raw password header
+            headers = pihole_auth.auth_headers(self.pihole_api_url, self.pihole_api_password, self.session)
             resp = self.session.get(url, params={"partial": "false"}, headers=headers, timeout=3.0)
             if resp.status_code != 200:
                 LOGGER.debug("Pi-hole gravity search for %s returned HTTP %s", domain, resp.status_code)
@@ -276,6 +307,16 @@ class ThreatIntel:
             except ValueError: 
                 pass
         return None
+
+    def _strong_direct_ioc(self, domain: str) -> bool:
+        """A threat-list entry for exactly this name that could confirm a threat on its own (confidence >= 0.5,
+        i.e. risk >= 2.0 -- the false-positive engine's hard-stop bar)."""
+        with self._lock:
+            meta = self._bad_domains.get(domain)
+        if not meta:
+            return False
+        hit = self._decayed(meta)
+        return bool(hit) and float(hit.get("confidence", 0.0) or 0.0) >= 0.5
 
     def lookup_domain(self, domain: str) -> Optional[dict]:
         if not domain: 
@@ -337,7 +378,8 @@ class ThreatIntel:
             if not self.paused:
                 try:
                     self._refresh_all()
-                    self._refresh_tranco_trust_list()
+                    if self.tranco_enabled:
+                        self._refresh_tranco_trust_list()
                 except Exception as e:
                     LOGGER.error("TI Refresh cycle encountered an exception: %s", e)
             HEARTBEATS.beat("ti_refresh", health_state="healthy")
@@ -355,13 +397,24 @@ class ThreatIntel:
                 with urlopen(req, timeout=10) as resp:
                     lines = resp.read().decode('utf-8').splitlines()
                 new_ja3 = set()
+                labels = {}
                 for line in lines:
                     if not line or line.startswith('#'):
                         continue
-                    h = line.split(',')[0].strip().lower()
+                    cols = [c.strip() for c in line.split(',')]
+                    h = cols[0].lower()
                     if _JA3_RE.match(h):
+                        # columns: ja3_md5, Firstseen, Lastseen, Listingreason
+                        reason = cols[3] if len(cols) > 3 and cols[3] else "unspecified"
+                        seen = cols[2][:10] if len(cols) > 2 and cols[2] else "?"
+                        # B4: listings are never removed upstream; a hash last seen years ago is a retired
+                        # tool (or a library everyone now shares), not current evidence.
+                        if _sslbl_listing_is_stale(seen):
+                            continue
                         new_ja3.add(h)
+                        labels[h] = f"abuse.ch SSLBL listing '{reason}', last seen {seen}"
                 if new_ja3:
+                    ja3_provenance.set_source("sslbl", labels)
                     self._sslbl_ja3 = frozenset(new_ja3)
                     self._rebuild_ja3()
                     LOGGER.info("Successfully loaded %d SSLBL JA3 fingerprints.", len(new_ja3))
@@ -416,6 +469,9 @@ class ThreatIntel:
         self._feed_urls["et_open"] = {}
         self._feed_cidrs["et_open"] = cidrs
         self._et_ja3 = frozenset(h.lower() for h in parsed.ja3)
+        ja3_provenance.set_source("et_open", {
+            h: (f"ET Open rule sid {m.get('sid')}" if isinstance(m, dict) and m.get("sid") else "ET Open rule")
+            for h, m in parsed.ja3.items()})
         self._rebuild_ja3()
 
     def _load_et_local(self) -> None:
@@ -551,6 +607,9 @@ class ThreatIntel:
         if not domain:
             return 0
         domain = domain.lower().strip(".")
+        if not self.tranco_enabled:
+            lp = self.local_popularity
+            return lp.get_rank(domain) if lp is not None else 0
         with self._lock:
             rank = self._tranco_ranks.get(domain, 0)
             if rank:
@@ -569,7 +628,8 @@ class ThreatIntel:
             try:
                 LOGGER.debug("Fetching feed: %s", feed_name)
                 cache_file = self.cache_dir / f"{feed_name}.cache"
-                data = self._fetch_with_cache(feed["url"], cache_file, feed["ttl"], feed_name=feed_name)
+                data = self._fetch_with_cache(feed["url"], cache_file, feed["ttl"], feed_name=feed_name,
+                                              auth_key=self.abusech_auth_key if feed.get("keyed") else "")
                 if not data: 
                     LOGGER.debug("No data returned for feed %s", feed_name)
                     continue
@@ -761,13 +821,17 @@ class ThreatIntel:
         except Exception as exc: 
             LOGGER.error("Failed to load ThreatIntel cache: %s", exc)
 
-    def _fetch_with_cache(self, url: str, cache_file: Path, ttl: int, feed_name: str = "") -> Optional[str]:
+    def _fetch_with_cache(self, url: str, cache_file: Path, ttl: int, feed_name: str = "",
+                          auth_key: str = "") -> Optional[str]:
         if cache_file.exists() and (time.time() - cache_file.stat().st_mtime) < ttl: 
             LOGGER.debug("Using cached feed response for %s", url)
             return cache_file.read_text(encoding="utf-8", errors="ignore")
         try:
             LOGGER.debug("Executing external HTTP fetch for %s", url)
-            req = Request(url, headers={"User-Agent": "home-ids/1.0"})
+            headers = {"User-Agent": "home-ids/1.0"}
+            if auth_key:
+                headers["Auth-Key"] = auth_key
+            req = Request(url, headers=headers)
             with urlopen(req, timeout=20) as r: 
                 data = r.read().decode("utf-8", errors="ignore")
             if data and len(data.strip()) > 0:
@@ -792,8 +856,13 @@ class AbuseIPDB:
     _RATE_DELAY = 16.0
     _DAILY_CAP = 480
     
-    def __init__(self, api_key: str, cache_dir: Path, refresh_interval: int = 3600):
+    def __init__(self, api_key: str, cache_dir: Path, refresh_interval: int = 3600, enabled_fn=None):
         self.api_key = api_key
+        # 2026-10-01 (owner decision): AbuseIPDB stays implemented for a later paid/opt-in tier but is OFF by
+        # default -- its free plan forbids commercial use. `enabled_fn` is read on every use (the web UI's
+        # advanced-settings toggle is a live config override), so switching it needs no restart; the API key
+        # itself still does (static secret).
+        self._enabled_fn = enabled_fn or (lambda: True)
         self.cache_file = cache_dir / "abuseipdb_blacklist.txt"
         self.live_cache_file = cache_dir / "abuseipdb_live.json.gz"
         self.refresh_interval = refresh_interval
@@ -821,8 +890,15 @@ class AbuseIPDB:
             LOGGER.info("Starting AbuseIPDB async live worker thread.")
             threading.Thread(target=self._live_worker_loop, daemon=True, name="abuseipdb-live").start()
 
+    @property
+    def active(self) -> bool:
+        try:
+            return bool(self.api_key) and not self.paused and bool(self._enabled_fn())
+        except Exception:
+            return False
+
     def enqueue_ip(self, ip: str, priority: int = 5) -> None:
-        if self.paused or not self.api_key or not ip or ip == "unknown": return
+        if not self.active or not ip or ip == "unknown": return
         try:
             if not ipaddress.ip_address(ip).is_global: return
         except ValueError:
@@ -943,12 +1019,16 @@ class AbuseIPDB:
     def _refresh_loop(self) -> None:
         time.sleep(15)
         while True:
-            if not self.paused:
+            if self.active:
                 try:
                     self._refresh()
                 except Exception as exc:
                     LOGGER.error("AbuseIPDB refresh loop encountered an exception: %s", exc)
-            time.sleep(self.refresh_interval)
+                time.sleep(self.refresh_interval)
+            else:
+                # Switched off (the default): re-check the live toggle every minute, so turning it on in the web UI
+                # fetches the blacklist promptly instead of after a full refresh interval.
+                time.sleep(60)
             
     def _refresh(self) -> None:
         if not self.api_key: 
@@ -1007,6 +1087,8 @@ class AbuseIPDB:
                 LOGGER.warning("Failed to load AbuseIPDB cache: %s", exc)
                 
     def get_live_risk(self, ip: str) -> float:
+        if not self.active:
+            return 0.0
         import time
         with self._lock:
             e = self._live_cache.get(ip)
@@ -1017,8 +1099,187 @@ class AbuseIPDB:
         return 0.0
 
     def lookup(self, ip: str) -> bool:
+        if not self.active:
+            return False
         with self._lock: 
             match = ip in self._bad_ips
             if match:
                 LOGGER.debug("AbuseIPDB blacklist match for IP: %s", ip)
             return match
+
+
+class VirusTotalClient:
+    """VirusTotal v3 IP/domain reputation, asynchronous and rate-limited.
+
+    Removed 2026-09-29 (the free public API "must not be used in commercial products or services") and restored
+    2026-10-01 at the owner's request, OFF by default, for a later paid/opt-in tier: a customer who brings their own
+    key decides in the web UI's advanced settings. `enabled_fn` is read on every use, so the toggle is live; the key
+    needs a restart. Free-tier limits are 4 requests/minute and 500/day -- hence the 16 s spacing and the daily cap
+    with margin; a premium key could raise both (`rate_delay`, `daily_cap`)."""
+    _BASE = "https://www.virustotal.com/api/v3"
+
+    def __init__(self, api_key: str, cache_dir: Path, enabled_fn=None, rate_delay: float = 16.0, daily_cap: int = 480):
+        self.api_key = api_key
+        self._enabled_fn = enabled_fn or (lambda: True)
+        self._rate_delay = float(rate_delay)
+        self._daily_cap = int(daily_cap)
+        self.cache_file = Path(cache_dir) / "vt_cache.json.gz"
+        self._cache = {}
+        self._queue = []
+        self._queued_items = set()
+        self._lock = threading.RLock()
+        self._last_req = 0.0
+        self._today_count = 0
+        self._today_date = ""
+        self._quota_exhausted_until = 0.0
+        # Health manager pauses enrichment under resource pressure (same flag as ThreatIntel/AbuseIPDB).
+        self.paused = False
+        self._load_cache()
+        if api_key:
+            threading.Thread(target=self._worker_loop, daemon=True, name="vt-worker").start()
+
+    @property
+    def active(self) -> bool:
+        try:
+            return bool(self.api_key) and not self.paused and bool(self._enabled_fn())
+        except Exception:
+            return False
+
+    def enqueue_domain(self, domain: str, priority: int = 5) -> None:
+        if not self.active or not domain or domain == "unknown":
+            return
+        self._enqueue("domain", domain, priority)
+
+    def enqueue_ip(self, ip: str, priority: int = 5) -> None:
+        if not self.active or not ip or ip == "unknown":
+            return
+        try:
+            if not ipaddress.ip_address(ip).is_global:
+                return
+        except ValueError:
+            return
+        self._enqueue("ip", ip, priority)
+
+    def _enqueue(self, ioc_type: str, value: str, priority: int) -> None:
+        k = f"{ioc_type}:{value}"
+        with self._lock:
+            if self._is_cached(k) or k in self._queued_items or len(self._queued_items) >= 10000:
+                return
+            self._queued_items.add(k)
+            heapq.heappush(self._queue, (priority, time.time(), ioc_type, value))
+
+    def get_result(self, ioc_type: str, value: str):
+        with self._lock:
+            e = self._cache.get(f"{ioc_type}:{value}")
+            if e and time.time() < e["expires"]:
+                return e["result"]
+        return None
+
+    def risk_contribution(self, ioc_type: str, value: str) -> float:
+        """0..4 on the same scale as the other reputation sources: the share of engines calling it malicious
+        (suspicious counts half), x6, capped at 4."""
+        if not self.active or not value:
+            return 0.0
+        res = self.get_result(ioc_type, value)
+        if not res:
+            return 0.0
+        s = res.get("last_analysis_stats", {})
+        total = sum(s.values()) or 1
+        return min(((s.get("malicious", 0) + s.get("suspicious", 0) * 0.5) / total) * 6.0, 4.0)
+
+    def _worker_loop(self) -> None:
+        while True:
+            if not self.active or time.time() < self._quota_exhausted_until:
+                time.sleep(30)
+                continue
+            item = None
+            with self._lock:
+                today = time.strftime("%Y-%m-%d")
+                if today != self._today_date:
+                    self._today_count, self._today_date = 0, today
+                if self._queue and self._today_count < self._daily_cap:
+                    _, _, itype, val = heapq.heappop(self._queue)
+                    self._queued_items.discard(f"{itype}:{val}")
+                    item = (itype, val)
+            if item is None:
+                time.sleep(5)
+                continue
+            wait = self._rate_delay - (time.time() - self._last_req)
+            if wait > 0:
+                time.sleep(wait)
+            itype, val = item
+            try:
+                res = self._query(itype, val)
+                with self._lock:
+                    self._cache[f"{itype}:{val}"] = {"result": res, "expires": time.time() + (86400 if res else 3600)}
+                    if res:
+                        self._today_count += 1
+                    while len(self._cache) > 2000:
+                        del self._cache[next(iter(self._cache))]
+                self._save_cache()
+            except Exception as exc:
+                LOGGER.error("VirusTotal worker error: %s", exc)
+            finally:
+                self._last_req = time.time()
+
+    def _query(self, ioc_type: str, value: str) -> dict:
+        u = f"{self._BASE}/domains/{value}" if ioc_type == "domain" else f"{self._BASE}/ip_addresses/{value}"
+        req = Request(u, headers={"x-apikey": self.api_key, "User-Agent": "home-ids/1.0"})
+        last_exc = None
+        for attempt in range(3):
+            try:
+                with urlopen(req, timeout=15) as r:
+                    data = json.loads(r.read())
+                attrs = data.get("data", {}).get("attributes", {})
+                feed_health.record_success("virustotal")
+                return {"last_analysis_stats": attrs.get("last_analysis_stats", {}),
+                        "reputation": attrs.get("reputation", 0)}
+            except URLError as e:
+                if hasattr(e, "close"):
+                    try:
+                        e.close()
+                    except Exception:
+                        pass
+                last_exc = e
+                code = getattr(e, "code", None)
+                if code == 404:
+                    return {}  # VirusTotal has never seen it: a valid "no verdict", not a failure
+                if code == 429:
+                    LOGGER.warning("VirusTotal rate limit (429) -- pausing lookups for an hour.")
+                    self._quota_exhausted_until = time.time() + 3600
+                    break
+                reason = str(getattr(e, "reason", ""))
+                if isinstance(getattr(e, "reason", None), TimeoutError) or "timeout" in reason.lower():
+                    time.sleep(2 ** attempt)
+                    continue
+                break
+        if last_exc is not None:
+            feed_health.record_failure("virustotal", str(last_exc), feed_health.classify_url_error(last_exc))
+        return {}
+
+    def _is_cached(self, key: str) -> bool:
+        e = self._cache.get(key)
+        return bool(e and time.time() < e["expires"])
+
+    def _save_cache(self) -> None:
+        try:
+            with self._lock:
+                d = dict(self._cache)
+            tmp = self.cache_file.with_suffix(".gz.tmp")
+            with gzip.open(tmp, "wt", encoding="utf-8") as f:
+                json.dump(d, f)
+            tmp.replace(self.cache_file)
+        except Exception as exc:
+            LOGGER.error("Failed to save VirusTotal cache: %s", exc)
+
+    def _load_cache(self) -> None:
+        if not self.cache_file.exists():
+            return
+        try:
+            with gzip.open(self.cache_file, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            now = time.time()
+            with self._lock:
+                self._cache = {k: v for k, v in data.items() if v.get("expires", 0) > now}
+        except Exception as exc:
+            LOGGER.error("Failed to load VirusTotal cache: %s", exc)

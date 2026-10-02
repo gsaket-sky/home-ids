@@ -122,8 +122,10 @@ check("curated vendor-cloud-API domain with the IDENTICAL burst profile is dampe
 # the same file -- last_dest_ip is already computed and already used for this same
 # evidence's own _is_local_dest() gate, so this is a real destination the Evidence
 # item can now carry at the source, not a new computation.
+# P0 (architecture review 2026-10-02): the destination is the one that RECEIVED the bytes
+# (zeek_outbound_top_dest), never last_dest_ip -- the device's most recent, possibly unrelated connection.
 exfil_features_with_dest = {"outbound_bytes_z": 6.0, "zeek_outbound_bytes": 3_000_000.0,
-                              "last_dest_ip": "93.184.216.34"}
+                              "zeek_outbound_top_dest": "93.184.216.34", "last_dest_ip": "8.8.4.4"}
 ev_exfil_dest = detector.detect("dev_exfil_dest", exfil_features_with_dest, top_domain="random-exfil-drop.io")
 exfil_ev = next((e for e in ev_exfil_dest if e.type == "zeek_exfiltration"), None)
 check("a zeek_exfiltration Evidence item now carries the real destination in .domain "
@@ -142,7 +144,9 @@ check("BeaconingHypothesis becomes the winning attack hypothesis",
 
 # Same Phase 9 bugfix as zeek_exfiltration above, for zeek_beaconing's own three add()
 # call sites.
-beacon_features_with_dest = {"beaconing_c2_1h": 5.0, "last_dest_ip": "104.16.132.229"}
+# P0 (2026-10-02): beaconing names the domain whose queries were periodic, not last_dest_ip.
+beacon_features_with_dest = {"beaconing_c2_1h": 5.0, "beaconing_c2_1h_domains": ["104.16.132.229"],
+                             "last_dest_ip": "8.8.4.4"}
 ev_beacon_dest = detector.detect("dev_beacon_dest", beacon_features_with_dest)
 beacon_ev = next((e for e in ev_beacon_dest if e.type == "zeek_beaconing"), None)
 check("a zeek_beaconing Evidence item now carries the real destination in .domain",

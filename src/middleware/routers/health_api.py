@@ -49,7 +49,8 @@ def _read_json(path: Path) -> dict:
 @router.get("/api/health/status")
 def get_health_status(token: str = Depends(verify_token)) -> dict:
     state_dir = _state_dir()
-    snapshot = _read_json(state_dir / "health_manager_snapshot.json")
+    from core.runtime_paths import runtime_dir
+    snapshot = _read_json(runtime_dir(state_dir) / "health_manager_snapshot.json")
     component_heartbeats = _read_json(state_dir / "component_heartbeat.json")
     job_health = _read_json(state_dir / "job_health.json")
     feed_health = _read_json(state_dir / "feed_health.json")

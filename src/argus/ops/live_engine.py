@@ -73,12 +73,6 @@ from utils import is_cloud_cdn_provider_org
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
 
-# Mirrors src/v13/ingest/sources.py's _NEEDS_LAST_DEST_IP_FALLBACK / _NO_DEST_SENTINEL
-# exactly -- these two v-current detectors (threat_signals.py:247-274) never set
-# Evidence.domain themselves; everyone else either sets it directly or has no domain
-# concept at all, so a fallback would be misleading, not helpful.
-_NEEDS_LAST_DEST_IP_FALLBACK = frozenset({"zeek_exfiltration", "zeek_beaconing"})
-_NO_DEST_SENTINEL = "unknown"  # ZeekFeatureExtractor._last_connection_meta's own "no data yet" sentinel
 
 # The longest TTL hypotheses/engine.py's own compute_freshness() honors (the
 # "reputation" independence_family, 86400s) -- see the module docstring above for why
@@ -275,6 +269,23 @@ def _maybe_checkpoint_wal(now: float) -> None:
         LOGGER.warning("Periodic WAL checkpoint failed (non-fatal): %s", e)
 
 
+def merge_device_in_own_connection(orphan_id: str, canonical_id: str) -> None:
+    """GraphStore.merge_device() for callers on a thread OTHER than the main loop (the identity-reconcile
+    worker). The singleton's connection is single-thread by design (sqlite3's check_same_thread), so such a caller
+    opens a short-lived store on the same database file; the merge runs in one transaction there and SQLite's file
+    locking orders it against the main loop's writes."""
+    store = GraphStore(_GRAPH_DB_PATH)
+    try:
+        store.merge_device(orphan_id, canonical_id)
+    finally:
+        store._conn.close()
+    try:   # the singleton caches canonical-id lookups; drop them so the main loop sees the merge at once
+        if _graph_store is not None:
+            _graph_store._invalidate_merge_caches()
+    except Exception:
+        pass
+
+
 def get_graph_store() -> GraphStore:
     """Public accessor for the SAME lazily-initialized GraphStore singleton this
     module's own evaluate() uses -- v13 full-architecture plan, Phase 3:
@@ -303,13 +314,15 @@ def _get_autotune_engine() -> AutotuneEngine:
     return _autotune_engine
 
 
+# Routine baseline updates are persisted at most this often per (device, metric, hour); changepoints save at once.
+_BASELINE_SAVE_MIN_INTERVAL_SECONDS = 300.0   # 2026-10-02: was 30 s; saves now batched in one transaction (flash wear)
 _baseline_engine: Optional[BaselineEngine] = None
 
 
 def _get_baseline_engine() -> BaselineEngine:
     global _baseline_engine
     if _baseline_engine is None or _baseline_engine.store is not _get_graph_store():
-        _baseline_engine = BaselineEngine(_get_graph_store())
+        _baseline_engine = BaselineEngine(_get_graph_store(), save_min_interval=_BASELINE_SAVE_MIN_INTERVAL_SECONDS)
     return _baseline_engine
 
 
@@ -369,27 +382,13 @@ def record_device_traffic(device_id: str, destination_ids, now: Optional[float] 
         )
 
 
-def _build_fallback_context(features: dict) -> Optional[Dict[str, str]]:
-    dest_ip = str((features or {}).get("last_dest_ip", "") or "")
-    if not dest_ip or dest_ip == _NO_DEST_SENTINEL:
-        return None
-    return {"dest_ip": dest_ip}
-
-
 def _convert_active_evidence(v1_evidence_list, features: dict):
-    """Same split as run_detection_cycle(): only the two known-gap types get a
-    fallback_context, so a zeek_notice/malicious_ja3/etc. item never gets a misleading
-    destination attached just because it happened to share a batch with one that does."""
-    needs_fallback = [ev for ev in v1_evidence_list if ev.type in _NEEDS_LAST_DEST_IP_FALLBACK]
-    no_fallback_needed = [ev for ev in v1_evidence_list if ev.type not in _NEEDS_LAST_DEST_IP_FALLBACK]
-
-    out = []
-    if no_fallback_needed:
-        out.extend(convert_list(no_fallback_needed, INDEPENDENCE_FAMILY_MAP))
-    if needs_fallback:
-        fallback_context = _build_fallback_context(features)
-        out.extend(convert_list(needs_fallback, INDEPENDENCE_FAMILY_MAP, fallback_context=fallback_context))
-    return out
+    """Converts this cycle's v1 evidence as-is. P0 (architecture review 2026-10-02): there is no longer a
+    last_dest_ip fallback for destination-less zeek_exfiltration/zeek_beaconing evidence -- it stamped the device's
+    most recent connection onto every such item in the batch, so one IP collected evidence from unrelated traffic
+    and false corroboration followed. The detectors now attribute to what actually fired (the dominant byte
+    receiver, the periodic domain); evidence without one keeps NO_DESTINATION."""
+    return convert_list(list(v1_evidence_list), INDEPENDENCE_FAMILY_MAP) if v1_evidence_list else []
 
 
 def _query_graph_window(device_id: str, now: float) -> List:
@@ -831,6 +830,23 @@ _PEER_DEVIATION_MIN_PEERS = 3
 _PEER_DEVIATION_MULTIPLIER = 3.0  # this device's own count must be >= 3x its cohort's average
 _PEER_DEVIATION_MIN_ABSOLUTE_COUNT = 5  # avoid flagging trivial small-number swings (e.g. 1 -> 4 is "4x" but meaningless)
 
+# A2 (2026-10-01): every device's evaluation used to re-query the 7-day distinct-destination count of EVERY peer in
+# its cohort -- O(devices x peers) COUNT(DISTINCT) queries per cycle, a steady share of the engine's CPU on .94. A
+# count over a 7-day window does not move in a few minutes, so each device's count is reused for this long.
+_DISTINCT_DEST_CACHE_TTL_SECONDS = 300.0
+_distinct_dest_cache: Dict[str, Tuple[float, int]] = {}
+
+
+def _cached_distinct_destination_count(store, device_id: str, ts: float) -> int:
+    hit = _distinct_dest_cache.get(device_id)
+    if hit is not None and 0.0 <= ts - hit[0] < _DISTINCT_DEST_CACHE_TTL_SECONDS:
+        return hit[1]
+    count = store.get_distinct_destination_count(device_id, ts - _PEER_DEVIATION_WINDOW_SECONDS)
+    if len(_distinct_dest_cache) > 10000:
+        _distinct_dest_cache.clear()
+    _distinct_dest_cache[device_id] = (ts, count)
+    return count
+
 
 def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float) -> List[Evidence]:
     """Release 14, net-new capability N2: "does this device deviate from
@@ -879,8 +895,7 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
         peers = [d for d in _peer_cohort_cache.get(device_type, []) if d != device_id]
         if len(peers) < _PEER_DEVIATION_MIN_PEERS:
             return []
-        since = ts - _PEER_DEVIATION_WINDOW_SECONDS
-        my_count = store.get_distinct_destination_count(device_id, since)
+        my_count = _cached_distinct_destination_count(store, device_id, ts)
         # 2026-09-27 (Phase 3 of the autonomy-completion effort): both constants below
         # are now allowlisted, device/category/global-scoped tunables -- resolved here
         # (not hardcoded) so a promoted override actually changes this evidence-creation
@@ -895,7 +910,7 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
             "peer_deviation_multiplier", device_id, default=_PEER_DEVIATION_MULTIPLIER)
         if my_count < min_absolute_count:
             return []
-        peer_counts = [store.get_distinct_destination_count(p, since) for p in peers]
+        peer_counts = [_cached_distinct_destination_count(store, p, ts) for p in peers]
         peer_avg = sum(peer_counts) / len(peer_counts)
         if peer_avg > 0 and my_count >= peer_avg * multiplier:
             return [Evidence(
@@ -1320,7 +1335,7 @@ def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float
                             fallback_evaluate=None, now: Optional[float] = None) -> Dict[str, Any]:
     """v13 full-architecture plan, Workstream 2 -- the pipeline.py call site once
     config.yaml's `cl_afpe_engine` is flipped from "v_current" to "argus" (see
-    cl_afpe_flip_monitor.py for how/when that flip happens). Unlike
+    config.yaml.example's cl_afpe_engine block; argus is the default since 2026-10-02). Unlike
     evaluate_cl_afpe_shadow() above, this function's RETURN VALUE is what pipeline.py
     actually acts on -- suppress/publish, ML-registry learn/reject, alerts.json's
     fp_verdict field -- exactly the same "one new call site, fail-safe fallback" shape

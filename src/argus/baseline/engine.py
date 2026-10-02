@@ -41,6 +41,17 @@ _INCIDENT_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})
 # row is correct here, not a row-count.
 _INCIDENT_COOLDOWN_SECONDS = 1800.0
 
+# is_learning_paused() answers are cached this long per device (and dropped at once when THIS process writes
+# a decision). A decision written by another process is seen within this window -- negligible next to the
+# 30 min cooldown it gates.
+_PAUSE_CACHE_SECONDS = 10.0
+
+# _save_tracker() writes a device_baselines row with JSON-serialised posterior + run-length state. It ran on
+# every observation (every metric x device x cycle: ~8 % of the engine's main loop, 2026-09-30 profile) and
+# now writes each (device, metric, hour) tracker at most this often. A crash loses at most this much
+# statistical history -- the baselines are running estimates, not records; changepoints are saved at once.
+_SAVE_MIN_INTERVAL_SECONDS = 300.0   # 2026-10-02: was 30 s; now also written in ONE transaction per interval (flash wear)
+
 # BOCPD: cp_mass (probability mass at run-length 0) crossing this bar is the
 # CANDIDATE trigger -- confirmation is a separate, second stage (see
 # _CHANGEPOINT_CONFIRM_* below and _evaluate_changepoint_candidate()). A
@@ -195,8 +206,11 @@ class BaselineEngine:
     GraphStore. One instance per ingest daemon process (matches
     IngestDaemon's own one-GraphStore-per-process pattern)."""
 
-    def __init__(self, store: GraphStore):
+    def __init__(self, store: GraphStore, save_min_interval: float = 0.0):
         self.store = store
+        # 0 = persist on every observation (default; what the tests and the ingest daemon rely on). The live engine
+        # passes _SAVE_MIN_INTERVAL_SECONDS so routine updates are batched; call flush() on shutdown.
+        self.save_min_interval = float(save_min_interval)
         # Release 15 Sheet 03a live wiring (closes that module's own former
         # honest gap: "not yet wired to make v13/decision/engine.py actually
         # READ these promoted values"): bocpd_hazard_rate is the one
@@ -245,6 +259,10 @@ class BaselineEngine:
         self._markov: Dict[Tuple[str, str], MarkovBaseline] = {}  # (device_id, axis) -> tracker
         self._last_state: Dict[Tuple[str, str], Tuple[Optional[str], Optional[str]]] = {}  # (device, axis) -> (prev, prev2)
         self._last_observed_at: Dict[str, float] = {}  # device_id -> wall-clock of its last real update
+        self._pause_cache: Dict[str, tuple] = {}       # device_id -> (paused, expires_at, decision_write_count)
+        self._last_saved: Dict[tuple, float] = {}      # (device, metric, hour) -> when its tracker was last persisted
+        self._dirty_trackers: Dict[tuple, tuple] = {}  # key -> args of a save that was skipped (flushed later)
+        self._dirty_markov: Dict[tuple, tuple] = {}    # (device_id, axis) -> (markov, now), same throttle (flash wear)
         # (device, metric, hour) -> {"anchor": <frozen pre-spike model>, "surprises": [...]}
         # -- an active reference-check for a candidate changepoint. See
         # _CHANGEPOINT_CONFIRM_* above for why this two-stage design replaced
@@ -270,14 +288,26 @@ class BaselineEngine:
         OWN device_baselines reads/writes, so this is resolved once, up front,
         for consistency rather than relying on it happening to also be safe
         here specifically."""
-        device_id = self.store.resolve_canonical_device_id(device_id)
-        latest = self.store.get_latest_decision_for_device(device_id)
-        if latest is None:
-            return False
-        if latest.get("state") in _INCIDENT_STATES:
-            return True
         now = now if now is not None else time.time()
-        return (now - float(latest.get("timestamp", 0) or 0)) < _INCIDENT_COOLDOWN_SECONDS
+        # PERF (profiled 2026-09-30, ~14 % of the engine's main loop): this is asked for every metric of
+        # every device every cycle, and the answer only changes when a new decision row is written (or the
+        # cooldown elapses). A short per-device cache turns ~N-metrics queries per cycle into one.
+        version = getattr(self.store, "decision_write_count", 0)
+        cached = self._pause_cache.get(device_id)
+        if cached is not None and cached[1] > now and cached[2] == version:
+            return cached[0]
+        canonical = self.store.resolve_canonical_device_id(device_id)
+        latest = self.store.get_latest_decision_state(canonical)
+        if latest is None:
+            paused = False
+        elif latest.get("state") in _INCIDENT_STATES:
+            paused = True
+        else:
+            paused = (now - float(latest.get("timestamp", 0) or 0)) < _INCIDENT_COOLDOWN_SECONDS
+        if len(self._pause_cache) > 20000:
+            self._pause_cache.clear()
+        self._pause_cache[device_id] = (paused, now + _PAUSE_CACHE_SECONDS, version)
+        return paused
 
     # ---------------------------------------------------------- persistence
 
@@ -448,8 +478,40 @@ class BaselineEngine:
         ).fetchone()
         return int(row["r"]) if row is not None and row["r"] is not None else 0
 
+    def flush(self) -> int:
+        """Persist every tracker whose save was skipped by the throttle. Called on a clean shutdown (and safe to
+        call any time). Returns how many were written."""
+        pending = list(self._dirty_trackers.values())
+        markovs = list(self._dirty_markov.items())
+        self._dirty_markov.clear()
+        self._last_bulk_flush = time.time()
+        # One transaction for all of them (flash wear, 2026-10-02): saving trackers one commit at a time rewrote the
+        # same device_baselines pages into the WAL over and over -- the graph store's largest page writer on .94.
+        with self.store.transaction():
+            for device_id, metric, model_kind, hour, tracker, regime_id in pending:
+                try:
+                    self._save_tracker(device_id, metric, model_kind, hour, tracker, regime_id, time.time(), force=True)
+                except Exception:
+                    LOGGER.exception("Baseline flush failed for (%r, %r, %r) -- skipped", device_id, metric, hour)
+            for (device_id, axis), (markov, now) in markovs:
+                try:
+                    self._write_markov(device_id, axis, markov, now)
+                except Exception:
+                    LOGGER.exception("Markov flush failed for (%r, %r) -- skipped", device_id, axis)
+        return len(pending) + len(markovs)
+
     def _save_tracker(self, device_id: str, metric: str, model_kind: str, hour: int,
-                        tracker: BOCPDTracker, regime_id: int, now: float) -> None:
+                        tracker: BOCPDTracker, regime_id: int, now: float, force: bool = False) -> None:
+        key = (device_id, metric, hour)
+        last = self._last_saved.get(key)
+        if not force and self.save_min_interval > 0:
+            # Throttled: remember it, and write ALL remembered trackers together once per interval (flush()).
+            self._dirty_trackers[key] = (device_id, metric, model_kind, hour, tracker, regime_id)
+            if time.time() - getattr(self, "_last_bulk_flush", 0.0) >= self.save_min_interval:
+                self.flush()
+            return
+        self._dirty_trackers.pop(key, None)
+        self._last_saved[key] = now
         run_length_state = [
             {"run_length": rl, "weight": w, "model": m.to_dict()}
             for rl, m, w in tracker._hypotheses  # noqa: SLF001 -- this engine owns the persistence contract
@@ -585,7 +647,8 @@ class BaselineEngine:
         if changepoint_confirmed:
             regime_id += 1
 
-        self._save_tracker(device_id, metric, model_kind, hour, tracker, regime_id, now)
+        self._save_tracker(device_id, metric, model_kind, hour, tracker, regime_id, now,
+                           force=changepoint_confirmed)      # a new regime is saved at once; routine updates are throttled
 
         dominant = tracker.dominant_model()
         surprise = (dominant.surprise(*_surprise_args_for(model_kind, observation_args))
@@ -693,6 +756,16 @@ class BaselineEngine:
         return MarkovBaseline(ACTIVITY_STATES if axis == "activity_state" else [])
 
     def _save_markov(self, device_id: str, axis: str, markov: MarkovBaseline, now: float) -> None:
+        if self.save_min_interval > 0:
+            # 2026-10-02 (flash wear): was written + committed on EVERY transition observation -- the main remaining
+            # device_baselines writer on .94. Now batched with the trackers (flush()).
+            self._dirty_markov[(device_id, axis)] = (markov, now)
+            if time.time() - getattr(self, "_last_bulk_flush", 0.0) >= self.save_min_interval:
+                self.flush()
+            return
+        self._write_markov(device_id, axis, markov, now)
+
+    def _write_markov(self, device_id: str, axis: str, markov: MarkovBaseline, now: float) -> None:
         self.store._conn.execute(
             "INSERT INTO device_baselines "
             "(device_id, metric, hour, regime_id, model_kind, posterior_params_json, run_length_json, n, updated_at) "

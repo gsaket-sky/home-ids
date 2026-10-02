@@ -23,6 +23,12 @@ from middleware import graph_client  # noqa: E402
 from middleware.routers import overview_api  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _no_summary_cache(monkeypatch):
+    monkeypatch.setattr(overview_api, "_SUMMARY_CACHE_TTL_SECONDS", 0.0)
+    overview_api._summary_cache.clear()
+
+
 def _write_jsonl(path, records):
     path.write_text("\n".join(json.dumps(r) for r in records) + "\n", encoding="utf-8")
 
@@ -284,6 +290,22 @@ def test_get_overview_summary_survives_scrape_failure(tmp_path, monkeypatch):
     result = overview_api.get_overview_summary(token="test")  # must not raise
     assert result["counters_available"] is False
     assert result["security"]["pihole_blocks"] == 0.0
+
+
+def test_failed_scrape_falls_back_to_the_last_good_totals(tmp_path, monkeypatch):
+    """A slow/failed /metrics scrape right after a good one must not blank the tiles to 0 with a warning."""
+    monkeypatch.setattr(overview_api.CONFIG, "get", lambda key, default=None: {
+        "metrics_port": 9105, "alert_json_path": str(tmp_path / "alerts.json"),
+    }.get(key, default))
+    text = 'home_ids_ips_pihole_blocks_total{device="a",hostname="h"} 7.0\n'
+    monkeypatch.setattr(overview_api.requests, "get", lambda url, timeout: SimpleNamespace(
+        status_code=200, text=text, raise_for_status=lambda: None))
+    assert overview_api.get_overview_summary(token="t")["security"]["pihole_blocks"] == 7.0
+    overview_api._summary_cache.pop("scrape", None)  # the scrape cache entry expires; the last-good copy stays
+    monkeypatch.setattr(overview_api.requests, "get", lambda *a, **kw: (_ for _ in ()).throw(ConnectionError()))
+    result = overview_api.get_overview_summary(token="t")
+    assert result["counters_available"] is True
+    assert result["security"]["pihole_blocks"] == 7.0
 
 
 def test_get_overview_summary_alerts_triaged_matches_volume_trend_sum(tmp_path, monkeypatch):

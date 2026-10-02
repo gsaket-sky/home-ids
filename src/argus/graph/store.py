@@ -167,6 +167,11 @@ _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW = 100
 # under it regardless of which SQLite build a given deployment ships.
 _SQLITE_DELETE_BATCH_SIZE = 400
 
+# How long merge-chain lookups (canonical id / ids resolving into it) are cached. Merges are rare and
+# audit-preserving; this process invalidates its own cache on every merge, another process's merge is
+# seen within this window.
+_MERGE_CACHE_TTL_SECONDS = 15.0
+
 # Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): decisions
 # and alert_events share the SAME retention window -- an alert_event without its
 # parent decision is meaningless, so they're pruned together, in one job. Closes a
@@ -280,6 +285,14 @@ class GraphStore:
         if cache_kb is not None:
             self._conn.execute(f"PRAGMA cache_size = -{cache_kb}")
         self._in_transaction = False
+        # Merge-chain lookups (resolve_canonical_device_id / _all_ids_resolving_to) ran several queries EACH,
+        # thousands of times per detection cycle (profiled 2026-09-30: ~20 % of the engine's main loop).
+        # Cached with a short TTL; dropped immediately when this process merges (merge_device). Another
+        # process's merge is picked up within the TTL.
+        self._merge_cache_ttl = _MERGE_CACHE_TTL_SECONDS
+        self.decision_write_count = 0            # bumped by insert_decision(); see baseline is_learning_paused()
+        self._canon_cache: Dict[str, tuple] = {}
+        self._resolving_cache: Dict[str, tuple] = {}
         if is_new:
             self._apply_schema()
         elif db_path not in GraphStore._migrated_db_paths:
@@ -637,6 +650,13 @@ class GraphStore:
 
     # --- devices -----------------------------------------------------------
 
+    # Flash wear (2026-10-02, measured on .94: ~25 GB/day from this store). The poll loop refreshes last_seen of
+    # every active device, destination and device<->destination pair every ~2 s; each refresh dirtied the same 4 KB
+    # table/index pages and every commit wrote them to the WAL (then again into the database at checkpoint). last_seen
+    # is only ever compared over windows of minutes to days, so it is advanced only when it is more than this many
+    # seconds old -- an UPDATE whose WHERE matches nothing touches no page. It also never moves backwards any more.
+    LAST_SEEN_RESOLUTION_SECONDS = 300.0
+
     def upsert_device(self, device_id: str, display_label: Optional[str] = None,
                         device_type: Optional[str] = None, timestamp: Optional[float] = None) -> None:
         ts = timestamp if timestamp is not None else time.time()
@@ -649,11 +669,13 @@ class GraphStore:
             )
         else:
             self._conn.execute(
-                "UPDATE devices SET last_seen = ?, "
+                "UPDATE devices SET last_seen = MAX(last_seen, ?), "
                 "display_label = COALESCE(?, display_label), "
                 "device_type = COALESCE(?, device_type) "
-                "WHERE device_id = ?",
-                (ts, display_label, device_type, device_id),
+                "WHERE device_id = ? AND (last_seen < ? "
+                "OR (? IS NOT NULL AND display_label IS NOT ?) OR (? IS NOT NULL AND device_type IS NOT ?))",
+                (ts, display_label, device_type, device_id, ts - self.LAST_SEEN_RESOLUTION_SECONDS,
+                 display_label, display_label, device_type, device_type),
             )
         self._maybe_commit()
 
@@ -713,7 +735,23 @@ class GraphStore:
             )
         return {row["device_id"] for row in cur.fetchall()}
 
+    def _invalidate_merge_caches(self) -> None:
+        self._canon_cache.clear()
+        self._resolving_cache.clear()
+
     def resolve_canonical_device_id(self, device_id: str) -> str:
+        """Cached (short TTL) front for `_resolve_canonical_uncached()` -- see __init__'s comment."""
+        now = time.monotonic()
+        hit = self._canon_cache.get(device_id)
+        if hit is not None and hit[1] > now:
+            return hit[0]
+        canonical = self._resolve_canonical_uncached(device_id)
+        if len(self._canon_cache) > 20000:
+            self._canon_cache.clear()          # bounded: a few thousand device ids at most in practice
+        self._canon_cache[device_id] = (canonical, now + self._merge_cache_ttl)
+        return canonical
+
+    def _resolve_canonical_uncached(self, device_id: str) -> str:
         """Walks the merged_into_device_id chain to the ultimate canonical id.
         Unlike v-current's merge_into_canonical() (state_guard.py), an orphan's row
         is NEVER deleted -- this resolution is what makes that audit-preserving
@@ -757,7 +795,7 @@ class GraphStore:
         if orphan_id == canonical_id:
             raise ValueError("cannot merge a device into itself")
         try:
-            resolved_canonical = self.resolve_canonical_device_id(canonical_id)
+            resolved_canonical = self._resolve_canonical_uncached(canonical_id)   # never trust a cache for cycle detection
         except RuntimeError as e:
             raise ValueError(
                 f"cannot merge '{orphan_id}' into '{canonical_id}': "
@@ -769,12 +807,20 @@ class GraphStore:
                 f"'{canonical_id}' is already (transitively) merged into '{orphan_id}' -- would create a cycle"
             )
         ts = timestamp if timestamp is not None else time.time()
+        # P2 (architecture review 2026-10-02): one transaction for the whole merge -- the upserts, the tombstone,
+        # the merged_into edge and the stability stamp used to commit one by one, so a crash in between could leave
+        # a tombstone without its edge (or the reverse).
+        with self.transaction():
+            self._merge_device_rows(orphan_id, canonical_id, ts)
+
+    def _merge_device_rows(self, orphan_id: str, canonical_id: str, ts: float) -> None:
         self.upsert_device(orphan_id, timestamp=ts)
         self.upsert_device(canonical_id, timestamp=ts)
         self._conn.execute(
             "UPDATE devices SET merged_into_device_id = ? WHERE device_id = ?",
             (canonical_id, orphan_id),
         )
+        self._invalidate_merge_caches()
         self.add_edge("device", orphan_id, "device", canonical_id, "merged_into", ts)
         # Phase 8 (behavioral cohorts, autonomy-completion effort): every real
         # identity-merge call site (core/identity.py's real-time path,
@@ -846,7 +892,8 @@ class GraphStore:
                 (destination_id, kind, ts, ts),
             )
         else:
-            self._conn.execute("UPDATE destinations SET last_seen = ? WHERE destination_id = ?", (ts, destination_id))
+            self._conn.execute("UPDATE destinations SET last_seen = ? WHERE destination_id = ? AND last_seen < ?",
+                               (ts, destination_id, ts - self.LAST_SEEN_RESOLUTION_SECONDS))
         self._maybe_commit()
 
     # --- evidence --------------------------------------------------------------
@@ -965,6 +1012,7 @@ class GraphStore:
             (decision_id, device_id, timestamp, winning_hypothesis_id, state, decision_path,
              confidence, risk_score, json.dumps(mechanism_flags or {}), json.dumps(payload)),
         )
+        self.decision_write_count += 1           # lets readers cache "latest decision" until this changes
         for eid in capped_evidence_ids:
             self.add_edge("evidence", eid, "decision", decision_id, "supports", timestamp)
         self._maybe_commit()
@@ -1511,12 +1559,29 @@ class GraphStore:
         return self._conn.execute(query, params).fetchone() is not None
 
     def _all_ids_resolving_to(self, canonical_id: str) -> List[str]:
+        """Every id that resolves (directly or transitively) into `canonical_id`, itself first. Cached with a
+        short TTL like resolve_canonical_device_id(); callers get a copy, so they may mutate the list."""
+        now = time.monotonic()
+        hit = self._resolving_cache.get(canonical_id)
+        if hit is not None and hit[1] > now:
+            return list(hit[0])
+        ids = self._all_ids_resolving_to_uncached(canonical_id)
+        if len(self._resolving_cache) > 20000:
+            self._resolving_cache.clear()
+        self._resolving_cache[canonical_id] = (ids, now + self._merge_cache_ttl)
+        return list(ids)
+
+    def _all_ids_resolving_to_uncached(self, canonical_id: str, _seen: Optional[set] = None) -> List[str]:
+        seen = _seen if _seen is not None else set()
+        if canonical_id in seen:               # a corrupt merge cycle must not recurse forever
+            return []
+        seen.add(canonical_id)
         ids = [canonical_id]
         rows = self._conn.execute(
             "SELECT device_id FROM devices WHERE merged_into_device_id = ?", (canonical_id,)
         ).fetchall()
         for r in rows:
-            ids.extend(self._all_ids_resolving_to(r["device_id"]))
+            ids.extend(self._all_ids_resolving_to_uncached(r["device_id"], seen))
         return ids
 
     # --- edges -----------------------------------------------------------------
@@ -1809,8 +1874,9 @@ class GraphStore:
                 self._conn.execute(
                     "INSERT INTO device_destinations (device_id, destination_id, first_seen, last_seen) "
                     "VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT(device_id, destination_id) DO UPDATE SET last_seen = excluded.last_seen",
-                    (device_id, dest_id, ts, ts),
+                    "ON CONFLICT(device_id, destination_id) DO UPDATE SET last_seen = excluded.last_seen "
+                    "WHERE device_destinations.last_seen < excluded.last_seen - ?",
+                    (device_id, dest_id, ts, ts, self.LAST_SEEN_RESOLUTION_SECONDS),
                 )
 
     def get_distinct_destination_count(self, device_id: str, since: float) -> int:
@@ -1986,6 +2052,22 @@ class GraphStore:
             d["mechanism_flags"] = {}
             d["raw_payload"] = {}
         return d
+
+    def get_latest_decision_state(self, device_id: str, resolve_merges: bool = True) -> Optional[Dict[str, Any]]:
+        """Just `{"state", "timestamp"}` of the device's newest decision (None when it has none). The
+        incident-cooldown gate calls this for every metric of every device every cycle and only needs those two
+        fields; get_latest_decision_for_device() loads the whole row and JSON-parses two payloads each time
+        (profiled 2026-09-30: ~14 % of the engine's main loop)."""
+        if resolve_merges:
+            device_ids = self._all_ids_resolving_to(self.resolve_canonical_device_id(device_id))
+        else:
+            device_ids = [device_id]
+        placeholders = ",".join("?" * len(device_ids))
+        row = self._conn.execute(
+            f"SELECT state, timestamp FROM decisions WHERE device_id IN ({placeholders}) ORDER BY timestamp DESC LIMIT 1",
+            device_ids,
+        ).fetchone()
+        return None if row is None else {"state": row["state"], "timestamp": row["timestamp"]}
 
     def get_recent_decisions(self, limit: int, device_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """The console API's graph-view endpoint's actual read pattern: the most

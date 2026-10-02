@@ -134,7 +134,7 @@ def _estimate_cron_interval_seconds(cron_expr: Optional[str]) -> Optional[float]
     used to apply ONE uniform health_manager_job_staleness_hours (30.0) to
     every job regardless of its real cadence -- correct-ish for the daily jobs
     that happen to dominate this config, but would have been badly wrong for
-    cl_afpe_flip_monitor (every 15 minutes -- a real failure wouldn't surface
+    a 15-minute job -- a real failure wouldn't surface
     for up to 30 hours) and live_decision_archive (monthly -- would show
     "degraded" ~29 days out of every 30 the moment it ever gets a first entry).
     """
@@ -186,6 +186,12 @@ def _estimate_cron_interval_seconds(cron_expr: Optional[str]) -> Optional[float]
     return None
 
 
+# feed name (feed_health.json) -> the config switch that turns the service on; feeds not listed are always on
+_FEED_SWITCHES = {"abuseipdb": "abuseipdb_enabled", "virustotal": "virustotal_enabled",
+                  "otx": "advanced_keyed_feeds", "urlhaus_hosts": "advanced_keyed_feeds",
+                  "urlhaus_urls": "advanced_keyed_feeds", "threatfox_iocs": "advanced_keyed_feeds"}
+
+
 class HealthManager:
     def __init__(
         self,
@@ -215,10 +221,17 @@ class HealthManager:
         self._component_state: Dict[str, Dict[str, Any]] = {}
         self._pressure_state: str = NORMAL
         self._pressure_entered_at: float = time.time()
+        # False until the first evaluation has applied the current level once (see _evaluate_resource_pressure).
+        self._pressure_reconciled: bool = False
         self._critical_streak: int = 0
         self._alerted_pressure_level: Optional[str] = None
         self._process = psutil.Process() if psutil is not None else None
-        self._dns_evasion_audit_disabled: bool = False
+        # A4 (2026-10-01): None = not yet reconciled in this process. The override is persisted in
+        # config_overrides.json, so a "disabled" written by a previous process (Pi-hole polling blipped, then the
+        # engine restarted before it recovered) must be cleared on the first healthy evaluation -- starting at False
+        # meant "no change, nothing to do" and the audit stayed off for good (found live on .94, set 2.75 h earlier,
+        # Pi-hole healthy the whole time since).
+        self._dns_evasion_audit_disabled: Optional[bool] = None
         self._last_known_rss_mb: float = 0.0
 
     # ------------------------------------------------------------------ lifecycle
@@ -386,14 +399,7 @@ class HealthManager:
         # "unexplained connection" evidence from a DNS source known unreliable
         # right now. Defaults back on (clears the override) the moment pihole_poll
         # reports HEALTHY again, same as every other health-driven override here.
-        pihole_poll_state = self._component_state.get("pihole_poll", {}).get("state", HEALTHY)
-        should_disable = pihole_poll_state != HEALTHY
-        if should_disable != self._dns_evasion_audit_disabled:
-            if should_disable:
-                self._set_config_override("dns_evasion_audit_enabled", False)
-            else:
-                self._clear_config_override("dns_evasion_audit_enabled")
-            self._dns_evasion_audit_disabled = should_disable
+        self._reconcile_dns_evasion_audit()
 
         # read-only classification off existing files -- never re-alerts what
         # feed_health.py/job_health.json's own consumers already alert on
@@ -658,6 +664,15 @@ class HealthManager:
         else:
             self._critical_streak = 0
 
+        if not self._pressure_reconciled:
+            # Conservation overrides persist in config_overrides.json, but this process starts at NORMAL in
+            # memory: without a level CHANGE they were never cleared, so a restart during conservation left
+            # the reactive-capture switches off for good (found live 2026-09-30, hours at "normal"). Apply
+            # the current level once at start; a change is applied by the branch below anyway.
+            self._pressure_reconciled = True
+            if new_level == old_level:
+                self._apply_pressure_level(new_level)
+
         if new_level != old_level:
             self._pressure_state = new_level
             self._pressure_entered_at = now
@@ -675,6 +690,12 @@ class HealthManager:
             # process is already under pressure).
             if _PRESSURE_ORDER.index(new_level) > _PRESSURE_ORDER.index(old_level) and new_level in (CONSERVATION, CRITICAL):
                 self._maybe_capture_memory_diagnostics(new_level)
+            # 2026-10-02: tracing started on demand (see _capture_memory_diagnostics) is switched off again once the
+            # pressure is gone -- tracemalloc made allocation-heavy engine code ~18x slower on .94.
+            if new_level == NORMAL and getattr(self, "_tracemalloc_started_on_demand", False) and tracemalloc.is_tracing():
+                tracemalloc.stop()
+                self._tracemalloc_started_on_demand = False
+                LOGGER.info("Memory diagnostics: pressure back to normal, tracemalloc stopped")
         elif new_level == NORMAL and self._alerted_pressure_level not in (None, NORMAL):
             # Fully recovered -- one confirmation alert, then stop repeating.
             self._send_pressure_alert(NORMAL, escalating=False)
@@ -736,11 +757,14 @@ class HealthManager:
         failure here must never affect the real pressure-response logic that
         already ran above it in _evaluate_resource_pressure()."""
         if not tracemalloc.is_tracing():
-            # health_manager_memory_diagnostics_enabled was false at process
-            # startup (main.py's own tracemalloc.start() gate) but flipped true
-            # live since -- tracemalloc can't retroactively trace allocations
-            # that already happened, so there's nothing meaningful to snapshot
-            # until the next restart picks up the new config at startup.
+            # 2026-10-02 (measured on .94: allocation-heavy engine code ~18x slower with tracemalloc on, and its
+            # snapshots came back empty anyway): tracing is no longer on from startup. The FIRST escalation starts
+            # it; from then on allocations are traced, so the NEXT escalation's snapshot shows exactly what grew in
+            # between -- the question a memory-growth investigation needs answered. Stopped again at NORMAL.
+            tracemalloc.start()
+            self._tracemalloc_started_on_demand = True
+            LOGGER.warning("Memory diagnostics: pressure %s -- tracemalloc started; the next escalation is "
+                           "captured with allocation statistics", level)
             return
 
         # BUGFIX (2026-09-22, live incident on .94): this pair (a tracemalloc
@@ -928,6 +952,18 @@ class HealthManager:
         lines = lines[-self._MAX_DIAGNOSTIC_ENTRIES:]
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
+    def _reconcile_dns_evasion_audit(self) -> None:
+        """dns_evasion_audit_enabled follows the pihole_poll component: off while it is unhealthy, back on when it
+        recovers. The first call in a process always reconciles (see _dns_evasion_audit_disabled in __init__)."""
+        pihole_poll_state = self._component_state.get("pihole_poll", {}).get("state", HEALTHY)
+        should_disable = pihole_poll_state != HEALTHY
+        if should_disable != self._dns_evasion_audit_disabled:
+            if should_disable:
+                self._set_config_override("dns_evasion_audit_enabled", False, reason="Pi-hole polling unhealthy")
+            else:
+                self._clear_config_override("dns_evasion_audit_enabled")
+            self._dns_evasion_audit_disabled = should_disable
+
     def _apply_pressure_level(self, level: str) -> None:
         """The concrete degradation levers for each pressure tier. Each tier
         includes everything the tiers below it already did (RESOURCE_PRESSURE's
@@ -940,7 +976,7 @@ class HealthManager:
         # on the already-constructed client objects instead).
         pause_ti = idx >= _PRESSURE_ORDER.index(RESOURCE_PRESSURE)
         if self.pipeline is not None:
-            for attr in ("ti_engine", "abuseipdb"):
+            for attr in ("ti_engine", "abuseipdb", "virustotal"):
                 client = getattr(self.pipeline, attr, None)
                 if client is not None:
                     client.paused = pause_ti
@@ -974,7 +1010,7 @@ class HealthManager:
 
     # --------------------------------------------------------- config-override helper
 
-    def _set_config_override(self, key: str, value: Any) -> None:
+    def _set_config_override(self, key: str, value: Any, reason: str = "resource pressure") -> None:
         """Same read-modify-write shape as middleware/routers/config_api.py's own
         _set_override() -- kept as a small local copy rather than importing that
         module (which would pull fastapi/pydantic into the main pipeline process
@@ -988,7 +1024,7 @@ class HealthManager:
                 data = json.loads(overrides_path.read_text(encoding="utf-8"))
             existing = data.get(key)
             baseline = existing["baseline"] if isinstance(existing, dict) and "baseline" in existing else self.config.get(key)
-            data[key] = {"value": value, "baseline": baseline, "set_at": time.time(), "set_by": "health_manager", "reason": "resource pressure"}
+            data[key] = {"value": value, "baseline": baseline, "set_at": time.time(), "set_by": "health_manager", "reason": reason}
             overrides_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = overrides_path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1003,9 +1039,11 @@ class HealthManager:
             if not overrides_path.exists():
                 return
             data = json.loads(overrides_path.read_text(encoding="utf-8"))
-            entry = data.pop(key, None)
-            if entry is None:
+            entry = data.get(key)
+            # Only undo what this manager set: an operator's own override (console) is theirs to change.
+            if not (isinstance(entry, dict) and entry.get("set_by") == "health_manager"):
                 return
+            data.pop(key)
             tmp = overrides_path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
             tmp.replace(overrides_path)
@@ -1067,6 +1105,13 @@ class HealthManager:
             failures = int(entry.get("consecutive_failures", 0) or 0)
             category = entry.get("category", "external_infra")
             component = f"feed:{feed_name}"
+            switch = _FEED_SWITCHES.get(feed_name)
+            if switch and not bool(self.config.get(switch, False)):
+                # 2026-10-02: a service the owner switched off is not a component to watch. Its last failure (e.g. a
+                # free-plan 429 hit while testing the key) would otherwise stay "degraded" forever, because a
+                # switched-off feed never fetches again to clear it.
+                self._component_state.pop(component, None)
+                continue
             if failures == 0:
                 self._apply_signal(component, HEALTHY, "no recent failures")
             elif category == "auth_expired":
@@ -1104,6 +1149,7 @@ class HealthManager:
             return
         scheduler_jobs = self.config.get("scheduler", {}) or {}
         fallback_hours = float(self.config.get("health_manager_job_staleness_hours", 30.0))
+        retired = []
         for job_name, entry in data.items():
             if not isinstance(entry, dict):
                 continue
@@ -1123,10 +1169,10 @@ class HealthManager:
                     cron_expr = job_cfg.get("cron")
 
             if cron_expr is None:
-                self._apply_signal(
-                    component, RETIRED,
-                    f"no longer scheduled -- last success {age_hours:.1f}h ago",
-                )
+                # 2026-10-02 (owner: "remove any stale entry ... and jobs (no retired)"): a job nothing schedules
+                # any more is dropped -- from job_health.json and from the health state -- instead of being shown
+                # forever as RETIRED. If it is scheduled again, its next run simply recreates the entry.
+                retired.append(job_name)
                 continue
 
             interval_seconds = _estimate_cron_interval_seconds(cron_expr)
@@ -1135,6 +1181,21 @@ class HealthManager:
                 self._apply_signal(component, HEALTHY, f"last success {age_hours:.1f}h ago")
             else:
                 self._apply_signal(component, DEGRADED, f"no success in {age_hours:.1f}h (expected within {staleness_hours:.1f}h)")
+        if retired:
+            self._drop_retired_jobs(path, retired)
+
+    def _drop_retired_jobs(self, path: Path, names: list) -> None:
+        try:
+            current = json.loads(path.read_text(encoding="utf-8"))
+            for name in names:
+                current.pop(name, None)
+                self._component_state.pop(f"job:{name}", None)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
+            tmp.replace(path)
+            LOGGER.info("Health manager: removed job(s) no longer scheduled: %s", ", ".join(sorted(names)))
+        except Exception as exc:
+            LOGGER.warning("Health manager: could not remove retired job entries: %s", exc)
 
     def _apply_signal(self, component: str, signal: str, detail: str) -> None:
         rec = self._get_record(component)
@@ -1291,7 +1352,8 @@ class HealthManager:
         # The file remains only for the console's separate API process (to be retired
         # once the console reads Prometheus); nothing Prometheus-facing reads it.
         try:
-            path = self.state_dir / "health_manager_snapshot.json"
+            from core.runtime_paths import runtime_dir   # rewritten every cycle: RAM in Docker (flash wear)
+            path = runtime_dir(self.state_dir) / "health_manager_snapshot.json"
             tmp = path.with_suffix(".json.tmp")
             tmp.write_text(json.dumps(snap, indent=2), encoding="utf-8")
             tmp.replace(path)

@@ -68,6 +68,7 @@ CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
 # Linux-only, like the tarpit always was: AF_PACKET must exist. (Still needs root/CAP_NET_RAW at runtime.)
 import socket as _socket_mod
 from mitigation import l2_raw
+from mitigation import pihole_auth
 L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
 
 
@@ -93,11 +94,14 @@ def check_pihole_health(config: Dict[str, Any], timeout: float = 3.0,
         return False, "pihole_api_url not configured"
     api_path = config.get("pihole_api_path", "/api/domains")
     api_password = config.get("pihole_api_password", "")
-    headers = {"sid": api_password} if api_password else {}
     url = f"{api_url}{api_path}/deny/exact"
     client = session or requests
     try:
-        resp = client.get(url, headers=headers, timeout=timeout)
+        resp = client.get(url, headers=pihole_auth.auth_headers(api_url, api_password, session, timeout), timeout=timeout)
+        if resp.status_code == 401 and api_password:
+            # the cached session may have expired or the Pi-hole restarted: log in again once
+            pihole_auth.invalidate(api_url, api_password)
+            resp = client.get(url, headers=pihole_auth.auth_headers(api_url, api_password, session, timeout), timeout=timeout)
     except Exception as exc:
         return False, f"connection failed: {exc}"
     if resp.status_code == 401:
@@ -967,7 +971,7 @@ class IPSMitigator:
             api_url = self.config.get("pihole_api_url", "")
             api_path = self.config.get("pihole_api_path", "/api/domains")
             api_password = self.config.get("pihole_api_password", "")
-            headers = {"sid": api_password} if api_password else {}
+            headers = pihole_auth.auth_headers(api_url, api_password, self.session)
             
             is_actually_blocked = True
             if api_url:
@@ -1027,7 +1031,7 @@ class IPSMitigator:
 
         # Inject the authentication token from config (populated automatically from ENV by config.py)
         api_password = self.config.get("pihole_api_password", "")
-        headers = {"sid": api_password} if api_password else {}
+        headers = pihole_auth.auth_headers(self.config.get("pihole_api_url", ""), api_password, self.session, timeout_seconds)
 
         import subprocess
         try:
@@ -1210,7 +1214,7 @@ class IPSMitigator:
         
         if api_url and self.config.get("ips_pihole_enabled", True):
             api_password = self.config.get("pihole_api_password", "")
-            headers = {"sid": api_password} if api_password else {}
+            headers = pihole_auth.auth_headers(api_url, api_password, self.session)
             
             import subprocess
             try:

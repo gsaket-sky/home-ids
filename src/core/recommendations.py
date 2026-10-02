@@ -13,6 +13,7 @@ and "act." A suggestion always either links to a page with a REAL existing
 action (device labeling, onboarding activation) or is read-only text.
 """
 import json
+import math
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -51,15 +52,19 @@ def build_recommendations(config, state_dir: str = "state") -> List[Dict[str, An
     # -- Onboarding status --------------------------------------------------
     onboarding = get_onboarding_status(config, state_dir)
     if onboarding["active"]:
-        cards.append(_card(
-            f"Onboarding grace period active -- {onboarding['days_remaining']:.1f} day(s) "
-            "remaining before autonomous blocking turns on. Review your alerts, then "
-            "activate protection early if you're ready.",
+        days = max(1, math.ceil(onboarding["days_remaining"]))
+        card = _card(
+            f"The IDS is still learning your network -- automatic blocking starts in {days} "
+            f"day{'' if days == 1 else 's'}. Look through your alerts, then turn protection on early if "
+            "you're ready.",
             severity="warning", action_url="/", action_label="Activate Protection Now",
-        ))
+        )
+        card["kind"] = "onboarding"     # Home shows this as its main button already
+        cards.append(card)
 
     # -- Unlabeled devices ----------------------------------------------------
-    ids_state = _read_json(state_dir_path / "ids_state.json") or {}
+    from core import state_store
+    ids_state = state_store.read_snapshot(state_dir_path / "ids_state.json", ledger=False) or {}
     devices = ids_state.get("devices", {}) or {}
     labels = _read_json(state_dir_path / "device_labels.json") or {}
     unlabeled = [d for d in devices.keys() if d not in labels]
@@ -82,8 +87,8 @@ def build_recommendations(config, state_dir: str = "state") -> List[Dict[str, An
         if age_hours > expected_hours:
             cards.append(_card(
                 f"'{job_name}' hasn't completed successfully in {age_hours:.0f}h "
-                f"(expected roughly every {expected_hours:.0f}h) -- check the Health page.",
-                severity="warning", action_url="/health", action_label="View Health",
+                f"(expected roughly every {expected_hours:.0f}h) -- check the System page.",
+                severity="warning", action_url="/system", action_label="Open System",
             ))
 
     # -- Suricata available but off (informational only, per module docstring) --

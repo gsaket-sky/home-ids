@@ -21,7 +21,7 @@ currently-working trust-cache suppression until real corroboration re-accumulate
 (days, possibly longer), a significant live behavior change with zero real data
 behind it on day one. Promote to a hard gate once shadow data shows
 permits_suppression() agreeing with real outcomes, the same shadow-then-promote
-shape CL-AFPE itself already went through (see cl_afpe_flip_monitor.py). When
+shape CL-AFPE itself already went through (argus is the default engine since 2026-10-02). When
 promoted, the intended integration is AND, not OR: a suppression decision requires
 BOTH is_trust_cached() AND permits_suppression() below to agree, so this module can
 only ever TIGHTEN what already exists, never loosen it.

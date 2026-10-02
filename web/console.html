@@ -28,6 +28,30 @@
   button, select, input{font-family:inherit;}
   :focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
 
+  /* Embedded in the web UI (Expert tools, /console?embed=1): no own sidebar, and the web UI's palette and font so
+     the two read as one product. html.embed-light / html.embed-dark follow the web UI's theme toggle live. */
+  html.embed{--font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;--radius:8px;}
+  html.embed-dark{
+    --bg:#0b0e16; --bg-panel:#121725; --bg-elevated:#161c2c; --bg-hover:#1c2335;
+    --border:#2f3a55; --border-soft:#232b40;
+    --text:#e8ecf5; --text-dim:#aab3c7; --text-faint:#7c869c;
+    --accent:#8b85ff; --accent-dim:#2b2d63; --danger-bg:#2d1416; --danger-border:#5b2327;
+  }
+  html.embed-light{
+    --bg:#f4f6fb; --bg-panel:#ffffff; --bg-elevated:#f7f8fc; --bg-hover:#eef1f7;
+    --border:#cfd6e4; --border-soft:#e3e7f0;
+    --text:#121826; --text-dim:#4a5468; --text-faint:#7a8499;
+    --accent:#4f46e5; --accent-dim:#c7c4fb; --danger-bg:#fdeeee; --danger-border:#f5c2c2;
+    --sev-benign:#059669; --sev-anomalous:#2563eb; --sev-suspicious:#b45309; --sev-high:#c2410c; --sev-critical:#dc2626;
+    color-scheme:light;
+  }
+  html.embed .btn-primary{color:#fff;} html.embed .btn-primary:hover{background:var(--accent);filter:brightness(1.1);}
+  html.embed a:hover{color:var(--accent);filter:brightness(1.15);}
+  html.embed-light .danger-banner, html.embed-light .error-banner, html.embed-light .toast-error, html.embed-light .btn-danger{color:#b42318;}
+  html.embed-light .toast-success{color:#05603a;}
+  html.embed-light .graph-legend{background:rgba(255,255,255,.92);}
+  html.embed .content{padding:20px 28px 40px;}
+
   .sidebar{width:216px;flex:0 0 216px;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;}
   .brand{padding:18px 18px 14px;border-bottom:1px solid var(--border-soft);}
   .brand-name{font-size:14px;font-weight:600;letter-spacing:.02em;}
@@ -354,6 +378,28 @@ var state = {
   deviceTypeSaving: false
 };
 
+/* ============================= embedded in the web UI ============================= */
+// /console?embed=1&view=<id>&theme=light|dark -- the web UI's Expert tools frame this page. The web UI provides
+// navigation (so no sidebar here), login (the same-origin proxy needs no API token) and the theme.
+var EMBED = (function(){
+  var q = new URLSearchParams(location.search);
+  if (q.get('embed') !== '1') return null;
+  return { view: q.get('view') || '', theme: q.get('theme') === 'light' ? 'light' : 'dark', device: q.get('device') || '' };
+})();
+function setEmbedTheme(t){
+  var h = document.documentElement;
+  h.classList.add('embed');
+  h.classList.toggle('embed-light', t === 'light');
+  h.classList.toggle('embed-dark', t !== 'light');
+}
+if (EMBED) {
+  setEmbedTheme(EMBED.theme);
+  if (['overview','devices','hunt','graph','blocking','suricata','health','autonomy','config'].indexOf(EMBED.view) >= 0) state.activeView = EMBED.view;
+  window.addEventListener('message', function(e){
+    if (e.origin === location.origin && e.data && e.data.idsTheme) setEmbedTheme(e.data.idsTheme);
+  });
+}
+
 /* ============================= config API client ============================= */
 
 function getToken(){ return localStorage.getItem('idsApiToken') || ''; }
@@ -365,7 +411,7 @@ async function apiFetch(path, options){
   var token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
   var resp = await fetch(path, Object.assign({}, options, { headers: headers }));
-  if (resp.status === 403) {
+  if (resp.status === 403 && !EMBED) {
     var entered = window.prompt('This server requires an API token for requests from another device (the same fritz_api_token / API_SECRET_TOKEN your Fritz!Box/Pi-hole integrations already use). Enter it once — it is remembered in this browser only:');
     if (entered) {
       setToken(entered.trim());
@@ -701,6 +747,7 @@ function typeOptionsHtml(selectedVal){
 }
 
 function renderSidebar(){
+  if (EMBED) return '';
   var defs = [['overview','Overview','overview'],['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['health','Health','health'],['autonomy','Autonomy','autonomy'],['config','Config','config']];
   var items = defs.map(function(d){
     var id=d[0], label=d[1], icon=d[2];
@@ -721,12 +768,9 @@ function fmtTime(ts){
   return d.toISOString().slice(0,19).replace('T',' ');
 }
 
-// The console has no auto-refresh anywhere (deliberately -- continuous
-// background polling on every tab would mean constant HTTP traffic against a
-// Pi-target box this whole project is trying to keep lightweight). Every view
-// already has its own reloadX() (previously reachable only via the "Retry"
-// button on an ERROR state) -- this makes that same reload reachable at any
-// time via one consistent topbar button, not just after a failure.
+// Only the live status views refresh themselves (once a minute, visible tab only -- see autoRefreshTick() near
+// the end of this script); continuous polling of every tab would be constant HTTP traffic against a Pi-target box.
+// Every view also has its own reloadX(), reachable at any time via this one consistent topbar button.
 function topbarRefreshBtn(reloadFn, loading){
   return '<button class="icon-btn" title="Refresh" onclick="app.'+reloadFn+'()"'+(loading?' disabled':'')+' style="flex:0 0 auto;">'+(loading?'⏳':'⟲')+'</button>';
 }
@@ -2350,6 +2394,9 @@ var app = {
   goView: function(v){
     state.activeView = v;
     render();
+    if (EMBED && window.parent !== window) {
+      try { window.parent.postMessage({ idsView: v }, location.origin); } catch (e) {}
+    }
     if (v === 'config' && !state.configLoading) loadConfig();
     if (v === 'devices' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
     if (v === 'hunt' && !state.devicesLoading && !state.devicesLoaded) loadDevices();
@@ -2678,10 +2725,45 @@ document.addEventListener('keydown', function(e){
   }
 });
 
-render();
-if (state.activeView === 'config') loadConfig();
-if (state.activeView === 'devices') loadDevices();
-if (state.activeView === 'graph') loadGraph();
+/* ============================= auto-refresh of the live views ============================= */
+// Every view used to load once and then show that snapshot until ⟲ was pressed. The status-type views now
+// refresh themselves while the tab is visible: the views below only ever show their "Loading" placeholder on the
+// FIRST load (loading && !loaded), so a background reload just swaps the data in place. Left alone on purpose:
+// Settings (would overwrite unsaved edits), the evidence graph and alert search (heavy, and reloading moves
+// what you are inspecting), and Autonomy. Overview runs at half the rate -- its summary costs the engine ~5 s.
+var AUTO_REFRESH_MS = 60000;
+var _autoTicks = 0;
+function autoRefreshTick(force){
+  if (document.hidden) return;
+  _autoTicks++;
+  switch (state.activeView) {
+    case 'overview': if ((force === true || _autoTicks % 2 === 0) && !state.overviewLoading) loadOverview(); break;
+    case 'health': if (!state.healthLoading) loadHealth(); break;
+    case 'blocking': if (!state.blockingLoading) loadBlockingState(); break;
+    case 'suricata': if (!state.suricataLoading) loadSuricata(); break;
+    case 'devices': if (!state.devicesLoading) loadDevices(); break;
+  }
+}
+setInterval(autoRefreshTick, AUTO_REFRESH_MS);
+var _hiddenSince = 0;
+document.addEventListener('visibilitychange', function(){
+  if (document.hidden) { _hiddenSince = Date.now(); return; }
+  if (_hiddenSince && Date.now() - _hiddenSince > AUTO_REFRESH_MS) autoRefreshTick(true);  // back after a while: catch up now
+});
+
+if (EMBED) {
+  app.goView(state.activeView);   // the view the web UI asked for, with that view's own loaders
+  if (state.activeView === 'hunt' && EMBED.device) {   // "Investigate" on an alert: that device's history right away
+    state.huntMode = 'history'; state.huntDeviceId = EMBED.device; state.huntSinceDays = ''; state.huntRan = false;
+    render();
+    runHuntQuery();
+  }
+} else {
+  render();
+  if (state.activeView === 'config') loadConfig();
+  if (state.activeView === 'devices') loadDevices();
+  if (state.activeView === 'graph') loadGraph();
+}
 </script>
 </body>
 </html>

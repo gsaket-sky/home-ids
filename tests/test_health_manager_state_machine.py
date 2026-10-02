@@ -242,8 +242,9 @@ def test_retired_job_never_reaches_degraded(hm):
         json.dumps(job_health_data), encoding="utf-8"
     )
     hm._evaluate_job_health_components(now)
-    assert hm._component_state["job:shadow_watcher"]["state"] == RETIRED
-    assert "300" in hm._component_state["job:shadow_watcher"]["detail"] or "no longer scheduled" in hm._component_state["job:shadow_watcher"]["detail"]
+    # 2026-10-02: a job nothing schedules is removed (owner: "no retired" entries), never DEGRADED/UNHEALTHY.
+    assert "job:shadow_watcher" not in hm._component_state
+    assert "shadow_watcher" not in json.loads((Path(hm.state_dir) / "job_health.json").read_text(encoding="utf-8"))
 
 
 def test_disabled_scheduler_job_is_also_retired_not_degraded(hm):
@@ -253,7 +254,7 @@ def test_disabled_scheduler_job_is_also_retired_not_degraded(hm):
         json.dumps({"retro_hunter": {"last_success": now - 100 * 3600}}), encoding="utf-8"
     )
     hm._evaluate_job_health_components(now)
-    assert hm._component_state["job:retro_hunter"]["state"] == RETIRED
+    assert "job:retro_hunter" not in hm._component_state
 
 
 def test_active_daily_job_uses_its_own_cron_derived_threshold(hm):
@@ -268,16 +269,16 @@ def test_active_daily_job_uses_its_own_cron_derived_threshold(hm):
 
 
 def test_active_15min_job_flags_degraded_much_sooner_than_the_old_uniform_30h(hm):
-    """THE FIX: cl_afpe_flip_monitor (every 15 minutes) used to be held to the
+    """THE FIX: a 15-minute job used to be held to the
     SAME 30h bar as a daily job -- a real failure wouldn't surface for up to
     30 hours. Now its own cron (2x = 30 minutes) catches it almost immediately."""
-    hm.config = FakeConfig(scheduler={"cl_afpe_flip_monitor": {"enabled": True, "cron": "*/15 * * * *"}})
+    hm.config = FakeConfig(scheduler={"quarter_hour_job": {"enabled": True, "cron": "*/15 * * * *"}})
     now = 1_000_000_000.0
     (Path(hm.state_dir) / "job_health.json").write_text(
-        json.dumps({"cl_afpe_flip_monitor": {"last_success": now - 3600}}), encoding="utf-8"  # 1h stale
+        json.dumps({"quarter_hour_job": {"last_success": now - 3600}}), encoding="utf-8"  # 1h stale
     )
     hm._evaluate_job_health_components(now)
-    assert hm._component_state["job:cl_afpe_flip_monitor"]["state"] == DEGRADED
+    assert hm._component_state["job:quarter_hour_job"]["state"] == DEGRADED
 
 
 def test_active_monthly_job_is_not_wrongly_flagged_degraded_under_the_old_uniform_30h(hm):
@@ -314,7 +315,18 @@ def test_train_fp_classifier_retired_when_autotune_disabled(hm):
         json.dumps({"train_fp_classifier": {"last_success": now - 3600}}), encoding="utf-8"
     )
     hm._evaluate_job_health_components(now)
-    assert hm._component_state["job:train_fp_classifier"]["state"] == RETIRED
+    assert "job:train_fp_classifier" not in hm._component_state
+
+
+def test_removing_retired_jobs_keeps_the_scheduled_ones(hm):
+    hm.config = FakeConfig(scheduler={"retro_hunter": {"enabled": True, "cron": "0 2 * * *"}})
+    now = 1_000_000_000.0
+    (Path(hm.state_dir) / "job_health.json").write_text(json.dumps({
+        "retro_hunter": {"last_success": now - 3600}, "gap_monitor": {"last_success": now - 900 * 3600}}),
+        encoding="utf-8")
+    hm._evaluate_job_health_components(now)
+    left = json.loads((Path(hm.state_dir) / "job_health.json").read_text(encoding="utf-8"))
+    assert set(left) == {"retro_hunter"} and hm._component_state["job:retro_hunter"]["state"] == HEALTHY
 
 
 # --- console visibility: snapshot() / _write_snapshot_file() ---------------------
@@ -519,3 +531,18 @@ def test_describe_disabled_reason_survives_a_corrupt_overrides_file(tmp_path):
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+def test_feed_of_a_switched_off_service_is_not_watched(tmp_path):
+    """2026-10-02: AbuseIPDB's last 429 (hit while testing the key) stayed 'degraded' for days after it was switched
+    off, since a switched-off feed never fetches again to clear it."""
+    (tmp_path / "feed_health.json").write_text(json.dumps({
+        "abuseipdb": {"consecutive_failures": 23, "category": "rate_limited"},
+        "feodo_ips": {"consecutive_failures": 4, "category": "external_infra"}}), encoding="utf-8")
+    hm = HealthManager(config=FakeConfig(abuseipdb_enabled=False), alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    hm._evaluate_feed_health_components()
+    assert "feed:abuseipdb" not in hm._component_state                       # off -> not a component at all
+    assert hm._component_state["feed:feodo_ips"]["state"] == UNHEALTHY       # an always-on feed is still judged
+    hm2 = HealthManager(config=FakeConfig(abuseipdb_enabled=True), alert_manager=FakeAlertManager(), state_dir=str(tmp_path))
+    hm2._evaluate_feed_health_components()
+    assert hm2._component_state["feed:abuseipdb"]["state"] == DEGRADED       # on -> judged as before

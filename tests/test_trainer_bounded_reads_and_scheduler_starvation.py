@@ -100,6 +100,86 @@ def test_collectors_use_passed_muted_docs_without_reading_the_graph(tmp_path, mo
     assert tfc._collect_connection_abuse_corrections(tmp_path, muted_docs=muted) == {}
 
 
+def _locked(*_a, **_k):
+    import sqlite3
+    raise sqlite3.OperationalError("database is locked")
+
+
+def _fake_graph(tmp_path):
+    (tmp_path / "v13_graph.db").write_bytes(b"")   # exists; reads are monkeypatched
+
+
+def test_missing_graph_is_empty_history_not_a_failure(tmp_path):
+    assert tfc._read_muted_docs_from_graph(tmp_path, strict=True) == []
+
+
+def test_non_lock_error_fails_fast_without_retrying(monkeypatch, tmp_path):
+    import sqlite3
+    _fake_graph(tmp_path)
+    calls = []
+
+    def once(*a, **k):
+        calls.append(1)
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(tfc, "_read_muted_docs_once", once)
+    monkeypatch.setattr(tfc, "GRAPH_READ_RETRY_SECONDS", 999.0)   # would hang if it retried
+    with pytest.raises(tfc.GraphReadError):
+        tfc._read_muted_docs_from_graph(tmp_path, strict=True)
+    assert len(calls) == 1
+
+
+def test_strict_graph_read_retries_then_raises(monkeypatch, tmp_path):
+    _fake_graph(tmp_path)
+    calls = []
+
+    def once(*a, **k):
+        calls.append(1)
+        _locked()
+
+    monkeypatch.setattr(tfc, "_read_muted_docs_once", once)
+    monkeypatch.setattr(tfc, "GRAPH_READ_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tfc, "GRAPH_READ_ATTEMPTS", 3)
+    with pytest.raises(tfc.GraphReadError):
+        tfc._read_muted_docs_from_graph(tmp_path, strict=True)
+    assert len(calls) == 3
+
+
+def test_strict_graph_read_recovers_when_lock_clears(monkeypatch, tmp_path):
+    _fake_graph(tmp_path)
+    state = {"n": 0}
+
+    def once(*a, **k):
+        state["n"] += 1
+        if state["n"] < 3:
+            _locked()
+        return [{"type": "x"}]
+
+    monkeypatch.setattr(tfc, "_read_muted_docs_once", once)
+    monkeypatch.setattr(tfc, "GRAPH_READ_RETRY_SECONDS", 0.0)
+    assert tfc._read_muted_docs_from_graph(tmp_path, strict=True) == [{"type": "x"}]
+    assert state["n"] == 3
+
+
+def test_non_strict_graph_read_still_swallows(monkeypatch, tmp_path):
+    monkeypatch.setattr(tfc, "_read_muted_docs_once", _locked)
+    assert tfc._read_muted_docs_from_graph(tmp_path) == []
+
+
+def test_unreadable_graph_aborts_retrain_and_keeps_existing_model(monkeypatch, tmp_path):
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    (model_dir / "fp_classifier.onnx").write_bytes(b"GOOD-MODEL")
+    (model_dir / "fp_calibration.json").write_text('{"reliable": true}')
+    _fake_graph(tmp_path)
+    monkeypatch.setattr(tfc, "_read_muted_docs_once", _locked)
+    monkeypatch.setattr(tfc, "GRAPH_READ_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(tfc, "GRAPH_READ_ATTEMPTS", 2)
+    assert tfc.train_and_export_onnx(tmp_path, model_dir) is False
+    assert (model_dir / "fp_classifier.onnx").read_bytes() == b"GOOD-MODEL"
+    assert (model_dir / "fp_calibration.json").read_text() == '{"reliable": true}'
+
+
 def test_is_deferred_lifecycle(tmp_path):
     assert job_coordinator.is_deferred(tmp_path, "live_prune") is False
     job_coordinator.record_deferral_start(tmp_path, "live_prune")

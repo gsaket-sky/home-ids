@@ -24,10 +24,10 @@ different and much higher-stakes risk than a dashboard read being briefly stale,
 isn't where this latency complaint came from. Only wire this into a genuinely
 read-only endpoint.
 """
-import os
 import threading
 from typing import Optional
 
+from core import state_store
 from core.state_guard import StateManager
 
 _lock = threading.Lock()
@@ -39,15 +39,12 @@ _cached_path: Optional[str] = None
 def get_cached_state_manager(state_path: str) -> StateManager:
     global _cached_sm, _cached_mtime, _cached_path
     with _lock:
-        try:
-            mtime = os.path.getmtime(state_path)
-        except OSError:
-            mtime = None
+        mtime = state_store.last_modified(state_path)   # the SQLite file/WAL (or a not-yet-migrated JSON)
         if (_cached_sm is not None and _cached_path == state_path
                 and mtime is not None and mtime == _cached_mtime):
             return _cached_sm
         sm = StateManager(state_path=state_path)
-        sm.load_from_disk()
+        sm.load_from_disk(ledger=False)   # read-only views never need the action ledger (most of the data)
         _cached_sm = sm
         _cached_mtime = mtime
         _cached_path = state_path

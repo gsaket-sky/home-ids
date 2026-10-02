@@ -46,6 +46,20 @@ async def _start_heartbeat_task():
             await asyncio.sleep(10)
 
     asyncio.create_task(_beat_loop())
+    try:   # 2026-10-02: the console's Overview should be instant from the first visit
+        overview_api.warm_cache()
+    except Exception:
+        pass
+
+    def _warm_graph():
+        # The evidence graph's first call pays for one-time loads (GeoIP/ASN tables, the cached state reader, imports):
+        # ~1.5 s once per API start. Pay it here, in the background, instead of in the first console click.
+        try:
+            graph_api.get_graph(limit=25, device_id=None, token="")
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=_warm_graph, name="graph-warm", daemon=True).start()
 
 # The console UI is one static file at the repo root's web/ directory (src/middleware ->
 # src -> repo root, 3 levels up). Served unauthenticated -- it's static markup with no

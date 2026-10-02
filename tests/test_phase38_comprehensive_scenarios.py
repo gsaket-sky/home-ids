@@ -438,7 +438,7 @@ check("a large-outbound-burst feature set returns SUSPECTED_EXFIL, not the bare,
       "confirmed-sounding EXFIL",
       exfil_phase == "SUSPECTED_EXFIL", f"got {exfil_phase}")
 
-recon_phase = fx._determine_killchain_phase(None, {"nxdomain_ratio": 0.5})
+recon_phase = fx._determine_killchain_phase(None, {"nxdomain_ratio": 0.5, "total": 50})
 check("a high-NXDOMAIN feature set returns SUSPECTED_RECON",
       recon_phase == "SUSPECTED_RECON", f"got {recon_phase}")
 

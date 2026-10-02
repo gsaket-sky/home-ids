@@ -96,7 +96,8 @@ def setup_logging():
     # produced it. See _SecretRedactingFormatter's own docstring for why this is a
     # blanket fix rather than another one-off patch at a single call site.
     _secret_keys = (
-        "telegram_token", "otx_api_key", "abuseipdb_api_key",
+        "telegram_token", "otx_api_key", "abuseipdb_api_key", "virustotal_api_key", "abusech_auth_key",
+        "maxmind_license_key",
         "pihole_api_password", "fritz_password", "fritz_api_token",
     )
     _secrets = [str(CONFIG.get(k, "")).strip() for k in _secret_keys]
@@ -145,7 +146,10 @@ def main():
     # that depth is modest and worth it specifically because this is a resource-
     # constrained target where the next memory-growth bug needs to be diagnosable
     # from a live box, not reproduced separately.
-    if bool(CONFIG.get("health_manager_memory_diagnostics_enabled", True)):
+    # 2026-10-02: off by default -- measured on .94, tracemalloc made allocation-heavy engine code ~18x slower,
+    # around the clock. The health manager now starts it on demand at the first memory-pressure escalation (see
+    # _capture_memory_diagnostics()). Set health_manager_tracemalloc_from_start: true for deep debugging only.
+    if bool(CONFIG.get("health_manager_tracemalloc_from_start", False)):
         tracemalloc.start()
 
     # BUGFIX (health manager): component_heartbeat.json persists across restarts
@@ -237,6 +241,8 @@ def main():
         pihole_search_api_path=CONFIG.get("pihole_search_api_path", "/api/search"),
         et_open_enabled=bool(CONFIG.get("et_open_enabled", True)),
         advanced_feeds=bool(CONFIG.get("advanced_keyed_feeds", False)),
+        tranco_enabled=bool(CONFIG.get("tranco_enabled", False)),
+        abusech_auth_key=CONFIG.get("abusech_auth_key", ""),
     )
     ti_engine.start_refresh_thread()
 
@@ -252,7 +258,8 @@ def main():
         LOGGER.debug("Booting GeoIPEngine...")
         geoip_engine = GeoIPEngine(
             db_path=CONFIG.get("geoip_db"), 
-            asn_db_path=CONFIG.get("geoip_asn_db", "")
+            asn_db_path=CONFIG.get("geoip_asn_db", ""),
+            run_updater=True,   # the engine keeps state/geoip/ip2asn-combined.tsv.gz fresh (weekly)
         )
     except Exception as exc:
         LOGGER.error("GeoIP disabled (Database missing): %s", exc)
@@ -321,6 +328,12 @@ def main():
     def shutdown_handler(signum, frame):
         LOGGER.info("🛑 Received termination signal (SIGINT/SIGTERM). Shutting down pipeline safely...")
         health_manager.stop()
+        try:    # persist baseline updates the save throttle was still holding back
+            from argus.ops import live_engine as _le
+            if _le._baseline_engine is not None:
+                LOGGER.info("Flushed %d pending baseline tracker(s)", _le._baseline_engine.flush())
+        except Exception:
+            LOGGER.exception("Baseline flush at shutdown failed (non-fatal)")
         # BUGFIX (health manager): reads health_manager.fastapi_proc/scheduler_proc
         # (not the original fastapi_proc/scheduler_proc locals closed over above) --
         # if HealthManager ever restarted either subprocess via its own healing
@@ -393,7 +406,8 @@ def main():
             
         telegram_token = CONFIG.get("telegram_token", "")
         telegram_chat_id = CONFIG.get("telegram_chat_id", "")
-        if telegram_token and telegram_chat_id:
+        # A12: the master switch applies to the boot message too.
+        if telegram_token and telegram_chat_id and bool(CONFIG.get("telegram_enabled", False)):
             # BUGFIX (live audit): every line below used to be either a hardcoded
             # "✅ Online" string (StateManager/ML Registry/IPS Mitigator/Zeek+PiHole
             # Collectors/Master Pipeline -- never actually checked at all) or a weak
@@ -564,6 +578,10 @@ def main():
 
     import threading
     threading.Thread(target=async_telegram_alert, daemon=True, name="boot_alert_thread").start()
+
+    # The main loop makes many short sqlite/IO calls, each re-acquiring the GIL; with CPU-bound background threads
+    # the default 5ms switch interval turns that into a convoy (seen as multi-minute loop stalls). 1ms keeps it responsive.
+    sys.setswitchinterval(0.001)
 
     # Hand over main thread execution to the pipeline
     LOGGER.debug("Handoff to EnginePipeline main loop.")

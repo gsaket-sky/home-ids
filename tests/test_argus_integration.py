@@ -60,8 +60,8 @@ check("Step 1: the device_id is NOT the gateway's (a real device, not the trust 
 evidence_items = [
     Evidence(device_id=device_id, destination_id="c2-server.example.com", evidence_type="malicious_ja3",
               independence_family="tls_fingerprint", timestamp=NOW - 30, source="zeek_features", value=1.0),
-    Evidence(device_id=device_id, destination_id="c2-server.example.com", evidence_type="zeek_lateral_scan",
-              independence_family="network_behavior", timestamp=NOW - 20, source="zeek_features", value=1.0),
+    Evidence(device_id=device_id, destination_id="c2-server.example.com", evidence_type="dns_dga_burst",
+              independence_family="dns_behavior", timestamp=NOW - 20, source="zeek_features", value=1.0),
 ]
 for ev in evidence_items:
     store.insert_evidence(ev)

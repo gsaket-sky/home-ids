@@ -90,6 +90,30 @@ if real and _P(real).exists():
 else:
     print("[SKIP] real-ruleset case (set IDS_ET_RULES=path/to/suricata.rules)")
 
+# --- JA3 hash that is only PART of a rule's condition (found live 2026-10-01) ------------------------------------
+# Real rule text from the ET Open ruleset. The hash in sid 2058288 is the stock Windows 11 TLS stack; the rule only
+# means something together with tls.sni "barefootinc.com.au". Using the hash alone flagged every Windows 11 machine
+# ("Malicious TLS client fingerprint (JA3)", hard stop, "matched a known-bad signature directly").
+_WIN11 = "6a5d235ee78c6aede6a61448b4e9ff1e"
+_RCLONE = "d0ee3237a14bbd89ca4d2b5356ab20ba"
+_STANDALONE = "950ccdd64d360a7b24c70678ac116a44"
+CONDITIONAL_RULES = [
+    'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET MALWARE [CIS] GootLoader C2 Activity - Windows 11 - barefootinc.com[.]au"; '
+    'flow:established,to_server; ja3.hash; content:"' + _WIN11 + '"; tls.sni; bsize:18; content:"barefootinc.com.au"; nocase; '
+    'startswith; fast_pattern; threshold: type limit, track by_src, seconds 3600, count 1; classtype:domain-c2; sid:2058288; rev:1;)',
+    'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET JA3 Hash - Possible Rclone Client Activity"; flow:established,to_server; '
+    'flowbits:set,ET.rclone; flowbits:noalert; ja3.hash; content:"' + _RCLONE + '"; tls.sni; content:!"grafana.com"; '
+    'content:!"grafana.org"; classtype:bad-unknown; sid:2033047; rev:3;)',
+    'alert tls $HOME_NET any -> $EXTERNAL_NET any (msg:"ET JA3 Hash - Metasploit CCS Scanner"; ja3_hash; content:"' + _STANDALONE + '"; '
+    'classtype:unknown; sid:2028302; rev:2;)',
+]
+pj = parse_et_rules(CONDITIONAL_RULES)
+check("JA3 of a rule that also requires tls.sni is NOT a standalone blocklist entry", _WIN11 not in pj.ja3)
+check("JA3 of a flowbits:noalert setter rule is NOT a standalone blocklist entry", _RCLONE not in pj.ja3)
+check("JA3 of a rule whose only condition is the hash IS kept", _STANDALONE in pj.ja3)
+check("skipped conditional JA3 rules are counted", pj.ja3_skipped == 2, str(pj.ja3_skipped))
+check("the SNI of the conditional rule is still a domain indicator", "barefootinc.com.au" in pj.domains)
+
 if FAILURES:
     print(f"FAILED: {FAILURES}")
     sys.exit(1)

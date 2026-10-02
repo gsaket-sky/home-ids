@@ -189,7 +189,7 @@ def _parse_eve_json_alerts(eve_path: Path) -> List[dict]:
     return alerts
 
 
-def check_suricata_health(suricata_bin: str, rules_path: Optional[str], timeout: float = 5.0) -> "tuple[bool, str]":
+def check_suricata_health(suricata_bin: str, rules_path: Optional[str], timeout: float = 10.0) -> "tuple[bool, str]":
     """BUGFIX (live audit): the boot-time Telegram status message previously reported
     every subsystem as a hardcoded "Online" string, or at best checked "did the
     constructor not raise" -- neither proves anything actually WORKS (a misconfigured

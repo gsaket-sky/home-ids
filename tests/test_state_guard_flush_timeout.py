@@ -82,8 +82,9 @@ released.set()
 sm = StateManager(state_path=_state_path, max_devices=100)
 ok = sm.flush_to_disk()
 check("a normal flush with no devices still succeeds", ok is True)
-check("the state file was actually written", _PathForSysPath(_state_path).exists())
-on_disk = json.loads(_PathForSysPath(_state_path).read_text(encoding="utf-8"))
+from core import state_store
+check("the state database was actually written", state_store.exists(_state_path))
+on_disk = state_store.read_snapshot(_state_path)
 check("the written file round-trips through disk with the expected shape",
       "devices" in on_disk and "ips_state" in on_disk)
 
@@ -113,7 +114,7 @@ check("flush_to_disk() returns promptly rather than blocking on the stuck write"
 # ═══════════════════════════════════════════════════════════════════════════════════
 _sg_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "state_guard.py").read_text(encoding="utf-8")
 check("SOURCE-GUARD: flush_to_disk() routes its write through _bounded_io()",
-      "self._bounded_io(_write_and_replace, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)" in _sg_src)
+      "self._bounded_io(_write_changed_rows, timeout=self._FLUSH_IO_TIMEOUT_SECONDS)" in _sg_src)
 
 
 print()

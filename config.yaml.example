@@ -759,6 +759,16 @@ reactive_capture:
     - 192.168.1.3   # NAS
     - 192.168.1.2   # this IDS host
 
+  # Sources that never count as a "new source" for that trigger: this IDS host's own scrape/backup jobs and other
+  # known infrastructure, otherwise they fire a capture burst every few minutes. [LIVE]
+  reactive_capture_wired_probe_ignore_sources: []
+
+  # Services on those devices that every client uses -- contacting them is not a probe (the IDS host runs the LAN's
+  # DNS). Integers are TCP/UDP destination ports; "icmp" covers ping. [LIVE after restart]
+  reactive_capture_wired_probe_ignore_services: [53, 67, 68, 123, 137, 5353, "icmp"]
+  # After a restart the known-source list starts empty; sources seen this long are learned without firing a burst.
+  reactive_capture_wired_probe_warmup_seconds: 600.0
+
   # Periodic baseline spot-check, in-process (not a separate scheduled script -- see
   # pipeline.py's PHASE 21D comment on why: a burst's findings only reach live
   # detection by ingesting into the SAME long-running ZeekFeatureExtractor instance
@@ -901,7 +911,7 @@ telegram:
 # it mid-run is safe; see the audit in Documentation/RESOURCE_AWARE_SCHEDULING.md),
 # and `max_runtime_minutes` (the coordinator's own orphan-reclaim backstop). Jobs
 # below this line that aren't on the live .94 deployment yet (live_prune_weak_notices,
-# cl_afpe_flip_monitor, zeek_log_prune, backtest_job) default to `pausable: false`
+# zeek_log_prune, backtest_job) default to `pausable: false`
 # until each is individually audited the same way the 7 live jobs already were --
 # see backtest_job's own entry below for why it's the highest-priority one to review
 # first (it's the exact job implicated in a real historical overlap-OOM incident).
@@ -1050,21 +1060,6 @@ scheduled_jobs:
       pausable: true  # per-statement auto-commit deletes, export-then-delete ordering; export write is atomic (temp+replace)
       max_runtime_minutes: 30
 
-    # v13 full-architecture plan, Workstream 2 -- checks state/cl_afpe_divergence_v13.jsonl
-    # (Phase 6e's shadow comparison, already accumulating real data) against a fixed bar
-    # (see cl_afpe_flip_monitor.py's own module docstring for the exact numbers and the
-    # asymmetric-risk false-negative check) and, if cleared, flips cl_afpe_engine (above)
-    # from v_current to v13 automatically -- never restarts soc.service. 15-minute cadence,
-    # matching the retired A10-era gap_monitor.py's own cron shape. Lives in src/v13/ops/,
-    # not scripts/, hence the "script" override below.
-    cl_afpe_flip_monitor:
-      enabled: true
-      cron: "*/15 * * * *"
-      script: "../argus/ops/cl_afpe_flip_monitor.py"
-      priority: 4
-      pausable: false  # not yet individually audited for transaction-wrapping -- default conservative until reviewed
-      max_runtime_minutes: 10
-
     # SSD/disk-capacity audit (2026-09-20) -- found /opt/zeek/logs holding 83 daily
     # dated directories (7.5GB, back to 2026-06-14) with zero retention ever
     # applied; Zeek's own hourly rotation+compression is already fine, nothing ever
@@ -1148,21 +1143,15 @@ scheduled_jobs:
 engine: argus
 
 # =============================================================================
-# cl_afpe_engine — CL-AFPE (autonomous false-positive suppression) live/rollback
-# switch (v13 full-architecture plan, Workstream 2, Documentation/
-# V13_FULL_ARCHITECTURE_SHIFT_PLAN.md)
+# cl_afpe_engine — CL-AFPE (autonomous false-positive suppression) engine switch
 # =============================================================================
-# "v_current" (default) = pipeline.py's real suppression decision comes from
-# intelligence/fp_engine.py's AutonomousFPEngine, unchanged. v13's own ClAfpeEngine
-# keeps running in SHADOW alongside it (compute + log to
-# state/cl_afpe_divergence_v13.jsonl), never affecting real suppression.
-# "argus" = pipeline.py's real suppression decision comes from argus's own ClAfpeEngine
-# (src/argus/cl_afpe/engine.py) instead -- a genuine engine swap, same shape as the
-# top-level `engine:` switch above, not a per-mechanism flag. Flipped automatically
-# by the scheduled cl_afpe_flip_monitor job (below) once its own documented bar
-# clears (state/cl_afpe_flip_monitor_state.json / job_health.json record when/why) --
-# never restarts soc.service itself; that stays a separate, explicit human action.
-cl_afpe_engine: v_current
+# "argus" (default since 2026-10-02) = the real suppression decision comes from
+# argus's own ClAfpeEngine (src/argus/cl_afpe/engine.py), with intelligence/
+# fp_engine.py's AutonomousFPEngine only as its internal fallback.
+# "v_current" = instant rollback to AutonomousFPEngine as the real decision (ClAfpeEngine
+# then runs in shadow, logging to state/cl_afpe_divergence_v13.jsonl) -- a config edit
+# + restart, no redeploy. Switching back to "argus" is the same manual edit.
+cl_afpe_engine: argus
 
 
 # =============================================================================

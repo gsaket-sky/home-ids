@@ -53,6 +53,18 @@ _PARTIAL_SUPPORT_FAMILIES = frozenset({
 })
 
 
+# B6 (2026-10-01): the three families below are all derived from ONE sensor (Zeek's log stream), only from
+# different log files. A TLS fingerprint on one flow plus a protocol notice on another is a single vantage
+# point, so for the "N independent sources" bar they count once. They stay separate in the reported family
+# list (the reader still sees which kinds of evidence fired).
+_ZEEK_DERIVED_FAMILIES = frozenset({"tls_fingerprint", "network_behavior", "data_transfer_pattern"})
+
+
+def _count_independent_sources(families) -> int:
+    zeek = len(set(families) & _ZEEK_DERIVED_FAMILIES)
+    return len(families) - max(0, zeek - 1)
+
+
 def _safe_float(val: Any) -> float:
     try:
         return float(val) if val is not None else 0.0
@@ -346,7 +358,7 @@ class DecisionEngine:
         ]
 
         independence_families = {family_for(e.evidence_type) for e in attack_evidence}
-        num_independent_sources = len(independence_families)
+        num_independent_sources = _count_independent_sources(independence_families)
 
         trail: List[str] = []
         hyp_line = (

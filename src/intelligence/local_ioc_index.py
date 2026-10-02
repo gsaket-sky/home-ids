@@ -31,7 +31,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 LOGGER = logging.getLogger("home_ids.local_ioc")
 
-INDEX_SCHEMA_VERSION = 1
+# 2: JA3 hashes are only taken from rules where the hash is the whole condition. A cached v1 index still holds
+# hashes of conditional rules (stock Windows TLS fingerprints), so it is rejected and rebuilt.
+INDEX_SCHEMA_VERSION = 2
 
 # --- confidence per source category ---------------------------------------------------------
 # HOW THIS STEERS THE ENGINE: ThreatIntel turns confidence into ti_risk as confidence * 4.0, and
@@ -65,6 +67,24 @@ _RULE_SID_RE = re.compile(r"\bsid:(\d+)")
 _RULE_CLASS_RE = re.compile(r"\bclasstype:([a-z0-9_-]+)")
 _BRACKET_LIST_RE = re.compile(r"\[([^\]]+)\]")
 _JA3_RE = re.compile(r'\bja3(?:_hash|\.hash)\s*;[^;]*?content:"([0-9a-fA-F]{32})"')
+# A JA3 hash identifies a TLS client STACK, not a malware family: the same hash is every ordinary client built on
+# that library. ET therefore pairs the hash with a second condition whenever the stack is a common one -- e.g.
+# sid 2058288 "GootLoader C2 Activity - Windows 11" needs ja3.hash AND tls.sni "barefootinc.com.au"; the hash alone is
+# stock Windows 11 (found live 2026-10-01: every Windows 11 TLS connection on a home network was flagged
+# "malicious JA3", "matched a known-bad signature directly"). Only rules whose hash IS the whole condition may feed a
+# standalone hash blocklist.
+_RULE_CONTENT_RE = re.compile(r"\bcontent:")
+_RULE_EXTRA_CONDITION_RE = re.compile(
+    r"\b(?:tls[._](?:sni|cert\w*)|http[._]\w+|dns[._]query|flowbits:\s*(?:isset|isnotset|noalert))")
+
+
+def _ja3_rule_is_standalone(line: str) -> bool:
+    """True when the rule's only condition is the JA3 hash: exactly one `content`, no SNI/certificate/HTTP/DNS
+    buffer, and not gated by flowbits (see the comment above)."""
+    opts = line[line.find("("):] if "(" in line else line
+    return len(_RULE_CONTENT_RE.findall(opts)) == 1 and not _RULE_EXTRA_CONDITION_RE.search(opts)
+
+
 # dns.query / dns_query / tls.sni followed (possibly after buffer modifiers) by content:"..."
 _DOMAIN_RULE_RE = re.compile(r'\b(?:dns[._]query|tls\.sni)\s*;(?:[^;]*;){0,3}?\s*content:"([^"]+)"')
 _HEX_ESCAPE_RE = re.compile(r"\|([0-9A-Fa-f ]+)\|")
@@ -80,6 +100,7 @@ class ParsedIOCs:
     ja3: Dict[str, dict] = field(default_factory=dict)
     rules_seen: int = 0
     rules_used: int = 0
+    ja3_skipped: int = 0   # JA3 rules not used because the hash is only part of their condition
 
     def counts(self) -> Dict[str, int]:
         return {"ips": len(self.ips), "cidrs": len(self.cidrs), "domains": len(self.domains),
@@ -158,7 +179,9 @@ def parse_et_rules(lines: Iterable[str]) -> ParsedIOCs:
 
         # --- JA3 fingerprints -----------------------------------------------------------
         ja3_m = _JA3_RE.search(line)
-        if ja3_m:
+        if ja3_m and not _ja3_rule_is_standalone(line):
+            out.ja3_skipped += 1
+        elif ja3_m:
             out.ja3.setdefault(ja3_m.group(1).lower(), {
                 "confidence": _JA3_CONFIDENCE, "tags": ["ja3", "et_open"], "source": "et_open",
                 "sid": int(sid_m.group(1)) if sid_m else None, "category": category})

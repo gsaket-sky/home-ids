@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from prometheus_client import start_http_server
+from core.metrics_server import start_cached_metrics_server
 
 from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domain, entropy as compute_entropy, etld1, register_safe_cdn_base_domains, is_local_or_multicast_destination, ZEEK_NOTICE_TIER_SCORE_WEIGHT, ZEEK_NOTICE_EVIDENCE_TYPES
 from config import resolve_home_subnets
@@ -34,6 +34,7 @@ from extractors.dns_features import FeatureExtractor, PiHoleCollector
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
+from intelligence import ja3_provenance
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
@@ -45,7 +46,7 @@ from mitigation.alerts import AlertManager, AlertJSONWriter
 from mitigation.ips import IPSMitigator, CRITICAL_DEVICE_TYPES
 from mitigation.plain_explanation import build_plain_explanation
 from middleware.humanize import resolve_destination_info
-from intelligence.threat_intel import ThreatIntel, AbuseIPDB
+from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
@@ -391,7 +392,18 @@ def _describe_evidence(ev, geoip_engine=None) -> str:
             parts4 = ev.provenance.split(":", 3)
             if len(parts4) == 4 and parts4[3] and parts4[3] != "unknown":
                 notice_suffix = f" — `{parts4[3]}`"
-    return f"{text}{domain_suffix}{notice_suffix}"
+    # A TLS fingerprint names a client LIBRARY, not a malware family, and the alert used to show neither the hash
+    # nor which list claims it -- so a stock Windows hash read as "matched a known-bad signature directly"
+    # (2026-10-01). Show the hash, the claiming list, and what a fingerprint does and does not prove.
+    fingerprint_suffix = ""
+    if ev.type in ("malicious_ja3", "malicious_ja4") and getattr(ev, "provenance", ""):
+        parts = ev.provenance.split(":", 3)
+        fp_hash = parts[3] if len(parts) == 4 and parts[3] and parts[3] != "unknown" else ""
+        if fp_hash:
+            listed_by = ja3_provenance.describe(fp_hash) if ev.type == "malicious_ja3" else ""
+            fingerprint_suffix = (f" — hash `{fp_hash[:12]}…`" + (f" ({listed_by})" if listed_by else "")
+                                  + " _(identifies a TLS client stack, not proof of malware)_")
+    return f"{text}{domain_suffix}{fingerprint_suffix}{notice_suffix}"
 
 
 # ALERT REDESIGN: the previous Telegram alert exposed two raw, differently-scaled
@@ -600,9 +612,11 @@ def _reapply_device_type_overrides(state_manager: Any, identity_manager: Any,
     extraction above) so it's directly testable against a real StateManager +
     identity manager, without needing a full EnginePipeline.
 
-    Returns the number of devices whose device_type actually changed."""
-    if not type_overrides:
-        return 0
+    Returns the number of devices whose device_type actually changed.
+
+    2026-10-02: no longer returns early when no overrides are configured -- the web UI's confirmed device labels
+    (core/device_labels.py, applied first inside apply_device_type()) must reach the engine on the same signal."""
+    type_overrides = type_overrides or {}
     reapplied = 0
     for dev_id in state_manager.get_all_device_ids():
         with state_manager.lock_device(dev_id) as locked_state:
@@ -631,6 +645,82 @@ def _reapply_device_type_overrides(state_manager: Any, identity_manager: Any,
 # fp_verdict["reasons"] (the exact trigger-message list both engines already
 # produce) to tell the two apart without needing a new signal anywhere upstream.
 _STATISTICAL_HARD_STOP_MARKERS = ("lateral movement", "exfiltration payload burst")
+
+# B2: how strongly each network evidence type points at "its" destination, used to pick the destination an
+# alert shows when several flows contributed. Unlisted types rank 2.0 (same as a medium notice).
+_NETWORK_EVIDENCE_STRENGTH = {
+    "zeek_lateral_scan": 4.0, "zeek_notice_highly_deterministic": 3.5, "malicious_ja3": 3.0,
+    "malicious_ja4": 3.0, "zeek_notice_strong": 2.5, "zeek_notice_medium": 2.0, "zeek_notice": 2.0,
+    "zeek_notice_weak": 1.0,
+}
+
+
+# B9 (2026-10-01): an alert listed the evidence for an attack but never said which ordinary explanations had been
+# looked at. The Aki-PC alert was certificate-revocation traffic (User-Agent Microsoft-CryptoAPI) and Microsoft
+# telemetry; the reader had to work that out by hand. These are the background agents and URL shapes that explain a
+# lot of "odd" TLS/HTTP traffic from a desktop OS.
+_BENIGN_AGENT_MARKERS = (
+    ("microsoft-cryptoapi", "Windows certificate checks (Microsoft-CryptoAPI)"),
+    ("windows-update-agent", "Windows Update"),
+    ("microsoft-delivery-optimization", "Windows Update delivery optimisation"),
+    ("microsoft bits", "Windows background transfer (BITS)"),
+    ("trustd", "Apple certificate checks (trustd)"),
+    ("ocspd", "Apple certificate checks (ocspd)"),
+    ("googleupdate", "Google Update"),
+    ("google update", "Google Update"),
+)
+_CERT_REVOCATION_URL_MARKERS = (".crl", "/ocsp", "ocsp.", "crl.", "ctldl.windowsupdate.com", "pki.goog")
+_ZEEK_DERIVED_FAMILIES = frozenset({"tls_fingerprint", "network_behavior", "data_transfer_pattern", "zeek_network"})
+
+
+def _benign_explanations_checked(target: str, app_name: str, http_reqs, ti_risk: float, abuse_risk: float,
+                                  asn_owner: Optional[str], asn_owner_is_safe: Optional[bool], families) -> list:
+    """Lines for the alert's "Ordinary explanations checked" block: each says what was checked and what it found,
+    so the reader sees both the case for an attack (WHY) and the case against it. Pure function -- no I/O."""
+    lines = []
+    app_l = (app_name or "").lower()
+    agent = next((label for marker, label in _BENIGN_AGENT_MARKERS if marker in app_l), None)
+    reqs = [str(r) for r in (http_reqs or [])]
+    revocation = [r for r in reqs if any(m in r.lower() for m in _CERT_REVOCATION_URL_MARKERS)]
+    if agent:
+        lines.append(f"⚠️ Traffic comes from an operating-system background agent: *{agent}* -- often explains odd TLS/HTTP patterns")
+    if revocation:
+        lines.append(f"⚠️ {len(revocation)} of the recent HTTP requests are certificate-revocation checks (CRL/OCSP), e.g. `{revocation[0][:80]}`")
+
+    tgt = (target or "").strip()
+    if tgt and tgt != "unknown":
+        try:
+            ipaddress.ip_address(tgt)
+            is_ip = True
+        except ValueError:
+            is_ip = False
+        if not is_ip:
+            try:
+                base = etld1(tgt) or tgt
+            except Exception:
+                base = tgt
+            if is_telemetry_domain(base):
+                lines.append(f"⚠️ `{tgt}` is a known vendor telemetry/update domain")
+            elif _is_cdn_or_cloud_domain(tgt):
+                lines.append(f"⚠️ `{tgt}` is a CDN/cloud domain shared by many unrelated services")
+            else:
+                lines.append(f"✓ `{tgt}` is not a known telemetry, CDN or cloud domain")
+        elif asn_owner and asn_owner != "Unknown":
+            if asn_owner_is_safe:
+                lines.append(f"⚠️ `{tgt}` belongs to *{asn_owner}*, a large provider -- the address alone says little")
+            else:
+                lines.append(f"✓ `{tgt}` belongs to *{asn_owner}*, not one of the large providers on the safe list")
+
+    if (ti_risk or 0.0) <= 0.0 and (abuse_risk or 0.0) <= 0.0:
+        lines.append("⚠️ The destination is on no threat-intel or AbuseIPDB list -- this alert rests on the device's "
+                     "behaviour or TLS fingerprint, not on where it connected")
+    else:
+        lines.append(f"✓ The destination has a reputation score (threat intel {ti_risk:.1f}, AbuseIPDB {abuse_risk:.1f})")
+
+    fams = set(families or [])
+    if len(fams) >= 2 and fams <= _ZEEK_DERIVED_FAMILIES:
+        lines.append("⚠️ Every evidence family above comes from the same sensor (Zeek) -- they are not fully independent")
+    return lines
 
 
 def _is_signature_based_hard_stop(reasons: Optional[list]) -> bool:
@@ -710,6 +800,7 @@ class EnginePipeline:
     ):
         self.config = config
         self.running = False
+        self._escalation_logged = {}  # A3: (device, signature) -> suspicious_since of the episode already logged
 
         LOGGER.debug("Activating configuration file live-watcher daemon.")
         if hasattr(self.config, "start_watcher"):
@@ -772,20 +863,44 @@ class EnginePipeline:
 
         self.ti_engine = ti_engine
         self.ml_registry = ml_registry
+        # Domain popularity learned on this network (replaces Tranco; intelligence/local_popularity.py). Fed from the
+        # Pi-hole query stream in identity.process_dns_identities(); read by ThreatIntel's allowlist and rank feature.
+        self.local_popularity = None
+        if bool(self.config.get("local_popularity_enabled", True)):
+            try:
+                from intelligence.local_popularity import LocalPopularity
+                self.local_popularity = LocalPopularity(state_dir / "popularity.db", etld1_fn=etld1)
+                self.local_popularity.start()
+                if self.ti_engine is not None:
+                    self.ti_engine.local_popularity = self.local_popularity
+                self.identity_manager.popularity = self.local_popularity
+                LOGGER.info("Local domain popularity: %d established names.", self.local_popularity.established_count)
+            except Exception as exc:
+                LOGGER.warning("Local domain popularity unavailable: %s", exc)
+                self.local_popularity = None
         if self.ml_registry: self.ml_registry.load_models()
         
         self.geoip_engine = geoip_engine or GeoIPEngine(db_path=self.config.get("geoip_db", str(state_dir / "GeoLite2-City.mmdb")), asn_db_path=self.config.get("geoip_asn_db", ""))
 
         cache_dir = state_dir / "ti_cache"
         # Hidden advanced switch (config-file only, default off): AbuseIPDB's free tier is personal-use only.
-        abuse_key = self.config.get("abuseipdb_api_key", "") if self.config.get("advanced_keyed_feeds", False) else ""
-        self.abuseipdb = AbuseIPDB(api_key=abuse_key, cache_dir=cache_dir, refresh_interval=int(self.config.get("ti_refresh_interval", 3600)))
+        # Paid/opt-in reputation services (owner decision 2026-10-01): built and wired, OFF unless the customer turns
+        # them on (web UI -> Advanced settings) with their own key. The toggles are read live on every lookup.
+        abuse_key = self.config.get("abuseipdb_api_key", "")
+        # The blacklist endpoint allows only ~5 downloads a day on the free plan; the hourly ti_refresh_interval
+        # used here before exhausted it (found 2026-10-01 on .94: 23 consecutive HTTP 429s). Own, longer interval.
+        self.abuseipdb = AbuseIPDB(api_key=abuse_key, cache_dir=cache_dir,
+                                   refresh_interval=int(float(self.config.get("abuseipdb_blacklist_refresh_hours", 8)) * 3600),
+                                   enabled_fn=lambda: bool(self.config.get("abuseipdb_enabled", False)))
+        self.virustotal = VirusTotalClient(api_key=self.config.get("virustotal_api_key", ""), cache_dir=cache_dir,
+                                           enabled_fn=lambda: bool(self.config.get("virustotal_enabled", False)))
         self.abuseipdb.start_refresh_thread()
-        if abuse_key:
-            LOGGER.info("AbuseIPDB integration activated successfully.")
-            integration_status_metric.labels("abuseipdb").set(1)
-        else:
-            integration_status_metric.labels("abuseipdb").set(0)
+        for _name, _client, _flag in (("abuseipdb", self.abuseipdb, "abuseipdb_enabled"),
+                                      ("virustotal", self.virustotal, "virustotal_enabled")):
+            if _client.api_key:
+                LOGGER.info("%s key present; %s (toggle: web UI -> Advanced settings).", _name,
+                            "ENABLED" if self.config.get(_flag, False) else "disabled")
+            integration_status_metric.labels(_name).set(1 if _client.active else 0)
             
         if self.ti_engine and self.ti_engine.otx_api_key:
             LOGGER.info("AlienVault OTX integration activated successfully.")
@@ -810,6 +925,9 @@ class EnginePipeline:
             ti_engine=self.ti_engine, geoip_engine=self.geoip_engine,
             safe_ips=safe_ips, honeypot_ips=honeypot_ips, safe_patterns=safe_patterns,
             wired_probe_ips=wired_probe_ips,
+            wired_probe_ignore_sources=set(self.config.get("reactive_capture_wired_probe_ignore_sources", [])),
+            wired_probe_ignore_services=self.config.get("reactive_capture_wired_probe_ignore_services"),
+            wired_probe_warmup_seconds=float(self.config.get("reactive_capture_wired_probe_warmup_seconds", 600.0)),
             lateral_ports=set(self.config.get("lateral_movement_ports", [22, 445, 3389, 5900, 23])),
         )
 
@@ -922,7 +1040,7 @@ class EnginePipeline:
         # evidence_store/metrics_exporter -- already exists on self).
         #
         # Deliberately NOT a scheduled_jobs.scheduler entry (the pattern
-        # live_prune.py/live_decision_archive.py/cl_afpe_flip_monitor.py use):
+        # live_prune.py/live_decision_archive.py use):
         # that mechanism spawns each job as a SEPARATE SUBPROCESS
         # (scripts/scheduler.py's own subprocess.Popen calls) against
         # state/ids_state.json on disk. soc.service runs continuously with its
@@ -1014,9 +1132,14 @@ class EnginePipeline:
                             orphan["device_id"], canonical["device_id"], exc,
                         )
                     try:
-                        argus_live_engine.get_graph_store().merge_device(orphan["device_id"], canonical["device_id"])
+                        # P1 (architecture review 2026-10-02): this runs on the reconcile worker THREAD. The live
+                        # GraphStore singleton's connection belongs to the main loop (sqlite3's same-thread check), so
+                        # this call used to fail every time -- logged at DEBUG, i.e. graph-side merges from this
+                        # worker silently never happened. A short-lived connection of its own; SQLite's file locking
+                        # (busy timeout) serialises it against the main loop's writes.
+                        argus_live_engine.merge_device_in_own_connection(orphan["device_id"], canonical["device_id"])
                     except Exception as exc:
-                        LOGGER.debug(
+                        LOGGER.warning(
                             "Identity reconcile: graph-side merge mirror failed for %s -> %s "
                             "(the real v1 merge already succeeded, unaffected): %s",
                             orphan["device_id"], canonical["device_id"], exc,
@@ -1036,7 +1159,7 @@ class EnginePipeline:
     def run(self) -> None:
         metrics_port = int(self.config.get("metrics_port", 9105))
         try:
-            start_http_server(metrics_port)
+            start_cached_metrics_server(metrics_port)   # A2: render cache + /healthz (core/metrics_server.py)
             LOGGER.info("📊 Prometheus metrics server running on port %d", metrics_port)
         except Exception as exc:
             LOGGER.error("Failed to start Prometheus server on port %d: %s", metrics_port, exc)
@@ -1500,15 +1623,28 @@ class EnginePipeline:
 
                 features["abuseipdb_risk"] = abuse_risk
 
-                # vt_risk: legacy name kept for feature/model-schema compatibility. VirusTotal was removed
-                # (2026-09-29); it now carries ONLY the honeypot signal (a honeypot target makes the
-                # external client inherently malicious).
+                # vt_risk: the honeypot signal (a honeypot target makes the external client inherently malicious)
+                # or, when the customer has switched VirusTotal on with their own key (off by default), its
+                # IP/domain verdict -- whichever of the two lookups scored higher names the reputation target.
                 vt_risk = 0.0
                 if dest_ip in honeypots:
                     vt_risk = 4.0
                     if vt_risk > _best_risk_seen:
                         _best_risk_seen = vt_risk
                         reputation_target = dest_ip
+                elif self.virustotal.active:
+                    if _dest_ip_is_real_host:
+                        self.virustotal.enqueue_ip(dest_ip)
+                    if top_domain:
+                        self.virustotal.enqueue_domain(top_domain)
+                    vt_ip_risk = self.virustotal.risk_contribution("ip", dest_ip) if _dest_ip_is_real_host else 0.0
+                    vt_domain_risk = self.virustotal.risk_contribution("domain", top_domain) if top_domain else 0.0
+                    vt_risk, vt_risk_source = (vt_ip_risk, dest_ip) if vt_ip_risk >= vt_domain_risk else (vt_domain_risk, top_domain)
+                    if vt_risk > 0:
+                        ti_ioc_hits_total.labels(source="virustotal", ioc_type="mixed").inc()
+                        if vt_risk > _best_risk_seen:
+                            _best_risk_seen = vt_risk
+                            reputation_target = vt_risk_source
                 features["vt_risk"] = vt_risk
 
                 # ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ──────────
@@ -2098,10 +2234,20 @@ class EnginePipeline:
                             persisted_for = now - state.suspicious_since
                             escalation_threshold = float(self.config.get("suspicious_escalation_seconds", 600.0))
                             if persisted_for >= escalation_threshold:
-                                LOGGER.warning(
-                                    "⬆️ [ESCALATION] %s: SUSPICIOUS signature '%s' persisted %.0fs (>= %.0fs) → escalating to HIGH",
-                                    hostname, primary_sig, persisted_for, escalation_threshold
-                                )
+                                # A3: this branch runs every cycle for as long as the state persists. Log (and
+                                # count) the escalation once per episode, not once per cycle -- ten devices x
+                                # every few seconds was most of the log volume.
+                                _esc_key = (str(state.device_id), str(primary_sig))
+                                _esc_seen = self._escalation_logged.get(_esc_key)
+                                _new_episode = _esc_seen is None or _esc_seen != state.suspicious_since
+                                if _new_episode:
+                                    self._escalation_logged[_esc_key] = state.suspicious_since
+                                    if len(self._escalation_logged) > 5000:
+                                        self._escalation_logged.clear()
+                                    LOGGER.warning(
+                                        "⬆️ [ESCALATION] %s: SUSPICIOUS signature '%s' persisted %.0fs (>= %.0fs) → escalating to HIGH",
+                                        hostname, primary_sig, persisted_for, escalation_threshold
+                                    )
                                 decision = dict(decision)
                                 decision["state"] = DecisionState.HIGH
                                 # PHASE 19 FIX: this escalation predates the severity gate (24e1d07) --
@@ -2124,9 +2270,10 @@ class EnginePipeline:
                                 # PHASE 30: primary_sig here is still the pre-"(persisted Ns)"
                                 # value (the suffix is appended on the next line) -- exactly the
                                 # stable underlying signature this counter should be keyed by.
-                                persistence_escalation_total.labels(
-                                    device=str(state.device_id), hostname=str(hostname), signature=str(primary_sig)
-                                ).inc()
+                                if _new_episode:
+                                    persistence_escalation_total.labels(
+                                        device=str(state.device_id), hostname=str(hostname), signature=str(primary_sig)
+                                    ).inc()
                                 decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
                                 # BUGFIX (live audit): 0.75 put a persistence-escalated alert's
                                 # confidence in the SAME range as decision_engine.py's genuine
@@ -2363,12 +2510,23 @@ class EnginePipeline:
                                 # fragmented into 4 evidence_type values by tier -- ev.type ==
                                 # "zeek_notice" (bare) also still matched for evidence written
                                 # before this deploy, still valid within the 24h graph window.
+                                # B2 (2026-10-01): was "the first item that has a domain" -- one
+                                # alert merges evidence from different flows, so the destination
+                                # shown could belong to a weak notice rather than the evidence that
+                                # actually drove the alert. Use the destination of the STRONGEST item.
+                                _best_rank, _best_ev = None, None
                                 for ev in active_evidence:
-                                    if (ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice")
-                                            or ev.type in ZEEK_NOTICE_EVIDENCE_TYPES) and ev.domain:
-                                        alert_dest_ip = ev.domain
-                                        alert_target_domain = "unknown"
-                                        break
+                                    if not ((ev.type in ("zeek_lateral_scan", "malicious_ja3", "malicious_ja4", "zeek_notice")
+                                             or ev.type in ZEEK_NOTICE_EVIDENCE_TYPES) and ev.domain):
+                                        continue
+                                    _rank = (_NETWORK_EVIDENCE_STRENGTH.get(ev.type, 2.0),
+                                             float(getattr(ev, "confidence", 0.0) or 0.0),
+                                             float(getattr(ev, "timestamp", 0.0) or 0.0))
+                                    if _best_rank is None or _rank > _best_rank:
+                                        _best_rank, _best_ev = _rank, ev
+                                if _best_ev is not None:
+                                    alert_dest_ip = _best_ev.domain
+                                    alert_target_domain = "unknown"
                             # BUGFIX (live audit, 2026-09-09): COORDINATED_TARGETING/
                             # PEER_COHORT_DEVIATION had no branch here at all -- their
                             # evidence (coordinated_targeting/peer_deviation) is v13-only,
@@ -2643,14 +2801,12 @@ class EnginePipeline:
                             # thresholds -- see fp_engine.evaluate()'s docstring.
                             # V13 FULL-ARCHITECTURE PLAN, WORKSTREAM 2: cl_afpe_engine mirrors
                             # the top-level `engine:` switch's exact shape -- default
-                            # "v_current" keeps AutonomousFPEngine as the real suppression
-                            # decision (with v13's ClAfpeEngine still shadow-computed
-                            # alongside for comparison, below); "argus" (set automatically by
-                            # cl_afpe_flip_monitor.py once its own bar clears, see that file's
-                            # docstring) makes ClAfpeEngine's verdict the real one instead --
-                            # a whole-engine swap, not a per-mechanism flag, matching this
+                            # "argus" (since 2026-10-02) makes ClAfpeEngine's verdict the real
+                            # one; "v_current" is the rollback: AutonomousFPEngine decides and
+                            # ClAfpeEngine is shadow-computed alongside for comparison (below)
+                            # -- a whole-engine swap, not a per-mechanism flag, matching this
                             # project's own precedent for the main decision engine (A13).
-                            if self.config.get("cl_afpe_engine", "v_current") == "argus":
+                            if self.config.get("cl_afpe_engine", "argus") == "argus":
                                 legacy_fallback_used = []
 
                                 def _legacy_fallback(**kwargs):
@@ -3581,6 +3737,7 @@ class EnginePipeline:
                                     # when target_display is a raw IP; a domain already carries its own
                                     # meaning and isn't touched.
                                     target_geo_note = ""
+                                    target_asn_owner = None  # B9: reused by the "ordinary explanations" block
                                     try:
                                         ipaddress.ip_address(target_display)
                                         is_ip_target_display = True
@@ -3590,6 +3747,7 @@ class EnginePipeline:
                                         asn_res = self.geoip_engine.lookup_asn(target_display)
                                         city_res = self.geoip_engine.lookup(target_display)
                                         geo_org = getattr(asn_res, "autonomous_system_organization", None) if asn_res else None
+                                        target_asn_owner = geo_org
                                         geo_country = getattr(getattr(city_res, "country", None), "name", None) if city_res else None
                                         geo_parts = [p for p in (geo_org, geo_country) if p]
                                         if geo_parts:
@@ -3712,6 +3870,24 @@ class EnginePipeline:
                                     if context_lines:
                                         alert_msg += "\n📎 *Also observed* _(context -- did not independently trigger this)_\n"
                                         for line in context_lines:
+                                            alert_msg += f"- {line}\n"
+
+                                    # B9: the case AGAINST an attack, next to the case for it (WHY above).
+                                    try:
+                                        _asn_safe = (self.rep_classifier.is_known_safe_asn_owner(target_asn_owner)
+                                                     if target_asn_owner and getattr(self, "rep_classifier", None) else None)
+                                        benign_lines = _benign_explanations_checked(
+                                            target_display, app_name, recent_http_reqs,
+                                            float(features.get("ti_risk", 0.0) or 0.0),
+                                            float(features.get("abuseipdb_risk", 0.0) or 0.0),
+                                            target_asn_owner, _asn_safe, list(grouped_evidence.keys()),
+                                        )
+                                    except Exception as exc:  # the alert must never fail over its context block
+                                        LOGGER.debug("benign-explanations block skipped: %s", exc)
+                                        benign_lines = []
+                                    if benign_lines:
+                                        alert_msg += "\n🔍 *Ordinary explanations checked* _(⚠️ = could explain this)_\n"
+                                        for line in benign_lines:
                                             alert_msg += f"- {line}\n"
 
                                     alert_msg += (
@@ -3985,7 +4161,7 @@ class EnginePipeline:
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
         if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models(wait=True)
-        if getattr(self, "fp_engine", None): self.fp_engine.flush_device_fp_profiles()
+        if getattr(self, "fp_engine", None): self.fp_engine.flush_device_fp_profiles(force=True)
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
 
     def _select_target_domain(self, state, ti_engine) -> str:

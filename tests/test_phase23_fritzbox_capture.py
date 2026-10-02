@@ -438,7 +438,8 @@ except Exception as e:
 history_dir = CLEAN_TMP / "history_test"
 _append_burst_history(history_dir, {"trigger_reason": "unit_test", "timestamp": time.time()})
 _append_burst_history(history_dir, {"trigger_reason": "unit_test_2", "timestamp": time.time()})
-history_path = history_dir / "reactive_capture_history.jsonl"
+# 2026-10-02 (flash wear): the history lives NEXT TO the scratch dir, which is a RAM disk in Docker
+history_path = history_dir.parent / "reactive_capture_history.jsonl"
 check("_append_burst_history() creates the history file and the target directory if needed",
       history_path.exists())
 history_lines = [json.loads(l) for l in history_path.read_text().splitlines() if l.strip()]

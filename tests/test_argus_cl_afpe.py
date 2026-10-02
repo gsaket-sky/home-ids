@@ -404,7 +404,10 @@ check("evaluate() Check 2 DOES hard-stop once the distinct-target threshold is m
 
 # Check 3: malicious JA3/JA4 TLS fingerprint.
 v = _evaluate(cl_afpe, _alert(features={"zeek_ja4_malicious": 1}))
-check("evaluate() Check 3 hard-stops on a malicious JA4+ fingerprint",
+check("evaluate() Check 3 (B1): a malicious JA4+ fingerprint ALONE is not a hard stop",
+      v["stage"] != "STAGE_1_HARD_STOP")
+v = _evaluate(cl_afpe, _alert(features={"zeek_ja4_malicious": 1, "ti_risk": 0.5}))
+check("evaluate() Check 3 hard-stops on a malicious JA4+ fingerprint corroborated by a reputation score",
       v["verdict"] == "CONFIRMED_THREAT" and any("TLS fingerprint" in r for r in v["reasons"]))
 
 # Check 4: honeypot.
