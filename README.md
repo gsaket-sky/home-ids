@@ -1,62 +1,104 @@
-# Home-IDS — an evidence-graph intrusion detection system for home networks
+<div align="center">
 
-A self-built network security system: it watches a network with [Zeek](https://zeek.org) and DNS telemetry, models what
-is *normal for each individual device*, reasons about what it sees as competing hypotheses backed by independent
-evidence, and acts — blocking, isolating or asking a human — only when the evidence justifies it. It has been running
-on a real home network, and this repository is the engineering behind it: **~55,000 lines of Python, 158 test
-scripts, and the design documents and mathematics that explain every decision.**
+# 🛡️ Home-IDS
 
-> **This is a showcase, not a product.** The code is published to be read. It is licensed for viewing only
-> (see [LICENSE](LICENSE)) and is deliberately not packaged for installation — see [Running it](#running-it).
+### Enterprise-style network security. On a box you own. Watching only your network.
 
-## What makes it interesting
+**Detects what's wrong with *your* devices, explains it in plain language, and acts only when the evidence is there.**
 
-| Idea | Where to read about it |
+![Edge](https://img.shields.io/badge/runs%20on-Raspberry%20Pi%208%20GB%20%7C%20x86-4f46e5?style=for-the-badge)
+![Cloud](https://img.shields.io/badge/cloud%20account-none%20needed-059669?style=for-the-badge)
+![Corroboration](https://img.shields.io/badge/top%20alerts-need%20corroboration-dc2626?style=for-the-badge)
+![Tests](https://img.shields.io/badge/automated%20tests-~160%20scripts-2563eb?style=for-the-badge)
+
+[**Product description**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) ·
+[**How it thinks**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) ·
+[**The maths**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) ·
+[**Engineering manual**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md)
+
+</div>
+
+---
+
+## Your network has a security guard now
+
+Every smart TV, tablet, laptop and forgotten smart plug is a door. Most home and small-office networks have no idea
+what is happening behind them. Enterprise teams have tools for that; everyone else gets a subscription box that sends
+their traffic to someone else's cloud.
+
+**Home-IDS is what a security team would run for you, on hardware you own, answering only to you.**
+
+|  |  |
 |---|---|
-| **Evidence graph.** Observations (a DNS burst, a suspicious TLS fingerprint, a periodic beacon…) are typed, timestamped *evidence* attached to a device and a destination in a SQLite graph. Decisions are made over the graph, so every alert has a traceable chain back to its evidence. | [ARGUS_ARCHITECTURE.md](Documentation/ARGUS_ARCHITECTURE.md), `src/argus/graph/` |
-| **Hypothesis competition with independence.** Threat hypotheses (C2 beaconing, DNS tunnelling, DGA, scanning, exfiltration, …) compete with benign explanations; corroboration only counts across *independent* evidence families, so five readings of the same signal never add up to a false certainty. | [PIPELINE_MATH_REFERENCE.md](Documentation/PIPELINE_MATH_REFERENCE.md), `src/argus/hypotheses/` |
-| **Per-device behavioural baselines.** Bayesian online change-point detection (BOCPD) and Markov models per device, metric and hour; peer cohorts so a device is also compared with devices like it. | `src/argus/baseline/`, [ARGUS_ARCHITECTURE.md](Documentation/ARGUS_ARCHITECTURE.md) |
-| **A second system grades the first.** CL-AFPE (a continuously-learning false-positive engine) suppresses what it is confident is benign, remembers why, and keeps its own track record — suppression is revocable and never hides a hard indicator. | `src/argus/cl_afpe/`, [ARGUS_DECISIONS.md](Documentation/ARGUS_DECISIONS.md) |
-| **Autonomy with accountability.** Self-tuning thresholds are evidence-gated, bounded, logged with their reasons, and reversible. | `src/argus/autotune/`, [ARGUS_AUTONOMY_DEPENDENCY_MAP.md](Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md) |
-| **Built for small, fragile hardware.** A health manager with resource-pressure modes, resource-aware job scheduling, bounded I/O on every hot path, and flash-wear-aware persistence (changed-rows-only SQLite state). | `src/core/health_manager.py`, [RESOURCE_AWARE_SCHEDULING.md](Documentation/RESOURCE_AWARE_SCHEDULING.md), [DISK_CAPACITY_AND_RETENTION_AUDIT.md](Documentation/DISK_CAPACITY_AND_RETENTION_AUDIT.md) |
-| **Containment that explains itself.** DNS sinkholing, router-level isolation and a Layer-2 ARP/NDP tarpit (own raw-socket implementation, no third-party packet library), each with a plain-language explanation and a one-tap undo. | `src/mitigation/` |
-| **Honest engineering records.** Audits, root-cause write-ups and "what we got wrong" are kept next to the code. | [AUDIT_V14_REVIEW_RESPONSE.md](Documentation/AUDIT_V14_REVIEW_RESPONSE.md), [MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md](Documentation/MEMORY_RESTART_ROOT_CAUSE_AND_CAPACITY_PLAN.md) |
+| 🧠 **Learns each device** | Not "speakers are chatty": *your* speaker, over time. Baselines per device, per metric, per hour. |
+| ⚖️ **Weighs evidence, not raw anomalies** | It forms hypotheses ("this device runs a DGA botnet") and weighs them against benign explanations. |
+| 🤝 **Demands corroboration** | A HIGH or CRITICAL alert never rests on one signal. Independent evidence families must agree. |
+| 🪞 **Grades its own work** | A second system suppresses what it is confident is benign, remembers why, and never hides a hard indicator. |
+| 🧯 **Acts proportionately, and can undo it** | Block a destination, cut a device off the internet, or quarantine it. One click to release. |
+| 🔒 **Stays private** | No cloud account. Nothing leaves your network except optional threat-intelligence lookups you switch on. |
 
-## Where to start reading
+---
 
-| Document | What it covers |
+## How a decision is made
+
+```mermaid
+flowchart LR
+    A["👁️ Sense<br/>Zeek · Pi-hole · Suricata"] --> B["🔬 Understand<br/>per-device baselines<br/>threat intelligence"]
+    B --> C[("🕸️ Evidence graph<br/>SQLite · WAL")]
+    C --> D["⚖️ Hypotheses<br/>threat vs. benign"]
+    D --> E["🤝 Corroboration<br/>independent evidence"]
+    E --> F["🪞 False-positive<br/>engine"]
+    F --> G["🛡️ Act<br/>explain · undo"]
+```
+
+> **Example.** A thermostat starts querying thousands of random-looking domains. One signal is a hint, not a verdict.
+> Home-IDS raises the hypothesis "DGA botnet", looks for an independent second source (a malicious TLS fingerprint, a
+> threat-intelligence hit, periodic beaconing), checks the benign explanations, and only then blocks the destination
+> and tells you, in a sentence, what it saw and how to undo it.
+
+---
+
+## Built for small hardware, and for SD cards
+
+| | |
 |---|---|
-| [ENGINEERING_MANUAL.md](Documentation/ENGINEERING_MANUAL.md) | The whole system, component by component |
-| [ARGUS_ARCHITECTURE.md](Documentation/ARGUS_ARCHITECTURE.md) | Pipeline stages, scheduling, the two decision engines, autotuning, identity, the health manager, threat categorisation |
-| [PIPELINE_MATH_REFERENCE.md](Documentation/PIPELINE_MATH_REFERENCE.md) | The mathematics: scoring, baselines, confidence, staleness |
-| [ARGUS_DECISIONS.md](Documentation/ARGUS_DECISIONS.md) | Standing rules, closed decisions, and what is deliberately not built |
-| [CONFIG_API.md](Documentation/CONFIG_API.md), [CONSOLE_DATA_API.md](Documentation/CONSOLE_DATA_API.md) | The engine API and the engineering console's data model |
-| [USER_MANUAL.md](Documentation/USER_MANUAL.md) | Every setting and what it does |
-| [CHANGELOG.md](Documentation/CHANGELOG.md) | Release by release |
+| ⚡ **Fast where it counts** | An exact, vectorised Isolation-Forest evaluator replaces a ~21 ms-per-call library path. |
+| 📏 **Bounded everywhere** | Ring buffers, per-hardware cache profiles, hard memory limits per service, capped work per cycle. |
+| 🩺 **Self-healing** | A health manager watches every part, switches to resource-saving modes under pressure, and degrades gracefully. If the internet drops, it keeps deciding on local evidence. |
+| 💾 **Flash-friendly** | State is stored as changed rows only, hot files live in RAM, and host write-back is coalesced. On one test host, engine writes fell from roughly 10–25 GB/day to roughly 3 GB/day (a longer measurement, and one on a Pi, are still pending). |
+| 🔌 **Crash-safe** | Transactional writes: a power cut never leaves a half-written update. |
 
-## Repository layout
+## A calm, consumer-grade experience
 
-```
-src/core/          pipeline, health manager, state, scheduling, identity
-src/argus/         evidence graph, hypotheses, baselines, CL-AFPE, autotune, shadow evaluation
-src/extractors/    Zeek and DNS feature extraction
-src/intelligence/  threat-intelligence feeds, false-positive engine, detectors
-src/mitigation/    containment (DNS, router, Layer-2 raw sockets)
-src/middleware/    engine API
-web/               the engineering console (single-page, no build step)
-tests/             158 standalone and pytest scripts
-```
+**Protected · Learning your network · Needs your attention · Act now.** One status, with detail one click away.
+Plain-language alert stories, one-click block and release, a **Test** button for every integration, a restart button
+for every part of the system, light and dark themes, and a layout that works on a phone.
 
-## Running it
+## Optional extras
 
-Home-IDS needs a Zeek sensor on a mirrored or in-path interface, a Pi-hole instance, a Python environment, a router
-integration if you want hardware-level isolation, and a hand-written `config.yaml` (see `config.yaml.example` and
-[USER_MANUAL.md](Documentation/USER_MANUAL.md)). It is **not packaged, not supported and not licensed for running**
-([LICENSE](LICENSE)); there is no installer and no step-by-step guide on purpose. If you want to discuss it, or
-the work behind it, get in touch through the profile of the account that owns this repository.
+🪤 **Decoy host** (any contact is proof of lateral movement) · 📡 **Wi-Fi capture and Suricata scans** · 📊 **Dashboards** ·
+🤖 **Local AI advisor** (explains alerts in plain words; a deterministic validator can veto it) · 📱 **Telegram** alerts and approvals
 
-## Limits, stated plainly
+*On the roadmap (ideas, not built):* managed-switch / VLAN isolation · WireGuard roaming protection ·
+encrypted-traffic analytics · opt-in, privacy-preserving fleet learning.
 
-It is a single-site system tuned on one network; it sees what its sensor sees (Wi-Fi traffic through an all-in-one
-router is only partly visible, which the documents explain); and it is a detector that helps a person decide, not a
-guarantee. The documents list what it still cannot do.
+---
+
+## Honest status
+
+Built and running on a real home network for months, with about 160 automated test scripts and published audits.
+**Not yet validated on real Raspberry Pi hardware** (designed and budgeted for it, tested on an x86 host so far), and
+there has been no independent security assessment. It is a detector that helps a person decide, not a guarantee.
+
+## Documents
+
+| | |
+|---|---|
+| [Product description](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) | What it is, how it works, where it stands |
+| [Engineering manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md) | The whole system, component by component |
+| [Architecture](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) · [Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) · [Decisions](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_DECISIONS.md) | How it thinks, and why |
+
+## Licence
+
+© 2026 Gagan Saket. All rights reserved. The source is visible so it can be read and reviewed. Running, copying,
+modifying or redistributing it requires the owner's written permission. Third-party components keep their own licences.
