@@ -402,6 +402,15 @@ def permits_suppression(key):
 A single repeated signal can never build enough trust alone: two distinct families must each pass 0.6. If the gate
 does not agree, or fails, the full evaluation below runs.
 
+The console's Autonomy tab shows each `(device, hypothesis, destination class, family)` row's progress as
+
+```python
+progress = min(1.0, trust / 0.6)         # 100% = this family qualifies as a witness
+```
+
+computed from the trust value stored at its last update. Four confirmations in quick succession reach 100%
+(4 × 0.15 = 0.6); spread out, each day of silence costs 0.05.
+
 A destination that is itself a known device on the network, with exactly zero threat-intelligence and abuse scores,
 builds composite trust in the same way and is suppressed only once the gate passes.
 

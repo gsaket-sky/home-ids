@@ -400,21 +400,28 @@ floor, and refuses to move when corrected and uncorrected scores overlap. Every 
 
 Detection sensitivity is tuned automatically, inside hard limits.
 
-**What can be tuned.** A closed allowlist of 16 parameters, each with bounds and a maximum step per change. Every one
-has a live reader and an automatic proposer driven by evidence:
+**What can be tuned.** A closed allowlist of 16 parameters, each with a shipped default, hard bounds and a maximum
+step per change. Every one has a live reader and an automatic proposer driven by evidence. "Less sensitive when" is
+the direction that makes the system more relaxed. That is the direction that needs statistical proof (below), and
+the one the drift check watches.
 
-| Area | Parameters (range) | Proposed from |
-|---|---|---|
-| Reputation | tier-4 floor (1.0–5.0), tier-5 floor (2.0–5.0) | Backtest detection rates per scope |
-| Reputation | propagation TTL: how long a suspicious destination counts as evidence for other devices (1 h–7 d) | Graph evidence; it can only be shortened, and only after a minimum sample |
-| Hard stops | confirmed-exploit sensitivity (0.50–0.99) | Synthetic attack sweep |
-| Baselines | BOCPD hazard rate (1/2000–1/100) | Real shifts detected late versus regimes that flap |
-| Baselines | population-prior pseudo-counts for Gaussian, Beta and Poisson models | Nightly prior build, per device type |
-| Peer cohort | deviation multiplier (1.5–10), minimum absolute count (2–20) | Observed outcomes; loosen only |
-| Reconnaissance | ARP-sweep unique-target threshold (4–40; up at most 4, down at most 1 per step) | Nightly calibration from corrections |
-| False-positive engine | suppression threshold (0.60–1.0), uncertainty threshold (0.3–0.8) | Nightly calibration from corrections |
-| False-positive engine | familiarity trust bar (0.3–0.9) | Graph evidence; lower only |
-| False-positive engine | trust-cache TTL (1–30 days) | Trusted destinations later found malicious; shorten only |
+| Parameter | Default (range) | What it controls | Less sensitive when | Proposed from |
+|---|---|---|---|---|
+| `reputation_tier_suspicious_floor` | 2.0 (1.0–5.0) | The threat-intelligence or VirusTotal score a destination must exceed to count as confirmed malicious (tier 5) | Raised | Backtest detection rates |
+| `reputation_tier_high_floor` | 4.0 (2.0–5.0) | The abuse score a destination must reach to count as confirmed malicious (tier 5) | Raised | Backtest detection rates |
+| `hard_stop_candidate_sensitivity` | 0.90 (0.50–0.99) | The Suricata signature confidence needed for the confirmed-exploit hard stop | Raised | Synthetic attack sweep |
+| `bocpd_hazard_rate` | 1/500 (1/2000–1/100) | How often the baselines expect a genuine change of habit. Higher means new habits are accepted, and real shifts flagged, sooner | Lowered | Real shifts detected late, against regimes that flap |
+| `arp_sweep_unique_targets_threshold` | 8 (4–40; up at most 4, down at most 1 per step) | How many different LAN addresses a device must probe before it counts as a network sweep | Raised | Nightly calibration from corrections |
+| `peer_deviation_multiplier` | 3.0 (1.5–10) | How many times more destinations than its device type's average make a device an outlier | Raised | Observed outcomes; loosen only |
+| `peer_deviation_min_absolute_count` | 5 (2–20) | The minimum number of destinations before a peer comparison is made at all | Raised | Observed outcomes; loosen only |
+| `fp_combined_suppress_threshold` | 0.80 (0.60–1.0) | The false-positive engine's score above which an alert is suppressed as harmless | Lowered | Nightly calibration from corrections |
+| `combined_uncertain_threshold` | 0.55 (0.30–0.80) | Below this score an alert is a confirmed threat; between it and the suppress threshold it is "uncertain" | Lowered | Nightly calibration from corrections |
+| `familiarity_trust_bar` | 0.60 (0.30–0.90) | How familiar a destination must be to a device to support the benign "normal device telemetry" explanation, and to let the AI advisor call it benign | Lowered | Graph evidence; lower only |
+| `trust_cache_ttl_seconds` | 14 days (1–30 days) | How long a destination confirmed safe for a device stays trusted | Raised | Trusted destinations later found malicious; shorten only |
+| `reputation_propagation_ttl_seconds` | 1 day (1 hour–7 days) | How long a destination's suspicious reputation keeps counting as evidence when other devices contact it | Lowered | Graph evidence; shorten only, after a minimum sample |
+| `pool_gaussian_kappa`, `pool_gaussian_alpha` | 5, 10 (1–20, 1–50) | How strongly a new device's starting point (its device type's typical behaviour) outweighs its own first observations, for rates and volumes | Raised | Nightly prior build, per device type |
+| `pool_beta_total` | 10 (1–50) | The same, for ratios (failed and blocked lookups) | Raised | Nightly prior build |
+| `pool_poisson_rate` | 5 (1–20) | The same, for counts (DGA hits, decoy touches) | Raised | Nightly prior build |
 
 **What can never be tuned.** The two-family corroboration minimum, family membership, the hard-stop registry, and the
 rule that persistence alone never authorises containment are code, not configuration.
@@ -436,6 +443,59 @@ to explain them, raise an operator warning.
 **The backtest** runs nightly: a golden set of real incidents, a synthetic attack sweep through the real decision
 engine against an isolated in-memory copy of each device's recent graph, and the drift check. Its pass or fail gates
 every promotion.
+
+### Reading the console's Autonomy tab
+
+The Autonomy tab in the expert console shows what the system has learned and changed by itself. Nothing on it needs a
+tap.
+
+**Tunable parameters.** One row per parameter above:
+
+- *Current* is the value in force for the whole network (the global tier).
+- *Shipped default* and *Bounds* are the limits described above.
+- *Status* is **At default** or **Tuned**. Tuned means the global value has moved from its default.
+
+A device or device type can have its own value, which takes precedence and appears under **Per-device status** and
+**Per-category autotuner status**.
+
+**Autotuner history.** Every proposal, with:
+
+- the direction, **tightened** (more sensitive) or **loosened** (less sensitive), judged by the parameter's meaning,
+  not by whether the number went up;
+- old and new values;
+- the status: **pending canary** (proposed, not yet in force), **promoted** (in force) or **rolled back**;
+- the reason, in words.
+
+**Composite trust: resolved.** Destinations the false-positive engine now treats as trusted for a device, and how
+that was decided:
+
+- marked as a false positive by the user;
+- automatically, by the machine-learning stages;
+- automatically, because the destination is one of the network's own devices and the trust was earned
+  (see below).
+
+**Composite trust: still building, and its percentages.** These are the "learning percentages". Each row is one
+combination of device, alert type (hypothesis), destination class (private, multicast, telemetry, CDN or public) and
+evidence family (for example DNS behaviour or network behaviour). Behind each row is a trust value from 0 to 1:
+
+- It rises by **0.15** each time an alert of that kind, for that device and destination class, is confirmed harmless.
+  This happens when the user marks it as a false positive, when the machine-learning stages suppress it, or when it
+  is traffic to one of the network's own devices with clean reputation. Every evidence family in that alert rises
+  together.
+- It falls by **0.05 per day** while nothing confirms it, so trust that is not renewed fades.
+- **The percentage is trust ÷ 0.6.** At 100% that family has reached the bar and counts as one independent witness
+  that this pattern is harmless. Four confirmations close together reach 100%.
+
+**What it changes.** When at least **two different evidence families** reach 100% for the same device, behaviour,
+destination class and alert type, the false-positive engine may resolve that alert automatically: it is recorded
+and visible but sends no notification and triggers no containment. One family at 100% is never enough, so a single
+noisy signal repeated many times cannot earn trust. Trust is kept per behaviour regime, so after a firmware update
+changes a device's behaviour it has to be earned again. Hard indicators, threat-intelligence matches and the local
+confirmed-threat memory are checked on every alert regardless of trust.
+
+The bar shows the value at its last update. Decay is applied when trust is next used, so a row that has not changed
+for days may be lower than its bar shows.
+
 
 ---
 

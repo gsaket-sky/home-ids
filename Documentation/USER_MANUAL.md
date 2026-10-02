@@ -245,6 +245,22 @@ so they are off by default.
 - **It keeps learning.** Each device's normal behaviour and the alarm thresholds keep improving, in small, tested,
   reversible steps.
 
+### Seeing what it has learned
+
+The expert console's **Autonomy** tab shows what Home-IDS has learned and changed by itself. You never need to act
+on it.
+
+- **Tunable parameters** are the 16 sensitivity settings Home-IDS may adjust within fixed limits, such as how many
+  devices a gadget must probe before it counts as scanning the network, or how long a website you confirmed as safe
+  stays trusted. **Tuned** means it has moved one away from its starting value, based on evidence from your network.
+- **Autotuner history** lists each change, whether it made the system more careful (**tightened**) or more relaxed
+  (**loosened**), and whether it is still on trial, in force, or undone.
+- **Still building**, with percentages, shows harmless patterns the system is learning to stop alerting about. Each
+  row is one device and one kind of alert. Every time such an alert turns out to be harmless (you mark it safe, or
+  the system concludes so itself) the bar grows, and it slowly shrinks again if nothing confirms it. Once **two
+  different kinds of evidence** for the same pattern reach 100%, Home-IDS stops notifying you about it for that
+  device. It still records it, and anything genuinely dangerous is always reported.
+
 ## 16. Privacy
 
 Everything stays on the box in your home. There is no account and no cloud. Home-IDS reads the "envelope" of network
