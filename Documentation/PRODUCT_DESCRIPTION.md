@@ -211,6 +211,11 @@ So you are covered against new threats as they appear, and against old ones that
 
 ## 6. Add-ons
 
+Everything the licences allow is on by default: the decoy host, Suricata scanning, Wi-Fi capture (once a supported router
+is set up) and all scheduled jobs. Two items are opt-in: the Grafana dashboards, which are heavy on small boards, and the
+keyed threat feeds (OTX, AbuseIPDB, URLhaus, ThreatFox), whose free tiers forbid commercial use. A licensed install
+enables the feeds with one setup script and its own keys.
+
 The **decoy host** is not an add-on: it ships as part of the product. It is a fake vulnerable machine on its own LAN
 address; no real device has a reason to touch it, so any contact is high-confidence proof of lateral movement.
 
@@ -218,7 +223,7 @@ address; no real device has a reason to touch it, so any contact is high-confide
 
 | Add-on | What it adds |
 |---|---|
-| Wi-Fi capture & scans | Short router-side packet captures scanned with Zeek and Suricata rule sets |
+| Wi-Fi capture & scans (on by default) | Short router-side packet captures scanned with Zeek and Suricata rule sets |
 | Dashboards | Grafana, Loki and Promtail for power users (being replaced by a built-in Trends page) |
 | Local AI advisor | Plain-language explanations from a local model, behind the deterministic validator |
 | Telegram | Alerts and approvals on a phone |
