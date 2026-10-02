@@ -2,119 +2,128 @@
 
 # 🛡️ Home-IDS
 
-### Enterprise-style network security. On a box you own. Watching only your network.
+### A smart security guard for your home or small office network.
+### You plug it in. It watches over everything. You can forget it is there.
 
-**Detects what's wrong with *your* devices, explains it in plain language, and acts only when the evidence is there.**
-
-![Edge](https://img.shields.io/badge/runs%20on-Raspberry%20Pi%208%20GB%20%7C%20x86-4f46e5?style=for-the-badge)
-![Cloud](https://img.shields.io/badge/cloud%20account-none%20needed-059669?style=for-the-badge)
-![Corroboration](https://img.shields.io/badge/top%20alerts-need%20corroboration-dc2626?style=for-the-badge)
-![Tests](https://img.shields.io/badge/automated%20tests-~160%20scripts-2563eb?style=for-the-badge)
-
-[**Product description**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) ·
-[**How it thinks**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) ·
-[**The maths**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) ·
-[**Engineering manual**](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md)
+![Runs on](https://img.shields.io/badge/runs%20on-a%20small%20low--cost%20computer-4f46e5?style=for-the-badge)
+![Privacy](https://img.shields.io/badge/your%20data-never%20leaves%20your%20home-059669?style=for-the-badge)
+![Setup](https://img.shields.io/badge/ongoing%20effort-none-dc2626?style=for-the-badge)
 
 </div>
 
 ---
 
-## Your network has a security guard now
+## The problem, in plain words
 
-Every smart TV, tablet, laptop and forgotten smart plug is a door. Most home and small-office networks have no idea
-what is happening behind them. Enterprise teams have tools for that; everyone else gets a subscription box that sends
-their traffic to someone else's cloud.
+Think about everything in your home that connects to the internet: phones, laptops, the TV, the baby monitor, the
+smart speaker, the cheap smart plug you bought online. Each one is like a window in your house. **Most of those
+windows have no lock, and nobody is watching them.**
 
-**Home-IDS is what a security team would run for you, on hardware you own, answering only to you.**
+Big companies solve this with a security team that watches their network around the clock. That costs a fortune. For
+everyone else, the options today are to hope for the best or to buy a gadget that sends a copy of your internet
+activity to a company's servers.
 
-|  |  |
+## What Home-IDS does
+
+Home-IDS is a small box that sits quietly on your network, like a **night watchman who knows every resident by habit.**
+
+| | In everyday terms |
 |---|---|
-| 🧠 **Learns each device** | Not "speakers are chatty": *your* speaker, over time. Baselines per device, per metric, per hour. |
-| ⚖️ **Weighs evidence, not raw anomalies** | It forms hypotheses ("this device runs a DGA botnet") and weighs them against benign explanations. |
-| 🤝 **Demands corroboration** | A HIGH or CRITICAL alert never rests on one signal. Independent evidence families must agree. |
-| 🪞 **Grades its own work** | A second system suppresses what it is confident is benign, remembers why, and never hides a hard indicator. |
-| 🧯 **Acts proportionately, and can undo it** | Block a destination, cut a device off the internet, or quarantine it. One click to release. |
-| 🪤 **Ships with a decoy host** | A fake vulnerable machine on its own LAN address. Nothing legitimate touches it, so any contact is proof of lateral movement. |
-| 🔒 **Stays private** | No cloud account. Nothing leaves your network except optional threat-intelligence lookups you switch on. |
+| 👀 **It watches** | It sees what each device on your network is doing, and which websites and services it talks to. It only reads the "envelope" of the traffic, not the private contents. |
+| 🧠 **It learns** | After a few days it knows what is normal for *your* devices. Your TV streams in the evening. Your thermostat chats a little all day. |
+| 🚨 **It notices trouble** | A thermostat suddenly contacting strange websites at 3 a.m. is not normal. Home-IDS spots it, even for threats nobody has seen before. |
+| 🤔 **It double-checks** | One odd sign is not enough to raise a serious alarm. It looks for a second, independent sign first, so you are not bothered by false alarms. |
+| 🛑 **It acts, and tells you why** | It can block a bad website, cut off a misbehaving device, and explain what happened in a sentence anyone can follow. One click undoes it. |
+| 🔒 **It keeps your secrets** | Everything stays on the box in your home. There is no account to create and no cloud to trust. |
+
+**A short example.** Your smart thermostat has been hacked. It begins contacting hundreds of strange, random-looking
+addresses, which is how a hacked device looks for its master. Home-IDS sees that, finds a second warning sign (the
+address is on a list of known bad ones), blocks it, and sends you this: *"Your thermostat was talking to a known
+criminal server. I have cut it off. Tap here to restore it if I got it wrong."*
+
+## A trap for burglars
+
+Home-IDS also puts out a **decoy**: a fake, easy-to-break-into computer that exists only as bait. Nothing in your
+home has any reason to touch it. So if something does, that is nearly certain proof that something on your network
+has been taken over and is snooping around. It works like a tripwire.
 
 ---
 
-## How a decision is made
+## Why it is different: peace of mind
+
+Most security products need constant attention: tune this, update that, read the logs. Home-IDS was built so that you
+do not have to.
+
+| What you would normally worry about | What Home-IDS does about it |
+|---|---|
+| "I will have to set it up and adjust it." | **There is nothing to tune.** It learns your network on its own and keeps getting better. |
+| "It will fill up the memory card and crash." | **It cleans up after itself.** Old data is removed automatically, and the disk cannot fill up. |
+| "It will slowly get slower and need rebooting." | **It has strict limits on what each part may use,** so a problem in one part is fixed by restarting just that part. |
+| "A power cut will corrupt it." | **It is built to survive sudden power loss** without losing or damaging its records. |
+| "Something inside will break and I will not notice." | **A built-in doctor checks every part** and restarts anything that stops working. If the internet goes down, it carries on protecting you. |
+| "Updates are risky." | **Updates are digitally signed and checked on arrival.** If a new version does not work properly, it goes back to the old one by itself. |
+| "Cheap hardware cannot cope." | **It is designed for a tiny, low-power computer** and was tuned against strict memory and storage limits. |
+
+---
+
+## How it works, in one picture
 
 ```mermaid
 flowchart LR
-    A["👁️ Sense<br/>Zeek · Pi-hole · Suricata"] --> B["🔬 Understand<br/>per-device baselines<br/>threat intelligence"]
-    B --> C[("🕸️ Evidence graph<br/>SQLite · WAL")]
-    C --> D["⚖️ Hypotheses<br/>threat vs. benign"]
-    D --> E["🤝 Corroboration<br/>independent evidence"]
-    E --> F["🪞 False-positive<br/>engine"]
-    F --> G["🛡️ Act<br/>explain · undo"]
+    A["👁️ Watch<br/>every device"] --> B["🧠 Learn<br/>what is normal"]
+    B --> C["🔎 Spot<br/>what is not"]
+    C --> D["🤝 Confirm<br/>with a second sign"]
+    D --> E["🛡️ Act<br/>and explain"]
 ```
 
-> **Example.** A thermostat starts querying thousands of random-looking domains. One signal is a hint, not a verdict.
-> Home-IDS raises the hypothesis "DGA botnet", looks for an independent second source (a malicious TLS fingerprint, a
-> threat-intelligence hit, periodic beaconing), checks the benign explanations, and only then blocks the destination
-> and tells you, in a sentence, what it saw and how to undo it.
+Behind each step is real engineering: a memory of how every device behaves, a system that weighs the evidence the way a
+detective would, and a second system whose only job is to catch its own false alarms. Details are in the technical
+documents below.
+
+## Using it
+
+Open a web page on your phone or computer and you see one calm status: **Protected**, **Learning your network**,
+**Needs your attention**, or **Act now**. Tap for the details. Every device is listed with its name and type, a
+**Block** button and a **Release** button. Every connected service has a **Test** button. It works in light and dark
+mode and on a phone.
 
 ---
 
-## Plug in. Forget it.
+## Where it stands, honestly
 
-You are buying peace of mind: a self-caring, self-healing system with nothing to tune. It learns your network and keeps
-improving.
+- ✅ **Built and working.** It has run on a real home network for months, and has been improved over many rounds of
+  measuring and fixing. It has about 160 automated test scripts and published reviews of its own design.
+- ✅ **Designed to run for years on its own,** on small, inexpensive hardware.
+- ⏳ **Not yet proven on the target small computer.** It has been tested on an ordinary small PC so far. Testing on the
+  intended low-cost hardware is the next step.
+- ⏳ **No independent security audit yet.**
+- ⚠️ **It is a helper, not a guarantee.** No security product can promise to stop every attack. Home-IDS is built to
+  make problems visible early and to help a person decide.
 
-- 🧠 **No tuning.** Baselines, thresholds and the false-positive engine learn from your traffic, and a learning period keeps a new install from acting too early.
-- 💽 **The disk cannot fill.** Logs and data are pruned by age, a disk-budget governor frees the oldest days first, and logs are size-capped.
-- 🧮 **Memory cannot creep.** Hard per-service limits set from measurement, capped caches, and a restart of the one part that misbehaves instead of the whole box.
-- 🩺 **It restarts what breaks.** A health manager watches every part, switches to saving modes under pressure, and carries on with local evidence when the internet drops.
-- ⚡ **It survives power cuts.** Transactional storage, with only changed rows written.
-- 🔄 **It updates itself.** Signed updates with automatic rollback.
+## What comes next
 
-Built over months of running on a real network, with repeated memory and disk benchmarking. The multi-year unattended
-goal is a design target and has not yet been proven on Raspberry Pi hardware.
-
-## Built for small hardware, and for SD cards
-
-| | |
-|---|---|
-| ⚡ **Fast where it counts** | An exact, vectorised Isolation-Forest evaluator replaces a ~21 ms-per-call library path. |
-| 📏 **Bounded everywhere** | Ring buffers, per-hardware cache profiles, hard memory limits per service, capped work per cycle. |
-| 🩺 **Self-healing** | A health manager watches every part, switches to resource-saving modes under pressure, and degrades gracefully. If the internet drops, it keeps deciding on local evidence. |
-| 💾 **Flash-friendly** | State is stored as changed rows only, hot files live in RAM, and host write-back is coalesced. On one test host, engine writes fell from roughly 10–25 GB/day to roughly 3 GB/day (a longer measurement, and one on a Pi, are still pending). |
-| 🔌 **Crash-safe** | Transactional writes: a power cut never leaves a half-written update. |
-
-## A calm, consumer-grade experience
-
-**Protected · Learning your network · Needs your attention · Act now.** One status, with detail one click away.
-Plain-language alert stories, one-click block and release, a **Test** button for every integration, a restart button
-for every part of the system, light and dark themes, and a layout that works on a phone.
-
-## Optional extras
-
-📡 **Wi-Fi capture and Suricata scans** · 📊 **Dashboards** ·
-🤖 **Local AI advisor** (explains alerts in plain words; a deterministic validator can veto it) · 📱 **Telegram** alerts and approvals
-
-*On the roadmap (ideas, not built):* managed-switch / VLAN isolation · WireGuard roaming protection ·
-encrypted-traffic analytics · opt-in, privacy-preserving fleet learning.
+Easy ordering and first-time setup for non-technical buyers, a built-in trends page, support for network switches that
+can isolate a hacked device, protection for phones and laptops when they are away from home, and (optionally, and only
+with permission) ways for many homes to learn from each other without sharing private data. These are plans, not
+finished features.
 
 ---
 
-## Honest status
+## For the technically curious
 
-Built and running on a real home network for months, with about 160 automated test scripts and published audits.
-**Not yet validated on real Raspberry Pi hardware** (designed and budgeted for it, tested on an x86 host so far), and
-there has been no independent security assessment. It is a detector that helps a person decide, not a guarantee.
+This is a complete, working system: a behavioural detection engine, a graph database of evidence, a hypothesis and
+corroboration layer, a false-positive engine, a self-healing health monitor, a signed-update pipeline, and a web
+console, all designed to fit in the memory and storage of a small single-board computer.
 
-## Documents
-
-| | |
+| Read | |
 |---|---|
-| [Product description](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) | What it is, how it works, where it stands |
-| [Engineering manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md) | The whole system, component by component |
-| [Architecture](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) · [Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) · [Decisions](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_DECISIONS.md) | How it thinks, and why |
+| [Product description](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) | What it is and where it stands, in more detail |
+| [Engineering manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md) | The whole system, part by part |
+| [Architecture](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) · [Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) · [Design decisions](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_DECISIONS.md) | How it thinks, and why |
 
-## Licence
+## About
+
+Created and maintained by **Gagan Saket**.
 
 © 2026 Gagan Saket. All rights reserved. The source is visible so it can be read and reviewed. Running, copying,
 modifying or redistributing it requires the owner's written permission. Third-party components keep their own licences.
