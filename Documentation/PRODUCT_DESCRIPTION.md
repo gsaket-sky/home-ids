@@ -235,6 +235,28 @@ device touched that indicator earlier, that device is flagged too.
 The memory is time-limited (30 days by default), because malicious infrastructure is often abandoned or reused. It
 covers addresses and domains. It does not yet share malicious connection fingerprints between devices.
 
+## 4g. What it learns about each device
+
+Every device gets its own profile, built from its own behaviour and kept up to date:
+
+- **Who it is:** its type (phone, TV, thermostat, laptop, router and so on), the names and addresses it has used, and
+  any correction you made.
+- **How busy it normally is:** how many lookups it makes, how many different sites it talks to, and how much data it
+  sends out.
+- **What its normal traffic looks like:** how random-looking the site names it uses are, how often its lookups fail, and
+  how often they are blocked.
+- **When it is normally active:** each of these is learned separately for each hour of the day, so a TV that streams
+  every evening is not suspicious at 8 p.m., and the same traffic at 3 a.m. stands out.
+- **How its behaviour usually flows:** the usual sequence of what it does next (quiet, browsing, bursts of activity),
+  so an unfamiliar sequence is noticed even when no single number looks odd.
+- **When its habits genuinely change:** it tracks shifts, so a legitimate change, such as a new app or a new family
+  member, is learned, while a sudden spike is treated as a spike.
+- **Which of its alerts were harmless:** the sites and behaviours that turned out to be benign for this device, and why.
+
+Three safeguards keep the learning honest. A new device starts from what is typical for its type instead of from
+nothing. A device that is under suspicion stops learning until it has been calm for a while, so an attacker's behaviour
+is never taught to the system as normal. Learned profiles are saved safely and are kept across restarts and power loss.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —

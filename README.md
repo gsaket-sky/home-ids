@@ -54,6 +54,20 @@ thinks a stranger has joined. Home-IDS recognises the same phone by putting seve
 history for it. It works on both kinds of internet address in use today (IPv4 and IPv6), so a device cannot hide by
 switching between them. Tell it once what a device is, and it never asks again.
 
+## What it learns about each device
+
+Every device gets its own personal profile, like a file kept on each resident:
+
+- 🏷️ **What it is.** A phone, a TV, a thermostat, a laptop. You can correct it once and it remembers.
+- 📊 **How busy it normally is.** How often it goes online, how many places it talks to, how much it sends out.
+- 🕒 **When it is normally active, hour by hour.** A TV streaming at 8 p.m. is fine. The same thing at 3 a.m. is not.
+- 🔁 **Its usual routine.** What it normally does next, so an unfamiliar pattern stands out.
+- 🌱 **When its habits really change.** A new app is learned. A sudden spike is treated as a spike.
+- ✅ **What turned out to be harmless.** So it does not raise the same false alarm twice.
+
+A new device starts from what is normal for its type instead of from nothing. And a device that looks suspicious stops
+being learned from until it has calmed down, so a hacker's behaviour is never taught to the system as "normal".
+
 ## It never forgets
 
 Restarts, updates, crashes, even a sudden power cut: when it comes back, it picks up exactly where it was. Everything
