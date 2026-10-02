@@ -59,6 +59,21 @@ flowchart LR
 
 ---
 
+## Plug in. Forget it.
+
+You are buying peace of mind: a self-caring, self-healing system with nothing to tune. It learns your network and keeps
+improving.
+
+- 🧠 **No tuning.** Baselines, thresholds and the false-positive engine learn from your traffic, and a learning period keeps a new install from acting too early.
+- 💽 **The disk cannot fill.** Logs and data are pruned by age, a disk-budget governor frees the oldest days first, and logs are size-capped.
+- 🧮 **Memory cannot creep.** Hard per-service limits set from measurement, capped caches, and a restart of the one part that misbehaves instead of the whole box.
+- 🩺 **It restarts what breaks.** A health manager watches every part, switches to saving modes under pressure, and carries on with local evidence when the internet drops.
+- ⚡ **It survives power cuts.** Transactional storage, with only changed rows written.
+- 🔄 **It updates itself.** Signed updates with automatic rollback.
+
+Built over months of running on a real network, with repeated memory and disk benchmarking. The multi-year unattended
+goal is a design target and has not yet been proven on Raspberry Pi hardware.
+
 ## Built for small hardware, and for SD cards
 
 | | |

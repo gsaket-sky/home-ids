@@ -98,6 +98,49 @@ At the centre is a strictly typed SQLite datastore in WAL mode.
   written in batches; host settings coalesce write-back and keep the system journal in RAM. On a test host this cut the
   engine's disk writes from roughly 10–25 GB/day to about 3 GB/day.
 
+## 4a. Plug in, and forget it
+
+The goal is peace of mind: you plug it in, it learns your network, and it looks after itself. There is nothing to tune.
+It was not designed on paper and left there. It has run for months on a real home network, and each round of that run
+produced measurements and fixes, summarised below.
+
+**It tunes itself.** Per-device baselines, the false-positive engine and the detection thresholds all learn from your
+traffic, and a learning period stops a new install from acting before it knows what is normal. The settings you would
+otherwise have to adjust are chosen from the hardware it finds (cache profiles, memory budgets, capture limits).
+
+**Disk cannot fill up.** Every kind of data has a bound:
+
+- Packet-metadata logs are pruned by age, and a disk-budget governor deletes the oldest days first if free space runs low.
+- Container logs are size-capped, and the alert, evidence and device stores are trimmed to fixed retention windows.
+- Short-lived working files (live status, capture scratch, control queues) sit in RAM, not on the disk.
+
+**Memory cannot creep up.** Each service has a hard memory limit, so one runaway part is restarted instead of taking
+the box down. The engine's limit was set from measurement: a smaller limit was observed to restart it every 10 to 45
+minutes, so the shipped value is the measured safe one. Caches and history are ring buffers or capped, and
+per-cycle work is capped. Memory profiling is available on demand and costs nothing while off. It was found to be
+a source of slowdown when left running, so it ships off.
+
+**It restarts what breaks.**
+
+- A health manager checks the engine, the capture feeds, the databases and the system's own resources.
+- When a part stops responding or falls behind, it restarts that part. Under memory or disk pressure it moves to
+  resource-saving modes first, and a stuck part does not stop the rest.
+- Containers also restart automatically after a crash or a reboot.
+- If the internet or a threat-intelligence feed goes away, the status page says so plainly and detection carries on with
+  local evidence.
+
+**It survives power cuts and flash wear.** State is held in SQLite with write-ahead logging, so a sudden power loss
+leaves the last committed state intact. Only changed rows are written, the hot paths are batched, and the operating
+system's write-back is coalesced. In one measurement, engine writes on a test host dropped from roughly 10 to 25 GB a day
+to roughly 3 GB a day. The measurement is being repeated over longer windows and on Raspberry Pi hardware.
+
+**It updates itself safely.** Signed updates are checked against a built-in key and applied with an automatic rollback
+if the new version does not come up healthy.
+
+**What this does and does not promise.** The design targets unattended multi-year operation on a small board, and every
+mechanism above exists and is covered by the automated tests. What has been observed is months on a home network, not
+years, and not yet on Raspberry Pi hardware, so the long-run claim is a design goal that has not been proven.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —
