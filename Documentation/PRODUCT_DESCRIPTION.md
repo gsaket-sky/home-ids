@@ -141,6 +141,41 @@ if the new version does not come up healthy.
 mechanism above exists and is covered by the automated tests. What has been observed is months on a home network, not
 years, and not yet on Raspberry Pi hardware, so the long-run claim is a design goal that has not been proven.
 
+## 4b. Knows every device, and remembers it
+
+**Identity that survives disguises.** Modern phones and laptops change their network address, and many use a
+"private" hardware address. A naive tool then sees a new stranger every time. The identity layer follows a device by
+several signals together (hardware address, network addresses, its self-announced name) and keeps a durable history of
+the addresses each device has used. When one device has been seen under several identities, they are merged into one,
+with its history, baselines and your labels kept. Phones that use a stable private address per Wi-Fi network are
+handled as the same device across reconnects. Routers, NAS boxes and other infrastructure are recognised as such
+and protected from automatic blocking.
+
+**IPv4 and IPv6, together.** Both address families are tracked and attributed to the same device, so a device cannot
+hide by switching from one to the other. The Layer-2 containment tools cover IPv6 neighbour discovery as well as IPv4 ARP.
+
+**Nothing is forgotten.** Devices, their types and your corrections, learned baselines, evidence, alert history, and
+the address history are all stored transactionally. A restart, an update, a crash or a sudden loss of power returns
+the system to where it was, not to a blank learning period.
+
+**Device types you can correct once.** The system guesses what each device is. Confirm or change a guess once and
+that answer is kept and reapplied permanently.
+
+## 4c. It tunes itself, within safe limits
+
+- **Continuous learning.** Per-device baselines, per-hour and per-metric, keep adapting as habits change. The
+  false-positive engine learns which patterns are benign for this network and remembers why.
+- **A closed-loop autotuner.** Detection sensitivity can be adjusted automatically, but only through a fixed list of
+  allowed parameters. Each change is small, rate-limited, versioned and audited. It is first tried in shadow mode,
+  must pass a back-test against recorded history, and is rolled back if it does not hold up.
+- **Guard rails that cannot be tuned.** The rules that protect you are fixed in code, not settings: a serious alert
+  always needs independent corroboration, and one weak signal alone can never trigger automatic containment. The
+  autotuner has no path to change them.
+- **Hardware-aware.** Cache sizes, work per cycle and memory budgets are chosen for the machine it finds.
+- **Honest scope:** continuous learning and the autotuner's safety machinery are built and tested. At present the
+  autotuner is wired to a small number of live parameters (the sensitivity of the strongest-evidence rule and the
+  familiarity trust bar). More will be connected as they are validated.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —

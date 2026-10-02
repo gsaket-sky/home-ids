@@ -47,6 +47,24 @@ Home-IDS also puts out a **decoy**: a fake, easy-to-break-into computer that exi
 home has any reason to touch it. So if something does, that is nearly certain proof that something on your network
 has been taken over and is snooping around. It works like a tripwire.
 
+## It knows your devices, even when they change disguise
+
+Modern phones keep changing their network "name tag" on purpose, to protect your privacy. A simple security tool then
+thinks a stranger has joined. Home-IDS recognises the same phone by putting several clues together, and keeps one
+history for it. It works on both kinds of internet address in use today (IPv4 and IPv6), so a device cannot hide by
+switching between them. Tell it once what a device is, and it never asks again.
+
+## It never forgets
+
+Restarts, updates, crashes, even a sudden power cut: when it comes back, it picks up exactly where it was. Everything
+it has learned about your devices, your corrections and its history is stored safely. It does not go back to day one.
+
+## It teaches itself
+
+Home-IDS keeps learning what is normal for each device, and slowly adjusts how sensitive it is, in small, tested steps
+that are undone automatically if they turn out to be wrong. The most important safety rules are locked and cannot be
+changed by the learning, so it cannot talk itself into being careless. You never have to tune a thing.
+
 ---
 
 ## Why it is different: peace of mind
