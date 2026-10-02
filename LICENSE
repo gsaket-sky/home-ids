@@ -1,0 +1,29 @@
+Home-IDS -- Source-Available Evaluation Licence
+Copyright (c) 2026 gsaket-sky (the owner of this repository). All rights reserved.
+
+This repository is published so that people can READ the work: how the system is designed, how its decisions are
+made and the mathematics behind them. It is not open-source software.
+
+YOU MAY
+  - view, read and study the source code and documentation in this repository, online or in a local clone made
+    for that purpose;
+  - quote short excerpts, with attribution and a link to this repository, in discussion, review or education;
+  - reference this repository (for example in a CV, profile or portfolio) as the author's work.
+
+YOU MAY NOT, without the owner's prior written permission
+  - run, deploy or operate this software or any part of it, for any purpose, including personal use and testing;
+  - copy, modify, translate, fork for development, or create derivative works;
+  - redistribute, publish, sublicense, sell or offer it, in whole or in part, as software or as a service;
+  - use it, or what is learned from copying it, to build or train a competing product or service;
+  - use it to train machine-learning models;
+  - remove or alter this notice.
+
+No licence is granted by implication or estoppel. Third-party components referenced by this repository (for
+example Zeek, Pi-hole, Suricata, scikit-learn, LightGBM, FastAPI) remain under their own licences, which this
+licence does not change.
+
+THE REPOSITORY IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. IT IS NOT A SECURITY PRODUCT, IS NOT SUPPORTED, AND
+THE OWNER ACCEPTS NO LIABILITY FOR ANY USE OF OR RELIANCE ON IT.
+
+Permission requests: open an issue or contact the repository owner through the profile of the account that owns
+this repository.
