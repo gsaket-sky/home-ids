@@ -1,235 +1,724 @@
-# ⚙️ Home-IDS: Engineering & Architecture Manual
+# Home-IDS Engineering Manual
 
-This manual is written for developers, security engineers, and data scientists. It explores the internal mathematics, system architecture, and code-level orchestration of Home-IDS.
+How the system is built, part by part. This is the current reference: everything here describes the code as it
+is today. How it got here is told in [EVOLUTION.md](EVOLUTION.md); the formal mathematics is in
+[PIPELINE_MATH_REFERENCE.md](PIPELINE_MATH_REFERENCE.md); the product view is in
+[PRODUCT_DESCRIPTION.md](PRODUCT_DESCRIPTION.md).
 
-Unlike the User Manual (which explains *how to use* the system), this document explains exactly **how the system is built** and **why the mathematics work**.
+## Contents
 
-**A note on accuracy**: an earlier revision of this document described an `asyncio`-based event loop, a Fourier-transform diurnal-rhythm analysis, and a learned, per-device Markov transition matrix that "mathematically approaches 0.0001" over months of history — none of which exist anywhere in this codebase. Every claim below has been checked directly against the running source (file and line references included) rather than carried forward from that earlier description.
+1. [The system at a glance](#1-the-system-at-a-glance)
+2. [Sensing](#2-sensing)
+3. [Device identity](#3-device-identity)
+4. [Features and detectors](#4-features-and-detectors)
+5. [Per-device learning](#5-per-device-learning)
+6. [Threat intelligence](#6-threat-intelligence)
+7. [The evidence graph](#7-the-evidence-graph)
+8. [Hypotheses, corroboration and the decision](#8-hypotheses-corroboration-and-the-decision)
+9. [The false-positive engine](#9-the-false-positive-engine)
+10. [Autotuning](#10-autotuning)
+11. [Shared threat memory and the daily look-back](#11-shared-threat-memory-and-the-daily-look-back)
+12. [Response](#12-response)
+13. [The local AI advisor](#13-the-local-ai-advisor)
+14. [Scheduled jobs](#14-scheduled-jobs)
+15. [Health manager and self-healing](#15-health-manager-and-self-healing)
+16. [Storage, retention and flash wear](#16-storage-retention-and-flash-wear)
+17. [Web interface, console and APIs](#17-web-interface-console-and-apis)
+18. [Observability](#18-observability)
+19. [Updates](#19-updates)
+20. [Packaging and hardware profiles](#20-packaging-and-hardware-profiles)
+21. [Defaults, optional systems and what each one does](#21-defaults-optional-systems-and-what-each-one-does)
+22. [Testing and verification](#22-testing-and-verification)
+23. [Known limits](#23-known-limits)
+24. [Roadmap](#24-roadmap)
 
 ---
 
-## 📋 Table of Contents
-1. [Core Architecture & The Real-Time Pipeline (`pipeline.py`)](#1-core-architecture--the-real-time-pipeline-pipelinepy)
-2. [The Hypothesis & Evidence Engine (HEE)](#2-the-hypothesis--evidence-engine-hee)
-3. [Machine Learning Methodologies](#3-machine-learning-methodologies)
-4. [Temporal Mathematics & Baselining](#4-temporal-mathematics--baselining)
-5. [The Autonomous Self-Calibration Loop](#5-the-autonomous-self-calibration-loop)
-6. [Mitigation Pipeline & IPS Integrity](#6-mitigation-pipeline--ips-integrity)
+## 1. The system at a glance
 
----
+Home-IDS is a network intrusion detection and prevention system for homes and small offices. It runs as one Docker
+Compose stack on a Raspberry Pi 8 GB (arm64) or a small x86 Linux machine, uses host networking to see the LAN, and
+needs no cloud account.
 
-## 1. Core Architecture & The Real-Time Pipeline (`pipeline.py`)
-
-The heart of Home-IDS is `src/core/pipeline.py`. It is a **threaded** (`threading.Lock`/`threading.RLock`, background `threading.Thread` daemon workers) execution loop — there is no `asyncio` anywhere in this codebase. High throughput comes from disciplined lock scoping, not from an event loop.
-
-### 1.1 Ingestion & File Cursors
-Home-IDS fuses two data streams:
-1. **Pi-hole (SQLite)**: polled on `poll_interval` (default 2s) by `pihole_collector.py`.
-2. **Zeek NDR (JSON Logs)**: tailed continuously by `zeek_collector.py`.
-
-**The `tail -F` problem**: naive file trailing loses events across a restart (or duplicates them, depending on how you recover). The fix is a cursor file per Zeek log type (`state/zeek_cursor_conn.json`, `_dns.json`, `_http.json`, `_notice.json`, `_ssl.json`, `_dhcp.json`) storing the exact byte offset processed so far. On restart, the collector seeks to that offset before resuming.
-
-### 1.2 The 5-Phase Execution Loop
-Verified against the actual `# ─── PHASE N:` comments in `pipeline.py`'s device-evaluation loop:
-
-```python
-# ─── PHASE 1: Snapshot state data (short lock window) ───────────────────
-# ─── PHASE 2: Pre-fetch Zeek data outside the lock ──────────────────────
-# ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
-# ─── PHASE 4: Expensive I/O outside the lock ────────────────────────────
-# ─── PHASE 5: ML scoring + risk computation (re-acquire lock) ───────────
+```mermaid
+flowchart TB
+    subgraph Sensors
+        Z[Zeek<br/>connection, DNS, TLS, DHCP, ARP metadata]
+        P[Pi-hole + Unbound<br/>DNS queries and blocking]
+        H[Decoy host<br/>Cowrie, own LAN address]
+        R[Router capture bursts<br/>Zeek + Suricata scans]
+    end
+    subgraph Engine["Engine (pipeline container)"]
+        I[Identity] --> F[Features and detectors]
+        F --> B[Per-device baselines<br/>and anomaly models]
+        F --> E[(Evidence graph<br/>SQLite, WAL)]
+        B --> E
+        T[Threat intelligence] --> E
+        E --> HY[Hypotheses] --> D[Decision<br/>corroboration rules]
+        D --> FP[False-positive engine]
+        FP --> M[Response<br/>DNS block, router, Layer 2]
+        HM[Health manager]
+    end
+    S[Scheduler<br/>prune, retro-hunt, backtest, retrain, ...] --> E
+    W[Web interface :8011<br/>console, API :8010] --> E
+    OA[ops-agent<br/>restart buttons] -.-> Engine
+    Sensors --> I
+    M --> TG[Telegram, optional]
+    L[Local AI advisor, optional] -.advisory.-> W
 ```
 
-1. **Phase 1 (short lock)**: copy the device's current baseline variables (rate/entropy/variance state) into local memory, release immediately.
-2. **Phase 2 (no lock)**: parse raw Zeek dictionaries — purely functional, no shared state touched.
-3. **Phase 3 (short lock)**: compute local temporal features (z-scores, entropy) against the snapshot from Phase 1.
-4. **Phase 4 (no lock)**: HTTP calls to optional keyed feeds (OTX/AbuseIPDB/URLhaus/ThreatFox, if `advanced_keyed_feeds: true`), and (if configured) GeoIP/ASN lookups. ET Open threat-intel lookups (default) are cached and have no Phase 4 I/O. This is the phase that matters most for throughput — if a threat-intel API is slow or unreachable, the pipeline does not hold the state lock while it waits, so every other device's evaluation this cycle is unaffected.
-5. **Phase 5 (short lock)**: push the computed feature matrix into the Hypothesis Engine, ML scorer, and CL-AFPE; commit the decision.
+| Container | Role | Memory limit (default) |
+|---|---|---|
+| `zeek` | Packet metadata sensor on the capture interface | 1024 MB |
+| `pihole`, `unbound` | DNS filter and local recursive resolver | 256 MB, 128 MB |
+| `pipeline` | The engine: ingest, identity, detection, decision, response, health manager, console API | 3584 MB, no swap |
+| `scheduler` | Background jobs, one at a time, in their own memory budget | 1024 MB |
+| `webui` | The consumer web interface | 256 MB |
+| `ops-agent` | The only container with the Docker socket; restarts services on request, has no network | 64 MB |
+| `honeypot` | The decoy host on its own macvlan address | 128 MB |
+| `capture-worker`, `suricata-rules` | Scans of router capture bursts; Suricata ruleset download | 1536 MB, 512 MB |
+| `prometheus`, `node-exporter` | Metrics | 512 MB, 64 MB |
+| `grafana`, `loki`, `promtail` | Optional dashboards | 512 / 512 / 128 MB |
 
-Separate `Evidence`-generating detectors (`intelligence/detectors/*.py`, `intelligence/hypotheses/engine.py`) run inside Phase 5's window, consuming only already-computed feature values — no additional I/O, no additional feature extraction of their own.
-
-### 1.3 Cross-Address-Family Device Identity (MAC Correlation)
-
-One physical device shows up on the network under multiple, unrelated-looking addresses over its lifetime — a DHCPv4 lease, a SLAAC/privacy-rotated IPv6 address that changes periodically, an IPv6 link-local address — and without correlation each of those would cold-start its own separate `DeviceState`, permanently fragmenting that device's actual behavioral baseline across several never-merged, statistically-thin profiles instead of one continuous one.
-
-`extractors/zeek_features.py`'s `_bind_mac(ip, mac)` is the single correlation point both ingestion paths feed: the DHCPv4 branch of `ingest()` (IPv4 only — a lease is inherently IPv4-only) and `_process_conn()`'s read of `conn.log`'s `orig_l2_addr` field (protocol-family-agnostic — this is what makes IPv6 addresses correlatable at all). `core/identity.py` resolves a device_id by MAC first when one is bound, falling back to per-IP cold-start only when no binding exists yet. `tests/test_phase6_mac_correlation.py` exercises this end-to-end, including the specific case of an IPv6 link-local address correctly resolving to the same `device_id` as that device's already-known IPv4 identity.
-
-**Critical, easy-to-miss deployment dependency**: `orig_l2_addr` is not in `conn.log` by default — it only appears once Zeek's `policy/protocols/conn/mac-logging.zeek` is loaded (`@load` line in the real site-policy file, `$(zeek-config --site_dir)/local.zeek` — for a `zeekctl`-managed install from the `security:zeek` OBS package this is typically `/opt/zeek/share/zeek/site/local.zeek`, **not** `/etc/zeek/local.zeek`; run `zeek-config --site_dir` to confirm on your own install. See `INSTALL.md` §3.3.1). Without it, `_bind_mac()` has nothing to bind for any non-DHCPv4 traffic — the code path is correct and tested, but silently idle. This was true of this project for some time before being caught: the mechanism was built, tested, and referenced in a source comment as "see the Phase 6 README" for its one-line deployment step, but that step was never actually written into the install guide, so IPv6 correlation was live in code but inert in practice. If you're investigating why the same physical device appears to have many entries in the Master Threat Ledger with `hostname` values that are raw IPv6 addresses rather than a resolved name, this is the first thing to check.
-
-### 1.3.1 When the MAC itself changes (Phase 4 fuzzy re-identification)
-
-§1.3 above only helps a device that keeps the *same* MAC across address changes. It does nothing once the MAC itself rotates — which modern phones increasingly do (iOS "Private Wi-Fi Address," Android's per-network randomized MAC) — since `_bind_mac()` has no shared key left to correlate on.
-
-`core/device_matching.py` is a separate, deliberately conservative fuzzy-matching pass for exactly this case, invoked from `StateManager.get_or_create()` via `identity.py`'s `_reidentify_kwargs()` whenever `resolve_device_id()` is about to cold-start a device under a brand-new MAC. It compares the new identity against every device seen within `identity_reidentify_window_seconds` (default 1800s) on two independent signals:
-
-- **DHCP fingerprint** (`dhcp_fingerprint_match()`): exact match on Option 60 vendor class + Option 55 parameter list. A *device-class* signal, not a unique-device one — two identical-firmware IoT units present an identical fingerprint (confirmed on the project's own network) — so this alone tops out at confidence 0.40, below both thresholds.
-- **JA4 TLS-fingerprint overlap** (`ja4_overlap()`): Jaccard similarity of the set of TLS client fingerprints (not just malicious ones) a device's apps have presented over time — a real behavioral signal, since a given phone's app mix tends to be stable session-to-session.
-
-`match_confidence()` combines these (plus an exact non-generic-hostname match as a third, weaker corroborator): a DHCP match alone never clears `AUTO_MERGE_CONFIDENCE` (0.75) on its own, but DHCP + decent JA4 overlap does, and strong-enough JA4 overlap (≥0.5 Jaccard) can clear the bar with no DHCP fingerprint at all — the higher-leverage signal to get working first if only one is feasible. Below `MIN_CANDIDATE_CONFIDENCE` (0.45) a candidate isn't even logged. This is a probabilistic match by design, not a guarantee — a wrong merge silently blends two different devices' security history, judged worse than a missed one, so the bar stays conservative rather than optimistic. Tested in `tests/test_phase4_reidentify.py`.
-
-**Same class of deployment gap as §1.3, plus one more.** Both signals need Zeek-side data this project doesn't ship by default: the maintained `zeek/foxio/ja4` package (`zkg install`, compiled plugin, not stock Zeek — the original choice, `zeek/salesforce/ja3`, was confirmed live to be non-functional on Zeek 8.x: unmaintained since 2020, its client-hello handler simply never fires), and DHCP fingerprint fields need a small custom script, `zeek_scripts/local-dhcp-fingerprint.zeek` in this repo, confirmed loading cleanly on a live Zeek 8.0.8 instance (Zeek scripts fail loudly at `zeekctl deploy` time if wrong, not silently). **Beyond the package itself, a live install also found a separate, more fundamental gap that silently defeats either signal**: `zeekctl`'s `extra_args=-C` (meant to make Zeek tolerate checksum-offloaded packets) is quietly ignored by `zeekctl` entirely, so without `redef ignore_checksums = T;` set directly in `local.zeek`, Zeek was discarding every LAN device's outbound handshake packet (ClientHello) while still processing the server's response fine — making JA3/JA4 (and anything else depending on client-originated payload bytes) look like a script problem when the real cause was packet-level. See `INSTALL.md` §3.2 and §3.3.2 for both deployment steps and verification commands.
+The engine loop runs about every 2 seconds. Each cycle reads new log data, resolves which device each record belongs
+to, updates features, writes evidence, evaluates hypotheses for devices with fresh evidence, decides, and acts. Locks
+are held only for short snapshots and commits; all slow input and output (feed lookups, router calls) happens outside
+them, so one slow integration never stalls the others.
 
 ---
 
-## 2. The Hypothesis & Evidence Engine (HEE)
+## 2. Sensing
 
-Located in `src/core/decision_engine.py` (state machine + evaluation order) and `src/intelligence/hypotheses/` (the hypothesis classes themselves), the HEE replaces a single additive risk score with a typed evidence graph.
+| Source | What the engine takes from it |
+|---|---|
+| **Zeek** `conn`, `dns`, `http`, `ssl`, `notice`, `dhcp` logs | Flows, bytes, ports, connection states, DNS queries, TLS client fingerprints (JA3 and JA4), DHCP fingerprints, Zeek's own notices |
+| **Zeek** MAC logging and an ARP log script | The hardware address on every flow (this is what ties a device's IPv4 and IPv6 traffic together) and ARP behaviour for spoofing and sweep detection |
+| **Pi-hole** | Every DNS query per client, with the blocked/allowed outcome; also the place DNS blocks are applied |
+| **Decoy host** | Any contact with its address is seen by Zeek and is a hard indicator |
+| **Router capture bursts** | Short packet captures from a supported router (Fritz!Box), replayed through Zeek and Suricata in the capture worker. They give ground truth for Wi-Fi devices the wired sensor cannot see directly |
+| **Router host table** | Device names known to the router |
 
-### 2.1 The Evidence Store
-```python
-Evidence(
-    type="zeek_lateral_scan",
-    source="zeek",
-    value=450,               # raw S0/REJ packet count
-    confidence=0.90,         # sensor reliability
-    independence_group="zeek_network",
-)
-```
-`independence_group` prevents evidence-stuffing: two anomalies from the same underlying sensor category collapse into one vote when counting independent sources toward an escalation decision — a single noisy sensor cannot manufacture apparent corroboration by tripping multiple related signals at once.
+Zeek logs are read through per-log byte cursors, so a restart resumes exactly where it stopped, with no loss and no
+double counting. Cursors and other high-frequency runtime files live in a RAM-backed directory (section 16).
 
-`EvidenceStore.get_for_device()` also applies age-based decay: general behavioral evidence has a 10-minute TTL, reputation evidence a 24-hour TTL, with linear freshness decay inside that window (`effective_weight() = confidence × freshness`).
+Zeek needs three site additions, all shipped in the image: MAC logging, the JA4 package, and a DHCP fingerprint
+script. It also needs `ignore_checksums` set, because many network cards offload checksums and Zeek would otherwise
+discard the client side of TLS handshakes.
 
-### 2.2 Hypothesis Scoring
-Each `Hypothesis` subclass (`hypotheses/engine.py`) evaluates required, strong, and contradicting evidence and returns a 0–4 confidence score:
-- **0.0** — required evidence absent, hypothesis doesn't apply.
-- **2.0 (Suspicious)** — required evidence present, nothing more.
-- **3.0 (Probable)** — required + at least one strong corroborating signal, no contradiction.
-- **4.0 (High)** — required + strong + no contradiction + (for some hypotheses) reputation tier supports it.
+---
 
-Seven attack hypotheses are registered: `DNS_TUNNELING` (rate+entropy burst — distinct from the newer, richer `DNS_COVERT_TUNNELING`), `NETWORK_INTRUSION`, `DGA_BOTNET_C2`, `DATA_EXFILTRATION`, `C2_BEACONING`, `DNS_COVERT_TUNNELING` (encoded labels / TXT-NULL abuse / suspicious-TLD concentration), `CONNECTION_ABUSE`. One benign hypothesis, `ADVERTISING_BURST`, actively competes against the attack hypotheses for domains under known ad-network reputation tiers.
+## 3. Device identity
 
-### 2.3 The Decision Order (`decision_engine.py`)
-Evaluated strictly in this sequence — a hard-stop earlier in the list always wins:
+Every record is mapped to a stable `device_id` before any evidence is created. Identity is resolved in this order;
+the first match wins:
+
+1. **Trust anchors.** The gateway and this host are discovered automatically at start-up from the kernel's routing
+   and neighbour tables; others (a NAS, a second access point) can be added. An anchor keeps one identity across all
+   of its addresses and interfaces. A discovered gateway that does not match the last known good one is not adopted
+   automatically.
+2. **Known hardware address.** If the MAC is already bound to a device, that device is used. This is what unifies a
+   dual-stack device: IPv4, IPv6 link-local, ULA and global addresses all arrive with the same MAC.
+3. **Local address**, then **a non-generic hostname**, then **the MAC**, then **the raw address**, each hashed into
+   a stable identifier.
+
+**Private (randomised) MAC addresses.** Modern phones use a locally administered MAC that is stable per network.
+These are bound like any other MAC, so a phone keeps its identity across reconnects. The locally administered bit is
+only used to avoid learning a rotating MAC as a trust anchor's permanent address.
+
+**Re-identification when the MAC itself changes.** When a device would otherwise start fresh under a new MAC, it is
+compared with devices active in the last 30 minutes on three signals: the DHCP fingerprint (vendor class and
+parameter list), overlap of the TLS client fingerprints its apps present (JA4 set similarity), and an exact
+non-generic hostname. A DHCP match alone is capped below the merge bar, because identical devices share it; it needs a
+second signal. Confident matches are migrated with their full history. Ambiguous ones are logged, and can trigger a
+capture burst to gather more evidence. A wrong merge is treated as worse than a missed one.
+
+**Merging fragments.** If an address already belongs to a different device than the one just resolved, the orphan
+is folded into the canonical device. In the graph, the merge is a tombstone: the orphan's history stays and reads
+are redirected. Containment that was applied to the old identity is released or moved.
+
+**Address history.** Each device keeps a bounded history of the MACs (20) and addresses (50) it has used, with
+last-seen times.
+
+**Device type.** Inferred from hostname and MAC vendor, with `unknown` as an honest fallback. A user confirmation or
+correction is stored as an override and re-applied to every device at once. Only an override (never a self-reported
+hostname) can mark a device as infrastructure.
+
+**Lifetime.** Devices idle for more than 7 days leave the live working set; their graph history stays until its
+retention window (section 16) and they resume their identity if they return.
+
+---
+
+## 4. Features and detectors
+
+Each cycle computes features per device from the DNS and Zeek streams: query rate, label entropy, unique-domain
+ratio, NXDOMAIN and blocked ratios, suspicious TLD share, encoded-label and TXT/NULL record use, outbound bytes and
+their z-score, beaconing measures (interval regularity, low-and-slow, uniform jitter), long and rejected connections,
+port fan-out, lateral scan counts, ARP sweep and spoof signals, and the TLS fingerprint match results.
+
+Detectors turn features into typed **evidence** (`type`, `confidence`, `destination`, `provenance`):
+
+| Detector | Evidence it produces |
+|---|---|
+| DNS behaviour | `dns_rate`, `dns_entropy`, `dns_unique_ratio` |
+| Threat signals | `dns_dga_burst`, `dns_tunnel_v2`, `zeek_exfiltration`, `zeek_beaconing`, `zeek_conn_abuse`, `zeek_long_conn` |
+| Zeek network | `zeek_lateral_scan`, Zeek notices graded weak/medium/strong/highly deterministic, `arp_sweep`, `arp_spoof_pending`, `arp_spoofing` |
+| TLS | `malicious_ja3`, `malicious_ja4`, with the source list and rule that named the fingerprint |
+| DNS evasion | `dns_evasion_anomaly`: real traffic in a capture burst that the device's own DNS history cannot explain. Known VPN providers are recognised by their network owner and not flagged |
+| Suricata (capture bursts) | `suricata_signature_match` with the rule and severity |
+| Inline | `honeypot_access`, `geofencing_violation`, `reputation`, `ml_anomaly`, `local_device_discovery`, `first_contact` |
+| Baselines (section 5) | `baseline_deviation`, `regime_change`, `markov_activity_surprise`, `markov_destination_surprise`, `markov_beaconing_surprise` |
+| Cross-device (computed from the graph each cycle) | `coordinated_targeting`, `fingerprint_campaign`, `dga_seed_campaign`, `peer_deviation` |
+
+Each alert is attributed to the destination of the evidence that actually fired (the DGA domain, the beaconing
+target, the matched signature's address), not to whatever the device contacted last. Device-wide signals such as a
+DNS rate burst are shown without a single destination.
+
+---
+
+## 5. Per-device learning
+
+### Statistical baselines
+
+For every device, every metric and every hour of the day, the engine keeps a conjugate Bayesian model:
+
+| Model | Metrics |
+|---|---|
+| Gaussian | query rate, label entropy, unique domains, outbound bytes, risk |
+| Beta | NXDOMAIN ratio, blocked ratio |
+| Poisson | DGA hits, decoy touches |
+
+Each model reports how surprising the current value is. A **Bayesian online change-point detector** (BOCPD) runs
+alongside, so a genuine change of habit (a new app, a firmware update) becomes a new regime that is learned, while a
+short spike stays a spike. Surprising values become `baseline_deviation` evidence; regime shifts become
+`regime_change` evidence. Both are context only and never count as corroboration (section 8).
+
+### Sequence model
+
+A per-device **Markov model** learns how the device moves between activity states (normal, reconnaissance,
+threat-intel hit, DNS anomaly, beaconing, lateral movement, exfiltration, policy violation). It is a
+Dirichlet-categorical transition matrix with smoothing. It conditions on the last two states once a context has at
+least 20 samples, and on the last state otherwise. Unlikely transitions become `markov_*_surprise` evidence, which can
+raise the severity of an already corroborated verdict but never corroborates on its own.
+
+### Cold start and safety
+
+- A new device starts from a **population prior** for its device type, built nightly from devices of the same type
+  whose recent backtests are clean.
+- **Learning pauses during an incident.** While a device is suspicious or worse, and for 30 minutes after it returns
+  to normal, its baselines and sequence model do not learn, so an attacker's behaviour is never taught as normal.
+- Baseline and sequence state is saved in batches (at most every 5 minutes per tracker) to limit flash writes. A
+  crash loses at most that much learning, never the model.
+
+### Anomaly models
+
+An **Isolation Forest** scores each device's feature vector: a global model for new devices, and a per-device model
+once a device has 5,000 samples. Scoring uses a compiled, vectorised evaluator that walks all trees in lock-step
+(exactly equal to the library result, without its ~21 ms per-call overhead). After a confirmed threat, the device's
+samples are excluded from training for a window, so a malicious burst cannot train the model. An Isolation Forest
+result alone can only produce an `ANOMALOUS` log entry.
+
+### Local popularity
+
+The engine learns which domains are popular on this network, and with how many devices. This feeds the allowlist
+that shields common domains from weak indicators, and the popularity feature of the false-positive model.
+
+---
+
+## 6. Threat intelligence
+
+**Built in, no key, licence-clean:**
+
+| Source | Provides | Refresh |
+|---|---|---|
+| Emerging Threats Open ruleset (BSD), read as data | Bad IPs and networks (DROP, CINS, compromised, C2), malicious domains (DNS and TLS SNI rules), JA3 fingerprints | Daily, conditional download |
+| abuse.ch Feodo Tracker | Botnet command-and-control IPs | Hourly |
+| abuse.ch SSLBL | Malicious JA3 fingerprints (stale listings ignored) | Hourly |
+| Pi-hole gravity | The ad and tracker blocklists Pi-hole already maintains | Pi-hole's schedule |
+| iptoasn.com (public domain) | AS number, registration country and owner for any address | Weekly |
+| Local confirmed intel (section 11) | Addresses and domains confirmed on this network | Live |
+
+Downloads are conditional (version file, ETag), jittered, backed off on errors, validated (minimum size, shrink
+guard) and swapped atomically; a failed or suspicious download never replaces the last good copy. Indicators age out:
+the local index keeps full weight for a period after its last successful check, then decays linearly to zero, so a
+unit that stops getting updates stops trusting old data. Each feed's freshness is tracked and shown in the web
+interface.
+
+**Optional, keyed (off by default for licence reasons):** AlienVault OTX, URLhaus and ThreatFox, AbuseIPDB
+(blacklist and per-address score), and VirusTotal (per-destination verdicts). Their free tiers forbid commercial use;
+see section 21. **Optional city-level geolocation:** MaxMind GeoLite2 files, if the user supplies a licence key or the
+files.
+
+### Reputation tiers
+
+Every destination gets a tier: **0** local, **1** major trusted vendors, **2** known infrastructure (CDN, cloud,
+advertising), **3** unclassified, **4** a single unconfirmed signal, **5** confirmed or strongly indicated malicious.
+Only an unclassified destination can be raised to tier 4 or 5 by a reputation score, so a noisy score cannot turn a
+known CDN into "malicious". The tier floors are tunable within bounds (section 10).
+
+---
+
+## 7. The evidence graph
+
+A single SQLite database in WAL mode holds the durable record: devices, destinations, evidence, hypotheses,
+decisions, containment actions, alert events, incidents, operator actions, trust edges, baselines, population
+priors, threshold history and backtest runs. A polymorphic edge table connects them (`observed`, `targets`,
+`supports`, `contradicts`, `merged_into`, `corroborates`, `trusts`), so a decision can be traced back to every piece of
+evidence that supported or contradicted it.
+
+- The engine owns one long-lived writer connection. Multi-statement changes (device merges, metadata updates) run in
+  explicit transactions, so a power cut leaves either the old state or the new one.
+- `last_seen` updates are throttled to 5-minute resolution, which removes most redundant page writes.
+- Device state that changes every cycle lives in a separate SQLite state store that writes only the rows that
+  changed.
+- Alerts are also indexed in memory (with a compressed snapshot) so the web interface can page through 30 days of
+  alerts without scanning files.
+
+Retention is enforced by scheduled jobs (section 14) and a disk budget (section 16).
+
+---
+
+## 8. Hypotheses, corroboration and the decision
+
+### Hypotheses
+
+Each cycle, every hypothesis is scored against the device's fresh evidence on a fixed ladder: **0** (its required
+evidence is absent), **2** (required evidence present), **3** (a strong supporting signal), **4** (strong signal and a
+second confirming condition). A destination's reputation tier can contradict a hypothesis; the tier used is the one
+for that hypothesis's own destination, not the device's busiest destination.
+
+| Attack hypothesis | Required evidence |
+|---|---|
+| DNS tunnelling | Very high query rate together with high label entropy |
+| Covert DNS tunnelling | Encoded labels, TXT/NULL abuse or suspicious-TLD concentration |
+| DGA botnet | A burst of algorithmically generated domains |
+| Network intrusion / lateral movement | Lateral scanning, a malicious TLS fingerprint, an ARP anomaly, or a medium-or-stronger Zeek notice |
+| Data exfiltration | An outbound byte burst well above the device's baseline |
+| C2 beaconing | Periodic connections; only the regular, single-target shape can climb alone |
+| Connection abuse / port scan / internal reconnaissance | Abusive connection patterns, long-lived connections, or an ARP sweep |
+| DNS evasion / policy bypass | Traffic the device's own DNS cannot explain |
+| Signature-matched threat | A Suricata signature match |
+| Coordinated targeting | Several devices sharing an unusual destination, TLS fingerprint or DGA seed |
+| Peer-cohort deviation | Seven-day destination count at least three times the device type's average; capped at 3 |
+
+| Benign hypothesis | When it applies |
+|---|---|
+| Advertising burst | High DNS volume to known advertising infrastructure |
+| Device-profile telemetry | A chatty device type talking to trusted or familiar destinations, with no attack-shaped evidence at all |
+| Local device discovery | UPnP / SSDP / mDNS discovery |
+
+### Independent evidence families
+
+Corroboration counts **families**, not items. Evidence from the same vantage point belongs to one family, so one
+noisy sensor cannot pretend to be two witnesses.
+
+| Family | Evidence types | Counts as a witness |
+|---|---|---|
+| DNS behaviour | DNS rate, entropy, unique ratio, DGA, covert tunnelling, DNS evasion | Yes |
+| TLS fingerprint | malicious JA3, malicious JA4 | Yes |
+| Network behaviour | Zeek notices (medium and above), lateral scan, connection abuse, long connections | Yes |
+| Data transfer pattern | exfiltration, beaconing | Yes |
+| Network reconnaissance | ARP sweep, ARP spoofing | Yes |
+| Reputation | threat-intelligence match | Yes |
+| Direct observation | decoy contact | Yes |
+| Signature match | Suricata | Yes |
+| Cross-device correlation | coordinated targeting, fingerprint and DGA-seed campaigns | Yes |
+| Policy | geofencing | No |
+| ML anomaly | Isolation Forest | No |
+| Peer-cohort deviation, baseline deviation, regime change, sequence surprise, first contact, local discovery | | No: context, never proof |
+
+An item only counts for a hypothesis if its destination matches that hypothesis's own evidence (or it has no
+destination at all).
+
+### Hard stops
+
+A short registry of rules is checked before any hypothesis score:
+
+| Hard stop | Trigger | Result |
+|---|---|---|
+| Decoy contact | Any contact with the decoy address by a device that is not marked safe | CRITICAL, block |
+| ARP spoofing | Fresh spoofing evidence (2 minutes) | CRITICAL, block |
+| Geofence | Fresh contact with a blocked country | CRITICAL only with one more independent family and attack winning; otherwise HIGH, alert only |
+| Confirmed exploit | A fresh Suricata match at or above the sensitivity bar (default 0.9) | CRITICAL only when corroborated by another family; otherwise HIGH, alert only |
+
+### The decision
 
 ```mermaid
 flowchart TD
-    A["Honeypot access?"] -->|yes| Z1["CRITICAL / block, conf=1.0"]
-    A -->|no| B["ARP/NDP spoofing?"]
-    B -->|yes| Z1
-    B -->|no| C["Geofencing violation?"]
-    C -->|yes| Z1
-    C -->|no| D["Reputation tier 5?<br/>(corroborated: TI/VT hit,<br/>or AbuseIPDB alone at a genuinely high bar)"]
-    D -->|yes| Z2["CRITICAL / block, conf=0.99"]
-    D -->|no| E["attack_score > benign_score<br/>AND attack_score ≥ 2.0?"]
-    E -->|yes, ≥2 independent sources<br/>AND score ≥3.0| Z3["HIGH / alert, conf=0.85"]
-    E -->|yes, otherwise| Z4["SUSPICIOUS / monitor, conf=0.40"]
-    E -->|no| F["Reputation tier 4?<br/>(one unconfirmed signal)<br/>max signal ≥ 1.5?"]
-    F -->|yes| Z5["SUSPICIOUS / monitor, conf=0.45<br/>— NEVER auto-blocks on this alone"]
-    F -->|no| G["ML anomaly > 0.90?"]
-    G -->|yes| Z6["ANOMALOUS / log, conf=0.10"]
-    G -->|no| Z7["BENIGN / suppress"]
+    A{Hard stop?} -->|yes| HS[Hard-stop verdict<br/>see table above]
+    A -->|no| T5{Reputation tier 5?}
+    T5 -->|verified IOC| C1[CRITICAL / block]
+    T5 -->|"not verified, >= 2 families, attack wins"| C2[CRITICAL / block]
+    T5 -->|otherwise| S1[SUSPICIOUS / monitor]
+    T5 -->|no| AW{"attack > benign<br/>and attack >= 2?"}
+    AW -->|"yes, >= 2 families and score >= 3"| H[HIGH / alert]
+    AW -->|yes, otherwise| S2[SUSPICIOUS / monitor]
+    AW -->|no| T4{"Tier 4 with a real score?"}
+    T4 -->|yes| S3[SUSPICIOUS / monitor<br/>never blocks on its own]
+    T4 -->|no| ML{"Isolation Forest > 0.90?"}
+    ML -->|yes| AN[ANOMALOUS / log]
+    ML -->|no| BN[BENIGN]
 ```
 
-**Why tier 4 exists as its own branch (fixed in 8.0)**: before this branch existed, a reputation signal that never rose to "confirmed" (tier 5) had exactly one path through this function — silence. The gap between "99% Confirmed Malicious IOC" and "nothing at all" was a single classification threshold in `reputation/classifier.py`. This was found by tracing a real production alert: a connection to Telegram's own infrastructure reached `CRITICAL`/auto-block purely from a single AbuseIPDB score, with VirusTotal and ThreatIntel both clean. `reputation/classifier.py`'s confirmed-IOC threshold for AbuseIPDB alone is now `≥4.0` (aligned with the exact bar `fp_engine.py`'s own hard-stop check already used for the same metric — previously the two disagreed, `>2.0` vs `≥4.0`, for the identical input). ThreatIntel and curated/multi-vendor signals keep the lower `>2.0` bar; they're more authoritative single-source signals than a crowd-sourced abuse-report aggregate. *(Note: VirusTotal was removed from shipped defaults in 2026-09; the bar it held — authoritative but lower than C2-tier confidence — now applies to ET Open / Feodo / SSLBL.)*
-
-Every evaluation builds a `reasoning_trail` (list of strings) alongside the decision — hard-stop check results, reputation context (tier, VT/TI/AbuseIPDB values, and now IP ownership via ASN lookup), hypothesis scores, and the final verdict with an explicit note when neither an attack nor a benign hypothesis found supporting evidence ("this rests on reputation context alone"). This is what Telegram alerts render under **🧭 REASONING**, and what `ollama_soc.py`'s LLM prompts now also receive (`alert_payload["reasoning_trail"]`) for better-grounded analysis.
-
-### 2.4 Kill-Chain Phase & the Markov Anomaly Signal
-`extractors/dns_features.py` classifies each device's recent window into one of `NORMAL / RECON / LATERAL / C2` using simple threshold rules over already-computed features (e.g. beaconing count + suspicious TLD ratio → `C2`; lateral-move count + S0/REJ count → `LATERAL`). This is **not** a separate model — it's a deterministic function of numbers already computed elsewhere.
-
-The "Markov anomaly" score is a small, deliberately simple addition on top: a hand-authored, static transition-probability table (`_MARKOV_TRANSITIONS`) maps `(previous_phase, current_phase) → probability`, e.g.:
-```python
-"NORMAL":  {"NORMAL": 0.90, "RECON": 0.08, "C2": 0.01, "LATERAL": 0.01, "EXFIL": 0.00}
-"C2":      {"NORMAL": 0.20, "RECON": 0.10, "C2": 0.60, "LATERAL": 0.05, "EXFIL": 0.05}
-```
-The anomaly score is `1.0 − transition_prob`. This is an analyst-estimated kill-chain progression model, not a per-device learned Markov chain — it doesn't change based on a device's individual history, and there is no `MarkovStateTracker` class or NxN learned matrix anywhere in the code.
+Every decision carries a reasoning trail (hard-stop checks, reputation context, network owner, hypothesis scores,
+families) and a plain-language explanation built from the same evidence labels the console shows.
 
 ---
 
-## 3. Machine Learning Methodologies
+## 9. The false-positive engine
 
-### 3.1 `ml_engine.py` — Bespoke IsolationForests
-`scikit-learn`'s `IsolationForest`, chosen because it requires no labeled training data.
-- **Global model** (`models/ids_model.pkl`): trained on aggregate home-network traffic, the default scorer for new/unwarmed devices.
-- **Bespoke per-device fork** (`models/devices/<id>.pkl`): once a device passes `ml_warmup_samples` (default 5,000), a personalized model forks for that device specifically.
-- **Anti-poisoning**: `reject_threat()` opens a 120-second exclusion window after a confirmed threat, during which `learn_normal()` calls for that device are skipped — a confirmed-malicious sample can no longer train the model to think its own behavior is normal.
+Every alert passes through the closed-loop false-positive engine (CL-AFPE) after the decision. It can suppress an
+alert's notifications and containment; it never rewrites the decision itself.
 
-### 3.2 `fp_engine.py` — CL-AFPE
-Prevents Brain 1 from blocking legitimate traffic before containment fires. Three stages, evaluated in order, each cheaper than the last is expensive:
+1. **Trust cache.** A destination this device has been confirmed safe with is trusted for 14 days. The trust is only
+   used if the **composite trust gate** agrees: the same device, behaviour fingerprint, destination class and
+   hypothesis must have been corroborated by at least two distinct evidence families. Even a trusted destination is
+   re-checked against the hard stops on every alert.
+2. **Stage 1, hard stops.** The decision engine already said CRITICAL; a threat-intelligence match; lateral movement
+   across several targets; a malicious TLS fingerprint; decoy contact; a high abuse score (when that feed is on); an
+   exfiltration burst above both a statistical and an absolute byte floor (known telemetry and CDN destinations
+   excepted); or a match in the local confirmed-intel memory. Any of these means CONFIRMED_THREAT.
+3. **Stage 2, a gradient-boosted classifier** (LightGBM, ONNX) over a small tabular feature vector: local popularity,
+   label entropy and length, outbound-bytes z-score, device-type weight, prior false positives, lateral moves,
+   port-scan intensity and protocol weight.
+4. **Stage 3, semantic similarity** of the destination name to known vendor telemetry patterns (small local embedding
+   model). Skipped when there is no real name to compare.
 
-1. **Stage 1 — hard-stop filter** (<1ms): confirmed TI IOC, active lateral movement, malicious JA3/JA4 fingerprint, honeypot access, AbuseIPDB ≥4.0, or an exfiltration payload-burst z-score >5.0. Any hit bypasses everything else — `CONFIRMED_THREAT`, no ML consulted. Re-run on **every** trust-cache hit too, not just first evaluation — an immunized domain can never permanently blind the system to a later confirmed IOC on the same registrable domain.
-2. **Stage 2 — LightGBM ONNX classifier** (<2ms): 9-dimensional tabular feature vector (Tranco rank, label entropy, label length, outbound-bytes z-score, device-type weight, historical-FP flag, lateral-moves, port-scan intensity, app-protocol weight) → `P(false positive)`.
-3. **Stage 3 — FastEmbed semantic similarity** (<15ms): `bge-small-en-v1.5`, 384-dim embeddings, cosine similarity against ~50 known-safe vendor telemetry patterns. **As of 8.0, this stage is skipped entirely when there's no real domain/hostname to compare** (a raw-IP connection has `domain="unknown"`, and scoring that literal string against vendor embeddings was producing a real-looking but meaningless similarity number that materially swayed the combined suppression decision — found by tracing the same Telegram-infrastructure alert mentioned in §2.3). When skipped, the combined score falls back to LightGBM alone at full weight rather than silently blending in a zero.
+The combined score is compared with the device's own threshold (default 0.80) and an uncertainty floor (0.55):
+above the threshold the alert is marked a false positive and suppressed; between the two it is published with a
+low-confidence flag; below the floor it is a confirmed threat. Refusal guards keep the engine from suppressing
+anything with corroborated attack evidence.
 
-Combined score = `0.45 × LGBM + 0.55 × Embed` (or `LGBM` alone if Stage 3 was skipped). Compared against **the requesting device's own calibrated threshold if one exists, else the global default** (`get_device_suppress_threshold()` — new in 8.0, see §5).
-
-All four Stage 2/3/combined thresholds are read via a fresh `self.config.get(...)` call on every evaluation — no cached copy anywhere in the path, so a `config.yaml` edit or an autonomous override takes effect on the very next alert.
-
-### 3.3 `scripts/ollama_soc.py` — Batch LLM Analyst
-Runs out-of-band, every 4 hours, launched by `scripts/scheduler.py` as a fresh subprocess — never in the real-time per-alert path. (An earlier real-time analyzer class, `intelligence/ollama_analyzer.py`, was instantiated at boot but its only method was never actually called from anywhere in the codebase — a permanently-idle background thread polling an empty queue for the lifetime of every process. Removed in 8.0.)
-
-Groups the last 24h of published, non-suppressed alerts by `device_id + target + signature` before querying anything — a single recurring pattern costs one LLM call regardless of how many times it fired. Checks a 7-day verdict cache (`state/ollama_analysis_cache.json`) before that one call, and hard-caps fresh calls per run (default 5) — added after a live diagnostic call to the actual production Ollama server measured **849 seconds of `total_duration` for a trivial "say hello" prompt**, while the model's own reported load+eval durations summed to only ~13 seconds; the remaining ~836 seconds was pure CPU-contention queueing on the host hardware.
-
-`intelligence/ai_soc.py`'s `DeterministicValidator` is the hallucination guardrail: it reconstructs the alert's reputation evidence from persisted feature values (`max(ti_risk, abuseipdb_risk, vt_risk)`) and rejects any "benign" LLM verdict where that reconstructed evidence shows a confirmed IOC (`≥4.0`) or contradicts a "just telemetry" claim (`≥3.0`). Validated corrections call `fp_engine.mark_false_positive(..., source="llm_validated")` — same mechanism as an operator's Telegram correction (`source="operator"`), distinguished only by an audit-log tag so downstream consumers (the self-calibration pass, §5) can pool or separate the two evidence sources.
-
----
-
-## 4. Temporal Mathematics & Baselining
-
-Rolling statistical baselines, not static thresholds, implemented in `src/core/state_guard.py`.
-
-### 4.1 Exponentially Weighted Moving Average (EWMA)
-$$ \mu_t = \alpha \cdot x_t + (1 - \alpha) \cdot \mu_{t-1} $$
-`baseline_alpha` (default 0.05) controls memory. A small $\alpha$ resists sudden spikes — a fresh infection cannot quickly poison the baseline into thinking its own traffic is normal.
-
-### 4.2 Welford's Online Algorithm for Variance
-$$ \sigma^2_t = (1 - \alpha) \cdot (\sigma^2_{t-1} + \alpha \cdot (x_t - \mu_{t-1})^2) $$
-$$ Z = \frac{x_t - \mu_t}{\sigma_t} $$
-Computed incrementally — no need to retain the full sample history in memory. $Z > 3.0$ is a 3-sigma anomaly (top ~0.3% of the statistical distribution for that feature).
-
-### 4.3 Per-Hour Rate Anomaly Bound
-Distinct from the general EWMA/z-score baselining above: `pipeline.py` maintains a **per-hour-of-day** rate baseline (`state.rate_baseline`, 24 buckets) and computes a live anomaly bound every cycle:
-$$ \text{threshold\_limit} = \text{rate\_mean}_h + \text{threshold\_std\_dev} \times \sqrt{\text{rate\_var}_h} $$
-where $h$ is the current hour and `threshold_std_dev` (default 3.0) is read live from config. This is exported as the `home_ids_query_rate_threshold_limit` telemetry gauge for operator visibility — it is **not** a scheduled "weekly autotune" recalculation of `alert_threshold`; it's computed fresh every ~2-second cycle, purely for that hour's rate baseline.
-
-### 4.4 Shannon Entropy for DGA Detection
-`src/utils.py`:
-$$ H = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i) $$
-High entropy ($H > 3.2$ for labels ≥12 chars, with digit-ratio and vowel-ratio guards to avoid flagging legitimate brand-name-plus-hash patterns) combined with a high NXDOMAIN ratio is the DGA/botnet-C2-hunting signal.
+**Learning loop.** User corrections, validated false positives and confirmed threats are logged in the graph. A
+nightly job retrains the classifier from this history and recalibrates the suppression, uncertainty and ARP-sweep
+thresholds, globally and per device. A threshold only moves towards what the evidence supports, never below its
+floor, and refuses to move when corrected and uncorrected scores overlap. Every change goes through the autotuner
+(section 10), so it is versioned, canaried and reversible like any other.
 
 ---
 
-## 5. The Autonomous Self-Calibration Loop
+## 10. Autotuning
 
-New in 8.0. Full mechanics in the User Manual §3 — this section covers the implementation specifics relevant to extending it.
+Detection sensitivity is tuned automatically, inside hard limits.
 
-`scripts/train_fp_classifier.py` runs `calibrate_suppress_threshold()` — one function, shared by both the global calibration pass and the per-device pass (different `current`/`min_samples` arguments, not two parallel implementations that could quietly drift apart):
+**What can be tuned.** A closed allowlist of 16 parameters, each with bounds and a maximum step per change. Every one
+has a live reader and an automatic proposer driven by evidence:
 
-```python
-def calibrate_suppress_threshold(corrected_fp_scores, uncorrected_uncertain_scores,
-                                  current, min_samples=AUTOTUNE_MIN_SAMPLES):
-    if len(corrected_fp_scores) < min_samples:
-        return None, "not enough evidence"
-    lowest_corrected = min(corrected_fp_scores)
-    if uncorrected_uncertain_scores and max(uncorrected_uncertain_scores) >= lowest_corrected:
-        return None, "ambiguous overlap — refusing"
-    candidate = max(lowest_corrected - SAFETY_MARGIN, ABSOLUTE_FLOOR)
-    candidate = min(candidate, current)  # never raises
-    if candidate >= current:
-        return None, "no change needed"
-    return candidate, "<full audit reason string>"
-```
+| Area | Parameters (range) | Proposed from |
+|---|---|---|
+| Reputation | tier-4 floor (1.0–5.0), tier-5 floor (2.0–5.0) | Backtest detection rates per scope |
+| Reputation | propagation TTL: how long a suspicious destination counts as evidence for other devices (1 h–7 d) | Graph evidence; it can only be shortened, and only after a minimum sample |
+| Hard stops | confirmed-exploit sensitivity (0.50–0.99) | Synthetic attack sweep |
+| Baselines | BOCPD hazard rate (1/2000–1/100) | Real shifts detected late versus regimes that flap |
+| Baselines | population-prior pseudo-counts for Gaussian, Beta and Poisson models | Nightly prior build, per device type |
+| Peer cohort | deviation multiplier (1.5–10), minimum absolute count (2–20) | Observed outcomes; loosen only |
+| Reconnaissance | ARP-sweep unique-target threshold (4–40; up at most 4, down at most 1 per step) | Nightly calibration from corrections |
+| False-positive engine | suppression threshold (0.60–1.0), uncertainty threshold (0.3–0.8) | Nightly calibration from corrections |
+| False-positive engine | familiarity trust bar (0.3–0.9) | Graph evidence; lower only |
+| False-positive engine | trust-cache TTL (1–30 days) | Trusted destinations later found malicious; shorten only |
 
-Evidence is pulled from `state/autonomous_muted.jsonl` (both `OPERATOR_MARKED_FALSE_POSITIVE` and `LLM_VALIDATED_FALSE_POSITIVE` entries — pooled for the global pass, grouped by `device.id` for the per-device pass) cross-referenced against each corrected alert's *original* CL-AFPE combined confidence, which `pipeline.py` now persists into every alert record as `alert_payload["fp_verdict"]` (verdict/confidence/stage) — this field didn't previously exist, so there was no data to calibrate against at all before 8.0.
+**What can never be tuned.** The two-family corroboration minimum, family membership, the hard-stop registry, and the
+rule that persistence alone never authorises containment are code, not configuration.
 
-Two independent triggers run this same function: the scheduler's standalone daily 3am cron invocation of `train_fp_classifier.py`'s `main()`, and `fp_engine.py`'s own internal 7-day in-process retrain thread (`_weekly_retrain_loop()`) — both now call `run_threshold_calibration()` after their respective model-retrain step, regardless of whether that retrain succeeded (calibration reads a different, if overlapping, slice of the same evidence and shouldn't be gated on ONNX export success).
+**Lifecycle.** propose → canary (6 hours; inert to live readers) → nightly backtest → promote, or roll back. One
+proposal per parameter and scope per hour. Every change is a versioned row in `threshold_history`, never overwritten.
 
-Output is written via `_write_config_override()` (global → `state/config_overrides.json`) or `AutonomousFPEngine.apply_device_fp_profile()` (per-device → `state/device_fp_profiles.json`, the same architectural home as the existing per-device sigma-shift and trust-cache state). Both are plain JSON, read by `config.py`'s `LiveConfig._load_overrides()` (global) or `fp_engine.py`'s `get_device_suppress_threshold()` (per-device) respectively — neither ever touches `config.yaml`.
+**Scopes.** A value resolves device first, then device type, then global. Loosening a device or category needs at
+least 20 trials of every synthetic attack class at that scope, a 100% raw detection rate, and a 95% Wilson lower
+bound of at least 0.85. A scope can never drift more than two steps looser than its parent. Tightening has no sample
+floor, so thin evidence always errs towards scrutiny.
+
+**Retroactive circuit breaker.** If a real signature match fell between a scope's looser value and its parent's
+stricter value and that device was later confirmed compromised, the scoped value is rolled back immediately.
+
+**Drift check.** Three or more promotions in seven days that all move towards "more benign", without a regime change
+to explain them, raise an operator warning.
+
+**The backtest** runs nightly: a golden set of real incidents, a synthetic attack sweep through the real decision
+engine against an isolated in-memory copy of each device's recent graph, and the drift check. Its pass or fail gates
+every promotion.
 
 ---
 
-## 6. Mitigation Pipeline & IPS Integrity
+## 11. Shared threat memory and the daily look-back
 
-`src/mitigation/ips.py`, engineered for fail-safe resilience.
+**One device protects the others.** When a destination is confirmed malicious for any device (a Stage-1 threat or a
+two-family HIGH/CRITICAL verdict), its address or domain is recorded in the local confirmed-intel memory for 30 days.
+Another device contacting it later is a confirmed threat immediately. The memory covers addresses and registrable
+domains. Shared telemetry domains and protected infrastructure addresses are never recorded, so the memory cannot be
+poisoned into blocking something essential. DNS
+blocks also apply to every device, because they all use the same resolver.
 
-### 6.1 Layer 7 (Pi-hole Sinkhole)
-POST to Pi-hole v6's `/api/domains/deny/exact` endpoint (`{"domain": [domain], "comment": ...}`); release is a DELETE to `/api/domains/deny/exact/{domain}`. Both the list-type (`deny`) and match-kind (`exact`) live in the URL path, not the request body — a live test against a running Pi-hole v6 instance is what surfaced this; the URL shape this code used before always 404'd. On failure, the domain enters a thread-safe retry queue with exponential backoff (`30s × 2^attempts`), falling to a dead-letter queue after 5 attempts. Automatically retried on subsequent cycles.
+**The look-back (retro-hunt).** Every night the scheduler re-scans the graph's history of destinations each device
+contacted against the latest threat intelligence and the local confirmed-intel memory. A destination that is
+malicious today becomes new `reputation` evidence for every device that touched it, and goes through the normal
+decision path at the device's next cycle. Devices that touched a newly confirmed indicator before it was confirmed are
+flagged, and the confirmation feeds the false-positive engine. Findings can be sent to Telegram.
 
-### 6.2 Layer 3 (Fritz!Box WAN Sever)
-TR-064 SOAP API. Applies a "Blocked" profile to the infected MAC, severing WAN access while leaving LAN access intact for remediation. Only reachable at `risk_score ≥ 8.5` or an active lateral-movement flag — and only actually fires if `ips_router_enabled` is set and (when `interactive_blocking_enabled` is true) an operator has approved it.
+---
 
-### 6.3 Layer 2 (Scapy ARP/NDP Tarpit)
-The most aggressive mitigation, `risk_score ≥ 9.0` or lateral movement. A daemonized Scapy thread forges ARP (IPv4) and NDP (IPv6) responses telling the infected device the gateway's MAC is unreachable, blackholing its outbound traffic at Layer 2 even if Layer 3 isolation fails or is disabled.
+## 12. Response
 
-### 6.4 The `interactive_blocking_enabled` Fix (8.0)
-Previously, the Telegram "🔒 Approve Hardware Isolation" button and the "⏳ WAITING FOR APPROVAL" status text appeared on **every** alert whenever `interactive_blocking_enabled` was true — including `SUSPICIOUS`/monitor-only alerts where `mitigate()` never reached either isolation branch (both gated behind the 8.5/9.0 risk floors above). The bug: `pipeline.py`'s post-processing checked only "does the containment status contain the word UNBLOCKED", with no check on whether anything was actually pending. Found by tracing a real alert where the decision engine said `SUSPICIOUS / monitor` and the Telegram message simultaneously said `WAITING FOR APPROVAL` — a direct contradiction. Both the status-text override and the inline-button attachment are now gated on `risk ≥ 8.5 or lateral_threat`, matching `mitigate()`'s own floor exactly.
+| Layer | Mechanism | When | Undo |
+|---|---|---|---|
+| DNS | Pi-hole exact-domain deny entry; failed calls are retried with exponential back-off and a dead-letter queue | Decision HIGH or CRITICAL | One click |
+| Router | Fritz!Box TR-064 "blocked" profile on the device: internet cut, LAN kept for repair | Risk ≥ 8.5 (a corroborated HIGH or worse), or a lateral threat | One click |
+| Layer 2 | ARP (IPv4) and Neighbour Discovery (IPv6) tarpit on raw `AF_PACKET` sockets: the device is told the gateway is unreachable | Risk ≥ 9.0, or a lateral threat; also armed with router isolation, because the router blocks IPv4 only | One click |
+
+A lateral threat is lateral movement across at least two internal targets, or contact with the decoy. A verdict that
+reached HIGH only by persisting for 10 minutes is displayed as HIGH but never contains or notifies, because
+persistence of one weak signal is not a second witness.
+
+**Policy.**
+
+- **Onboarding:** the first 14 days are alert-only, so the system learns before it acts. The user can end it early.
+- **Approval:** by default, router and Layer-2 isolation wait for one tap in Telegram, as they always do for
+  critical device types. Lateral threats are contained at once. A single setting makes all isolation automatic. Any
+  containment can be released from the web interface or Telegram.
+- **Infrastructure protection:** devices marked safe (router, NAS, this host) are never contained automatically.
+- **Release cooldown:** after a user releases a device, it is not automatically contained again for an hour, unless
+  the threat is lateral.
+- **Kill switches:** `ips_enabled: false` gives a detection-only install; `simulation_mode` logs actions without
+  performing them.
+- **Uncorroborated single signals** (a lone tier-4 reputation, a lone Suricata rule, an Isolation Forest outlier)
+  never contain anything.
+
+Containment state is reconciled with the router every 5 minutes and survives restarts; an identity merge moves or
+releases containment with the device.
+
+**Telling the user.** Alerts appear in the web interface and, if configured, in Telegram, with a plain-language
+story (what was seen, the evidence, the counter-argument considered, the action taken, how to undo it), buttons for
+approve, release and mark-as-safe, and `/release` commands. Notifications are grouped per device, target and
+signature: a message is sent for a new incident, for a real escalation, or as a 15-minute "still ongoing" update.
+
+---
+
+## 13. The local AI advisor
+
+Optional. If an Ollama server is configured, a scheduled job (every 4 hours) groups recent alerts, asks a local model
+for a plain-language second opinion using the evidence only, and adds it to reports and digests. Output is
+schema-constrained. A **deterministic validator** rejects any answer that contradicts the evidence: "benign" when a
+confirmed indicator is present, when the decision was a hard stop or a corroborated attack, when attack-shaped
+evidence exists, when the destination is not familiar to that device, or when the cited evidence is empty,
+self-contradictory or invented. The advisor is advisory only: it cannot suppress, confirm or contain anything.
+
+---
+
+## 14. Scheduled jobs
+
+The scheduler runs at most one job at a time. Each job has a priority and a flag saying whether it can be safely
+paused mid-run; new jobs wait while the system is under resource pressure, with a starvation backstop of 60 minutes.
+
+| Job | Default schedule | What it does |
+|---|---|---|
+| Retro-hunt | Daily 02:45 | Section 11 |
+| Classifier retrain and threshold calibration | Daily 03:00 | Section 9 |
+| Graph prune | Daily 03:15 | Evidence and destination history past retention |
+| Disk budget governor | Daily 03:30 | Section 16 |
+| Backtest | Daily 03:30 | Section 10 |
+| Weak-notice prune | Every 4 hours | Removes weak Zeek notices after 12 hours (they never score) |
+| Zeek log prune | Daily 04:15 | Raw Zeek day folders past 14 days |
+| Population priors | Daily 04:45 | Device-type priors for cold start |
+| Top destinations report | Daily 06:00 | Daily summary of the most contacted domains |
+| Decision archive | Monthly | Exports, then removes, decisions past retention |
+| AI advisor review | Every 4 hours | Section 13 (needs an Ollama server) |
+
+In-process loops: the main loop (~2 s), health manager (15 s), identity reconciliation (10 min), router
+reconciliation (5 min), threat-intelligence refresh (1 h), and a live configuration watcher (10 s) that applies most
+settings without a restart.
+
+---
+
+## 15. Health manager and self-healing
+
+A health manager inside the engine checks every component every 15 seconds.
+
+| Component | How it is checked |
+|---|---|
+| Main loop, identity worker, threat-intel refresh | In-process heartbeats |
+| Console API, scheduler | Cross-process heartbeat file |
+| Backtest | Daily heartbeat |
+| Zeek | Log freshness |
+| Suricata, Pi-hole | Direct probes |
+| Each feed, each job | Feed-health and job-health records |
+
+Each component moves through HEALTHY → DEGRADED (2× its expected interval) → UNHEALTHY (5×, or 3 failed probes).
+Components with a recovery action are restarted with back-off (immediately, then 30 s, 2 min, 10 min); after five
+attempts the component enters SAFE_MODE with one alert, and leaves it by itself once healthy. External components
+(Zeek, Pi-hole, feeds) are alert-only inside the engine and restarted by their container's restart policy or the
+ops-agent.
+
+**Resource pressure.**
+
+| Level | Trigger | Action |
+|---|---|---|
+| Resource pressure | Engine memory above the first threshold | Alert, garbage collection, pause external lookups |
+| Conservation | Higher memory, or high swap while already under pressure | Pause capture spot checks, wired probes and Suricata scans; slow the main loop to 10 s |
+| Critical | Higher still, or system available memory under 512 MB | Immediate alert; after 3 consecutive critical checks, a clean self-restart |
+
+Levels step down one at a time as pressure falls, and every temporary change is reverted. System-wide swap is never a
+restart trigger on its own, because restarting the engine does not free other processes' memory.
+
+Every container has a restart policy and a hard memory limit, so a misbehaving part is restarted alone. The web
+interface shows every part's state and has a restart button for each, carried out by the ops-agent. Memory
+profiling (tracemalloc) is available on demand and off by default, because it slows the engine.
+
+---
+
+## 16. Storage, retention and flash wear
+
+| Data | Bound |
+|---|---|
+| Evidence | 90 days (30 on the Pi profile) |
+| Per-device destination history | 30 days |
+| Weak Zeek notices | 12 hours |
+| Decisions | 365 days (180 on the Pi profile), exported before removal |
+| Backtest runs | 90 days |
+| Raw Zeek logs | 14 days |
+| Capture scratch | 5 GB, oldest first |
+| Container logs | 10 MB per container |
+| Everything | A disk budget (20 GB by default, split between graph, Zeek logs and state) enforced nightly, deleting the oldest data first |
+
+**Flash wear.** SD cards and small SSDs wear out from writes, so: per-cycle state is written as changed rows only;
+heartbeats, cursors, control queues and capture scratch live in RAM-backed volumes; graph `last_seen` updates are
+throttled; baselines, sequence models and false-positive profiles are flushed in batches; the host tuning script
+enables zram swap, coalesces write-back (`dirty_expire` of 60 s or more) and sets the ext4 commit interval. Measured
+on one test host: engine writes fell from roughly 10–25 GB a day to roughly 3 GB a day. Longer measurements and
+measurements on Raspberry Pi hardware are still to be done.
+
+**Crash safety.** SQLite WAL with transactions, atomic temp-file-and-rename for every file the engine writes, and
+consistent backups through SQLite's backup API before updates.
+
+---
+
+## 17. Web interface, console and APIs
+
+**Web interface (port 8011)**, designed for non-technical users:
+
+| Page | What it offers |
+|---|---|
+| Home | One status (Protected, Learning your network, Needs your attention, Act now), the next action, recent alerts, system summary, "Turn on protection now" during onboarding |
+| Devices | Every device with name, type and state; filters (active, needs a look, isolated, type guessed); confirm or correct the type; block, release, forget |
+| Alerts | Plain-language alerts by severity and time range (30 days, paged) |
+| Insights | Rule-based next-best-action suggestions |
+| System | Every part with its health and a restart button; background jobs with Run now; threat-data freshness; resources; models; maintenance tools with a preview first |
+| Integrations | Every external service with its fields, a Test button, keys stored on the box and never shown again, and its licence terms |
+| Setup | Threat data (built-in sources, optional city-level data), router capture set-up and test, Pi-hole backup import |
+| Password | One shared password for the web interface, console, engine API, Pi-hole and Grafana, changed everywhere at once with rollback if any service refuses |
+| Expert | Every setting, with descriptions and validation, and the full detection console |
+
+Pages are rendered on the server with gzip, long-lived static caching, prefetching and stale-while-revalidate data
+caches, so they open instantly even while the engine is busy.
+
+**Console and engine API (port 8010):** the expert detection console (evidence graph per alert, autonomy panel with
+per-device tuning, health tab) and documented JSON APIs ([CONFIG_API.md](CONFIG_API.md),
+[CONSOLE_DATA_API.md](CONSOLE_DATA_API.md)). Settings changed here are written as overrides, never into
+`config.yaml`, and take effect live.
+
+---
+
+## 18. Observability
+
+The engine exports Prometheus metrics: decisions and confidence, DNS and Zeek features, false-positive engine
+efficacy, containment, feed and job health, resource pressure, and autonomy transparency (what it learned, what it
+tuned, what it suppressed, what it could not do). Node exporter adds host metrics. Grafana dashboards are an optional
+profile; a built-in Trends page is planned to replace them.
+
+---
+
+## 19. Updates
+
+Releases are built in CI: tests, container image tarballs, and a manifest signed with Ed25519. They are fetched from a
+private gateway that checks a per-device token (only its hash is stored). The device verifies the manifest against a
+built-in public key, checks every digest, refuses downgrades and replays, backs up state (consistent SQLite backup),
+switches, and health-checks for two minutes. If anything is unhealthy, it rolls back by itself. Updates run in a
+maintenance window, on a stable or beta channel.
+
+---
+
+## 20. Packaging and hardware profiles
+
+`scripts/init.sh` creates the data tree, generates secrets, seeds configuration from templates, picks a free LAN
+address for the decoy, and sets ownership. `scripts/preflight.sh` checks Docker, architecture, memory, swap, write-back
+tuning, the capture interface, port conflicts and the decoy address. `scripts/setup-zram.sh` applies host tuning for
+small boards.
+
+`hardware_profile` (`pi_8gb`, `x86_16gb`, `custom`) scales caches, retention, per-cycle work and capture limits. Release
+images are built for amd64; the arm64 build needs a native arm runner and is pending.
+
+---
+
+## 21. Defaults, optional systems and what each one does
+
+Everything the licences allow is on by default. The table lists every optional part, what it adds when enabled, and
+how to enable it.
+
+| System | Default | What it does when enabled | How |
+|---|---|---|---|
+| Decoy host | **On** | A fake SSH/Telnet machine on a free LAN address; any contact is a hard stop | Automatic; `HONEYPOT_AUTO=0` to opt out |
+| Suricata scans | **On** | Signature scanning of router capture bursts (ET Open rules) | `suricata` profile |
+| Router capture bursts | **On**, inert until a router is set up | Short Wi-Fi captures on triggers (new device, ARP sweep, DNS anomaly, high-severity alert, ambiguous identity, wired probe, periodic spot check), within hourly count, byte and disk budgets | Set up the router under Setup |
+| Router integration (Fritz!Box) | Off until configured | Device names, router-level isolation, capture bursts | Integrations |
+| All scheduled jobs | **On** | Section 14 | — |
+| Autotuner | **On** | Section 10 | `autotune_enabled` |
+| Baseline scoring | **On** | Section 5 | `baseline_scoring_enabled` |
+| Geofencing | **On** (RU, KP, IR) | Contact with listed countries is a hard stop, CRITICAL only when corroborated | `geofencing_countries` |
+| Response | **On**, after 14-day onboarding | Section 12 | `ips_enabled`, `onboarding_mode_days` |
+| Approval for isolation | **On** | Router and Layer-2 isolation wait for one tap | `interactive_blocking_enabled: false` makes them automatic |
+| Telegram | Off until configured | Alerts, approvals, release commands, digests, retro-hunt findings | Integrations: bot token and chat ID; optional chat allowlist |
+| Local AI advisor | Off until configured | Section 13 | Integrations: Ollama server address |
+| Keyed feeds: OTX, URLhaus, ThreatFox | **Off (licence)** | More indicators of malicious addresses, domains and URLs | `scripts/enable-licensed-feeds.sh` with a licence, plus keys |
+| AbuseIPDB | **Off (licence)** | Abuse blacklist and per-address abuse scores (can reach tier 5) | Same script, plus key |
+| VirusTotal | **Off (licence)** | Antivirus-engine verdicts per destination | Same script, plus key |
+| MaxMind GeoLite2 | Off | City-level location in alerts and maps (country and owner are built in) | Setup → Threat data: key or file |
+| Dashboards (Grafana, Loki, Promtail) | Off (heavy on small boards) | Pre-built Grafana dashboards and log search | Add `dashboards` to `COMPOSE_PROFILES` |
+| Unbound forwarding | Recursive by default | Forward DNS to chosen resolvers over TLS | `UNBOUND_MODE=forward` |
+| More decoy addresses | One | Decoys on other subnets or VLANs | `honeypot_ips` |
+| Trust anchors | Auto-discovered gateway and host | Extra infrastructure that keeps one identity across addresses | `network.trust_anchors` |
+| cgroup isolation for scans | Off | Runs Suricata scans in a CPU-limited systemd slice | Needs `loginctl enable-linger` once |
+| Detection-only / simulation | Off | No containment / containment only logged | `ips_enabled: false` / `simulation_mode: true` |
+| Network-activity archive | Off | Unbounded diagnostic copy of activity; for short investigations only | `archive_network_activity_backup` |
+| Memory profiling | Off | tracemalloc snapshots for diagnosing growth | On demand from the console |
+| Automatic updates | On, once a device is provisioned | Section 19 | Updater `config.json` |
+
+---
+
+## 22. Testing and verification
+
+- About 160 test scripts cover the decision engine, every hypothesis, families, hard stops, identity, merges, the
+  false-positive engine, autotuning gates, the health manager's state machines, storage (changed-row writes, flash
+  wear, atomic merges), the web interface (every page and button), packet builders for the Layer-2 tarpit, the
+  updater (signature, digest, downgrade, rollback) and the repository sync guards.
+- The nightly **backtest** replays real incidents and a synthetic attack sweep through the real decision code.
+- **Decision replay** re-runs any historical decision's real evidence through the current code to show whether a
+  change would alter it.
+- **Threat hunt** queries the graph directly ("every device that ever touched X", "the full evidence timeline of this
+  decision").
+
+---
+
+## 23. Known limits
+
+- Not yet validated on real Raspberry Pi hardware; resource budgets come from an x86 test host.
+- No independent security assessment yet.
+- The wired sensor sees Wi-Fi devices only through the router; on an all-in-one router, Layer-2 containment of Wi-Fi
+  clients does not reach them, and router isolation is used instead.
+- The shared threat memory covers addresses and domains, not TLS fingerprints.
+- Removing a device-type override leaves the device on its last overridden type; automatic type inference does not
+  resume for it.
+- Router integration supports Fritz!Box today.
+- Marking an alert as safe is done from the Telegram alert; the web interface offers release and block only.
+
+---
+
+## 24. Roadmap
+
+- **Periodicity detector** for slow, jittery command-and-control beaconing (an autocorrelation or Fourier method over
+  per-destination connection times). It will run in shadow mode as an evidence source that never counts alone, so its
+  real detections and false positives (NTP, update checks) can be measured first. Planned only after resource
+  measurements on Raspberry Pi hardware.
+- Mark-as-safe from the web interface.
+- Built-in Trends page replacing Grafana; Loki and Promtail removed.
+- Remaining JSON stores (learned profiles, alerts) moved into SQLite.
+- Managed-switch and VLAN isolation (UniFi, MikroTik); more router integrations.
+- WireGuard roaming protection; encrypted-traffic analytics; opt-in, privacy-preserving fleet learning.
+- Activation-code first-boot set-up for non-technical buyers.

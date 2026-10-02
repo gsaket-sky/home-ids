@@ -183,7 +183,10 @@ console, all designed to fit in the memory and storage of a small single-board c
 |---|---|
 | [Product description](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PRODUCT_DESCRIPTION.md) | What it is and where it stands, in more detail |
 | [Engineering manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md) | The whole system, part by part |
-| [Architecture](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_ARCHITECTURE.md) · [Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) · [Design decisions](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ARGUS_DECISIONS.md) | How it thinks, and why |
+| [Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md) | Every formula and constant |
+| [How it evolved](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/EVOLUTION.md) | What the real network taught it, and what it does now because of that |
+| [User manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/USER_MANUAL.md) | Using it day to day |
+| [Engineering records](https://github.com/gsaket-sky/home-ids/tree/main/Documentation/records) | Dated audits and investigations |
 
 ## About
 

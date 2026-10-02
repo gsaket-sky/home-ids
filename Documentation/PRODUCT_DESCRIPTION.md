@@ -20,7 +20,7 @@ flowchart LR
     subgraph Sense["Sense"]
         Z[Zeek<br/>flows · TLS · DNS · ARP]
         P[Pi-hole + Unbound<br/>DNS telemetry & blocking]
-        S[Suricata<br/>optional burst scans]
+        S[Suricata<br/>scans of capture bursts]
     end
     subgraph Understand["Understand"]
         F[Feature extraction]
@@ -45,15 +45,15 @@ flowchart LR
     T --> G
     G --> H --> C --> Q --> M
     Q --> U
-    L[Optional local LLM advisor] -.explains.-> U
+    L[Optional local AI advisor] -.explains.-> U
     V[Deterministic validator<br/>hard vetoes] -.guards.-> L
 ```
 
-1. **Sense.** Zeek and Pi-hole/Unbound observe flows, TLS handshakes and DNS; Suricata can scan short packet captures
-   (opt-in).
-2. **Understand.** Features are extracted per device. Each device has its own behavioural baseline (Bayesian online
-   change-point detection and Markov models per metric and hour), plus comparison against peers of the same type, and
-   a fast Isolation-Forest anomaly score. Threat intelligence (a local index and optional feeds) adds reputation.
+1. **Sense.** Zeek and Pi-hole/Unbound observe flows, TLS handshakes and DNS. A decoy host on its own address catches
+   anything probing the network. With a supported router, short Wi-Fi captures are scanned by Zeek and Suricata.
+2. **Understand.** Features are extracted per device. Each device has its own behavioural baselines (Bayesian models per
+   metric and hour of day, with change-point detection) and a learned model of its usual sequence of activity. It is also
+   compared with peers of the same type, and scored by a fast Isolation-Forest anomaly model. Threat intelligence (a local index and optional feeds) adds reputation.
 3. **Decide.** Every observation becomes typed, timestamped **evidence** in a SQLite evidence graph. A **hypothesis
    engine** weighs, for example, "this device is running a DGA botnet" against benign explanations such as an
    advertising burst or a known device profile. At the top severities the decision engine enforces **corroboration across
@@ -122,9 +122,11 @@ a source of slowdown when left running, so it ships off.
 
 **It restarts what breaks.**
 
-- A health manager checks the engine, the capture feeds, the databases and the system's own resources.
-- When a part stops responding or falls behind, it restarts that part. Under memory or disk pressure it moves to
-  resource-saving modes first, and a stuck part does not stop the rest.
+- A health manager checks every part every 15 seconds: the engine's own loops, the console and scheduler, Zeek,
+  Pi-hole, Suricata, each threat feed, each background job, and the engine's memory.
+- When a part stops responding or falls behind, it restarts that part, with increasing pauses between attempts.
+  Under memory pressure it moves to resource-saving modes first, and a stuck part does not stop the rest. Disk use is
+  enforced nightly by the disk-budget governor.
 - Containers also restart automatically after a crash or a reboot.
 - If the internet or a threat-intelligence feed goes away, the status page says so plainly and detection carries on with
   local evidence.
@@ -172,9 +174,11 @@ that answer is kept and reapplied permanently.
   always needs independent corroboration, and one weak signal alone can never trigger automatic containment. The
   autotuner has no path to change them.
 - **Hardware-aware.** Cache sizes, work per cycle and memory budgets are chosen for the machine it finds.
-- **Honest scope:** continuous learning and the autotuner's safety machinery are built and tested. At present the
-  autotuner is wired to a small number of live parameters (the sensitivity of the strongest-evidence rule and the
-  familiarity trust bar). More will be connected as they are validated.
+- **What it tunes:** 16 parameters, each with a live reader and an automatic proposer. They cover reputation
+  thresholds, the confirmed-exploit sensitivity, how readily a change of habit is accepted, peer-comparison limits,
+  reconnaissance thresholds, and the false-positive engine's thresholds and trust lifetimes. Loosening anything for one
+  device or device type needs statistical proof (a 95% lower bound on detection of at least 0.85 from at least 20
+  trials per attack type). Tightening needs none, because it errs towards scrutiny.
 
 ## 4d. Stays current, and looks back
 
@@ -203,10 +207,10 @@ baselines, its false-positive memory and its sensitivity all improve as it sees 
 You are never locked out. Human feedback is welcome, always optional, and always wins:
 
 - **Correct a device type** once and it stays corrected.
-- **Block, release or protect** any device or destination with one click. A release is respected: after you release a
-  device, it is not automatically isolated again for a cooling-off period.
-- **Mark something as safe** and the system remembers.
-- **Tell it an alert was wrong** and the false-positive engine learns from it.
+- **Block or release** any device with one click. A release is respected: after you release a device, it is not
+  automatically isolated again for an hour, unless it is attacking other devices.
+- **Protect** infrastructure such as the router or a NAS, so it is never contained automatically.
+- **Mark an alert as safe** (from the phone alert) and the false-positive engine learns from it and remembers why.
 - **Choose how much autonomy it has.** A new install starts with a 14-day alert-only learning period, then protection
   switches on automatically (or earlier at one click). By default the heaviest actions, cutting a device off the network,
   ask for a one-tap approval on your phone. A single setting makes even those fully automatic, and another turns all
@@ -222,14 +226,16 @@ cannot be changed by the learning.
 need at least two independent kinds of evidence to agree, such as unusual behaviour plus a known-bad reputation, or a
 suspicious domain pattern plus a malicious connection fingerprint. Two signals derived from the same underlying fact do
 not count twice: they are grouped into one evidence family. A weak signal on its own, or one that merely persisted for a
-long time, can never trigger automatic containment. The only exceptions are a small list of hard indicators, such as a
-confirmed exploit or contact with the decoy, which are strong enough alone and are handled by explicit rules.
+long time, can never trigger automatic containment. The only exceptions are two hard indicators that are strong enough
+alone: contact with the decoy, and ARP spoofing. Even a Suricata exploit signature or a contact with a blocked country
+needs a second, independent sign before it is treated as critical.
 
 **One device's threat protects all the others.** When any device is confirmed to be talking to a malicious address or
 domain, that indicator is saved in a local threat memory that grows with your network. If a different device later
 contacts the same destination, it does not have to earn its way to a verdict again from scratch: it is treated as a
 confirmed threat at once. DNS blocks of a bad domain also apply to the whole network, because every device uses the same
-resolver. The daily look-back (section 4d) applies the same idea to the past: when a new confirmation shows another
+resolver. A destination's suspicious reputation is shared too: for a tuned period it counts as evidence when other
+devices contact it. The daily look-back (section 4d) applies the same idea to the past: when a new confirmation shows another
 device touched that indicator earlier, that device is flagged too.
 
 The memory is time-limited (30 days by default), because malicious infrastructure is often abandoned or reused. It
@@ -272,33 +278,45 @@ is never taught to the system as normal. Learned profiles are saved safely and a
   updates are fetched from a private gateway with a per-device token, verified against a built-in public key, and rolled
   back automatically if the new version is unhealthy.
 
-## 6. Add-ons
+## 6. What is included, and what is optional
 
-Everything the licences allow is on by default: the decoy host, Suricata scanning, Wi-Fi capture (once a supported router
-is set up) and all scheduled jobs. Two items are opt-in: the Grafana dashboards, which are heavy on small boards, and the
-keyed threat feeds (OTX, AbuseIPDB, URLhaus, ThreatFox), whose free tiers forbid commercial use. A licensed install
-enables the feeds with one setup script and its own keys.
+Everything the licences allow is on by default. The **decoy host** is part of the product, not an add-on. It is a
+fake vulnerable machine on its own LAN address, chosen automatically. No real device has a reason to touch it, so any
+contact is high-confidence proof that something on the network is probing.
 
-The **decoy host** is not an add-on: it ships as part of the product. It is a fake vulnerable machine on its own LAN
-address; no real device has a reason to touch it, so any contact is high-confidence proof of lateral movement.
+| Part | Default | What it does when enabled |
+|---|---|---|
+| Decoy host | **On** | A tripwire for intruders moving around the network |
+| Suricata scans | **On** | Signature scans of captured traffic |
+| Wi-Fi capture bursts | **On**, once a supported router is connected | Short captures when something needs a closer look, within hourly and disk budgets |
+| Router integration (Fritz!Box) | When configured | Device names, cutting a device off the internet at the router, captures |
+| All scheduled jobs | **On** | Retention, disk budget, nightly look-back, retraining, backtests, priors, reports |
+| Autotuner, baselines, geofencing | **On** | Self-tuning, per-device learning, country rules that need corroboration |
+| Automatic response | **On**, after the 14-day learning period | DNS blocks; isolation asks for one tap by default |
+| Telegram | When configured | Alerts, approvals, "mark safe" and release from a phone |
+| Local AI advisor (Ollama) | When configured | Plain-language second opinions, advisory only, behind the deterministic validator |
+| Keyed threat feeds: OTX, URLhaus, ThreatFox, AbuseIPDB, VirusTotal | **Off: licence** | More reputation sources. Their free tiers forbid commercial use; a licensed install enables them with one script and its own keys |
+| City-level geolocation (MaxMind) | Off | City and coordinates in alerts; country and network owner are built in |
+| Dashboards (Grafana, Loki, Promtail) | Off | Charts and log search for power users; heavy on small boards, and being replaced by a built-in Trends page |
 
-**Available today**
+The full list, including expert switches such as detection-only and simulation modes, is in the
+[Engineering Manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md#21-defaults-optional-systems-and-what-each-one-does).
 
-| Add-on | What it adds |
-|---|---|
-| Wi-Fi capture & scans (on by default) | Short router-side packet captures scanned with Zeek and Suricata rule sets |
-| Dashboards | Grafana, Loki and Promtail for power users (being replaced by a built-in Trends page) |
-| Local AI advisor | Plain-language explanations from a local model, behind the deterministic validator |
-| Telegram | Alerts and approvals on a phone |
+**On the roadmap (not built yet)**
 
-**Ideas (not built)**
-
-- **Managed-switch / VLAN integration** (UniFi, MikroTik): drop a compromised device into an isolated VLAN at the switch
-  port, instead of containing it with Layer-2 techniques.
+- **A periodicity detector** for slow, jittery command-and-control beaconing (autocorrelation or Fourier analysis of
+  each destination's connection times). It will first run in shadow mode and never count as evidence on its own, so
+  its real detections and its false positives (time sync, update checks) can be measured, and it will be enabled
+  only after resource measurements on Raspberry Pi hardware.
+- **Mark as safe from the web page.** Today this is done from the phone alert.
+- **A built-in Trends page** replacing Grafana.
+- **Managed-switch / VLAN integration** (UniFi, MikroTik): move a compromised device into an isolated VLAN at the
+  switch port, instead of containing it with Layer-2 techniques. Support for more routers.
 - **Roaming protection:** a WireGuard server so phones and laptops on public Wi-Fi route through the box.
-- **Encrypted-traffic analytics:** metadata-based detection of malware inside TLS without decrypting it.
-- **Opt-in, privacy-preserving fleet learning:** sharing anonymised threat fingerprints so many installations learn
-  normal IoT behaviour and novel command-and-control servers faster.
+- **Encrypted-traffic analytics:** detecting malware inside TLS from metadata, without decrypting it.
+- **Opt-in, privacy-preserving fleet learning:** sharing anonymised threat fingerprints, so many installations learn
+  normal IoT behaviour and new command-and-control servers faster.
+- **Activation-code set-up** for non-technical buyers.
 
 ## 7. Where it stands — plainly
 
@@ -306,9 +324,9 @@ address; no real device has a reason to touch it, so any contact is high-confide
 |---|---|
 | Detection engine, evidence graph, hypotheses, baselines, CL-AFPE | Built; running against a real home network for months; ~160 automated test scripts |
 | Consumer web UI, integrations, per-part restarts, signed updates | Built; exercised end to end on the test host |
-| Raspberry Pi 8 GB | Designed and budgeted for it; **not yet validated on real Pi hardware** (development and soak testing so far on an x86 box) |
+| Raspberry Pi 8 GB | Designed and budgeted for it; **not yet validated on real Pi hardware** (development and soak testing so far on an x86 box). Release images are built for x86 today; the arm64 build is pending |
 | Flash-wear reductions | Measured and applied; to be re-measured on a Pi |
-| Independent security assessment | Not done; internal audits only (published in the engineering repository) |
+| Independent security assessment | Not done; design reviews and internal audits only (published in the engineering repository) |
 | Wi-Fi visibility | Depends on the router: an all-in-one router shows Wi-Fi traffic only partly; documented limits |
 
 Home-IDS is a detector that helps a person decide. It does not guarantee protection, and nothing here replaces updates,
@@ -316,5 +334,11 @@ good passwords and common sense.
 
 ## 8. Further reading
 
-The engineering documents — architecture, the mathematics, decisions and audits — are in the public showcase
-repository: <https://github.com/gsaket-sky/home-ids>.
+- [Engineering Manual](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/ENGINEERING_MANUAL.md): the
+  whole system, part by part.
+- [Pipeline Mathematics](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/PIPELINE_MATH_REFERENCE.md):
+  every formula and constant.
+- [How it evolved](https://github.com/gsaket-sky/home-ids/blob/main/Documentation/EVOLUTION.md): the problems the real
+  network revealed, and what the system does now because of them.
+- [Engineering records](https://github.com/gsaket-sky/home-ids/tree/main/Documentation/records): dated audits and
+  investigations.
