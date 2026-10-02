@@ -65,6 +65,16 @@ Home-IDS keeps learning what is normal for each device, and slowly adjusts how s
 that are undone automatically if they turn out to be wrong. The most important safety rules are locked and cannot be
 changed by the learning, so it cannot talk itself into being careless. You never have to tune a thing.
 
+## It keeps up with new threats, and looks back
+
+New dangers appear every day, so Home-IDS keeps refreshing its knowledge of them. If one of its sources stops
+updating, it tells you instead of quietly protecting you less.
+
+It also **looks back**. Some threats are only recognised days or weeks after they first appear. Every day it
+re-checks everything your devices have connected to in the past against what is known today. If something that looked
+harmless back then turns out to be dangerous, you are told, together with which device was involved. You are covered
+against new threats, and against old ones that only become known today.
+
 ---
 
 ## Why it is different: peace of mind

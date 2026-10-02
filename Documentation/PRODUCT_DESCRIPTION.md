@@ -176,6 +176,24 @@ that answer is kept and reapplied permanently.
   autotuner is wired to a small number of live parameters (the sensitivity of the strongest-evidence rule and the
   familiarity trust bar). More will be connected as they are validated.
 
+## 4d. Stays current, and looks back
+
+**Evolving threats.** Threat intelligence is refreshed on a schedule: a local index of known-bad addresses, domains and
+fingerprints, plus optional feeds you enable with your own keys. The system watches the freshness of each feed. If one
+goes stale or starts failing, the status page says so plainly instead of silently protecting you less, and detection
+carries on with the evidence it has locally. The detection models are also retrained on a schedule from what the
+system has seen on your network.
+
+**Yesterday's traffic, judged by today's knowledge.** Many threats are only recognised days or weeks after they
+first appear. A scheduled retro-hunt job re-scans the stored history of every destination each device has contacted
+against the latest intelligence. When something that looked harmless at the time is now known to be malicious, the
+finding is written back as new evidence against the device that touched it. It goes through the normal decision path,
+so it is weighed, corroborated and explained like any other alert, and you can be notified. If one device's contact with
+a newly confirmed threat reveals other devices that touched the same indicator earlier, those are flagged too, and the
+system learns from the confirmation.
+
+So you are covered against new threats as they appear, and against old ones that only become known today.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —
