@@ -35,6 +35,7 @@ their traffic to someone else's cloud.
 | 🤝 **Demands corroboration** | A HIGH or CRITICAL alert never rests on one signal. Independent evidence families must agree. |
 | 🪞 **Grades its own work** | A second system suppresses what it is confident is benign, remembers why, and never hides a hard indicator. |
 | 🧯 **Acts proportionately, and can undo it** | Block a destination, cut a device off the internet, or quarantine it. One click to release. |
+| 🪤 **Ships with a decoy host** | A fake vulnerable machine on its own LAN address. Nothing legitimate touches it, so any contact is proof of lateral movement. |
 | 🔒 **Stays private** | No cloud account. Nothing leaves your network except optional threat-intelligence lookups you switch on. |
 
 ---
@@ -76,7 +77,7 @@ for every part of the system, light and dark themes, and a layout that works on 
 
 ## Optional extras
 
-🪤 **Decoy host** (any contact is proof of lateral movement) · 📡 **Wi-Fi capture and Suricata scans** · 📊 **Dashboards** ·
+📡 **Wi-Fi capture and Suricata scans** · 📊 **Dashboards** ·
 🤖 **Local AI advisor** (explains alerts in plain words; a deterministic validator can veto it) · 📱 **Telegram** alerts and approvals
 
 *On the roadmap (ideas, not built):* managed-switch / VLAN isolation · WireGuard roaming protection ·

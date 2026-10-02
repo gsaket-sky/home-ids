@@ -115,11 +115,13 @@ At the centre is a strictly typed SQLite datastore in WAL mode.
 
 ## 6. Add-ons
 
+The **decoy host** is not an add-on: it ships as part of the product. It is a fake vulnerable machine on its own LAN
+address; no real device has a reason to touch it, so any contact is high-confidence proof of lateral movement.
+
 **Available today**
 
 | Add-on | What it adds |
 |---|---|
-| Decoy (honeypot) | A fake vulnerable host; any contact is high-confidence proof of lateral movement |
 | Wi-Fi capture & scans | Short router-side packet captures scanned with Zeek and Suricata rule sets |
 | Dashboards | Grafana, Loki and Promtail for power users (being replaced by a built-in Trends page) |
 | Local AI advisor | Plain-language explanations from a local model, behind the deterministic validator |
