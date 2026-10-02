@@ -75,6 +75,15 @@ re-checks everything your devices have connected to in the past against what is 
 harmless back then turns out to be dangerous, you are told, together with which device was involved. You are covered
 against new threats, and against old ones that only become known today.
 
+## It runs itself. You can still step in.
+
+Home-IDS is designed to work completely on its own: it learns, adjusts, protects, cleans up, updates and repairs
+itself, with no daily input from you. It simply keeps getting better the longer it runs.
+
+And you are always in charge. If you want to, you can correct it, release something it blocked, mark something as
+safe, or tell it an alert was wrong, and it learns from that. By default, the biggest step (cutting a device off the
+network) waits for one tap from you on your phone; one setting makes even that automatic.
+
 ---
 
 ## Why it is different: peace of mind

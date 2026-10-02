@@ -194,6 +194,28 @@ system learns from the confirmation.
 
 So you are covered against new threats as they appear, and against old ones that only become known today.
 
+## 4e. Automatic by design, human-overridable
+
+The system is designed to run completely on its own: sensing, learning, tuning, deciding, acting, cleaning up,
+updating and repairing itself. It does not need your active input, and it keeps getting better with time, because its
+baselines, its false-positive memory and its sensitivity all improve as it sees more of your network.
+
+You are never locked out. Human feedback is welcome, always optional, and always wins:
+
+- **Correct a device type** once and it stays corrected.
+- **Block, release or protect** any device or destination with one click. A release is respected: after you release a
+  device, it is not automatically isolated again for a cooling-off period.
+- **Mark something as safe** and the system remembers.
+- **Tell it an alert was wrong** and the false-positive engine learns from it.
+- **Choose how much autonomy it has.** A new install starts with a 14-day alert-only learning period, then protection
+  switches on automatically (or earlier at one click). By default the heaviest actions, cutting a device off the network,
+  ask for a one-tap approval on your phone. A single setting makes even those fully automatic, and another turns all
+  active response off for a detection-only install.
+
+The defaults favour trust: it acts alone where being wrong is cheap and reversible, and asks where being wrong would be
+disruptive. Its own automatic changes are small, logged and reversible, and the rules that guard against careless action
+cannot be changed by the learning.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —
