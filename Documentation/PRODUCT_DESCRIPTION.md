@@ -216,6 +216,25 @@ The defaults favour trust: it acts alone where being wrong is cheap and reversib
 disruptive. Its own automatic changes are small, logged and reversible, and the rules that guard against careless action
 cannot be changed by the learning.
 
+## 4f. Two witnesses, and one for all
+
+**Corroboration: no conviction on one witness.** A single odd signal is a hint. Serious alerts (HIGH or CRITICAL)
+need at least two independent kinds of evidence to agree, such as unusual behaviour plus a known-bad reputation, or a
+suspicious domain pattern plus a malicious connection fingerprint. Two signals derived from the same underlying fact do
+not count twice: they are grouped into one evidence family. A weak signal on its own, or one that merely persisted for a
+long time, can never trigger automatic containment. The only exceptions are a small list of hard indicators, such as a
+confirmed exploit or contact with the decoy, which are strong enough alone and are handled by explicit rules.
+
+**One device's threat protects all the others.** When any device is confirmed to be talking to a malicious address or
+domain, that indicator is saved in a local threat memory that grows with your network. If a different device later
+contacts the same destination, it does not have to earn its way to a verdict again from scratch: it is treated as a
+confirmed threat at once. DNS blocks of a bad domain also apply to the whole network, because every device uses the same
+resolver. The daily look-back (section 4d) applies the same idea to the past: when a new confirmation shows another
+device touched that indicator earlier, that device is flagged too.
+
+The memory is time-limited (30 days by default), because malicious infrastructure is often abandoned or reused. It
+covers addresses and domains. It does not yet share malicious connection fingerprints between devices.
+
 ## 5. Consumer-grade experience
 
 - **Progressive disclosure.** A single status — *Learning your network*, *Protected*, *Needs your attention*, *Act now* —

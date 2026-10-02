@@ -84,6 +84,19 @@ And you are always in charge. If you want to, you can correct it, release someth
 safe, or tell it an alert was wrong, and it learns from that. By default, the biggest step (cutting a device off the
 network) waits for one tap from you on your phone; one setting makes even that automatic.
 
+## Two witnesses before it acts
+
+One strange sign is only a hint, like a single odd noise at night. Before Home-IDS raises a serious alarm, it wants
+**two independent signs that agree**, for example a device behaving strangely *and* talking to a place known to be
+dangerous. That is why you are not woken up for nothing, and why a real problem is not missed.
+
+## One device's bad day protects all the others
+
+When Home-IDS confirms that one device has been talking to something dangerous, it remembers that danger. If any other
+device in your home later reaches for the same thing, it is stopped straight away, with no need to build the case again
+from scratch. It also looks back to check whether other devices touched it earlier. Each threat it catches makes the
+whole network safer. Like a neighbourhood watch, it only needs one neighbour to spot the burglar.
+
 ---
 
 ## Why it is different: peace of mind
