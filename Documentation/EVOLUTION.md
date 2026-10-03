@@ -35,8 +35,11 @@ or contradicted it, replayed against new code, or hunted across all devices. The
 graph edges as well, so "why is this trusted?" has an answer.
 
 The graph engine first ran in shadow beside the original one, and was compared on live traffic before it took over.
-Once it had proven itself, the switch back was removed: the earlier engine now only steps in, for a single cycle,
-if the graph engine ever raises an error.
+Once it had proven itself, the switch back was removed, and then the earlier engine itself: the duties it still
+carried (per-device familiarity, confirmed-threat counts, training records, model reloading) moved into the graph
+engine, and its state files are imported once on first start. There is no standby engine. If the engine raises an
+error, that cycle is recorded as not evaluated and reported to the health manager, and the false-positive engine
+publishes the alert as uncertain rather than hiding it.
 
 ## 3. Identity that follows devices
 

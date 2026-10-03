@@ -217,6 +217,16 @@ once a device has 5,000 samples. Scoring uses a compiled, vectorised evaluator t
 samples are excluded from training for a window, so a malicious burst cannot train the model. An Isolation Forest
 result alone can only produce an `ANOMALOUS` log entry.
 
+### Destination familiarity
+
+For every device the engine counts how often it uses each destination port, network owner (ASN organisation) and
+registrable domain. Five observations make a destination fully familiar (1.0); fewer give a fraction. Only cycles
+already judged benign or merely anomalous are counted, so a device's attack traffic never becomes "familiar". At most
+200 entries per device and kind are kept (least recently seen dropped first). The store is shared by the decision
+engine's "normal device telemetry" explanation, the AI advisor's validator, the DNS-evasion audit and the
+false-positive engine, and is saved to `state/device_familiarity.json` at most every 10 minutes and at shutdown.
+Familiarity is damping evidence only, never a verdict.
+
 ### Local popularity
 
 The engine learns which domains are popular on this network, and with how many devices. This feeds the allowlist
@@ -359,8 +369,10 @@ flowchart TD
     ML -->|no| BN[BENIGN]
 ```
 
-If the graph-based engine ever raises an error, that one cycle is decided by the earlier, simpler engine
-(`core/decision_engine.py`) instead of being dropped; the same holds for the false-positive engine (section 9).
+There is one engine and no fallback. If it raises an error, that cycle is recorded as **not evaluated**: no state
+change, no action, and the same evidence is decided again on the next pass. The error is counted and reported by the
+health manager (section 15). A second, older engine standing by would be a second set of rules to keep in step, and
+would decide differently in exactly the cases where the main one failed.
 
 Every decision carries a reasoning trail (hard-stop checks, reputation context, network owner, hypothesis scores,
 families) and a plain-language explanation built from the same evidence labels the console shows.
@@ -386,13 +398,22 @@ alert's notifications and containment; it never rewrites the decision itself.
 4. **Stage 3, semantic similarity** of the destination name to known vendor telemetry patterns (small local embedding
    model). Skipped when there is no real name to compare.
 
-The combined score is compared with the device's own threshold (default 0.80) and an uncertainty floor (0.55):
-above the threshold the alert is marked a false positive and suppressed; between the two it is published with a
-low-confidence flag; below the floor it is a confirmed threat. Refusal guards keep the engine from suppressing
-anything with corroborated attack evidence.
+The combined score is compared with a suppress threshold (default 0.80) and an uncertainty floor (0.55): above the
+threshold the alert is marked a false positive and suppressed; between the two it is published with a low-confidence
+flag; below the floor it is a confirmed threat. Both are read on every alert: the configured value, then the device's
+own value raised by corrections, then a value promoted by the autotuner (device, device type, then global). Refusal
+guards keep the engine from suppressing anything with corroborated attack evidence.
 
-**Learning loop.** User corrections, validated false positives and confirmed threats are logged in the graph. A
-nightly job retrains the classifier from this history and recalibrates the suppression, uncertainty and ARP-sweep
+If the false-positive engine raises an error, the alert is published as **uncertain**, never suppressed, and the
+error is reported by the health manager. The models load in the background at start, so no alert waits for them;
+until they are ready, Stage 2 gives a neutral score and Stage 3 uses fixed vendor rules.
+
+**Learning loop.** Every correction is written as a training record on the decision it corrects: user corrections,
+corrections validated by the AI advisor, suppressions made by the engine itself, and trust-cache hits. Confirmed
+threats are counted per device and alert type. A correction also raises the device's own detection thresholds when
+the alert was about connection volume (ARP sweeps, rejected connections, long connections), or trusts the
+destination otherwise, and slightly widens the device's sensitivity. A nightly job retrains the classifier from this
+history (the engine picks up the new model as soon as the file changes, without a restart) and recalibrates the suppression, uncertainty and ARP-sweep
 thresholds, globally and per device. A threshold only moves towards what the evidence supports, never below its
 floor, and refuses to move when corrected and uncorrected scores overlap. Every change goes through the autotuner
 (section 10), so it is versioned, canaried and reversible like any other.
@@ -487,7 +508,8 @@ evidence family (for example DNS behaviour or network behaviour). Behind each ro
   together.
 - It falls by **0.05 per day** while nothing confirms it, so trust that is not renewed fades.
 - **The percentage is trust ÷ 0.6.** At 100% that family has reached the bar and counts as one independent witness
-  that this pattern is harmless. Four confirmations close together reach 100%.
+  that this pattern is harmless. About five confirmations close together reach 100% (four give 0.60 less the
+  decay between them, just under the bar).
 
 **What it changes.** When at least **two different evidence families** reach 100% for the same device, behaviour,
 destination class and alert type, the false-positive engine may resolve that alert automatically: it is recorded
@@ -605,6 +627,7 @@ A health manager inside the engine checks every component every 15 seconds.
 | Zeek | Log freshness |
 | Suricata, Pi-hole | Direct probes |
 | Each feed, each job | Feed-health and job-health records |
+| Engine errors | Fails while the decision or false-positive engine raised an error in the last 2 minutes; alert-only (gauge `home_ids_engine_errors`) |
 
 Each component moves through HEALTHY → DEGRADED (2× its expected interval) → UNHEALTHY (5×, or 3 failed probes).
 Components with a recovery action are restarted with back-off (immediately, then 30 s, 2 min, 10 min); after five

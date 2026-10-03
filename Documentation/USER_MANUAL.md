@@ -259,7 +259,8 @@ on it.
   row is one device and one kind of alert. Every time such an alert turns out to be harmless (you mark it safe, or
   the system concludes so itself) the bar grows, and it slowly shrinks again if nothing confirms it. Once **two
   different kinds of evidence** for the same pattern reach 100%, Home-IDS stops notifying you about it for that
-  device. It still records it, and anything genuinely dangerous is always reported.
+  device. That takes about five confirmations in a row. It still records it, and anything genuinely dangerous is
+  always reported.
 
 ## 16. Privacy
 

@@ -127,6 +127,9 @@ a source of slowdown when left running, so it ships off.
 - When a part stops responding or falls behind, it restarts that part, with increasing pauses between attempts.
   Under memory pressure it moves to resource-saving modes first, and a stuck part does not stop the rest. Disk use is
   enforced nightly by the disk-budget governor.
+- If the detection engine itself hits an internal error, it fails safe. A check that could not be completed takes no
+  action and runs again on the next pass. An alert the false-positive filter could not judge is shown to you, never
+  hidden. Either way the health page reports the error.
 - Containers also restart automatically after a crash or a reboot.
 - If the internet or a threat-intelligence feed goes away, the status page says so plainly and detection carries on with
   local evidence.

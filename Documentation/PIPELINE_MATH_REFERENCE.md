@@ -408,8 +408,8 @@ The console's Autonomy tab shows each `(device, hypothesis, destination class, f
 progress = min(1.0, trust / 0.6)         # 100% = this family qualifies as a witness
 ```
 
-computed from the trust value stored at its last update. Four confirmations in quick succession reach 100%
-(4 × 0.15 = 0.6); spread out, each day of silence costs 0.05.
+computed from the trust value stored at its last update. About five confirmations in quick succession reach 100%
+(4 × 0.15 = 0.6 exactly, less the decay between them, falls just short); spread out, each day of silence costs 0.05.
 
 A destination that is itself a known device on the network, with exactly zero threat-intelligence and abuse scores,
 builds composite trust in the same way and is suppressed only once the gate passes.
@@ -445,7 +445,10 @@ uncertain threshold (0.55) <= combined < 0.80    -> UNCERTAIN, published with a 
 combined < 0.55                                  -> CONFIRMED_THREAT, sensitivity tightened
 ```
 
-Both thresholds are per device and tuned automatically.
+Both thresholds are read on every alert, in layers: the configured value (`fp_combined_suppress_threshold`,
+`fp_combined_uncertain_threshold`), then for the suppress threshold the device's own value raised by corrections,
+then a value promoted by the autotuner (device, device type, global). If the engine raises an error the verdict is
+UNCERTAIN with `suppress = false`.
 
 ### 11d. Sensitivity shift
 
