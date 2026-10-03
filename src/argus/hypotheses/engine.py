@@ -788,7 +788,12 @@ class PeerDeviationHypothesis(Hypothesis):
     corroboration with something else (the decision engine's own >=2-
     independent-source bar for HIGH already enforces that structurally), never
     an autonomous escalation to HIGH by itself the way an established signal
-    can reach."""
+    can reach.
+
+    CONTEXT ONLY (owner decision 2026-10-03): on its own it scores 0 and creates no alert. On .94 it was 2,872 of
+    3,438 alerts a day (84%), none of them corroborated. It scores only when the same device also has attack-shaped
+    evidence (DeviceProfileBenignHypothesis.ATTACK_SHAPED_EVIDENCE_TYPES), where "this device also behaves unlike
+    its peers" adds to a real finding."""
     RELEVANT_EVIDENCE_TYPES = frozenset({"peer_deviation"})
 
     def __init__(self):
@@ -797,7 +802,9 @@ class PeerDeviationHypothesis(Hypothesis):
     def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
         self._reset_eval_state()
         hits = [e for e in ev_store if e.evidence_type == "peer_deviation"]
-        self.required_satisfied = bool(hits)
+        attack_shaped = DeviceProfileBenignHypothesis.ATTACK_SHAPED_EVIDENCE_TYPES
+        corroborated = any(e.evidence_type in attack_shaped for e in ev_store)
+        self.required_satisfied = bool(hits) and corroborated
         if not self.required_satisfied:
             return 0.0
         best = max(e.effective_weight() for e in hits)

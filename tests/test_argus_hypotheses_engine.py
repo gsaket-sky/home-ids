@@ -487,13 +487,20 @@ check("N2: PeerDeviationHypothesis requires its own peer_deviation evidence -- "
       score_no_dev == 0.0 and not h2.required_satisfied)
 
 h2 = PeerDeviationHypothesis()
-score_dev = h2.evaluate(score_evidence([ev("peer_deviation", 15.0, confidence=0.6)], now=NOW), rep(3))
-check("N2: a genuine peer_deviation hit reaches SUSPICIOUS (3.0)",
+score_alone = h2.evaluate(score_evidence([ev("peer_deviation", 15.0, confidence=0.6)], now=NOW), rep(3))
+check("N2: CONTEXT ONLY (2026-10-03) -- peer_deviation on its own scores 0 and creates no alert",
+      score_alone == 0.0 and not h2.required_satisfied)
+
+# with attack-shaped evidence on the same device it still contributes
+_PEER_WITH = lambda conf=0.6, v=15.0: [ev("peer_deviation", v, confidence=conf), ev("zeek_conn_abuse", 1.0)]
+h2 = PeerDeviationHypothesis()
+score_dev = h2.evaluate(score_evidence(_PEER_WITH(), now=NOW), rep(3))
+check("N2: peer_deviation alongside attack-shaped evidence reaches SUSPICIOUS (3.0)",
       h2.required_satisfied and score_dev == 3.0)
 
 h2 = PeerDeviationHypothesis()
 score_dev_contradicted = h2.evaluate(
-    score_evidence([ev("peer_deviation", 15.0, confidence=0.6)], now=NOW), rep(1),  # trusted destination
+    score_evidence(_PEER_WITH(), now=NOW), rep(1),  # trusted destination
 )
 check("N2: a trusted-tier context contradicts peer_deviation, same "
       "contradicting-evidence pattern every other hypothesis uses",
@@ -503,7 +510,7 @@ check("N2: PeerDeviationHypothesis is capped at SUSPICIOUS (3.0) even with a "
       "very high effective_weight -- deliberately never reaches HIGH on its own, "
       "unlike an established signal such as coordinated_targeting",
       PeerDeviationHypothesis().evaluate(
-          score_evidence([ev("peer_deviation", 50.0, confidence=1.0)], now=NOW), rep(3),
+          score_evidence(_PEER_WITH(conf=1.0, v=50.0), now=NOW), rep(3),
       ) == 3.0)
 
 # --- HypothesisEngine.evaluate_all(): winner selection ---
@@ -580,7 +587,7 @@ check("a tier-4 rep_vector that DOES describe this hypothesis's own destination 
 # NO_DESTINATION, live_engine.py's _inject_peer_deviation_evidence()) -- confirms the
 # generalized fix is a correct NO-OP here, not an accidental behavior change to the
 # one hypothesis that deliberately has no destination to compare against.
-pd_hits = [ev_at("peer_deviation", 0.9, NO_DESTINATION)]
+pd_hits = [ev_at("peer_deviation", 0.9, NO_DESTINATION), ev_at("zeek_conn_abuse", 1.0, NO_DESTINATION)]
 pd = PeerDeviationHypothesis()
 pd_score = pd.evaluate(score_evidence(pd_hits, now=NOW), rep(1, domain="some-unrelated-domain.example"))
 check("PeerDeviationHypothesis (destination-less evidence by design) is unaffected by the "

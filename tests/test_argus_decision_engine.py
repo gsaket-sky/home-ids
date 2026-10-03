@@ -338,7 +338,13 @@ peer_dev_ev = Evidence(
     value=42.0, confidence=0.6,
     features={"device_type": "smart_plug", "my_count": 42, "peer_avg": 8.5, "peer_count": 4},
 )
-r_peer = engine.evaluate([peer_dev_ev], rep(3), now=NOW)
+r_peer_alone = engine.evaluate([peer_dev_ev], rep(3), now=NOW)
+check("CONTEXT ONLY (owner, 2026-10-03): peer_deviation on its own creates no alert",
+      r_peer_alone["state"] == DecisionState.BENIGN, f"got {r_peer_alone['state']}")
+# With weak attack-shaped evidence on the same device, PEER_COHORT_DEVIATION can still win and must be displayable.
+weak_long_conn = Evidence(device_id="dev1", destination_id=NO_DESTINATION, evidence_type="zeek_long_conn",
+                          independence_family="network_behavior", timestamp=NOW, source="s", value=1.0, confidence=0.3)
+r_peer = engine.evaluate([peer_dev_ev, weak_long_conn], rep(3), now=NOW)
 check("REGRESSION GUARD: winning_evidence is NOT empty when PEER_COHORT_DEVIATION wins "
       "-- peer_deviation's own family (peer_cohort_deviation) is excluded from "
       "attack_evidence/corroboration-counting, but must still be displayable",
