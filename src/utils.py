@@ -674,6 +674,18 @@ KNOWN_PUBLIC_DNS_RESOLVERS = frozenset({
     "2606:4700:4700::1111", "2606:4700:4700::1001",  # Cloudflare, IPv6
 })
 
+# Never recorded or honoured as a confirmed threat (CL-AFPE's local confirmed-intel guard): the public resolvers above
+# plus those VPN and DNS-filtering services point devices at -- shared infrastructure, never a threat indicator of its
+# own (2026-10-03: NordVPN's resolver had been recorded as a confirmed threat on .94). Deliberately a separate set:
+# the DNS-evasion audit skips KNOWN_PUBLIC_DNS_RESOLVERS, and a device using a VPN's resolver instead of Pi-hole must
+# stay visible there as a policy finding.
+NOT_A_THREAT_INDICATOR_RESOLVERS = KNOWN_PUBLIC_DNS_RESOLVERS | frozenset({
+    "103.86.96.100", "103.86.99.100",  # NordVPN DNS
+    "194.242.2.2",                     # Mullvad DNS
+    "45.90.28.0", "45.90.30.0",        # NextDNS (anycast)
+    "76.76.2.0", "76.76.10.0",         # Control D
+})
+
 @lru_cache(maxsize=4096)
 def is_local_or_multicast_destination(dest: str) -> bool:
     """True if `dest` is a multicast/link-local/loopback/reserved/unspecified IP, or

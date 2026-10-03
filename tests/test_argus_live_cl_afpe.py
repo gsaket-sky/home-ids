@@ -14,6 +14,7 @@ Sections:
   H. Confirmed-threat counts per device/signature; corrections written as training records.
   I. One-time import of the earlier engine's flat files.
   J. False-positive thresholds read from config, layered with the device profile and the autotuner.
+  K. A memory-only hard stop does not renew its confirmed-intel entry; VPN/filter resolvers never become threats.
   D. evaluate_cl_afpe_live(): returns the engine's verdict; an engine error yields UNCERTAIN (never suppressed)
      and is counted for the health manager.
 """
@@ -186,6 +187,37 @@ _profiles_j = _store.get_device_metadata_values("fp_profile")
 check("J: every device's corrected thresholds can be read in one pass (the dashboard gauges)",
       _profiles_j.get("pipeline_dev", {}).get("fp_combined_suppress_threshold", {}).get("value") == 0.95)
 check("J: the live engine reads config", live_engine.get_cl_afpe_engine()._config_get is not None)
+
+# --- K. A hard stop caused only by the local-intel match does not renew that entry; VPN/filter resolvers never enter ---
+from argus.cl_afpe.engine import ClAfpeEngine as _K_Engine  # noqa: E402
+_k_dir = tmpdir / "k_state"
+_k_intel = LocalConfirmedIntel(str(_k_dir))
+_k_eng = _K_Engine(_store, local_intel=_k_intel)
+_store.upsert_device("k_dev_a", timestamp=NOW)
+_store.upsert_device("k_dev_b", timestamp=NOW)
+_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.205.77", reason="TEST_CONFIRMED", asn_owner="Example Hosting")
+_k_before = dict(_k_intel.check("ip", "45.155.205.77"))
+time.sleep(0.05)
+_k_v = _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.205.77"), features={}, now=NOW + 5)
+_k_after = _k_intel.check("ip", "45.155.205.77")
+check("K: a destination in the confirmed memory is still a confirmed threat for another device",
+      _k_v["verdict"] == "CONFIRMED_THREAT" and _k_v["stage"] == "STAGE_1_HARD_STOP", str(_k_v))
+check("K: ...but that memory-only hard stop does NOT renew the entry (no self-perpetuation)",
+      _k_after["count"] == _k_before["count"] and _k_after["last_confirmed"] == _k_before["last_confirmed"],
+      f"before={_k_before} after={_k_after}")
+_k_v2 = _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.205.77", features={"zeek_honeypot_hits": 1}),
+                        features={"zeek_honeypot_hits": 1}, now=NOW + 6)
+check("K: an independent hard stop (decoy contact) on the same destination does renew it",
+      _k_intel.check("ip", "45.155.205.77")["count"] == _k_before["count"] + 1, str(_k_intel.check("ip", "45.155.205.77")))
+_k_eng.record_confirmed_threat("k_dev_a", None, "103.86.96.100", reason="TEST_CONFIRMED")
+check("K: a VPN provider's public resolver (NordVPN DNS) is never recorded as a confirmed threat",
+      _k_intel.check("ip", "103.86.96.100") is None)
+_k_intel.record("ip", "103.86.99.100", "k_dev_a", reason="LEGACY_ENTRY")
+check("K: an entry recorded earlier for such a resolver is no longer honoured",
+      _k_eng.check_local_intel_hard_stop(None, "103.86.99.100") is None)
+from utils import KNOWN_PUBLIC_DNS_RESOLVERS as _K_DNS  # noqa: E402
+check("K: the DNS-evasion audit's resolver list is unchanged (a VPN resolver stays visible as a policy finding)",
+      "103.86.96.100" not in _K_DNS)
 
 # --- D. an engine error never suppresses: the alert is published as UNCERTAIN ---
 

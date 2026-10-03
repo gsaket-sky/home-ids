@@ -1,5 +1,5 @@
 {
- "commit": "bf8a305012cafbd4e1e73c5f59158340f50fbcc1",
+ "commit": "f91a2fbd519e7cfca21f71909625f615ad6c5ac5",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "1f96179103eec2ec7c206de5667cec096a8f3ba6fd63963cb498a44c0c586905",
@@ -11,7 +11,7 @@
   "src/argus/baseline/bayesian.py": "d576b88c4384e03ef4adadbef6c5b220318ebed50d135f17cc76aac31919fe22",
   "src/argus/baseline/engine.py": "10037932632c5c45dcab3849d70b3e817841ff5ebce84f1d99eac9ea6334d673",
   "src/argus/cl_afpe/composite_trust.py": "e4c8d9fc41558d069f8a07265cc7691dc5374b85062a1ae96932a3ac962c6fe1",
-  "src/argus/cl_afpe/engine.py": "a2413dd810f8c08b084752c462e529fb840e92b38d1a8020193b8033914193dd",
+  "src/argus/cl_afpe/engine.py": "dfa32ace8116349a9bfc565a30eddc8227f71088aa6e604f75da50acaf023fb9",
   "src/argus/cl_afpe/ml_scoring.py": "e7936fba0452f43b84c5db35e33f90526e0b526d8cb7342cb37c86552767f359",
   "src/argus/cl_afpe/state_import.py": "16354f30d9dbec8ea8568c866f1f8f661b67137412842db84bf6c7b4693d849b",
   "src/argus/config/trust_anchors.py": "8f36913c6f3c3d84f8a6fed51f9439b1e45fa21241e6ece1187c8715573165a4",
@@ -141,7 +141,7 @@
   "src/scripts/scheduler.py": "8ca75ee0b14d32c99edf3e755d9c6dd0d76d3b722b4911ae38bd8bf67de479df",
   "src/scripts/top_domains_report.py": "ceb042c1ca8c853860f56d1625fd6819ca54d3386970ecd8593cc5b424d34ac1",
   "src/scripts/train_fp_classifier.py": "9b5679218f6154988d8fd761e2d4df0575d0867954355582df3fc1d7487f0098",
-  "src/utils.py": "22e2d4a73199fb13f75c2efbf1cc3e137947bfe6335ceb07657cd9adff73e758",
+  "src/utils.py": "092b8792ae47624928ab9ef40262719606911631d22040e6a73ba79f5a5e8873",
   "tests/README.md": "ae2a0bbc12298995d79cde83216eb514a3d39bbdeca3799f35e55f7f4b482082",
   "tests/argus_scenarios.py": "f7543ec9d5a45762a546f05e911e5b78f96c6d432c68567d695f63dc1b43df6f",
   "tests/test_advanced_keyed_feeds.py": "3faffdb05aec1a8e9aeafc4bf521e46001ee56175ce634a391a57eb5cc09e21f",
@@ -168,7 +168,7 @@
   "tests/test_argus_independence.py": "d3276fe1d8f277d7141d78870c3c25e3500a455930c61e19a03d221e42f182b1",
   "tests/test_argus_integration.py": "e27cc70226eba759162492074836251abd4f6e1e9d97efe72eabfc486c495015",
   "tests/test_argus_ip_family.py": "2780138a89f2b36d6ca63b535cecb8680d78bb563a24735fd10d6d7321181744",
-  "tests/test_argus_live_cl_afpe.py": "e8252e14bc13cd4e642aed61a9cbb790ce5e146c817e703aacdba0f38c5d97f2",
+  "tests/test_argus_live_cl_afpe.py": "33f9172634a451507c352231b138fc2b4e7a884bed688e93f3f4c8cc13e316be",
   "tests/test_argus_live_decision_archive.py": "4d6dea8bfe34aeb3da908f6256f6d5254f25164c6eef8bd088114b1377da611e",
   "tests/test_argus_live_engine.py": "f4059cc1ba98638d2072b56b2e830c2e7424276e170e8ecc070a54be06a68519",
   "tests/test_argus_live_identity.py": "1518eb5c8192af2db883c11b8eeb98c208568c1b95bb620caa72d40a29686803",

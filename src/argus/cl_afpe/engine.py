@@ -47,7 +47,7 @@ from argus.baseline.engine import derive_activity_state
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.device_familiarity import DeviceFamiliarity
 from utils import (
-    KNOWN_PUBLIC_DNS_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain,
+    NOT_A_THREAT_INDICATOR_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain,
     _is_cdn_or_cloud_domain, etld1_strict as etld1,  # trust decisions fail closed (see utils.etld1_strict)
 )
 
@@ -113,6 +113,17 @@ _ABUSEIPDB_HARD_STOP = 4.0
 _EXFIL_OUTBOUND_Z_HARD_STOP = 5.0
 _EXFIL_OUTBOUND_BYTES_HARD_STOP = 2_500_000
 _DEFAULT_LATERAL_MOVEMENT_UNIQUE_TARGETS_THRESHOLD = 2
+
+
+LOCAL_INTEL_TRIGGER_PREFIX = "Local confirmed-threat match"
+
+
+def _is_independent_confirmation(stage1_triggers: List[str]) -> bool:
+    """True when at least one Stage-1 trigger is NOT the local confirmed-intel match. A hard stop caused only by that
+    match is not a new confirmation: recording it again would refresh the entry's last_confirmed, so an entry renewed
+    itself for as long as any device kept contacting it and never expired (found 2026-10-03 on .94: one entry
+    re-confirmed 1,230 times this way)."""
+    return any(not str(t).startswith(LOCAL_INTEL_TRIGGER_PREFIX) for t in stage1_triggers or [])
 
 
 def _strip_persistence_suffix(signature: Optional[str]) -> Optional[str]:
@@ -553,7 +564,7 @@ class ClAfpeEngine:
         (public resolvers, this network's own IDS host, mDNS multicast, hundreds of cloud/CDN IPs)."""
         if not ip or ip == "unknown":
             return False
-        if ip in KNOWN_PUBLIC_DNS_RESOLVERS:
+        if ip in NOT_A_THREAT_INDICATOR_RESOLVERS:
             return True
         if ip in self._safe_ips:
             return True
@@ -758,7 +769,7 @@ class ClAfpeEngine:
         if local_hit:
             entry = local_hit["entry"]
             triggers.append(
-                f"Local confirmed-threat match: '{local_hit['target']}' previously confirmed malicious on "
+                f"{LOCAL_INTEL_TRIGGER_PREFIX}: '{local_hit['target']}' previously confirmed malicious on "
                 f"this network ({entry.get('count', 1)} confirmation(s), first seen "
                 f"{time.strftime('%Y-%m-%d', time.localtime(entry.get('first_confirmed', time.time())))})"
             )
@@ -826,12 +837,13 @@ class ClAfpeEngine:
                 features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
             if stage1_triggers:
                 self._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous", now=now)
-                self.record_confirmed_threat(
-                    device_id,
-                    base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
-                    dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
-                    signature=alert_hypothesis,
-                )
+                if _is_independent_confirmation(stage1_triggers):
+                    self.record_confirmed_threat(
+                        device_id,
+                        base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
+                        dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
+                        signature=alert_hypothesis,
+                    )
                 return {
                     "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
                     "calibrated_confidence": None,
@@ -853,11 +865,12 @@ class ClAfpeEngine:
             features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
         if stage1_triggers:
             self._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous", now=now)
-            self.record_confirmed_threat(
-                device_id,
-                base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
-                dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
-            )
+            if _is_independent_confirmation(stage1_triggers):
+                self.record_confirmed_threat(
+                    device_id,
+                    base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
+                    dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
+                )
             return {
                 "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
                 "calibrated_confidence": None,
