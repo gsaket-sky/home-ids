@@ -1,5 +1,5 @@
 """
-v13 EvidenceGraph SQLite store (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+EvidenceGraph SQLite store.
 Read/write API over graph/schema.sql. This module owns device/destination/evidence
 read+write and audit-preserving identity merges; hypothesis/decision writes are
 wired in by their own respective phases (the tables already exist in schema.sql,
@@ -27,7 +27,7 @@ LOGGER = logging.getLogger("home_ids.graph_store")
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
 
 # Matches schema.sql's own documented policy (comment at the bottom of that file).
-# v13 full-architecture plan, Phase 10b: evidence retention itself is now
+# evidence retention itself is now
 # hardware_profile-driven too -- see live_prune.py's own _RETENTION_DAYS_BY_PROFILE
 # (this constant stays the fallback for the "custom"/unrecognized-profile case and
 # for any caller that doesn't go through that wiring, e.g. direct GraphStore use in
@@ -49,7 +49,7 @@ DEFAULT_DEVICE_DESTINATIONS_RETENTION_DAYS = 30
 # (weird:data_before_established) accounted for 68,688 of those on its own -- the
 # graph db was already 5.05GB after just 3.5 days of uptime. Weak-tier notices
 # contribute ZERO scoring weight to any hypothesis (utils.py's
-# ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"] == 0.0, v13/hypotheses/engine.py's
+# ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"] == 0.0, argus/hypotheses/engine.py's
 # NetworkIntrusionHypothesis/DeviceProfileBenignHypothesis both already ignore them)
 # -- keeping them for the full 90-day evidence window has zero benefit to any live
 # decision, only disk cost. 12 hours is generous relative to that zero-benefit
@@ -73,7 +73,7 @@ _SHARED_INFRASTRUCTURE_LOOKBACK_SECONDS = 7 * 86400
 _SHARED_INFRASTRUCTURE_MIN_FLEET_SIZE = 5
 _SHARED_INFRASTRUCTURE_DEVICE_RATIO = 0.4
 
-# v13 full-architecture plan, Phase 10b: SQLite PRAGMA cache_size (negative = KB,
+# SQLite PRAGMA cache_size (negative = KB,
 # per SQLite's own docs), sized against config/trust_anchors.py's own
 # VALID_HARDWARE_PROFILES. A first-pass judgment call (this project's own
 # established convention for a not-yet-empirically-tuned number, matching
@@ -96,7 +96,7 @@ _HARDWARE_PROFILE_CACHE_SIZE_KB: Dict[str, int] = {
     "custom": 16_000,
 }
 
-# v13 full-architecture plan, alert/decision unification, Phase 1 (write-side edge
+# the graph-engine migration, alert/decision unification, Phase 1 (write-side edge
 # cap): real production data found ONE decision with 56,073 'supports' edges (a
 # device with a very long evidence history) -- insert_decision() previously created
 # one edge per evidence_id with no cap at all, the actual root cause behind the
@@ -296,7 +296,7 @@ class GraphStore:
         if is_new:
             self._apply_schema()
         elif db_path not in GraphStore._migrated_db_paths:
-            # v13 full-architecture plan, IPS containment unification: schema.sql
+            # IPS containment unification: schema.sql
             # is ONLY ever executescript()'d for a brand-new db file (`is_new`
             # above) -- an EXISTING db (e.g. .94's real, already-populated
             # state/v13_graph.db) never re-runs it, so a table added to schema.sql
@@ -685,8 +685,8 @@ class GraphStore:
         `updates` overwrite the same key in the existing dict, everything else is left
         alone). Auto-upserts the device row first, so this is safe to call for a
         device_id that hasn't been seen via insert_evidence()/insert_decision() yet
-        (v13 full-architecture plan, Phase 3 -- used to persist a trust anchor's
-        learned MAC, surviving restarts, unlike v-current's own single in-memory
+        (the graph-engine migration, Phase 3 -- used to persist a trust anchor's
+        learned MAC, surviving restarts, unlike core/identity.py's own single in-memory
         `_gateway_mac` field)."""
         self.upsert_device(device_id, timestamp=timestamp)
         row = self._conn.execute(
@@ -753,7 +753,7 @@ class GraphStore:
 
     def _resolve_canonical_uncached(self, device_id: str) -> str:
         """Walks the merged_into_device_id chain to the ultimate canonical id.
-        Unlike v-current's merge_into_canonical() (state_guard.py), an orphan's row
+        Unlike StateManager.merge_into_canonical() (state_guard.py), an orphan's row
         is NEVER deleted -- this resolution is what makes that audit-preserving
         design actually transparent to every other read in this module."""
         seen = set()
@@ -770,7 +770,7 @@ class GraphStore:
             current = row["merged_into_device_id"]
 
     def merge_device(self, orphan_id: str, canonical_id: str, timestamp: Optional[float] = None) -> None:
-        """Audit-preserving merge -- a deliberate improvement over v-current's
+        """Audit-preserving merge -- a deliberate improvement over StateManager's
         discard-on-merge (state_guard.py:436-439, called out in the plan for your
         sign-off, not a silent behavior change). The orphan row is tombstoned via
         merged_into_device_id, never deleted, so every evidence/edge row that
@@ -788,7 +788,7 @@ class GraphStore:
         forever on. Every real caller already wraps this in a broad
         try/except Exception treating a graph-mirror failure as best-effort
         (live_manager.py, pipeline.py, merge_fragmented_devices.py all log-and-
-        continue, never blocking the real v1 merge that already happened) -- so
+        continue, never blocking the state-side merge that already happened) -- so
         refusing here is safe: it just skips the graph-side mirror for this one
         conflicting call, exactly like any other best-effort graph write failure,
         rather than silently corrupting the merge chain into an infinite loop."""
@@ -926,7 +926,7 @@ class GraphStore:
                           raw_payload: Optional[Dict[str, Any]] = None,
                           evidence_ids: Optional[List[str]] = None) -> str:
         # winning_hypothesis_id references the `hypotheses` table's own versioned
-        # registry (schema.sql) -- not yet populated by any v13 module (a
+        # registry (schema.sql) -- not yet populated by any argus module (a
         # separate, not-yet-built concern: registering/versioning hypothesis
         # definitions as graph rows). Left None here deliberately rather than
         # inventing a fake row to satisfy the FK; the winning hypothesis NAME is
@@ -940,7 +940,7 @@ class GraphStore:
         it flipped live -- schema.sql's own stated reason for this column,
         confirmed via direct read, not guessed.
 
-        evidence_ids (Phase 1 fix, v13 full-architecture plan): the evidence_id of
+        evidence_ids (Phase 1 fix, the graph-engine migration): the evidence_id of
         every Evidence item that contributed to this decision -- creates an
         evidence->decision 'supports' edge for each, UP TO a hardware-profile-driven
         cap (_MAX_SUPPORTING_EVIDENCE_EDGES_BY_PROFILE, most-recent-first) -- a real
@@ -1020,7 +1020,7 @@ class GraphStore:
 
     def update_decision_payload(self, decision_id: str, updates: Dict[str, Any],
                                   timestamp: Optional[float] = None) -> bool:
-        """v13 full-architecture plan, alert/decision unification (Phase 2): merges
+        """alert/decision unification (Phase 2): merges
         `updates` into an existing decision's raw_payload_json (shallow -- top-level
         keys in `updates` overwrite the same key in the existing dict, everything
         else untouched), the SAME merge pattern update_device_metadata() already
@@ -1042,7 +1042,7 @@ class GraphStore:
         still raises on a real DB error (a caller enriching a decision it just
         wrote wants to know if that failed) -- the "never affect the real alert"
         fail-safety is the CALLER's responsibility (wrap the call in try/except),
-        matching every other v13 graph write's own fail-safe convention documented
+        matching every other argus graph write's own fail-safe convention documented
         at its own call site rather than swallowed silently in here.
 
         Returns False (no-op) if decision_id doesn't exist; True if updated."""
@@ -1333,7 +1333,7 @@ class GraphStore:
             for i in order
         ]
 
-    # --- containment actions (v13 full-architecture plan, IPS unification) -----
+    # --- containment actions -----
 
     def insert_containment_action(self, device_id: str, action_type: str, status: str,
                                     timestamp: Optional[float] = None, target: Optional[str] = None,
@@ -1345,7 +1345,7 @@ class GraphStore:
         decides or performs the real action, it only records that ips.py already
         did, immediately after ips.py's own StateManager-backed dict write. Callers
         must treat this as best-effort (wrap in try/except at the call site,
-        matching every other v13 graph write's own fail-safe convention) -- a
+        matching every other argus graph write's own fail-safe convention) -- a
         failure here must never affect the real containment action, which has
         already happened by the time this is called.
 
@@ -1438,7 +1438,7 @@ class GraphStore:
                                   resolve_merges: bool = True,
                                   cap_per_type: Optional[int] = None) -> List[Evidence]:
         """Fresh, per-call snapshot -- never a cached/mutated object, matching the
-        pure-per-cycle evaluation model every v13 Hypothesis.evaluate() (Phase 3)
+        pure-per-cycle evaluation model every argus Hypothesis.evaluate() (Phase 3)
         relies on.
 
         cap_per_type (2026-09-20, restart-cadence investigation): None (the
@@ -1600,7 +1600,7 @@ class GraphStore:
 
     def get_devices_targeting(self, destination_id: str, since: float) -> List[str]:
         """Distinct CANONICAL device_ids that have touched this destination since
-        `since` -- v13 full-architecture plan, Phase 1a: the real, cheap
+        `since` -- the real, cheap
         cross-device query `idx_evidence_destination` exists to support ("which
         devices have an edge targeting destination X in the last N minutes,"
         schema.sql's own stated reason for that index). Canonicalizes each raw
@@ -1751,7 +1751,7 @@ class GraphStore:
         whose metadata_json[key] == value -- a full table scan, parsed in
         Python rather than a SQLite json_extract() query, deliberately, so this
         doesn't depend on the JSON1 extension being available in every
-        deployment's SQLite build (the same reasoning every other v13 metadata
+        deployment's SQLite build (the same reasoning every other argus metadata
         read in this module already applies). Device counts are small (tens,
         not thousands) on any real deployment this project targets, so a full
         scan is cheap -- this is a peer-cohort lookup run once per decision
@@ -1939,7 +1939,7 @@ class GraphStore:
     def set_destination_reputation(self, destination_id: str, tier: int,
                                      timestamp: Optional[float] = None) -> None:
         """Writes a live reputation-tier cache onto the shared `destinations` row
-        (v13 full-architecture plan, Phase 1a: network-wide reputation
+        (network-wide reputation
         propagation) -- schema.sql's own `reputation_tier_cache`/`reputation_cached_at`
         columns, confirmed unused by anything before this. Once one device's
         evidence confirms a destination as malicious (see retro_hunter.py's own
@@ -1996,7 +1996,7 @@ class GraphStore:
     def get_device_destinations_since(self, since: float) -> List[Any]:
         """Distinct (device_id, destination_id) pairs observed since `since` --
         used by retro_hunter.py (Phase 6) to re-scan historical destinations
-        against freshly-updated threat intel, replacing v-current's
+        against freshly-updated threat intel, replacing the earlier engine's
         load_historical_domains()'s flat-file JSONL scan with a direct graph query."""
         rows = self._conn.execute(
             "SELECT DISTINCT device_id, destination_id FROM evidence "
@@ -2813,7 +2813,7 @@ class GraphStore:
         self._maybe_commit()
         return cur.rowcount
 
-    # --- decision archival (v13 full-architecture plan, Phase 10a) -------------
+    # --- decision archival -------------
 
     def get_decisions_older_than(self, days: float, now: Optional[float] = None) -> List[Dict[str, Any]]:
         """Read-only: decisions older than the cutoff, same parsed shape as

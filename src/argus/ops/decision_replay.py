@@ -13,9 +13,9 @@ incidents, before it ships live -- not just synthetic test scenarios.
 
 NOT a scheduled job, not part of soc.service -- a manual/CI-style diagnostic
 tool. Run directly:
-  python3 src/v13/ops/decision_replay.py --since-days 7
-  python3 src/v13/ops/decision_replay.py --since-days 30 --device-id <id>
-  python3 src/v13/ops/decision_replay.py --db /path/to/v13_graph.db --since-days 1 --changed-only
+  python3 src/argus/ops/decision_replay.py --since-days 7
+  python3 src/argus/ops/decision_replay.py --since-days 30 --device-id <id>
+  python3 src/argus/ops/decision_replay.py --db /path/to/v13_graph.db --since-days 1 --changed-only
 
 REAL, DOCUMENTED LIMITATION, not hidden: a decision's `rep` (ReputationVector),
 `device_type`, `baseline_familiarity`, and `is_safe` context at the time it was

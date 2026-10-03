@@ -5,16 +5,16 @@ historical threat-hunting surface.
 
 "Show every device that ever touched X" or "trace the full evidence timeline
 behind this decision" as a direct query, not a log grep -- the data's already
-indexed and relational (v13's whole point); this was a query-surface problem,
+indexed and relational (argus's whole point); this was a query-surface problem,
 not a storage problem, so this file is deliberately thin: three small
 functions over GraphStore's own already-built read methods, plus a CLI.
 
 NOT a scheduled job, not part of soc.service -- a manual diagnostic tool for an
 operator or a future session investigating a real incident. Run directly:
 
-  python3 src/v13/ops/threat_hunt.py devices --destination evil.example.com
-  python3 src/v13/ops/threat_hunt.py timeline --decision-id <decision_id>
-  python3 src/v13/ops/threat_hunt.py device --device-id <device_id> [--since-days N]
+  python3 src/argus/ops/threat_hunt.py devices --destination evil.example.com
+  python3 src/argus/ops/threat_hunt.py timeline --decision-id <decision_id>
+  python3 src/argus/ops/threat_hunt.py device --device-id <device_id> [--since-days N]
 """
 import argparse
 import sys
@@ -59,7 +59,7 @@ def decision_timeline(store: GraphStore, decision_id: str) -> Optional[Dict[str,
 def device_history(store: GraphStore, device_id: str, since: float = 0.0) -> Dict[str, Any]:
     """A single device's full evidence + decision history since `since`,
     chronologically merged for a "what has this device actually done" read.
-    Canonicalizes device_id first, matching every other v13 read's own
+    Canonicalizes device_id first, matching every other argus read's own
     convention -- a merged orphan's history is included transparently."""
     canonical = store.resolve_canonical_device_id(device_id)
     evidence_list = sorted(store.get_evidence_for_device(canonical, since=since), key=lambda e: e.timestamp)

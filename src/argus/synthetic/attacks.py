@@ -1,5 +1,5 @@
 """
-v13/synthetic/attacks.py -- Release 15 Sheet 01: synthetic anomaly injection
+argus/synthetic/attacks.py -- Release 15 Sheet 01: synthetic anomaly injection
 generators, the anti-poisoning backbone the plan's Phase 2 backtest and
 Phase 3 autotuner/CL-AFPE both gate on.
 
@@ -8,7 +8,7 @@ injection capability exists anywhere in this codebase before this file --
 only hand-written static test fixtures (tests/test_argus_decision_engine.py)
 and real-incident replays (tests/test_real_world_alert_regression.py).
 
-Each generator returns a list of v13 Evidence items shaped like a real
+Each generator returns a list of argus Evidence items shaped like a real
 attack of that class, using only evidence_type strings already registered
 in hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP -- never a made-up
 type the decision engine wouldn't actually recognize. Every generator

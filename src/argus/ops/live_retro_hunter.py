@@ -1,9 +1,9 @@
 """
-live_retro_hunter.py - schedules v13's RetroHunter (src/v13/retro_hunter.py) against
-`.94`'s own live graph (v13 full-architecture plan, Phase 4).
+live_retro_hunter.py - schedules argus's RetroHunter (src/argus/retro_hunter.py) against
+`.94`'s own live graph.
 
 Registered as its own scheduled job (config.yaml's scheduled_jobs.scheduler.live_retro_hunter,
-same mechanism as live_prune.py). v16: the sole retro-hunt job -- v-current's own
+same mechanism as live_prune.py). v16: the sole retro-hunt job -- the earlier engine's own
 scripts/retro_hunter.py was retired the same release once its findings/local-intel-store
 activity stayed flat across multiple live checks while this job (which by then had reached
 full feature parity: local-intel cross-reference, Telegram notification, and the
@@ -15,21 +15,21 @@ device's very next live decision cycle through the same HypothesisEngine/Decisio
 any other evidence goes through (this exact feedback loop is already proven end-to-end by
 tests/test_argus_integration.py's own Step 8, against a test store).
 
-v13 full-architecture plan, Phase 7 (added after this module's initial Phase 4 build):
+
 cross-device local-intel correlation and Telegram notification, both now wired in here
 -- see retro_hunter.py's own module docstring item #4 for check_local_intel_history()'s
 design, and this module's own _notify_external_ti_findings()/_notify_local_intel_matches()
 below for the notification shape (a direct port of scripts/retro_hunter.py's own
-run_retro_hunt() notification text, using the shared v13/ops/telegram.py helper).
+run_retro_hunt() notification text, using the shared argus/ops/telegram.py helper).
 
 Release 14, Workstream 5 (2026-09-07): both items A25/A26 deliberately deferred are
-now wired in. (1) Per-device job-health breakdown (v1's own
+now wired in. (1) Per-device job-health breakdown (the earlier engine's own
 _count_findings_by_device() equivalent) -- see _count_by_device() below. (2) The
 loop-closing action: when check_local_intel_history() finds a NEWLY-implicated
 device (one that touched an IOC before it was confirmed by a different device),
 this job now ALSO calls ClAfpeEngine.record_confirmed_threat() +
 _apply_sigma_shift(TUNE_UP) for that device -- the same "close the loop" mutation
-v1's own run_retro_hunt() performs, previously named as deferred because it needed
+the earlier engine's own run_retro_hunt() performs, previously named as deferred because it needed
 a ClAfpeEngine instance threaded in, which this phase does. This has a real,
 useful side effect beyond the immediate device: it adds the device to the IOC's own
 confirmed `sources` list, so the SAME match correctly stops re-firing on the next
@@ -58,11 +58,11 @@ from argus.ops.telegram import send_telegram  # noqa: E402
 
 LOGGER = logging.getLogger("live_retro_hunter")
 
-# v1's own scripts/retro_hunter.py's _REASON_PHRASES, ported exactly -- only the
-# reasons this v13 job's own local-intel store can actually carry are included
+# the earlier engine's own scripts/retro_hunter.py's _REASON_PHRASES, ported exactly -- only the
+# reasons this argus job's own local-intel store can actually carry are included
 # (STAGE_1_HARD_STOP/TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP from CL-AFPE's shadow
-# mode, Phase 6b/6e); v1-only reasons (LLM_VALIDATED_MALICIOUS,
-# HIGH_CRITICAL_DECISION) are omitted since nothing in v13 writes those yet.
+# mode, Phase 6b/6e); reasons only the retired script had (LLM_VALIDATED_MALICIOUS,
+# HIGH_CRITICAL_DECISION) are omitted since nothing in argus writes those yet.
 _REASON_PHRASES = {
     "STAGE_1_HARD_STOP": "a hard-stop match against known-bad intel",
     "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP": "a hard-stop that overrode an existing trust-cache entry",
@@ -92,7 +92,7 @@ def _geo_note(geoip_engine: GeoIPEngine, ip: str) -> str:
 
 
 def _count_by_device(items: list, device_id_getter) -> dict:
-    """v13-native equivalent of scripts/retro_hunter.py's own
+    """argus-native equivalent of scripts/retro_hunter.py's own
     _count_findings_by_device() -- a simple {device_id: count} tally, generic over
     both `findings` (Evidence objects, device_id via attribute) and `local_matches`
     (dicts, device_id via key) via the caller-supplied getter."""
@@ -105,7 +105,7 @@ def _count_by_device(items: list, device_id_getter) -> dict:
 
 
 def _close_local_intel_loop(cl_afpe: ClAfpeEngine, matches: list) -> int:
-    """The loop-closing action A25/A26 named as deferred: v1's own run_retro_hunt()
+    """The loop-closing action A25/A26 named as deferred: the earlier engine's own run_retro_hunt()
     doesn't just NOTIFY about a newly-implicated device, it also confirms the
     threat against that device's own CL-AFPE state (record_confirmed_threat() +
     a TUNE_UP sigma-shift, tightening its sensitivity the same way a direct
@@ -146,7 +146,7 @@ def _notify_external_ti_findings(findings: list, days_back: float) -> None:
     if not findings:
         return
     top = findings[:10]
-    lines = [f"\U0001f6a8 <b>v13 Retroactive Threat Hunt: {len(findings)} match(es)</b>",
+    lines = [f"\U0001f6a8 <b>Retroactive Threat Hunt: {len(findings)} match(es)</b>",
              f"Destinations queried in the past {int(days_back)}d, now classified malicious by fresh intel:", ""]
     for f in top:
         lines.append(f"• <code>{f.destination_id}</code> — {f.source}, confidence {f.confidence:.2f}")
@@ -158,14 +158,14 @@ def _notify_external_ti_findings(findings: list, days_back: float) -> None:
 def _notify_local_intel_matches(matches: list, geoip_engine: GeoIPEngine, days_back: float) -> None:
     """Matches run_retro_hunt()'s own local-intel cross-reference notification
     shape (scripts/retro_hunter.py lines 405-434), GeoIP-enriched for any IP
-    match. device_id is used directly as the display label (v13's devices table
+    match. device_id is used directly as the display label (argus's devices table
     has a display_label column, but nothing populates it yet -- a real, minor,
-    tracked simplification versus v1's hostname/display-name map, not a
+    tracked simplification versus the earlier engine's hostname/display-name map, not a
     correctness gap)."""
     if not matches:
         return
     top = matches[:10]
-    lines = [f"\U0001f310 <b>v13 Retroactive Local-Intel Cross-Reference: {len(matches)} match(es)</b>",
+    lines = [f"\U0001f310 <b>Retroactive Local-Intel Cross-Reference: {len(matches)} match(es)</b>",
              f"Devices that touched a since-confirmed-malicious IP/domain in the past {int(days_back)}d:", ""]
     for m in top:
         ip_note = _geo_note(geoip_engine, m["matched_value"]) if m["matched_kind"] == "ip" else ""
@@ -185,7 +185,7 @@ def _notify_local_intel_matches(matches: list, geoip_engine: GeoIPEngine, days_b
         lines.append(f"...and {len(matches) - len(top)} more")
     send_telegram(CONFIG, "\n".join(lines)[:4000])
 
-# v13 full-architecture plan, Phase 1a's item 5: "retro-hunter against the FULL
+# Phase 1a's item 5: "retro-hunter against the FULL
 # retained history, not just recent days" -- now that live_prune.py actually enforces
 # GraphStore's 90-day evidence retention (Phase 1's own follow-up fix), a newly
 # confirmed-malicious destination can be checked against everything any device
@@ -250,7 +250,7 @@ def main() -> None:
 
         # Release 14, Workstream 5 (item 2): close the loop for each newly-implicated
         # device -- record_confirmed_threat() + a sigma TUNE_UP, the same real
-        # mutation v1's own run_retro_hunt() performs, previously deferred pending a
+        # mutation the earlier engine's own run_retro_hunt() performs, previously deferred pending a
         # ClAfpeEngine instance being threaded in here. Uses the SAME store/
         # local_intel this run already has open (still open -- store.close() moved
         # below this block).
@@ -279,7 +279,7 @@ def main() -> None:
                               "local_intel_matches_count": len(local_matches),
                               "local_intel_loop_closed_count": closed_count,
                               # Release 14, Workstream 5 (item 1): per-device breakdown,
-                              # v1's own _count_findings_by_device() equivalent.
+                              # the earlier engine's own _count_findings_by_device() equivalent.
                               "findings_by_device": _count_by_device(findings, lambda e: e.device_id),
                               "local_intel_matches_by_device": _count_by_device(local_matches, lambda m: m.get("device_id")),
                           })

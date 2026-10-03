@@ -1,5 +1,5 @@
 """
-v13/autotune/engine.py -- Release 15 Sheet 03a: the closed-loop autotuner
+argus/autotune/engine.py -- Release 15 Sheet 03a: the closed-loop autotuner
 (sensitivity/threshold tuning half -- CL-AFPE, the FP-suppression half,
 stays its own independent loop, see cl_afpe_trust.py in this same package).
 
@@ -12,7 +12,7 @@ autotuning plan).
 WHAT IT MAY NEVER TOUCH, enforced by construction, not convention: the
 independent-sources minimum, family-collapse rules, `escalated_via_
 persistence` never alone authorizing autonomous containment, and hard-stop
-registry membership are code-level invariants in v13/decision/engine.py,
+registry membership are code-level invariants in argus/decision/engine.py,
 not config -- TUNABLE_PARAMETERS below is an explicit, closed allowlist
 that never includes any of them, so there is no code path by which this
 module could touch them even by a bounded step.
@@ -20,7 +20,7 @@ module could touch them even by a bounded step.
 HONEST SCOPE NOTE: this builds the complete propose/canary/promote/rollback
 INFRASTRUCTURE, versioned in threshold_history (Release 15 schema addition,
 already migrated) and gated by backtest_runs. It is NOT yet wired to make
-v13/decision/engine.py actually READ these promoted values at decision
+argus/decision/engine.py actually READ these promoted values at decision
 time -- that engine currently has very few externally-tunable constants
 (confirmed via direct grep before writing this: _HARD_STOP_FRESHNESS_SECONDS
 and _PARTIAL_SUPPORT_FAMILIES are the only module-level ones, neither on

@@ -3,7 +3,7 @@ devices_api.py -- real device-list and device-detail endpoints for the console U
 replacing its original sample data.
 
 There is no persisted "current state/risk" anywhere in DeviceState/state/ids_state.json
-(confirmed by direct inspection) -- the real source is each device's most recent v13
+(confirmed by direct inspection) -- the real source is each device's most recent argus
 decision, the same way Grafana's own "Master Threat Ledger" panel already sources its
 State/Risk columns (home_ids_decision_state / home_ids_threat_confidence gauges,
 themselves populated from this same per-cycle decision). So a device's identity fields
@@ -12,7 +12,7 @@ DeviceState, while its state/risk_score/confidence come from GraphStore's latest
 decision -- two different sources for one device, merged here.
 
 Top 10 domains (all-time) is deliberately NOT implemented here -- see the note in
-get_device_detail()'s response. The v13 evidence graph only stores evidence-worthy
+get_device_detail()'s response. The argus evidence graph only stores evidence-worthy
 events, not general query volume; that data lives in Pi-hole's own query log (same
 source scripts/top_domains_report.py already uses, but only for a rolling 24h window).
 """
@@ -31,7 +31,7 @@ from middleware.state_client import get_cached_state_manager
 router = APIRouter()
 
 TOP_DOMAINS_NOTE = (
-    "Not available yet -- the v13 evidence graph only stores evidence-worthy events, "
+    "Not available yet -- the evidence graph only stores evidence-worthy events, "
     "not general query volume, so an all-time top-domains-per-device view can't be "
     "built from it. The real data lives in Pi-hole's query log (same source "
     "scripts/top_domains_report.py already uses, but only for a rolling 24h window) -- "

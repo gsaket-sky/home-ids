@@ -1,7 +1,7 @@
 """
-v13 DeterministicValidator (Phase 5 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+DeterministicValidator.
 
-Faithful port of intelligence/ai_soc.py's DeterministicValidator (256 lines, read in
+Ported from the retired intelligence/ai_soc.py's DeterministicValidator (256 lines, read in
 full before writing anything). Every rejection rule and its ordering is copied
 exactly: confirmed-IOC veto, telemetry-claim-vs-reputation veto, the
 _STRONG_ATTACK_DECISION_PATHS override-block, the attack-shaped-evidence structural
@@ -9,13 +9,13 @@ check, the destination-ownership/baseline-familiarity check, the hypothesis-
 independence check, the empty-supporting-evidence check, the self-contradiction
 check, and the circular-reasoning-on-malicious check. Constants
 (ATTACK_SHAPED_EVIDENCE_TYPES, FAMILIARITY_TRUST_BAR) are the SAME ones already
-ported onto v13's DeviceProfileBenignHypothesis (argus/hypotheses/engine.py) -- imported
+ported onto argus's DeviceProfileBenignHypothesis (argus/hypotheses/engine.py) -- imported
 from there, not redefined, so the two consumers can never silently drift apart the
-way Gap 6 found they had in v-current before the fix.
+way Gap 6 found they had in the earlier engine before the fix.
 
-ground_truth is assembled by build_ground_truth() (below) from v13's own
-DecisionEngine result + evidence list -- v13's decision engine doesn't persist
-hee_* fields onto an alert_payload the way v-current's pipeline.py does (v13 has no
+ground_truth is assembled by build_ground_truth() (below) from argus's own
+DecisionEngine result + evidence list -- argus's decision engine doesn't persist
+hee_* fields onto an alert_payload the way pipeline.py does (argus has no
 such payload yet), so this module builds the equivalent structure directly.
 """
 import logging
@@ -28,7 +28,7 @@ _TRUSTED_REP_TIERS = frozenset({0, 1, 2})
 _STRONG_ATTACK_DECISION_PATHS = frozenset({
     "hard_stop", "tier5_confirmed", "tier5_corroborated", "hypothesis_high",
 })
-VALIDATOR_SCHEMA_VERSION = 1  # v13's own versioning starts fresh -- not a continuation of v-current's counter
+VALIDATOR_SCHEMA_VERSION = 1  # argus's own versioning starts fresh -- not a continuation of the earlier engine's counter
 
 LOGGER = logging.getLogger(__name__)
 
@@ -63,8 +63,8 @@ def candidate_alternate_hypotheses(winning_attack_name: str, present_evidence_ty
 def build_ground_truth(decision_result: Dict[str, Any], evidence_list: List[Evidence],
                           rep_tier: Optional[int] = None) -> Dict[str, Any]:
     """Assembles the ground_truth dict DeterministicValidator.validate() expects,
-    from argus's own DecisionEngine.evaluate() output -- the v13-native equivalent of
-    v-current's pipeline.py persisting hee_evidence_types/hee_rep_tier/etc. onto an
+    from argus's own DecisionEngine.evaluate() output -- the argus-native equivalent of
+    pipeline.py persisting hee_evidence_types/hee_rep_tier/etc. onto an
     alert_payload for ollama_soc.py to read back later."""
     winning_attack_name = decision_result.get("hypotheses", {}).get("attack", {}).get("name", "")
     present_evidence_types = {e.evidence_type for e in evidence_list}

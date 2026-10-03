@@ -1,6 +1,5 @@
 """
-live_manager.py - the actual swap-in for `.94`'s live `DeviceIdentityManager`
-(v13 full-architecture plan, Phase 3).
+live_manager.py - the actual swap-in for `.94`'s live `DeviceIdentityManager`.
 
 Real investigation before writing this (not assumed): `core/identity.py`'s
 `DeviceIdentityManager` is NOT just `resolve_device_id()` -- `process_dns_identities()`/
@@ -12,7 +11,7 @@ already-tested machinery, and reinventing it in parallel would risk silently dro
 real side effect. So `LiveIdentityManager` **subclasses** `DeviceIdentityManager` and
 overrides ONLY `resolve_device_id()` -- everything else (Fritz!Box polling, the full
 per-row orchestration, device_type inference, orphan-merge cleanup) is inherited
-unchanged, exactly like the fast-cutover kept v-current's real detectors/mitigation/
+unchanged, exactly like the fast-cutover kept the existing detectors/mitigation/
 alerting untouched and only swapped the decision computation itself.
 
 What the override actually changes, concretely:
@@ -20,7 +19,7 @@ What the override actually changes, concretely:
    (Phase 2's config loader) -- an arbitrary list of named anchors (gateway, NAS, a
    second AP, ...), not just one.
 2. Persists each anchor's learned MAC via `GraphStore.update_device_metadata()`
-   instead of v-current's own single in-memory `_gateway_mac` field -- survives a
+   instead of core/identity.py's own single in-memory `_gateway_mac` field -- survives a
    `soc.service` restart instead of needing to relearn it from the next cycle that
    happens to see the anchor with a MAC attached.
 3. Real MAC-randomization detection (`resolver.is_locally_administered_mac()`) --
@@ -38,7 +37,7 @@ What the override actually changes, concretely:
    before this was allowed to run unattended -- see the dependency map).
 4. `mac_bindings` (branch 3, "does this MAC already resolve to a known device_id")
    is NOT reinvented -- reuses `self.state_manager.get_device_id_for_mac()` directly,
-   v-current's own real, already-persisted-to-disk mechanism, unchanged.
+   core/identity.py's own real, already-persisted-to-disk mechanism, unchanged.
 
 Deliberately NOT covered by Phase 3 (investigated and found to live elsewhere, not in
 identity resolution at all): ARP-spoof-vs-benign-MAC-rotation disambiguation lives in
@@ -51,7 +50,7 @@ see that fix's own separate change.
    Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md; an explicit architecture
    decision, asked and answered by the user rather than defaulted, because the
    identity subsystem has already had 3 real production incidents in this session
-   alone). `_refresh_identity_signals()` override: runs the real v1 update
+   alone). `_refresh_identity_signals()` override: runs the state-side update
    unchanged via `super()`, then mirrors the MAC/IP just recorded into
    `GraphStore.update_device_metadata()`'s `mac_history`/`known_ips_history`
    dicts (`{value: last_seen_timestamp}`, each capped at a bounded size -- see
@@ -66,21 +65,21 @@ see that fix's own separate change.
 
 5. GRAPH-AWARE DEVICE MERGE (added a continuation session after Phase 3's initial
    build, once a real audit found it missing): `_merge_orphan_if_fragmented()`
-   override, folding the SAME live orphan-merge into the v13 graph via
+   override, folding the SAME live orphan-merge into the argus graph via
    `GraphStore.merge_device()` -- audit-preserving (tombstone, never delete,
    `resolve_canonical_device_id()` transparently redirects every later read),
-   unlike v1's own `merge_into_canonical()` which DISCARDS the orphan's
+   unlike core/identity.py's own `merge_into_canonical()` which DISCARDS the orphan's
    accumulated state entirely. Confirmed via direct investigation this was a
    real, live gap: `GraphStore.merge_device()`/`resolve_canonical_device_id()`
    were fully built (matching schema.sql's own explicitly-stated design goal,
-   "a deliberate improvement" over v1's discard-on-merge) but had ZERO callers
-   anywhere in the codebase -- every live orphan-merge event updated v1's
-   `state/ids_state.json` while the v13 graph stayed completely unaware, so an
+   "a deliberate improvement" over core/identity.py's discard-on-merge) but had ZERO callers
+   anywhere in the codebase -- every live orphan-merge event updated core/identity.py's
+   `state/ids_state.json` while the argus graph stayed completely unaware, so an
    orphan's own evidence/decisions kept accumulating in the graph as a
    permanently separate, never-reunited device forever. Best-effort: a graph
-   failure here degrades to "the v1-side merge still happened correctly, only
-   the graph-side mirroring didn't," matching every other v13 graph write's own
-   fail-safe direction -- never blocks or reverts the real (v1) merge, which is
+   failure here degrades to "the state-side merge still happened correctly, only
+   the graph-side mirroring didn't," matching every other argus graph write's own
+   fail-safe direction -- never blocks or reverts the state-side merge, which is
    the one that actually matters for the live pipeline right now.
 """
 import logging
@@ -99,21 +98,21 @@ from argus.identity.resolver import (
 
 LOGGER = logging.getLogger("home_ids.v13_live_identity")
 
-# v-current's and v13's stable_device_id() are independently-maintained but confirmed
+# core/identity.py's and argus's stable_device_id() are independently-maintained but confirmed
 # byte-for-byte identical formulas (both docstrings say so explicitly) -- asserted once
 # here at import time rather than trusted silently, since a future edit to either file
 # drifting out of sync would otherwise fail invisibly (every device_id this manager
-# returns would just be internally self-consistent but wrong relative to v-current's
+# returns would just be internally self-consistent but wrong relative to core/identity.py's
 # own historical device_ids, a very hard bug to notice after the fact).
 assert v_current_stable_device_id("assert-canary") == v13_stable_device_id("assert-canary"), (
-    "core.identity.stable_device_id and v13.identity.resolver.stable_device_id have "
+    "core.identity.stable_device_id and argus.identity.resolver.stable_device_id have "
     "drifted apart -- LiveIdentityManager's device_ids would silently stop matching "
-    "v-current's own historical ones."
+    "the state store's historical ones."
 )
 
 
 def _anchor_device_id(role: str) -> str:
-    """Matches v13.identity.resolver's own private _anchor_device_id() formula exactly
+    """Matches argus.identity.resolver's own private _anchor_device_id() formula exactly
     (duplicated rather than importing a private name, matching resolver.py's own stated
     preference for small stable formulas being duplicated over a live import
     dependency)."""
@@ -138,7 +137,7 @@ class LiveIdentityManager(DeviceIdentityManager):
     def _get_learned_anchor_macs(self) -> Dict[str, str]:
         """Best-effort: a graph failure here degrades to 'no learned anchor MACs yet
         this call' (branch 2 simply won't match), never raises -- matches every other
-        v13 graph-read's fail-safe direction."""
+        argus graph-read's fail-safe direction."""
         if self._graph_store is None or not self._trust_anchors:
             return {}
         now = time.monotonic()
@@ -231,10 +230,10 @@ class LiveIdentityManager(DeviceIdentityManager):
 
     def _refresh_identity_signals(self, locked_state: Any, mac_addr: str, client_ip: str,
                                     hostname: str, zeek_fx: Any, overwrite_hostname: bool = True) -> None:
-        """Runs the real v1 update unchanged via `super()`, then mirrors the
+        """Runs the state-side update unchanged via `super()`, then mirrors the
         MAC/IP just recorded -- see `_mirror_identity_signals()`'s own docstring
         for the full design rationale. A graph failure here never affects the
-        real (v1) state update, matching every other v13 graph write's own
+        state-side update, matching every other argus graph write's own
         fail-safe direction."""
         super()._refresh_identity_signals(
             locked_state, mac_addr, client_ip, hostname, zeek_fx, overwrite_hostname=overwrite_hostname,
@@ -250,14 +249,14 @@ class LiveIdentityManager(DeviceIdentityManager):
         # v13_resolve_device_id()'s own branch-1/2 logic -- a real bug found by this
         # phase's own parity test, not guessed: resolver.py's `_anchor_device_id()`
         # returns a ROLE-based hash (stable_device_id(f"anchor:{role}")), which is a
-        # DIFFERENT value than v-current's real historical formula for its one
+        # DIFFERENT value than core/identity.py's real historical formula for its one
         # existing anchor (gateway_ip): stable_device_id(gateway_ip) itself, the IP
         # string. Using resolver.py's own formula here would have silently reset the
         # gateway's ENTIRE historical baseline/evidence/alert trail (a brand-new
         # device_id) the moment this manager went live. For an anchor WITH a
-        # configured ip, this uses v-current's exact formula for full migration
+        # configured ip, this uses core/identity.py's exact formula for full migration
         # continuity; a role-only anchor (no ip configured, a real but rare case)
-        # has no v-current-compatible formula to match, so it falls back to the
+        # has no core/identity.py-compatible formula to match, so it falls back to the
         # role-based id -- there's nothing to be compatible WITH in that case anyway.
         for role, anchor in self._trust_anchors.items():
             if anchor.ip and anchor.ip == client_ip:
@@ -294,7 +293,7 @@ class LiveIdentityManager(DeviceIdentityManager):
 
         # Delegate the remaining branches (trackable IP / hostname / MAC fallback /
         # raw IP) to the pure function -- trust_anchors is deliberately omitted here
-        # since 1/2 are already fully handled above with the v-current-compatible
+        # since 1/2 are already fully handled above with core/identity.py-compatible
         # formula; letting the pure function re-match them with its own role-based
         # formula would silently undo that.
         #
@@ -315,9 +314,9 @@ class LiveIdentityManager(DeviceIdentityManager):
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
                                       ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
-        """Runs the real v1 merge unchanged (every side effect -- ml_registry/
+        """Runs the state-side merge unchanged (every side effect -- ml_registry/
         familiarity/ips_mitigator/evidence_store/metrics_exporter cleanup -- still
-        happens exactly as before), then mirrors the SAME merge into the v13
+        happens exactly as before), then mirrors the SAME merge into the argus
         graph if it actually happened. See this module's own top-of-file item 5
         for the full design rationale."""
         orphan_id = super()._merge_orphan_if_fragmented(
@@ -329,8 +328,8 @@ class LiveIdentityManager(DeviceIdentityManager):
             self._graph_store.merge_device(orphan_id, dev_id)
         except Exception as e:
             LOGGER.warning(
-                "Failed to mirror identity merge (orphan=%s -> canonical=%s) into the v13 "
-                "graph -- the real (v1) merge above already succeeded and is unaffected: %s",
+                "Failed to mirror identity merge (orphan=%s -> canonical=%s) into the "
+                "graph -- the state merge above already succeeded and is unaffected: %s",
                 orphan_id, dev_id, e,
             )
         return orphan_id

@@ -262,12 +262,12 @@ class ThreatSignalDetector:
         if is_local_exfil_dest:
             pass
         elif outbound_z > 5.0 and outbound_bytes > 2500000:
-            # BUGFIX (v13 full-architecture plan, Phase 9): domain= was never passed
+            # BUGFIX: domain= was never passed
             # here, unlike the dns_tunnel_v2 blocks above -- exfil_dest_ip is already
             # computed and already used for the _is_local_dest() gate just above, so
             # this is a real destination this Evidence item can carry, not a new
-            # computation. Benefits v-current's own alert display directly (the same
-            # class of fix dns_tunnel_v2 already got) and lets v13's evidence ingest
+            # computation. Benefits the alert display directly (the same
+            # class of fix dns_tunnel_v2 already got) and lets argus's evidence ingest
             # receive a real .domain at the source instead of needing
             # live_engine.py's fallback_context workaround (which stays in place as
             # a safety net regardless, not removed by this fix).
@@ -322,7 +322,7 @@ class ThreatSignalDetector:
         slow_beacon_domain = next(iter(features.get("beaconing_c2_1h_domains") or []), None)
         jitter_beacon_domain = next(iter(features.get("beaconing_c2_domains") or []), None)
 
-        # BUGFIX (v13 full-architecture plan, Phase 9): domain= added to all three
+        # BUGFIX: domain= added to all three
         # branches below, same reasoning as zeek_exfiltration above -- last_dest_ip
         # is already computed and already used by the third branch's own
         # _is_local_dest() gate. NOTE (deliberately not "fixed" beyond this phase's

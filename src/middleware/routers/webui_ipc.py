@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from middleware.auth import verify_token, CONFIG
 from core.state_guard import StateManager
 from core.device_labels import remove_label
+from core.device_purge import request_purge
 
 LOGGER = logging.getLogger("home_ids.webui_ipc")
 
@@ -104,6 +105,9 @@ def ipc_purge_device(device_id: str, token: str = Depends(verify_token)):
 
     sm.remove_device(device_id)
     sm.flush_to_disk()
+    # The running engine holds the device in memory too and would write it back: it applies this request on its
+    # next cycle (core/device_purge.py).
+    request_purge(state_dir, device_id)
 
     # Best-effort: never fatal to the purge itself.
     _purge_learned_fp_values(state_dir, device_id)

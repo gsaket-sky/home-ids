@@ -15,7 +15,7 @@ NO new instrumentation:
   every corroboration-driven auto-resolution, with a timestamp and a
   metadata.source field distinguishing HOW it was granted (operator tap vs.
   the autonomous Stage 2/3 ML path vs. the autonomous Stage 1b local-origin
-  path vs. the original v1-to-Argus migration).
+  path vs. the original migration to argus).
 - cl_afpe_trust (GraphStore.get_recent_composite_trust()): the "still
   building trust, not yet resolved" counterpart -- tuples that have SOME
   corroboration but haven't crossed composite_trust.py's own suppression

@@ -1,5 +1,5 @@
 """
-v13 retro-hunter (Phase 6 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+Retro-hunter.
 
 Faithful port of scripts/retro_hunter.py's CORE loop (451 lines, read in full
 before writing anything): re-scan historical destinations against freshly-updated
@@ -10,7 +10,7 @@ with Phases 4/5's own honest cuts, not accidents:
 1. THREAT-INTEL LOOKUP IS AN INJECTED DEPENDENCY, not a reimplementation of
    intelligence/threat_intel.py's ThreatIntel class (URLHaus/FeodoTracker/
    ThreatFox/OTX feed integration -- its own substantial, unresearched subsystem).
-   Callers pass a `lookup: Callable[[str], Optional[dict]]` -- v-current's real
+   Callers pass a `lookup: Callable[[str], Optional[dict]]` -- the live
    ThreatIntel.lookup_domain() has exactly this shape (domain -> {confidence,
    tags, source} or None), so wiring the real one in later is a one-line change,
    not a redesign.
@@ -26,12 +26,12 @@ with Phases 4/5's own honest cuts, not accidents:
 
 NOT PORTED HERE (a deliberate module-boundary choice, not a scope cut): Telegram
 notification and GeoIP-enriched reporting stay OUT of this module -- an
-orchestration concern, kept out for testability. Callers (v13/ops/live_retro_hunter.py)
+orchestration concern, kept out for testability. Callers (argus/ops/live_retro_hunter.py)
 get the finding/match lists back and decide how to notify, the same "hand data
 back, let the caller act" shape CL-AFPE's MarkFalsePositiveResult already uses.
 See that ops module for Phase 7's Telegram/GeoIP wiring.
 
-3. NETWORK-WIDE REPUTATION PROPAGATION (v13 full-architecture plan, Phase 1a,
+3. NETWORK-WIDE REPUTATION PROPAGATION (the graph-engine migration, Phase 1a,
    added after this module's initial Phase 6 build): every confirmed destination
    also gets `store.set_destination_reputation(dest, tier=5, ...)` called once,
    writing onto the shared `destinations` row so ANY other device touching that
@@ -40,20 +40,20 @@ See that ops module for Phase 7's Telegram/GeoIP wiring.
    happened to already know about. A genuinely different mechanism from #2 above
    (a per-device Evidence write-back) -- this one is destination-scoped, not
    device-scoped, closing the gap check_local_intel_history() addresses for
-   v-current's own separate LocalConfirmedIntel store.
+   the shared LocalConfirmedIntel store.
 
-4. LOCAL-INTEL CROSS-DEVICE CORRELATION (v13 full-architecture plan, Phase 7):
+4. LOCAL-INTEL CROSS-DEVICE CORRELATION:
    check_local_intel_history() below is the "not yet ported" item #1 named at the
    top of this docstring, now built. Graph-native port of
    scripts/retro_hunter.py's own check_local_intel_history() (lines 197-258) --
    same exclusion rule (a device already among an IOC's own confirmed `sources`
    is not a new finding), same {device_id, matched_kind, matched_value,
-   confirmed_by, first_confirmed, count, reason} shape -- but reads v13's OWN
+   confirmed_by, first_confirmed, count, reason} shape -- but reads argus's OWN
    graph-derived destination history (get_device_destinations_since(), the SAME
-   query hunt() itself already uses) instead of v1's flat alerts.json log, and
+   query hunt() itself already uses) instead of the earlier engine's flat alerts.json log, and
    classifies each destination_id as "ip"/"domain" via the same _looks_like_ip()
-   GraphStore's own insert_evidence() already uses (v13 Evidence has one
-   destination_id field, not v1's separate queried_domain/destination_ip pair).
+   GraphStore's own insert_evidence() already uses (argus Evidence has one
+   destination_id field, not the earlier engine's separate queried_domain/destination_ip pair).
 
    Checked against the shared confirmed-intel store (state/local_confirmed_intel.json),
    the one the live CL-AFPE records into when its Stage-1 hard stop confirms a threat for
@@ -72,7 +72,7 @@ from intelligence.local_intel import LocalConfirmedIntel
 
 def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
                                        refresh: bool = True) -> Callable[[str], Optional[Dict[str, Any]]]:
-    """Wires in v-current's REAL ThreatIntel (intelligence/threat_intel.py,
+    """Wires in the live ThreatIntel (intelligence/threat_intel.py,
     URLHaus/FeodoTracker/ThreatFox/OTX) as RetroHunter's injected lookup --
     confirmed via direct read that ThreatIntel.lookup_domain(domain) already
     returns exactly the Optional[dict] shape ({confidence, tags, source} or
@@ -81,7 +81,7 @@ def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
 
     refresh=True (the real-usage default) calls ThreatIntel._refresh_all() once
     up front -- a real network call against external feeds, matching
-    v-current's own run_retro_hunt() -- so this factory itself is NOT called
+    the earlier engine's own run_retro_hunt() -- so this factory itself is NOT called
     from any test (tests use a plain fake callable instead, see
     tests/test_argus_retro_hunter.py). Set refresh=False only when reusing an
     already-warm on-disk cache from a prior run without paying for a fresh
@@ -124,8 +124,8 @@ class RetroHunter:
         # Matches load_historical_domains()'s own dedup-by-domain behavior: a
         # domain looked up once here, even if multiple devices touched it, still
         # only calls threat_intel_lookup() once per distinct destination -- but
-        # unlike v1 (which discards per-device attribution entirely once
-        # deduped), each match is still written back per-DEVICE below, since v13
+        # unlike the earlier engine (which discards per-device attribution entirely once
+        # deduped), each match is still written back per-DEVICE below, since argus
         # evidence is inherently device-attributed and losing that would be a
         # real regression, not a neutral simplification.
         destinations = {dest for _, dest in pairs}
@@ -135,7 +135,7 @@ class RetroHunter:
             if result:
                 intel_by_destination[dest] = result
 
-        # Phase 1a (v13 full-architecture plan): network-wide reputation propagation.
+        # Phase 1a: network-wide reputation propagation.
         # A retro-hunt confirmation IS exactly a "one device's evidence confirms a
         # destination as malicious" moment (ReputationVector's own tier-5 docstring:
         # "corroborated (TI/VT match...) can justify auto-block") -- write it once per
@@ -176,7 +176,7 @@ class RetroHunter:
 
     def check_local_intel_history(self, local_intel: LocalConfirmedIntel, days_back: float = 14,
                                      now: Optional[float] = None) -> List[Dict[str, Any]]:
-        """v13 full-architecture plan, Phase 7 -- see this module's own top-of-file
+        """the graph-engine migration, Phase 7 -- see this module's own top-of-file
         docstring item #4 for the full design rationale. Matches
         scripts/retro_hunter.py's real check_local_intel_history() exclusion rule
         exactly: a device already among an IOC's own confirmed `sources` is not a

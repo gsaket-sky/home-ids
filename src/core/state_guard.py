@@ -49,7 +49,7 @@ class StateManager:
                   graph_store: Optional[Any] = None):
         self.state_path = Path(state_path)
         self.max_devices = max_devices
-        # v13 full-architecture plan, device-state unification: OPTIONAL write-only
+        # device-state unification: OPTIONAL write-only
         # graph mirror target for flush_to_disk()'s own cold-field snapshot -- see
         # _mirror_graph_metadata()'s docstring. None (the default, and every
         # pre-existing caller/test) means flush_to_disk() behaves EXACTLY as before
@@ -406,6 +406,12 @@ class StateManager:
         with self._global_lock:
             return device_id in self._states
 
+    def get_device_labels(self, device_id: str):
+        """(hostname, device_type) of a tracked device, or None."""
+        with self._global_lock:
+            state = self._states.get(device_id)
+            return (state.hostname, state.device_type) if state is not None else None
+
     def remove_device(self, device_id: str) -> bool:
         """WebUI Maintenance page's "Remove Device" action (PRODUCTIZATION_ROADMAP.md
         Phase 4) -- permanently forgets a device's tracked profile: risk history,
@@ -415,9 +421,9 @@ class StateManager:
         entirely" action, irreversible for that device's history. Also drops any
         MAC/IP reverse-index entries pointing at it, so a stale index never resolves to a
         pruned device_id (same defensive pattern get_device_id_for_mac/_ip already use).
-        Caller is responsible for the matching cleanup in the sibling JSON side files
-        (device_labels.json) and the graph -- this method
-        only owns in-memory/persisted StateManager state."""
+        Caller is responsible for the matching cleanup elsewhere (device_labels.json, the
+        graph, and the running engine via core/device_purge.py) -- this method only owns
+        in-memory/persisted StateManager state."""
         with self._global_lock:
             existed = device_id in self._states
             self._states.pop(device_id, None)
@@ -984,7 +990,7 @@ class StateManager:
                 for dev_id, state in self._states.items():
                     devices_snapshot[dev_id] = state.to_dict()
                     if self._graph_store is not None:
-                        # v13 full-architecture plan, device-state unification: cheap,
+                        # device-state unification: cheap,
                         # in-memory-only snapshot of the COLD field subset (see
                         # DeviceState.to_graph_metadata()'s own docstring for exactly
                         # which fields and why) -- taken under the SAME lock as
@@ -1094,10 +1100,10 @@ class StateManager:
             return False
 
     def _mirror_graph_metadata(self, graph_metadata_snapshot: Dict[str, dict]) -> None:
-        """v13 full-architecture plan, device-state unification: best-effort,
+        """device-state unification: best-effort,
         write-only mirror of each device's COLD state fields into
         GraphStore.update_device_metadata() -- extends the SAME durable-mirror
-        pattern src/v13/identity/live_manager.py already established for MAC/IP
+        pattern src/argus/identity/live_manager.py already established for MAC/IP
         history to the rest of a device's cold identity/audit fields (hostname,
         device_type, confirmed_threat_count, fp_count, etc.). Deliberately never
         read back on any hot path -- flush_to_disk()'s local DeviceState/

@@ -1,9 +1,9 @@
 """
-v13 dual-tier Ollama client (Phase 5 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+Dual-tier Ollama client.
 
 Implements decision #3's resolution (2026-09-05, real-data evidence, see the
 dependency map's Ollama spike sections): full structured Tier-2 analysis always
-goes to a remote, capable model -- exactly like v-current's ollama_soc.py/
+goes to a remote, capable model -- exactly like the earlier engine's ollama_soc.py/
 _query_ollama() (scripts/ollama_soc.py:796-818, read directly) -- while a local
 small model on-device only ever does lightweight triage (a coarse "does this need
 deeper review" signal), never the full multi-field contract that real-data testing
@@ -16,7 +16,7 @@ of the Phase 0 spike found EVERY model (0.5B through 3B) literally echoing a
 prose-described `"benign|malicious"` placeholder verbatim instead of picking a
 value; Round 2 fixed this completely by switching to a real schema. This is
 carried into both FULL_ANALYSIS_SCHEMA and TRIAGE_SCHEMA below -- there is no
-prose-schema code path in this client at all, unlike v-current's `_query_ollama()`
+prose-schema code path in this client at all, unlike the earlier engine's `_query_ollama()`
 which still uses `"format": "json"` (a bug this client structurally cannot have).
 """
 import json
@@ -129,7 +129,7 @@ class OllamaClient:
 
     def query_full_analysis(self, prompt_text: str, timeout: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """Always remote -- the full structured Tier-2 contract, matching
-        v-current's own architecture for the hard cases. Never routed to a local
+        the earlier engine's own architecture for the hard cases. Never routed to a local
         model; that's the whole point of decision #3's resolution."""
         return self._query(self.remote_url, self.remote_model, FULL_ANALYSIS_SYSTEM_PROMPT,
                              prompt_text, FULL_ANALYSIS_SCHEMA, timeout=timeout)
@@ -147,11 +147,11 @@ class OllamaClient:
 
 def build_evidence_prompt(device_id: str, evidence_list, relevance: Optional[Dict[str, Any]] = None,
                             candidate_hypotheses: Optional[list] = None) -> str:
-    """v13-native prompt builder -- operates on v13 Evidence objects directly
-    (evidence_type/value/confidence/destination_id/timestamp), not v-current's
+    """argus-native prompt builder -- operates on argus Evidence objects directly
+    (evidence_type/value/confidence/destination_id/timestamp), not the earlier engine's
     already-published alert_payload dict shape (ollama_soc.py's
     _build_evidence_only_payload operates on THAT, a structurally different input
-    v13 doesn't have since nothing gets 'published' to a v1-shaped alert log)."""
+    argus doesn't have since nothing gets 'published' to an alerts.json-shaped log)."""
     payload = {
         "device_id": device_id,
         "evidence": [

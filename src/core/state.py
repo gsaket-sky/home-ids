@@ -244,7 +244,7 @@ class DeviceState:
         }
 
     def to_graph_metadata(self) -> dict:
-        """v13 full-architecture plan, device-state unification: the COLD subset of
+        """device-state unification: the COLD subset of
         to_dict() -- durable, low-churn identity/audit fields worth mirroring into
         GraphStore.update_device_metadata() (see StateManager.flush_to_disk()'s own
         call site). Deliberately excludes every HOT field to_dict() also carries:

@@ -22,7 +22,7 @@ class ZeekNetworkDetector:
                 # way to tell WHICH ja3/ja4 hash fired, so nothing downstream could ever
                 # answer "did another device see this SAME fingerprint" -- the hash
                 # itself was computed by Zeek and available on `evt`, just never
-                # propagated past this detector. v13/graph/store.py's
+                # propagated past this detector. argus/graph/store.py's
                 # get_devices_sharing_provenance() is the new consumer.
                 fingerprint_hash = evt.get("ja3") if evt_type == "malicious_ja3" else evt.get("ja4")
                 ev_list.append(Evidence(

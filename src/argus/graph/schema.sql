@@ -1,4 +1,4 @@
--- v13 EvidenceGraph SQLite schema (design pass, Phase 0 -- see
+-- argus EvidenceGraph SQLite schema (design pass, Phase 0 -- see
 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md). This file documents the design;
 -- graph/store.py (Phase 1) is the actual read/write API built on top of it. Answers
 -- HEE_ROADMAP.md item 4's storage objection directly: a real embedded database with
@@ -39,7 +39,7 @@ CREATE TABLE devices (
 CREATE INDEX idx_devices_merged_into ON devices(merged_into_device_id) WHERE merged_into_device_id IS NOT NULL;
 
 -- One row per distinct domain/IP ever targeted. Reputation tier is a cache (the
--- authoritative source stays whatever live reputation classifier v13 wires in) --
+-- authoritative source stays whatever live reputation classifier argus wires in) --
 -- refreshed on read if stale, never trusted blindly past its own TTL.
 CREATE TABLE destinations (
     destination_id      TEXT PRIMARY KEY,  -- normalized domain or IP string
@@ -92,7 +92,7 @@ CREATE TABLE hypotheses (
 );
 
 -- One row per decision cycle's verdict for a device. mechanism_flags_json records
--- which v13 mechanisms were shadow vs. live AT THE TIME -- essential for the
+-- which argus mechanisms were shadow vs. live AT THE TIME -- essential for the
 -- automated incremental-flip design: a divergence found after a mechanism flipped
 -- live means something different than one found while it was still shadow-only.
 CREATE TABLE decisions (
@@ -114,7 +114,7 @@ CREATE INDEX idx_decisions_device_ts ON decisions(device_id, timestamp);
 -- forces a full scan+sort every time the tab loads.
 CREATE INDEX idx_decisions_timestamp ON decisions(timestamp);
 
--- v13 full-architecture plan, IPS containment unification: a write-only AUDIT
+-- IPS containment unification: a write-only AUDIT
 -- MIRROR of src/mitigation/ips.py's real containment state (StateManager's own
 -- ips_state dict stays the live, synchronous, hot-path source of truth -- the
 -- actuator logic and its cooldown/retry-queue bookkeeping all need that fast,
@@ -196,7 +196,7 @@ CREATE INDEX idx_edges_relation ON edges(relation);
 
 -- Closed-loop autotuning architecture (Release 15). One row per (device, metric,
 -- hour-of-day, regime) -- the Bayesian conjugate posterior + BOCPD run-length state
--- that replaces v-current's plain EWMABaseline for this metric/hour. regime_id
+-- beside the pipeline's plain EWMABaseline (core/state.py) for this metric/hour. regime_id
 -- increments on a detected changepoint; prior-regime rows are retained (not
 -- overwritten) for reset/undo traceability, not deleted on promotion.
 CREATE TABLE IF NOT EXISTS device_baselines (

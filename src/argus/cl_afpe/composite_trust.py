@@ -1,5 +1,5 @@
 """
-v13/cl_afpe/composite_trust.py -- Release 15 Sheet 03b: CL-AFPE's
+argus/cl_afpe/composite_trust.py -- Release 15 Sheet 03b: CL-AFPE's
 six-dimensional composite trust key (device x behavior_fingerprint x
 destination_class x hypothesis x evidence_family x regime), persisted in
 cl_afpe_trust (already migrated).

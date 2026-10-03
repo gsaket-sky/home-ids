@@ -1,14 +1,14 @@
 """
-v13 evidence ingest adapter (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
-Converts v-current's Evidence (intelligence/hypotheses/evidence.py) into v13's
-Evidence v2 (v13/evidence/model.py) at one chokepoint, so every v13 module downstream
+Evidence ingest adapter.
+Converts detector Evidence (intelligence/hypotheses/evidence.py) into argus's
+Evidence v2 (argus/evidence/model.py) at one chokepoint, so every argus module downstream
 can rely on mandatory destination attribution without re-deriving it per detector.
 
 HONEST SCOPE NOTE (do not overclaim): this adapter guarantees every v2 Evidence item
 HAS a destination_id (NO_DESTINATION when nothing better is available) -- it does
 NOT retroactively fix the two detectors (zeek_exfiltration, zeek_beaconing --
 threat_signals.py:247-274, confirmed via direct research this session) that build
-their v1 Evidence without ever setting .domain at all. Fixing THOSE at the source
+their detector Evidence without ever setting .domain at all. Fixing THOSE at the source
 means threading real dest_ip/domain context into those two detectors' own call
 sites -- separate, tracked, not-yet-done work (see the dependency map's open items).
 This adapter's `fallback_context` param exists specifically so a caller that HAS
@@ -36,16 +36,16 @@ def _looks_like_ip(value: str) -> bool:
 
 def convert(v1_evidence: Any, independence_family: str,
              fallback_context: Optional[Dict[str, Any]] = None) -> Evidence:
-    """Converts one v-current Evidence item to v13 Evidence v2.
+    """Converts one detector Evidence item to argus Evidence v2.
 
     independence_family is REQUIRED and passed explicitly by the caller (from
     hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP, Phase 3) rather than
-    read off v1's own `independence_group` -- v1's field conflates "which family
-    this evidence belongs to for reporting" with what v13 needs independence_family
+    read off detector Evidence's own `independence_group` -- that field conflates "which family
+    this evidence belongs to for reporting" with what argus needs independence_family
     to mean specifically ("what can legitimately corroborate this for scoring
     purposes"), the exact Phase 64 category-error this project already hit once.
-    Reusing v1's value blindly would silently reintroduce that same conflation
-    into v13 -- so it's never read from v1_evidence here, even though the field
+    Reusing that value blindly would silently reintroduce that same conflation
+    into argus -- so it's never read from v1_evidence here, even though the field
     exists and looks tempting to reuse.
 
     fallback_context, if given, may carry 'dest_ip' and/or 'dest_domain' -- checked

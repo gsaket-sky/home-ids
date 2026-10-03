@@ -1,5 +1,5 @@
 """
-live_decision_archive.py - v13 full-architecture plan, Phase 10a: enforces
+live_decision_archive.py - enforces
 schema.sql's own documented decision-retention policy ("decisions: kept 1 year, then
 archived (exported, not deleted)") -- nothing enforced this before this file existed,
 the same real motivation live_prune.py had for evidence's own 90-day policy before it
@@ -7,7 +7,7 @@ existed.
 
 Same shape as live_prune.py: a scheduled job (config.yaml's
 scheduled_jobs.scheduler.live_decision_archive) against `.94`'s own live graph, using
-the SAME state/v13_graph.db path every other v13 ops file writes to. Scheduled
+the SAME state/v13_graph.db path every other argus ops file writes to. Scheduled
 MONTHLY, not daily -- matches the policy's own year-scale cadence, unlike
 live_prune.py's own 90-day-window daily cadence.
 
@@ -25,8 +25,8 @@ Retention is hardware_profile-driven, matching live_prune.py's own precedent
 (_RETENTION_DAYS_BY_PROFILE) -- a pi_8gb deployment archives sooner (180 days)
 than the schema-documented 365-day default, since a Pi's shared resource budget
 means average decision row size matters more there, and this matters more now
-that raw_payload_json carries the full alert_payload superset (v13 full-
-architecture plan, alert/decision unification) instead of just v13's own internal
+that raw_payload_json carries the full alert_payload superset (argus full-
+architecture plan, alert/decision unification) instead of just argus's own internal
 decision dict. x86_16gb/custom keep the original 365-day default unchanged.
 """
 import json

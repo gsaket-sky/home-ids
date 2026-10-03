@@ -693,7 +693,7 @@ def is_local_or_multicast_destination(dest: str) -> bool:
     already applies for the local confirmed-intel store, after that store was found
     poisoned hundreds of times over by exactly this traffic shape (ff02::fb,
     224.0.0.22, 224.0.0.251 -- see that method's own docstring). Centralized here so
-    the v13 cross-device-correlation/peer-deviation graph queries (`graph/store.py`)
+    the argus cross-device-correlation/peer-deviation graph queries (`graph/store.py`)
     can apply the same guard instead of re-deriving it a fourth time.
 
     @lru_cache (2026-09-28, live root-cause investigation): a pure function of

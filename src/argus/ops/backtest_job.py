@@ -1,11 +1,11 @@
 """
-v13/ops/backtest_job.py -- Release 15 Sheet 02: scheduled nightly backtest
+argus/ops/backtest_job.py -- Release 15 Sheet 02: scheduled nightly backtest
 harness.
 
 Combines two real checks that existed before this file only as separate,
 manual tools -- tests/test_real_world_alert_regression.py (curated
 real-incident golden set, previously run by hand) and Sheet 01's synthetic
-injection sweep (src/v13/synthetic/injector.py) -- into one scheduled job
+injection sweep (src/argus/synthetic/injector.py) -- into one scheduled job
 whose pass/fail becomes Sheet 03's actual autotuner gate.
 
 DELIBERATE DEVIATION FROM THE PLAN'S ORIGINAL WORDING, noted honestly: the
@@ -22,9 +22,9 @@ carefully and separately, not bundled into this commit.
 
 Wired into config.yaml's scheduled_jobs.scheduler.backtest_job (Release 15
 follow-up), nightly at 3:30am, same "script" override pattern every other
-v13/ops/*.py scheduled job uses. This module is written to be callable
+argus/ops/*.py scheduled job uses. This module is written to be callable
 either as a scheduled subprocess via its own __main__, or directly imported
-and called, matching every other v13/ops/*.py module's shape.
+and called, matching every other argus/ops/*.py module's shape.
 """
 import argparse
 import json
@@ -38,12 +38,12 @@ from typing import Any, Dict, List, Optional
 
 # BUGFIX (found live on .94 while dynamically testing this job ahead of its
 # first-ever scheduled run): this module had NO sys.path setup at all, unlike
-# every other v13/ops/*.py scheduled job (live_prune.py, live_retro_hunter.py,
-# etc., all `sys.path.append(.../src)` before their own v13.* imports).
+# every other argus/ops/*.py scheduled job (live_prune.py, live_retro_hunter.py,
+# etc., all `sys.path.append(.../src)` before their own argus.* imports).
 # Running it directly (as config.yaml's scheduler.backtest_job now does every
 # night, or as scripts/scheduler.py's own bare `subprocess.Popen([sys.executable,
 # script_path])` with no PYTHONPATH) failed immediately with `ModuleNotFoundError:
-# No module named 'v13'`, silently -- scheduler.py doesn't capture or check
+# No module named 'argus'`, silently -- scheduler.py doesn't capture or check
 # subprocess output/exit codes, so this would have failed every single night
 # with nothing surfacing it. This never showed up in this module's own test
 # suite because that suite already sets up sys.path itself before importing.
@@ -59,7 +59,7 @@ from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
 from utils import is_resource_pressure_active  # noqa: E402
 
-LOGGER = logging.getLogger("v13.ops.backtest_job")
+LOGGER = logging.getLogger("argus.ops.backtest_job")
 
 _GOLDEN_SET_SCRIPT = Path(__file__).resolve().parent.parent.parent.parent / "tests" / "test_real_world_alert_regression.py"
 _GOLDEN_SET_TIMEOUT_SECONDS = 120
@@ -1473,7 +1473,7 @@ def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float)
 
     HONEST SCOPE NOTE: global-only (a 'trusts' edge isn't consistently
     device-scoped -- some carry a device_id in metadata, most don't, matching
-    v1's own documented "globally unscoped" trust-cache design), and tighten-only
+    the earlier engine's own documented "globally unscoped" trust-cache design), and tighten-only
     (shorten the TTL). Real evidence: a destination that was actively trust-cached
     (an unexpired 'trusts' edge existed) when a NEW piece of attack-shaped
     evidence for that SAME destination correlated with a CONFIRMED_THREAT
@@ -1689,7 +1689,7 @@ def run_backtest(store: GraphStore, device_ids: Optional[List[str]] = None,
 
     Drift check (Sheet 00's posterior-trajectory drift check, this module's
     own former honest gap -- drift_result_json used to be written as an
-    empty {} placeholder every run): v13.autotune.engine.compute_drift_result()
+    empty {} placeholder every run): argus.autotune.engine.compute_drift_result()
     flags a tunable parameter whose promoted changes trend monotonically
     toward "everything looks more benign" with no matching regime_change to
     explain it. Deliberately NOT folded into `overall_pass` -- a real,

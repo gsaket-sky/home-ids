@@ -94,7 +94,7 @@ ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 # BUGFIX (explicit user request, 2026-09-09): "zeek_notice" fragmented into 4
 # evidence_type values by tier (utils.py's ZEEK_NOTICE_EVIDENCE_TYPES) -- weak
 # (routine TCP-framing/capture-timing noise, not attacker behavior) deliberately
-# excluded here too, matching v13's own DeviceProfileBenignHypothesis treatment,
+# excluded here too, matching argus's own DeviceProfileBenignHypothesis treatment,
 # so the two engines don't silently diverge on this exact question again.
 ATTACK_SHAPED_EVIDENCE_TYPES = frozenset({
     "dns_dga_burst", "dns_tunnel_v2", "zeek_lateral_scan", "malicious_ja3",

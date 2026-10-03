@@ -1,6 +1,6 @@
 """
-v13 identity resolver (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
-Generalizes v-current's resolve_device_id() (core/identity.py) from one hardcoded
+Identity resolver.
+Generalizes core/identity.py's resolve_device_id() from one hardcoded
 gateway_ip/gateway_mac special case to an arbitrary list of `trust_anchors`
 (config.yaml.example's `network.trust_anchors`) -- an IDS product needs to
 recognize "this is a well-known infrastructure device" for however many such
@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 # Matches core/identity.py's own _GENERIC_HOSTNAMES exactly (confirmed via direct
-# read) -- kept here rather than imported, since v13 is meant to eventually stand
-# alone from v-current, not share a live import dependency on it.
+# read) -- kept here rather than imported, since argus is meant to eventually stand
+# alone from core/identity.py, not share a live import dependency on it.
 _GENERIC_HOSTNAMES = frozenset({
     "android", "iphone", "ipad", "ipod", "macbook", "macbook-pro", "macbook-air",
     "imac", "apple-tv", "desktop", "laptop", "pc", "workstation", "unknown",
@@ -55,7 +55,7 @@ def stable_device_id(raw_client: str) -> str:
 
 
 def is_locally_administered_mac(mac: Optional[str]) -> bool:
-    """v13 full-architecture plan, Phase 3: real MAC-randomization detection --
+    """real MAC-randomization detection --
     confirmed via direct investigation that NO such check existed anywhere in this
     codebase before this function (the only prior "signal" was OUI-lookup failure in
     utils.get_mac_vendor(), an indirect side effect, not a deliberate flag). The
@@ -89,10 +89,10 @@ def is_generic_hostname(hostname: Optional[str]) -> bool:
 
 
 def _is_trackable_ip(ip: str) -> bool:
-    """JUDGMENT CALL (not a confirmed line-for-line match of v-current -- the excerpt
+    """JUDGMENT CALL (not a confirmed line-for-line match of core/identity.py -- the excerpt
     read this session didn't show this specific gate): treats any parseable IP as
     trackable except loopback/unspecified. Private-range RFC1918 addresses are the
-    common case on a LAN, but a v13 deployment may reasonably see other private
+    common case on a LAN, but a argus deployment may reasonably see other private
     ranges too (ULA IPv6, etc.) -- this doesn't hard-restrict to IPv4 RFC1918 the
     way that might over-narrow a generalized product's actual deployments."""
     try:
@@ -105,7 +105,7 @@ def _is_trackable_ip(ip: str) -> bool:
 def _anchor_device_id(anchor: TrustAnchor) -> str:
     """Continuity-safe by construction (2026-09-27, Phase 11 of the autonomy-
     completion effort). An anchor WITH a configured ip resolves via
-    stable_device_id(anchor.ip) directly -- the same formula pre-v13 code always
+    stable_device_id(anchor.ip) directly -- the same formula pre-argus code always
     used for its one anchor (gateway_ip) -- so a newly-configured trust anchor
     resolves to the SAME device_id its history already lives under, not a fresh
     role-based hash that would silently reset it. A role-only anchor (no ip

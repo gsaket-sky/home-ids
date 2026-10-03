@@ -120,13 +120,13 @@ class HardStopRule:
     own_families: FrozenSet[str] = field(default_factory=frozenset)
 
 
-# Honeypot reads features["zeek_honeypot_hits"] directly (matches v-current's
+# Honeypot reads features["zeek_honeypot_hits"] directly (matches the earlier engine's
 # fresh_honeypot exactly -- the same raw signal pipeline.py itself gates evidence
 # creation on, sidestepping the evidence-store timing question entirely) plus the
-# is_safe exemption (BUGFIX precedent in v-current: safe_ips devices touching the
+# is_safe exemption (BUGFIX precedent in the earlier engine: safe_ips devices touching the
 # honeypot for benign reasons is expected). The other three use fresh evidence-store
 # presence, freshness-aware by default -- see this module's own docstring for why
-# that's a deliberate generational difference from v-current's current live behavior.
+# that's a deliberate difference from the earlier engine.
 DEFAULT_HARD_STOP_REGISTRY: List[HardStopRule] = [
     HardStopRule(
         name="honeypot",
@@ -198,7 +198,7 @@ class DecisionEngine:
     def __init__(self, hard_stop_registry: Optional[List[HardStopRule]] = None):
         self.hypothesis_engine = HypothesisEngine()
         # Pluggable -- a deployment can add/remove/reorder hard-stop rules without
-        # touching evaluate() at all, unlike v-current's 4 hardcoded elif branches.
+        # touching evaluate() at all, unlike the earlier engine's 4 hardcoded elif branches.
         self.hard_stop_registry = hard_stop_registry if hard_stop_registry is not None else DEFAULT_HARD_STOP_REGISTRY
 
     def evaluate(self, evidence_list: List[Evidence], rep, device_type: str = "",
@@ -210,8 +210,8 @@ class DecisionEngine:
         follow-up): overrides the confirmed_exploit hard-stop rule's
         min_confidence bar (default 0.9, hardcoded in DEFAULT_HARD_STOP_
         REGISTRY below) when given. None (the default -- every caller except
-        v13/ops/live_engine.py) preserves the exact original hardcoded
-        behavior. This engine stays store-agnostic by design (v13/autotune/
+        argus/ops/live_engine.py) preserves the exact original hardcoded
+        behavior. This engine stays store-agnostic by design (argus/autotune/
         engine.py's AutotuneEngine.get_active_value() lookup happens in the
         CALLER, live_engine.py, which already owns the GraphStore singleton
         -- see that module's own comment) -- this param is a plain float,
@@ -354,7 +354,7 @@ class DecisionEngine:
         threat_confidence = 0.0
         decision_path = "benign"
 
-        # --- pluggable hard-stop registry (replaces v-current's 4 hardcoded elifs) ---
+        # --- pluggable hard-stop registry (replaces the earlier engine's 4 hardcoded elifs) ---
         hard_stop_fired = None
         for rule in self.hard_stop_registry:
             # See evaluate()'s own docstring for hard_stop_candidate_sensitivity --
@@ -461,8 +461,8 @@ class DecisionEngine:
         # BUGFIX (live audit, 2026-09-09): pipeline.py's alert-building step has its
         # own destination-attribution switch (per primary_sig_base) that reaches back
         # into active_evidence for the real evidence-linked domain/IP a given
-        # signature fired on -- but that switch can only see pipeline.py's OWN v1
-        # Evidence store, never the v13-only synthetic evidence
+        # signature fired on -- but that switch can only see pipeline.py's OWN detector
+        # Evidence store, never the argus-only synthetic evidence
         # (coordinated_targeting/peer_deviation, live_engine.py's
         # _inject_graph_derived_evidence()/_inject_peer_deviation_evidence()) that
         # only ever existed inside THIS evaluate() call's evidence_list. Confirmed
@@ -509,11 +509,11 @@ class DecisionEngine:
 
         # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review): pipeline.py's
         # persisted hee_evidence_families/hee_evidence_types have ALWAYS been recomputed
-        # independently from active_evidence (pipeline.py's own v1 evidence store) rather
+        # independently from active_evidence (pipeline.py's own detector evidence store) rather
         # than read from here -- confirmed live via a real 24h extraction: 34 of 121
         # would-send alerts show hee_evidence_families=[] (empty) while
         # hee_independent_sources correctly shows 2-4 and attack_score 3.0-4.0, EVERY one
-        # of them a v13-only-synthetic-evidence-driven signature (COORDINATED_TARGETING/
+        # of them a argus-only-synthetic-evidence-driven signature (COORDINATED_TARGETING/
         # PEER_COHORT_DEVIATION -- family cross_device_correlation/peer_cohort_deviation
         # never exists in active_evidence, same root cause f027a6f already fixed for
         # alert_dest_ip alone). The Telegram message's own "WHY (N independent evidence
@@ -538,7 +538,7 @@ class DecisionEngine:
         # TEXT showed only 1 (sometimes 0) families -- because pipeline.py's WHY-block
         # loops over its OWN active_evidence (a short ~600s-TTL local snapshot,
         # EvidenceStore.get_for_device()), while independence_families here draws on
-        # v13's graph-window query (up to 86400s / 24h, live_engine.py's
+        # argus's graph-window query (up to 86400s / 24h, live_engine.py's
         # _query_graph_window()) -- corroborating evidence older than ~10 minutes is
         # still valid for THIS decision but has already aged out of pipeline.py's own
         # short-TTL list, so the WHY-block literally cannot see it no matter how the
@@ -584,14 +584,14 @@ class DecisionEngine:
             # identical "does this evidence's destination actually relate to the
             # winning hypothesis" check to what it DISPLAYS, not just trust that
             # attack_evidence (already filtered) is the only thing it draws from --
-            # active_evidence (pipeline.py's own separate, short-TTL v1 evidence
+            # active_evidence (pipeline.py's own separate, short-TTL detector evidence
             # store) had no such check at all until this fix, so a destination-
             # mismatched item could win a decisive WHY-block slot even though this
             # same function had already excluded it from independent_sources for the
             # identical reason. Empty list means "no destination anchor for this
             # decision" -- see _route_evidence_into_buckets() (core/pipeline.py) for
             # how this is consumed; None/missing on the receiving end degrades to the
-            # same "don't filter" behavior (v-current's decision dict lacks this key
+            # same "don't filter" behavior (a decision dict that lacks this key
             # entirely, same graceful-degradation pattern as evidence_families/
             # evidence_types above).
             "hypothesis_destination_ids": sorted(hyp_destinations),

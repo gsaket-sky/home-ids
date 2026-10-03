@@ -1,6 +1,6 @@
 """
 hunt_api.py -- thin HTTP wrappers around the real, already-built ad-hoc threat-hunting
-functions in src/v13/ops/threat_hunt.py and decision_replay.py, backing the console's
+functions in src/argus/ops/threat_hunt.py and decision_replay.py, backing the console's
 Threat Hunt tab (previously sample data).
 
 Deliberately thin, matching threat_hunt.py's own stated design ("three small functions

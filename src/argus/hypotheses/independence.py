@@ -1,15 +1,15 @@
 """
-v13 INDEPENDENCE_FAMILY_MAP (Phase 3 groundwork, built early in Phase 1 since it's
+argus INDEPENDENCE_FAMILY_MAP (Phase 3 groundwork, built early in Phase 1 since it's
 the plan's own "core design correction" -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
 THE CATEGORY ERROR THIS FILE EXISTS TO AVOID REPEATING (Phase 64's postmortem,
 DECISION_LOGIC_DEPENDENCY_MAP.md:48, confirmed via direct research this session):
-a first v-current attempt at per-hypothesis independence scoping was built and
+a first attempt at per-hypothesis independence scoping was built and
 reverted because it filtered `attack_evidence` using `HYPOTHESIS_RELEVANT_EVIDENCE_TYPES`
 -- but that registry answers "what does this hypothesis's own evaluate() read,"
 NOT "what independence families can legitimately corroborate it." Those are
 different questions. This file answers ONLY the second one, and is never consulted
-for the first (v13's own relevance registry, when built, stays a fully separate
+for the first (argus's own relevance registry, when built, stays a fully separate
 file/map -- this one must never grow a "what a hypothesis reads" field).
 
 WHAT A FAMILY MEANS: evidence types that share the same underlying sensor/vantage
@@ -25,27 +25,26 @@ HONEST STATUS: these specific groupings are a first-draft judgment call made thi
 session, grounded in this project's own detector documentation -- NOT yet validated
 against real divergence data the way this project validates everything else (Gap
 1/2/3's own evidentiary bar). Treat this mapping itself as a hypothesis to test
-during the parallel run, not a settled fact just because it's now code.
+against outcomes, not a settled fact just because it's now code.
 
-KNOWN DISCREPANCY FROM v-CURRENT (found during Phase 3 decision-engine porting,
+KNOWN DISCREPANCY FROM THE DETECTOR EVIDENCE MODEL (found while building the decision engine,
 confirmed via direct read of hypotheses/evidence.py's EVIDENCE_FAMILIES, not
-guessed -- flagged rather than silently carried forward): v-current groups
+guessed -- flagged rather than silently carried forward): evidence.py groups
 malicious_ja3/ja4, zeek_notice, zeek_lateral_scan, zeek_exfiltration,
 zeek_beaconing, zeek_conn_abuse, and zeek_long_conn ALL into one family
 ("zeek_network") -- so a JA3 match plus an exfiltration signal count as ONE
 independent source there, not two. This file deliberately splits them into three
 families (tls_fingerprint, network_behavior, data_transfer_pattern) on the
 reasoning that TLS fingerprinting and traffic-volume analysis are genuinely
-different vantage points from flow-level notices. v-current's own grouping is
+different vantage points from flow-level notices. evidence.py's own grouping is
 ALSO a one-time judgment call, not something empirically validated at this
-granularity either -- so this isn't "v13 fixing a known-wrong v1 value," it's two
-independent judgment calls that happen to disagree, and the parallel run's
-divergence data is exactly what should settle which one predicts real outcomes
-better. Similarly, v-current's "dns_behavior" family also includes dns_tunnel_v2
-and dns_evasion_anomaly (which v-current itself further splits into separate
+granularity either -- so this isn't "argus fixing a known-wrong value," it's two
+independent judgment calls that happen to disagree; outcome data should settle which
+one predicts real outcomes better. Similarly, evidence.py's "dns_behavior" family also includes dns_tunnel_v2
+and dns_evasion_anomaly (which evidence.py itself further splits into separate
 "dns_tunnel_v2" and "blindspot_audit" families) -- this file's simpler
 "dns_behavior" bucket for all four DNS-related types is a real simplification
-relative to v-current's own three-way DNS split, not an oversight.
+relative to evidence.py's own three-way DNS split, not an oversight.
 """
 from typing import Dict, FrozenSet, Iterable
 
@@ -57,9 +56,9 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "dns_dga_burst": "dns_behavior",
     "dns_evasion_anomaly": "dns_behavior",
     # DNSBehaviorDetector's other two evidence types (intelligence/detectors/
-    # dns_behavior.py) -- v-current itself groups all three (rate/entropy/
+    # dns_behavior.py) -- evidence.py itself groups all three (rate/entropy/
     # unique_ratio) under one independence_group="dns_behavior", so mapping
-    # these here too matches v-current's own grouping choice for this
+    # these here too matches evidence.py's own grouping choice for this
     # detector specifically, consistent with dns_entropy above.
     "dns_rate": "dns_behavior",
     "dns_unique_ratio": "dns_behavior",
@@ -135,14 +134,13 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "ml_anomaly": "ml_anomaly",
 
     # BENIGN-CONTEXT ONLY, deliberately excluded from attack corroboration counting
-    # by decision/engine.py (mirrors v-current's own ATTACK_EVIDENCE_FAMILIES =
+    # by decision/engine.py (mirrors evidence.py's own ATTACK_EVIDENCE_FAMILIES =
     # EVIDENCE_FAMILIES - {"local_context"}, hypotheses/evidence.py:71) -- real UPnP/
     # SSDP local-device-discovery traffic must never count toward "N independent
-    # attack sources," the same way it can't in v-current.
+    # attack sources," the same way it can't in evidence.py.
     "local_device_discovery": "local_context",
 
-    # v13 full-architecture plan, Phase 1a -- new capabilities the graph makes
-    # possible, not ported from v-current (no v1 equivalent exists). A genuinely
+    # New capabilities the graph makes possible (no detector-side equivalent exists). A genuinely
     # distinct vantage point: "another device's own independent behavior," not a
     # sensor reading on THIS device at all -- counts toward independent-source
     # corroboration like any other family (2+ devices independently hitting the
@@ -183,8 +181,8 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # independent sources" on its own.
     "first_contact": "novelty_context",
 
-    # Release 15, closed-loop autotuning architecture (v13/baseline/bayesian.py,
-    # v13/baseline/engine.py). A statistical outlier is context, never proof --
+    # Release 15, closed-loop autotuning architecture (argus/baseline/bayesian.py,
+    # argus/baseline/engine.py). A statistical outlier is context, never proof --
     # same posture as ml_anomaly above, for the same reason (an unvalidated
     # model output must never silently be the second source that promotes an
     # unrelated hypothesis to HIGH).
@@ -223,7 +221,7 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     "markov_beaconing_surprise": "sequence_dynamics",
 }
 
-# Mirrors v-current's ATTACK_EVIDENCE_FAMILIES exclusion exactly -- decision/engine.py
+# Mirrors evidence.py's ATTACK_EVIDENCE_FAMILIES exclusion exactly -- decision/engine.py
 # excludes evidence in this family from independent-source counting toward an ATTACK
 # verdict (it's legitimate evidence for the LocalDeviceDiscoveryHypothesis benign
 # side, never for corroborating an attack). "novelty_context" (Phase 1a) gets the

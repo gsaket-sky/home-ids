@@ -3,11 +3,11 @@ suricata_api.py -- surfaces Suricata's real signature-match findings in the cons
 the first time. Confirmed directly against the codebase and .94's live data before
 building this (not assumed):
 
-- Suricata never got wired into the v13 evidence graph at all (Documentation/
+- Suricata never got wired into the argus evidence graph at all (Documentation/
   CONSOLE_DATA_API.md already documents this -- it only runs as a subprocess against
   reactive-capture pcap bursts, not a continuous log stream). So this reads
   state/alerts.json directly instead of GraphStore, and is explicitly NOT an attempt at
-  the bigger "wire Suricata into the v13 graph" migration that doc flags as separate,
+  the bigger "wire Suricata into the argus graph" migration that doc flags as separate,
   larger work.
 - state/alerts.json is a 113MB append-only JSONL log on the real deployment (checked over
   SSH). Reading it forward from the start would mean parsing the whole thing on every

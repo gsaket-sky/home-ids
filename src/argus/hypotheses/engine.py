@@ -1,23 +1,12 @@
 """
-v13 HypothesisEngine (Phase 1/3 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+HypothesisEngine.
 
-Faithful port of argus/hypotheses/engine.py (786 lines, read in full this
-session before writing a single line here -- not reconstructed from memory or
-research notes, per this project's own "verify, don't assume" standard for
-security-critical scoring logic). Every hypothesis's required/strong/contradicting
-logic, dynamic naming, and score thresholds are copied line-for-line with only the
-mechanical renames v13's Evidence model requires:
-  - `e.type`              -> `e.evidence_type`
-  - `e.effective_weight()` -> `e.effective_weight()` via ScoredEvidence (below) --
-    v13 Evidence doesn't store a decaying `.freshness` on the item itself (that's a
-    query-time property, not stored state -- see graph/window.py's own docstring),
-    so freshness is computed once per evaluate_all() call and paired with each
-    Evidence in a ScoredEvidence wrapper, keeping every hypothesis's own evaluate()
-    body visually identical to its v-current counterpart for easy side-by-side audit.
+The attack and benign hypotheses that compete over one device's evidence. Each hypothesis declares the evidence it
+reads (RELEVANT_EVIDENCE_TYPES), what it requires, what strengthens it and what contradicts it, and returns a score.
+Evidence is scored once per evaluate_all() call: argus Evidence carries no stored freshness (freshness is a query-time
+property -- see graph/window.py), so each item is paired with its freshness in a ScoredEvidence wrapper.
 
-WHAT'S DELIBERATELY DIFFERENT (the actual point of this rewrite, not an accident):
-each hypothesis's RELEVANT_EVIDENCE_TYPES stays exactly as declared in v-current
-(kept here unchanged) -- it answers "what does evaluate() read," same as always.
+RELEVANT_EVIDENCE_TYPES answers only "what does evaluate() read".
 INDEPENDENCE_FAMILY_MAP (hypotheses/independence.py) is a completely separate
 registry that this file never reads from or writes to -- corroboration-family
 counting (Phase 3's decision engine) is computed independently of anything in this
@@ -47,10 +36,8 @@ _REPUTATION_TTL_SECONDS = 86400
 
 
 def compute_freshness(ev: Evidence, now: float) -> Optional[float]:
-    """Returns None for evidence older than its TTL (the v1 equivalent of
-    EvidenceStore silently dropping it from active_evidence) -- callers filter
-    these out before scoring, matching v1's behavior of never presenting stale
-    evidence to a Hypothesis at all."""
+    """Returns None for evidence older than its TTL (as the detector EvidenceStore drops it from active_evidence) --
+    callers filter these out before scoring, so a Hypothesis never sees stale evidence."""
     age = now - ev.timestamp
     ttl = _REPUTATION_TTL_SECONDS if ev.independence_family == "reputation" else _DEFAULT_TTL_SECONDS
     if age >= ttl:
@@ -62,8 +49,8 @@ def compute_freshness(ev: Evidence, now: float) -> Optional[float]:
 class ScoredEvidence:
     """Pairs one Evidence item with its freshness for a single evaluate_all() call
     -- keeps every hypothesis body below reading `.evidence_type`/`.value`/
-    `.provenance`/`.effective_weight()` exactly like its v-current counterpart,
-    without v13 Evidence itself needing to store a decaying, call-order-dependent
+    `.provenance`/`.effective_weight()` exactly like detector Evidence (intelligence/hypotheses/evidence.py),
+    without argus Evidence itself needing to store a decaying, call-order-dependent
     field (which would break the "fresh snapshot" property graph/window.py exists
     to preserve)."""
     evidence: Evidence
@@ -247,9 +234,7 @@ class NetworkIntrusionHypothesis(Hypothesis):
         super().__init__(self._NAME_NETWORK_INTRUSION)
 
     def evaluate(self, ev_store, rep_vector, device_type="", baseline_familiarity=0.0) -> float:
-        # v13 has no shadow-mode concept -- Gap 2's fix (use_gap2_fix=True) is already
-        # fully live in v-current by the time this port was written, so it's simply
-        # baked in here, not offered as a toggle.
+        # Gap 2's fix is always on (no toggle).
         self._reset_eval_state()
         has_lateral_scan = any(e.evidence_type == "zeek_lateral_scan" and e.value > 0 for e in ev_store)
         has_malicious_tls = any(e.evidence_type in ("malicious_ja3", "malicious_ja4") for e in ev_store)
@@ -491,7 +476,7 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
         if not self.required_satisfied:
             return 0.0
         best = max(e.effective_weight() for e in hits)
-        # Matches v-current's PHASE 1 FIX exactly: provenance format
+        # PHASE 1 FIX: provenance format
         # "detector:threat_signals:dns_tunnel_v2:{subtag}:{note}", split(":", 4)
         # maxsplit=4 -> index [3] is the stable subtag.
         distinct_signals = len({
@@ -517,14 +502,12 @@ class DNSTunnelingV2Hypothesis(Hypothesis):
 
 
 class CoordinatedTargetingHypothesis(Hypothesis):
-    """v13 full-architecture plan, Phase 1a -- a genuinely new detection
-    capability, not a port (no v-current equivalent exists: v-current's
-    per-device, in-memory-only RollingWindow has no cross-device view at all).
+    """Needs the graph's cross-device view (a per-device, in-memory window has none).
     Scores up when 2+ distinct devices independently reach the same destination
     within a short window -- a real signal for a compromised fleet, a coordinated
     scan, or several devices independently reaching a shared C2 destination.
     `coordinated_targeting` evidence is synthesized per-cycle by
-    v13/ops/live_engine.py from graph/window.py's devices_targeting() query, never
+    argus/ops/live_engine.py from graph/window.py's devices_targeting() query, never
     written back to the graph itself (it's derived context, not a sensor
     observation) -- see that module's own docstring.
 
@@ -720,11 +703,7 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         "smart_tv", "iot", "gaming_console", "nas", "router", "gateway", "dns_server",
     })
 
-    # v-current hoists this from hypotheses/evidence.py's module-level
-    # ATTACK_SHAPED_EVIDENCE_TYPES so ai_soc.py's validator shares the exact same set.
-    # v13 doesn't have that shared-with-the-LLM-validator concern (yet -- Phase 5),
-    # so this is declared directly here; kept as its own named constant (not inlined)
-    # so a future Phase 5 module can import it the same way v-current's validator does.
+    # Evidence that looks like an attack; the LLM review validator (argus/llm_review/validator.py) imports this set.
     # BUGFIX (live audit + explicit user request, 2026-09-09): "zeek_notice" used to
     # be a single flat type here, requiring a special-cased tier check in evaluate()
     # below (weak-tier notices, ~90% of all zeek_notice volume, shouldn't veto an
@@ -795,7 +774,7 @@ class PeerDeviationHypothesis(Hypothesis):
     generalizing the SAME cross-device-query mechanism Phase 1a/N4 already
     proved out to a peer-COMPARISON question rather than a peer-CORROBORATION
     one. `peer_deviation` evidence is synthesized per-cycle by
-    v13/ops/live_engine.py's _inject_peer_deviation_evidence() from a
+    argus/ops/live_engine.py's _inject_peer_deviation_evidence() from a
     device_type-grouped distinct-destination-count comparison, never written
     back to the graph itself (derived context, same principle as every other
     Phase 1a/N4 synthetic signal).
@@ -899,8 +878,7 @@ class HypothesisEngine:
         """Pure per-cycle evaluation -- ev_store is scored fresh from a plain
         evidence_list each call (typically graph/window.py's evidence_in_window()
         output), never a mutated object carried across cycles. No shadow-mode
-        machinery -- v13 has no shipped/unshipped Gap-style variants to compare;
-        that entire mechanism was specific to v-current's incremental-flip history.
+        machinery.
 
         familiarity_trust_bar (2026-09-27, Phase 3 of the autonomy-completion
         effort): plain float resolved by the caller (decision/engine.py, itself

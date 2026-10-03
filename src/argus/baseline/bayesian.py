@@ -1,5 +1,5 @@
 """
-v13/baseline/bayesian.py -- Release 15 closed-loop autotuning architecture,
+argus/baseline/bayesian.py -- Release 15 closed-loop autotuning architecture,
 Sheet 00: per-device Bayesian baseline models.
 
 Pure math only -- no GraphStore/SQLite/IO in this module (matches this codebase's
@@ -8,9 +8,8 @@ ingest/daemon.py). engine.py (this same package) is the orchestration layer that
 persists this module's state to device_baselines/population_priors and turns its
 output into Evidence rows.
 
-Four conjugate families, replacing v-current's point-estimate EWMABaseline
-(core/state.py:53-108) with a real posterior (mean + uncertainty), not just a
-mean/variance pair:
+Four conjugate families with a real posterior (mean + uncertainty) -- unlike the pipeline's
+point-estimate EWMABaseline (core/state.py), which keeps only a mean/variance pair:
 
   GaussianBaseline  -- Normal-Inverse-Gamma, for continuous metrics (query_rate,
                        entropy, unique_domains, outbound_bytes, risk).

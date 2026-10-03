@@ -154,13 +154,13 @@ class ReputationClassifier:
         optional overrides, defaulting to those exact original values -- pure
         signature extension, zero behavior change for any caller that doesn't
         pass them (every existing call site: core/pipeline.py's real live
-        classification, v13/synthetic/injector.py, v13/ingest/sources.py).
-        v13/ops/live_engine.py is the one caller that DOES pass tunable
-        values (v13/autotune/engine.py's TUNABLE_PARAMETERS
+        classification, argus/synthetic/injector.py, argus/ingest/sources.py).
+        argus/ops/live_engine.py is the one caller that DOES pass tunable
+        values (argus/autotune/engine.py's TUNABLE_PARAMETERS
         reputation_tier_suspicious_floor/reputation_tier_high_floor), scoped
-        to v13's OWN decision path only -- see that module's own comment for
+        to argus's OWN decision path only -- see that module's own comment for
         why re-classifying there, not editing pipeline.py's shared call site,
-        keeps v-current's live behavior completely untouched."""
+        keeps the pipeline's own use completely untouched."""
         domain = (domain or "").lower().strip(".")
         tier = 3 # Unknown by default
 

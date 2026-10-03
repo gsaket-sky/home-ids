@@ -49,17 +49,18 @@ from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
 from intelligence.device_familiarity import DeviceFamiliarity
+from core import device_purge
 from intelligence.local_intel import LocalConfirmedIntel
 from argus.cl_afpe.state_import import import_legacy_state
 from argus.ops import live_engine as argus_live_engine  # argus fast cutover -- see Documentation/ARGUS_ARCHITECTURE.md
-from argus.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
+from argus.identity.live_manager import LiveIdentityManager  # the graph-engine migration, Phase 3
 from argus.config.trust_anchors import bootstrap_trust_anchors, load_hardware_profile  # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors is now auto-discovered/authoritative, not hand-configured-only (see bootstrap_trust_anchors()'s own docstring for the gateway-continuity safety guard)
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES  # 2026-09-15 Telegram WHY-block dedup fix, see grouped_evidence's own comment
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical  # device-identity fragmentation fix, in-process reconciliation worker
 
 
 def _ip_family(ip: str) -> str:
-    """v13 full-architecture plan, Phase 3: a real display gap found by direct
+    """a real display gap found by direct
     investigation, not guessed -- alert payloads carry whatever raw address was
     active THIS cycle (client_ip) with no address-family label at all. Confirmed
     live this session: a real alert for the router showed a bare `fe80::...` link-
@@ -264,8 +265,8 @@ _EVIDENCE_PLAIN_LANGUAGE = {
     "domain": "Destination domain matches a known-malicious reputation list",
     "ip": "Destination IP matches a known-malicious reputation list",
     "mixed": "Mixed reputation signal on this connection",
-    # BUGFIX (live audit, 2026-09-09): these 4 are v13-only synthetic evidence
-    # (v13/ops/live_engine.py, coordinated_targeting/peer_deviation's own docstrings)
+    # BUGFIX (live audit, 2026-09-09): these 4 are argus-only synthetic evidence
+    # (argus/ops/live_engine.py, coordinated_targeting/peer_deviation's own docstrings)
     # that never existed in _EVIDENCE_PLAIN_LANGUAGE because they never existed in
     # active_evidence at all -- see the WHY-block synthetic-evidence bridging below.
     "coordinated_targeting": "Same destination independently reached by multiple other devices",
@@ -296,17 +297,17 @@ _EVIDENCE_FAMILY_LABELS = {
     "local_context": "Local Context",
     "reputation": "Reputation",
     "suricata": "Signature Match",
-    # BUGFIX (live audit, 2026-09-09): v13's own finer independence-family split
+    # BUGFIX (live audit, 2026-09-09): argus's own finer independence-family split
     # (hypotheses/independence.py) names these two families -- see
     # _EVIDENCE_PLAIN_LANGUAGE's matching new entries above for why they were never
     # reachable here before.
     "cross_device_correlation": "Cross-Device Correlation",
     "peer_cohort_deviation": "Peer-Cohort Deviation",
-    # BUGFIX (live audit, 2026-09-09): v13's INDEPENDENCE_FAMILY_MAP names zeek_notice's
+    # BUGFIX (live audit, 2026-09-09): argus's INDEPENDENCE_FAMILY_MAP names zeek_notice's
     # own family "network_behavior" (hypotheses/independence.py), a DIFFERENT string
-    # than v1's "zeek_network" independence_group above -- a zeek_notice item reaching
+    # than the detector evidence's "zeek_network" independence_group above -- a zeek_notice item reaching
     # the WHY-block via decision["attack_evidence"] (the corroborating-evidence bridge,
-    # not the primary active_evidence loop) carries the v13 name directly and fell
+    # not the primary active_evidence loop) carries the argus name directly and fell
     # through to the generic de-snake-cased fallback ("Network Behavior") instead of
     # this dict's own "Network (Zeek)" label -- confirmed live, the exact same
     # evidence shape showed two different family labels depending on which bridge
@@ -314,7 +315,7 @@ _EVIDENCE_FAMILY_LABELS = {
     "network_behavior": "Network (Zeek)",
     # BUGFIX (2026-09-15, same pass as grouped_evidence's own canonical-key fix
     # above): these two families (hypotheses/independence.py's own three-way split
-    # of v1's single "zeek_network" bucket) had no entry here at all, so they fell
+    # of the detector evidence's single "zeek_network" bucket) had no entry here at all, so they fell
     # through to the generic de-snake-cased fallback -- harmless for
     # "data_transfer_pattern" (already reads fine as "Data Transfer Pattern"), but
     # "tls_fingerprint" rendered as "Tls Fingerprint" (title() only capitalizes the
@@ -323,12 +324,12 @@ _EVIDENCE_FAMILY_LABELS = {
     "tls_fingerprint": "TLS Fingerprint",
 }
 
-# BUGFIX (live audit, 2026-09-09): the 4 v13-only synthetic evidence types
-# (v13/ops/live_engine.py's _inject_graph_derived_evidence()/
-# _inject_peer_deviation_evidence()) mapped to v13's own independence-family name
+# BUGFIX (live audit, 2026-09-09): the 4 argus-only synthetic evidence types
+# (argus/ops/live_engine.py's _inject_graph_derived_evidence()/
+# _inject_peer_deviation_evidence()) mapped to argus's own independence-family name
 # (hypotheses/independence.py's INDEPENDENCE_FAMILY_MAP) -- used to bridge
 # decision["winning_evidence"] entries into the WHY-block grouping loop below, since
-# these never exist in active_evidence (pipeline.py's own v1 evidence store) at all.
+# these never exist in active_evidence (pipeline.py's own detector evidence store) at all.
 _V13_SYNTHETIC_EVIDENCE_FAMILY = {
     "coordinated_targeting": "cross_device_correlation",
     "fingerprint_campaign": "cross_device_correlation",
@@ -566,7 +567,7 @@ def _enforce_evidence_families_invariant(grouped_evidence: dict, context_evidenc
     BUGFIX (2026-09-16, user-requested general guarantee -- "ensure telegram alerts
     for all cases exactly match the HEE decision engine"): the destination-mismatch
     check _route_evidence_into_buckets() now applies closes ONE specific way
-    active_evidence's own loop (pipeline.py's separate, short-TTL v1 evidence store)
+    active_evidence's own loop (pipeline.py's separate, short-TTL detector evidence store)
     could disagree with decision/engine.py's actual verdict -- but that loop still
     applies none of decision/engine.py's OTHER filters on ev_store before it becomes
     attack_evidence there (per-type freshness TTLs via score_evidence(),
@@ -581,8 +582,8 @@ def _enforce_evidence_families_invariant(grouped_evidence: dict, context_evidenc
     itself says so. Demoted (not dropped) to context_evidence, same "shown for
     completeness, never decisive" treatment every other non-decisive item already
     gets, keeping the higher-.value item if context_evidence already had an entry
-    for that family. Gated on the key's PRESENCE (not truthiness) so v-current's
-    decision dict -- which lacks this key entirely -- degrades to exactly today's
+    for that family. Gated on the key's PRESENCE (not truthiness) so a
+    decision dict that lacks this key entirely degrades to the
     unfiltered behavior, same pattern as every other decision.get(...) call in this
     file; an argus decision with a genuinely empty evidence_families (0 independent
     sources) correctly demotes everything, matching that true state."""
@@ -816,24 +817,24 @@ class EnginePipeline:
         state_dir.mkdir(parents=True, exist_ok=True)
         self.state_dir = state_dir  # PHASE 18: sync_relay_metrics() needs this every cycle
 
-        # v13 full-architecture plan, Phase 1: point the live graph store at THIS box's
+        # point the live graph store at THIS box's
         # own state dir (matching every other state file's location) rather than the
         # module's bare relative default -- avoids depending on soc.service's CWD
         # happening to already be the right directory. Moved here (before
         # self.identity_manager below) specifically so Phase 3's LiveIdentityManager
         # can call argus_live_engine.get_graph_store() and get the CORRECTLY-configured
         # singleton, not one lazily initialized against the wrong default path.
-        # v13 full-architecture plan, Phase 10b: hardware_profile-driven SQLite
+        # hardware_profile-driven SQLite
         # cache_size tuning for the live graph store singleton (GraphStore's own
         # PRAGMA cache_size, see graph/store.py's _HARDWARE_PROFILE_CACHE_SIZE_KB).
         argus_live_engine.configure(str(state_dir / "v13_graph.db"),
                                     hardware_profile=load_hardware_profile(self.config))
 
-        # v13 full-architecture plan, device-state unification: mirrors each
+        # device-state unification: mirrors each
         # device's COLD fields (hostname/device_type/confirmed_threat_count/etc.,
         # see DeviceState.to_graph_metadata()) into the graph on every
         # flush_to_disk() -- the hot fields (baselines/rolling) never leave this
-        # process. Same already-configured graph store singleton every other v13
+        # process. Same already-configured graph store singleton every other argus
         # write path this cycle reuses, not a second connection.
         self.state_manager = state_manager or StateManager(
             state_path=state_path, max_devices=int(self.config.get("max_device_states", 5000)),
@@ -952,7 +953,7 @@ class EnginePipeline:
         else:
             integration_status_metric.labels("telegram").set(0)
         
-        # v13 full-architecture plan, IPS containment unification: the graph store
+        # IPS containment unification: the graph store
         # singleton is already configured above (argus_live_engine.configure()) --
         # reused here, not a second connection, matching LiveIdentityManager's own
         # argus_live_engine.get_graph_store() call site. Passed unconditionally
@@ -1067,6 +1068,28 @@ class EnginePipeline:
             except Exception as e:
                 LOGGER.warning("autotuned %s lookup failed for %s, using %s: %s", key, dev_id, value, e)
         return value
+
+    def _apply_device_purges(self) -> None:
+        """Applies the web UI's queued Remove device requests (core/device_purge.py) to everything this process holds
+        for the device, and clears its learned false-positive values in the graph. Best-effort per device."""
+        for path, dev_id in device_purge.pending_purges(self.state_dir):
+            try:
+                labels = self.state_manager.get_device_labels(dev_id)
+                self.state_manager.remove_device(dev_id)
+                if labels:
+                    self.metrics_exporter.remove_device_metric_labels(dev_id, labels[0], labels[1])
+                if hasattr(self, "evidence_store"):
+                    self.evidence_store.clear_device(dev_id)
+                self.familiarity.discard_device_profile(dev_id, reason="purge")
+                if self.ml_registry:
+                    self.ml_registry.discard_device(dev_id, reason="purge")
+                if self.cl_afpe.store.get_device_metadata(dev_id):
+                    self.cl_afpe.store.update_device_metadata(
+                        dev_id, {"fp_profile": {}, "sigma_shift": 0.0, "confirmed_threat_counts": {}})
+                LOGGER.info("Removed device %s at the operator's request", dev_id)
+            except Exception as exc:
+                LOGGER.warning("Applying the removal of device %s failed (non-fatal): %s", dev_id, exc)
+            device_purge.done(path)
 
     def _export_cl_afpe_gauges(self) -> None:
         """Model status, trust-cache size, confirmed-intel size, engine errors and per-device corrected thresholds
@@ -1183,7 +1206,7 @@ class EnginePipeline:
                     except Exception as exc:
                         LOGGER.warning(
                             "Identity reconcile: graph-side merge mirror failed for %s -> %s "
-                            "(the real v1 merge already succeeded, unaffected): %s",
+                            "(the state merge already succeeded, unaffected): %s",
                             orphan["device_id"], canonical["device_id"], exc,
                         )
         if merged_count:
@@ -1219,6 +1242,7 @@ class EnginePipeline:
             self.alert_manager.send("🚀 *Home IDS Network Security Engine Online*")
 
         self.running = True
+        self._apply_device_purges()   # requests made while the engine was down
         self.zeek_collector.start()  # background Zeek file reading/parsing, off the main loop
         LOGGER.info("🟢 Pipeline loop active. Ingesting network telemetry...")
 
@@ -2174,8 +2198,8 @@ class EnginePipeline:
                                             geofencing_evidence_this_cycle.append(geofencing_evidence_item)
                                             # Force re-evaluate decision (V13 FAST CUTOVER: same engine
                                             # selection as the main call site above, kept consistent).
-                                            # Deliberately NOT passed device_id/now here (Phase 1, v13
-                                            # full-architecture plan): v13's evidence/ingest.py assigns
+                                            # Deliberately NOT passed device_id/now here (Phase 1, argus
+                                            # full-architecture plan): argus's evidence/ingest.py assigns
                                             # a FRESH evidence_id on every convert() call, no dedup by
                                             # content -- since `active_evidence` here is the SAME list
                                             # already converted+written once by the main call site above
@@ -2535,7 +2559,7 @@ class EnginePipeline:
                                     alert_target_domain = "unknown"
                             # BUGFIX (live audit, 2026-09-09): COORDINATED_TARGETING/
                             # PEER_COHORT_DEVIATION had no branch here at all -- their
-                            # evidence (coordinated_targeting/peer_deviation) is v13-only,
+                            # evidence (coordinated_targeting/peer_deviation) is argus-only,
                             # synthesized inside decision_engine.evaluate() from graph
                             # queries and never written into pipeline.py's own
                             # active_evidence store, so both signatures silently fell
@@ -2548,7 +2572,7 @@ class EnginePipeline:
                             # already correctly keeps OUT of the actual scoring, just
                             # never made it into the display. decision.get("winning_evidence")
                             # (decision/engine.py, this same session) carries the real
-                            # v13-only evidence that satisfied the winning hypothesis.
+                            # argus-only evidence that satisfied the winning hypothesis.
                             # coordinated_targeting DOES have a real destination_id (the
                             # destination multiple devices targeted); peer_deviation is
                             # device-level by design (destination_id=NO_DESTINATION,
@@ -2596,9 +2620,9 @@ class EnginePipeline:
                                         break
                             # DATA_EXFILTRATION/C2_BEACONING's own evidence (zeek_exfiltration/
                             # zeek_beaconing, detectors/threat_signals.py) has the SAME known gap
-                            # v13/ops/live_engine.py's own _NEEDS_LAST_DEST_IP_FALLBACK already
+                            # argus/ops/live_engine.py's own _NEEDS_LAST_DEST_IP_FALLBACK already
                             # documents and patches (a last-known-dest-IP fallback, applied when
-                            # v13 converts this cycle's v1 evidence to its own model) -- so
+                            # argus converts this cycle's detector evidence to its own model) -- so
                             # decision.get("winning_evidence") already carries a usable
                             # destination_id for these two, the same field COORDINATED_TARGETING
                             # above reads, no new plumbing needed.
@@ -2622,7 +2646,7 @@ class EnginePipeline:
                             # name for a high-confidence Suricata match) are two different verdict
                             # PATHS over the exact same suricata_signature_match evidence
                             # (detectors/suricata_scan.py), which already sets a real .domain
-                            # (target_ip) directly on the v1 evidence -- same simple pattern as
+                            # (target_ip) directly on the detector evidence -- same simple pattern as
                             # the NETWORK_INTRUSION/ARP-spoofing/honeypot branches above, no
                             # winning_evidence needed.
                             # SECURITY FIX (alert/evidence/decision-engine consistency audit,
@@ -2679,7 +2703,7 @@ class EnginePipeline:
                                 "timestamp": now,
                                 "device": {
                                     "id": dev_id, "ip": client_ip, "hostname": hostname, "type": state.device_type,
-                                    # v13 full-architecture plan, Phase 3: closes a real operator-confusion
+                                    # closes a real operator-confusion
                                     # gap -- see _ip_family()'s own docstring above for the real incident
                                     # that prompted this. other_known_ips lets an operator immediately see
                                     # this device's OTHER addresses (e.g. its IPv4 alongside an IPv6-only
@@ -2724,8 +2748,8 @@ class EnginePipeline:
                                 "hee_decision_path": decision.get("decision_path", ""),
                                 # BUGFIX (live audit, 2026-09-09, third-party ChatGPT review):
                                 # these were ALWAYS computed from active_evidence alone --
-                                # pipeline.py's own v1 evidence store, which structurally never
-                                # contains v13-only synthetic evidence (coordinated_targeting/
+                                # pipeline.py's own detector evidence store, which structurally never
+                                # contains argus-only synthetic evidence (coordinated_targeting/
                                 # peer_deviation/fingerprint_campaign/dga_seed_campaign -- see
                                 # decision/engine.py's own comment on its "evidence_families"/
                                 # "evidence_types" return fields, the actual ground truth
@@ -2734,9 +2758,9 @@ class EnginePipeline:
                                 # hee_independent_sources correctly showed 2-4 -- every one a
                                 # COORDINATED_TARGETING/PEER_COHORT_DEVIATION verdict, exactly the
                                 # "HIGH with 0 evidence families" inconsistency flagged externally.
-                                # Unioned (not replaced) with decision's own values so v-current
-                                # (whose decision dict lacks these keys, .get(...,[]) degrades to
-                                # today's behavior unchanged) and any evidence type not read by
+                                # Unioned (not replaced) with decision's own values so a decision dict
+                                # that lacks these keys (.get(...,[]) degrades to the
+                                # plain behavior) and any evidence type not read by
                                 # argus/decision/engine.py's attack_evidence (e.g. local_context/
                                 # novelty_context families, deliberately excluded there) are never
                                 # lost -- purely additive, can only ADD what was missing.
@@ -2752,7 +2776,7 @@ class EnginePipeline:
                                 # hypotheses/evidence.py's ATTACK_SHAPED_EVIDENCE_TYPES). Reuses
                                 # the SAME active_evidence list already in scope here, same
                                 # treatment as hee_evidence_families right above -- same union
-                                # reasoning for the v13-synthetic-type gap.
+                                # reasoning for the argus-synthetic-type gap.
                                 "hee_evidence_types": sorted(
                                     {ev.type for ev in active_evidence} | set(decision.get("evidence_types", []))
                                 ),
@@ -3451,7 +3475,7 @@ class EnginePipeline:
                                     # recorded as 2): this loop used to bucket by each evidence
                                     # item's own RAW `.independence_group` -- the family name
                                     # whichever detector happened to assign it at creation time,
-                                    # which for several evidence types is v1's own OLDER family
+                                    # which for several evidence types is the detector evidence's own OLDER family
                                     # name (e.g. dns_evasion_anomaly -> "blindspot_audit",
                                     # zeek_exfiltration -> "zeek_network", both from
                                     # intelligence/hypotheses/evidence.py and threat_signals.py).
@@ -3506,7 +3530,7 @@ class EnginePipeline:
                                     # -- sometimes 0 -- families): active_evidence is a SHORT-TTL
                                     # (~600s, EvidenceStore.get_for_device()) local snapshot, but
                                     # independence_families/num_independent_sources (decision/
-                                    # engine.py) draws on v13's graph-window query, up to 86400s/
+                                    # engine.py) draws on argus's graph-window query, up to 86400s/
                                     # 24h (live_engine.py's _query_graph_window()). Corroborating
                                     # evidence older than ~10 minutes is still genuinely valid for
                                     # THIS decision but has already aged out of active_evidence --
@@ -3520,7 +3544,7 @@ class EnginePipeline:
                                     # decision["attack_evidence"] (decision/engine.py, this same
                                     # pass) is the fix: the FULL post-domain-stripping set
                                     # independent_sources itself counts against, not just the
-                                    # winning hypothesis's own slice -- bridged into synthetic v1
+                                    # winning hypothesis's own slice -- bridged into synthetic detector
                                     # Evidence objects so _describe_evidence() and the grouping/
                                     # sorting logic below need no special-casing, same pattern as
                                     # before, just fed from the complete list instead of a narrow
@@ -4066,6 +4090,7 @@ class EnginePipeline:
         # before the periodic flush so the latest operator action is not overwritten.
         _sentinel = self.state_manager.state_path.parent / ".ipc_sync_signal"
         if _sentinel.exists():
+            self._apply_device_purges()
             try:
                 _sentinel.unlink()
                 self.state_manager.reconcile_ips_from_disk()

@@ -1,5 +1,5 @@
 """
-v13/autotune/reset.py -- Release 15 Sheet 04: per-device snapshots and
+argus/autotune/reset.py -- Release 15 Sheet 04: per-device snapshots and
 reset/undo. The accountability layer the closed loop needs precisely
 because there's no human approving each autonomous step: every device has a
 legible history of how its own tuning got where it is, and an operator

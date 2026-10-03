@@ -428,9 +428,9 @@ class DeviceIdentityManager:
         the final canonical id by the time either of those touch it.
 
         Returns the orphan_id that was actually merged, or None if nothing
-        merged (v13 full-architecture plan, continuation session:
+        merged (continuation session: 
         LiveIdentityManager overrides this method to ALSO fold the same merge
-        into the v13 graph via GraphStore.merge_device(orphan_id, dev_id) --
+        into the argus graph via GraphStore.merge_device(orphan_id, dev_id) --
         it needs the SPECIFIC orphan_id captured here, not just a bool,
         because get_device_id_for_ip(client_ip) would return the UPDATED
         (post-merge) value if re-queried after merge_into_canonical() runs, not
@@ -440,7 +440,7 @@ class DeviceIdentityManager:
         exactly why the real return value is needed rather than inferring
         success from the trigger condition alone. Every pre-existing caller
         ignores the return value, so this is purely additive, not a behavior
-        change for v-current."""
+        change for them."""
         orphan_id = self.state_manager.get_device_id_for_ip(client_ip)
         if not orphan_id or orphan_id == dev_id:
             return None

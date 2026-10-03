@@ -1,9 +1,8 @@
 """
-v13 rolling-window-as-query (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
-Replaces core/state.py's RollingWindow (deques + Counters kept in memory per
-device, never persisted -- state.py:110-127,165-173 confirms this is intentional
-in v-current, lost on every restart) with plain time-bounded SQL queries against
-GraphStore's evidence table. "Recent window" becomes a query parameter, not a
+Rolling-window-as-query.
+For argus, the recent window is a plain time-bounded SQL query against GraphStore's evidence table,
+not an in-memory structure like the pipeline's RollingWindow (core/state.py: deques + Counters per device, lost on
+every restart). "Recent window" becomes a query parameter, not a
 separate struct that has to be kept in sync with the evidence store by hand.
 
 This also directly answers one of HEE_ROADMAP.md item 4's own cited benefits for
@@ -60,7 +59,7 @@ class RollingWindowView:
         """Answers "has this device contacted this destination before, outside the
         current incident window" -- the cross-cycle question HEE_ROADMAP.md item 4
         named as a real benefit of a graph-backed store, not achievable as a plain
-        query against v-current's in-memory-only RollingWindow.
+        query against core/state.py's in-memory-only RollingWindow.
 
         exclude_window_seconds lets a caller ask "seen before the CURRENT alert's
         own window" by excluding the most recent slice -- e.g. lookback_seconds=90days,
@@ -86,8 +85,8 @@ class RollingWindowView:
                             now: Optional[float] = None,
                             exclude_device_id: Optional[str] = None) -> List[str]:
         """Answers "which OTHER devices have touched this destination in the last
-        N seconds" -- v13 full-architecture plan, Phase 1a: cross-device
-        correlation / coordinated-campaign detection, a real capability v-current's
+        N seconds" -- cross-device
+        correlation / coordinated-campaign detection, a real capability the earlier engine's
         per-device, in-memory-only RollingWindow structurally cannot answer (it has
         no view across devices at all). exclude_device_id is typically the calling
         device itself, since the point of this query is "who ELSE is touching this

@@ -156,7 +156,7 @@ CONFIG_SCHEMA = [
      "desc": "Your router's IP -- pinned to one canonical device_id since a router genuinely has multiple physical MACs. Blank disables this special case."},
     # Phase 9 (zero-site bootstrap A, autonomy-completion effort, 2026-09-27): these
     # 2 keys existed in config.yaml and were already loaded (argus/config/
-    # trust_anchors.py, since the v13 full-architecture plan's Phase 2) but had no
+    # trust_anchors.py, since the the graph-engine migration's Phase 2) but had no
     # CONFIG_SCHEMA entry at all -- invisible to GET /api/config, unvalidated by
     # anything but a best-effort log warning at load time. hardware_profile is a
     # plain top-level scalar, so the existing generic enum mechanism applies

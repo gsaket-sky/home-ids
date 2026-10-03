@@ -1,5 +1,5 @@
 """
-v13 Telegram notification helper (v13 full-architecture plan, Phase 7).
+argus Telegram notification helper.
 
 A direct port of scripts/retro_hunter.py's own _send_telegram() (itself mirroring
 scripts/top_domains_report.py's send_telegram()) -- same config keys
@@ -33,4 +33,4 @@ def send_telegram(config: Dict[str, Any], msg: str) -> None:
         )
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
-        LOGGER.error("Failed to send v13 Telegram notification: %s", e)
+        LOGGER.error("Failed to send Telegram notification: %s", e)

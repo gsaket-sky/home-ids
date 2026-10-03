@@ -1,5 +1,5 @@
 """
-v13 Evidence v2 (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+Evidence v2.
 
 Fixes reviewer #17 (_select_target_domain()'s heuristic, pipeline.py:2626) at the
 root: destination attribution is MANDATORY on every Evidence item, never a silently
@@ -9,13 +9,13 @@ NO_DESTINATION -- "no target" becomes a queryable fact, not an absent column tha
 downstream code has to guess about or patch around with a per-signature override.
 
 independence_family is a SEPARATE field from evidence_type -- the core design
-correction carried into every v13 module (see the plan's own writeup of Phase 64's
+correction carried into every argus module (see the plan's own writeup of Phase 64's
 postmortem): "what a hypothesis's own evaluate() reads" (evidence_type, matched
 against HYPOTHESIS_RELEVANT_EVIDENCE_TYPES) and "what can legitimately corroborate
 it" (independence_family, matched against the new INDEPENDENCE_FAMILY_MAP,
 hypotheses/independence.py) are different questions and must never be read from the
 same column -- that conflation is what broke the first per-hypothesis independence
-attempt in v-current.
+attempt in the earlier engine.
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
@@ -65,9 +65,9 @@ class Evidence:
             raise ValueError(f"Evidence.confidence must be in [0.0, 1.0], got {self.confidence}")
 
     def effective_weight(self, freshness: float = 1.0) -> float:
-        """Mirrors v-current's Evidence.effective_weight() (hypotheses/evidence.py)
+        """Mirrors detector Evidence.effective_weight() (hypotheses/evidence.py)
         -- confidence * freshness. Freshness is NOT stored on the item itself here
-        (unlike v-current's EvidenceStore-managed decay) -- it's a property of *when*
+        (unlike the detector EvidenceStore's managed decay) -- it's a property of *when*
         a query runs relative to the item's timestamp, computed by the caller
         (graph/window.py, Phase 1) at query time, not baked into the stored row."""
         return self.confidence * freshness

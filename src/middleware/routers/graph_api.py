@@ -7,7 +7,7 @@ real deployment's state/v13_graph.db already has 5000+ decisions and 8M+ edges r
 returning everything would be neither a useful visualization nor a fast response.
 
 winning_hypothesis_id (schema.sql's own column on `decisions`) is never actually
-populated by any v13 module yet -- confirmed empirically against the real deployment
+populated by any argus module yet -- confirmed empirically against the real deployment
 (0 non-null rows out of 5050 decisions). The winning hypothesis's NAME is recovered
 from each decision's own raw_payload_json["explanation"] instead, which IS reliably
 populated (confirmed against real data: e.g. {"state": "BENIGN", "explanation":

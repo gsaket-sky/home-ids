@@ -1,21 +1,21 @@
 """
-live_prune.py - schedules src/v13/graph/store.py's GraphStore.prune_evidence() against
-`.94`'s own live graph (v13 full-architecture plan, Phase 1 follow-up).
+live_prune.py - schedules src/argus/graph/store.py's GraphStore.prune_evidence() against
+`.94`'s own live graph.
 
 Registered as its own scheduled job (config.yaml's scheduled_jobs.scheduler.live_prune,
 same mechanism as retro_hunter.py/shadow_watcher.py) rather than folded into the live
 per-cycle pipeline -- pruning is a periodic maintenance concern, not something that
-belongs inside pipeline.py's 2s decision loop (src/v13/ingest/daemon.py already keeps
+belongs inside pipeline.py's 2s decision loop (src/argus/ingest/daemon.py already keeps
 this same separation for .19's own graph, via its own prune_interval_seconds gate).
 
 Real motivation, not a speculative safeguard: A14's write-path bugs (fixed, see
 Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md) demonstrated real, if since-fixed,
 runaway growth potential, and nothing on .94 was enforcing schema.sql's own documented
 90-day evidence retention policy at all until this file existed. Uses the SAME
-`state/v13_graph.db` path `src/v13/ops/live_engine.py` writes to (configured the same
+`state/v13_graph.db` path `src/argus/ops/live_engine.py` writes to (configured the same
 way, via config.yaml's state_path).
 
-v13 full-architecture plan, Phase 10b: retention itself is now hardware_profile-driven
+retention itself is now hardware_profile-driven
 -- a pi_8gb deployment prunes sooner (30 days) than the schema-documented 90-day
 default, given that box's own tighter, shared resource budget (see
 ARGUS_AUTONOMY_DEPENDENCY_MAP.md's "Hardware topology" section); x86_16gb/custom

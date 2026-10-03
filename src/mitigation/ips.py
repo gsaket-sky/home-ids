@@ -120,7 +120,7 @@ class IPSMitigator:
                   graph_store: Optional[Any] = None):
         self.config = config
         self.stream_writer = stream_writer
-        # v13 full-architecture plan, IPS containment unification: OPTIONAL
+        # IPS containment unification: OPTIONAL
         # write-only audit mirror into GraphStore's containment_actions table --
         # never the real containment state (self.state_manager's ips_state dict
         # below stays that, unchanged, hot-path). None (the default, and every
@@ -339,7 +339,7 @@ class IPSMitigator:
 
     def _mirror_containment(self, device_id: str, action_type: str, status: str,
                               target: Optional[str] = None, reason: Optional[str] = None) -> Optional[str]:
-        """v13 full-architecture plan, IPS containment unification: best-effort
+        """IPS containment unification: best-effort
         write-only mirror of a containment action THIS CLASS HAS ALREADY TAKEN
         into GraphStore.containment_actions -- never gates or affects the real
         action, which has already happened by the time every call site below

@@ -76,6 +76,59 @@ check("purge removes the device's WebUI label", get_label("dev_purge", str(state
 check("purge leaves other devices' WebUI labels", get_label("dev_keep", str(state_dir)) == "nas")
 
 
+# ── the running engine applies the request to what it holds in memory ────────
+from core import device_purge
+from core.pipeline import EnginePipeline
+from intelligence.device_familiarity import DeviceFamiliarity
+
+eng_dir = _tmp / "engine"
+eng_dir.mkdir()
+eng_sm = StateManager(state_path=str(eng_dir / "ids_state.json"))
+eng_sm.get_or_create("dev_gone", "192.168.1.30", "gone-host")
+eng_sm.get_or_create("dev_stays", "192.168.1.31", "stays-host")
+fam = DeviceFamiliarity(str(eng_dir))
+for d in ("dev_gone", "dev_stays"):
+    fam.record_device_baseline_observation(d, dest_port=443, asn_owner="Example", domain_base="example.com")
+
+
+class _Recorder:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        return lambda *a, **kw: self.calls.append((name, a))
+
+
+eng_store = GraphStore(str(eng_dir / "v13_graph.db"))
+eng_store.update_device_metadata("dev_gone", {"sigma_shift": 1.0}, timestamp=1.0)
+
+
+class _P:
+    pass
+
+
+p = _P()
+p.state_dir, p.state_manager, p.familiarity = eng_dir, eng_sm, fam
+p.metrics_exporter, p.evidence_store, p.ml_registry = _Recorder(), _Recorder(), _Recorder()
+p.cl_afpe = _P()
+p.cl_afpe.store = eng_store
+
+device_purge.request_purge(eng_dir, "dev_gone")
+check("a request is queued", len(device_purge.pending_purges(eng_dir)) == 1)
+EnginePipeline._apply_device_purges(p)
+check("the engine drops the device from its in-memory state (so its next flush does not write it back)",
+      not eng_sm.has_device("dev_gone") and eng_sm.has_device("dev_stays"))
+check("the engine forgets the device's familiarity",
+      fam.get_baseline_entry_count("dev_gone") == 0 and fam.get_baseline_entry_count("dev_stays") > 0)
+check("the engine drops the device's model, evidence and metric labels",
+      ("discard_device", ("dev_gone",)) in p.ml_registry.calls
+      and ("clear_device", ("dev_gone",)) in p.evidence_store.calls
+      and any(c[0] == "remove_device_metric_labels" and c[1][0] == "dev_gone" for c in p.metrics_exporter.calls))
+check("the engine clears the device's learned false-positive values",
+      eng_store.get_device_metadata("dev_gone").get("sigma_shift") == 0.0)
+check("the request is consumed", device_purge.pending_purges(eng_dir) == [])
+eng_store.close()
+
 if FAILURES:
     print(f"\n{len(FAILURES)} device-purge check(s) FAILED: {FAILURES}")
     sys.exit(1)

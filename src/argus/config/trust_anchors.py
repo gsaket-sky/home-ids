@@ -1,6 +1,6 @@
 """
-v13 config loader: network.trust_anchors -> Dict[str, TrustAnchor], plus
-hardware_profile validation (v13 full-architecture plan, Phase 2).
+argus config loader: network.trust_anchors -> Dict[str, TrustAnchor], plus
+hardware_profile validation.
 
 Bridges the YAML list shape config.yaml.example's `network:` block documents
 (`network.trust_anchors: [{role, ip, mac}, ...]`) into the `Dict[str, TrustAnchor]`

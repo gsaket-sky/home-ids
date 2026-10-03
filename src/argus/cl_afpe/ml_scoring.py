@@ -102,8 +102,8 @@ def build_feature_vector(features: Dict[str, Any], domain: str, is_trust_cached:
     """Matches _stage2_lgbm()'s real 11-feature vector construction exactly (lines
     1310-1377) -- MUST stay in lockstep with train_fp_classifier.py's own
     extract_features_from_alert(), the same "no shared helper by design"
-    relationship v1's own docstring documents (one runs in the always-on pipeline
-    process, the other in a separate weekly retrain script); v13 joins that
+    relationship the earlier engine's own docstring documents (one runs in the always-on pipeline
+    process, the other in a separate weekly retrain script); argus joins that
     relationship rather than inventing a third, independently-drifting copy."""
     from utils import entropy as compute_entropy
 
@@ -295,7 +295,7 @@ class MLScorer:
 
     def score_stage2(self, features: Dict[str, Any], domain: str, is_trust_cached: bool) -> Optional[float]:
         """Returns P(FP) in [0,1], or None if the model isn't ready -- caller
-        substitutes the neutral 0.50 sentinel, matching v1 exactly."""
+        substitutes the neutral 0.50 sentinel, matching the earlier engine exactly."""
         self._ensure_lgbm_loaded()
         session = self._lgbm_session
         if session is None:
@@ -307,7 +307,7 @@ class MLScorer:
             expected_feats = (
                 input_spec.shape[1] if (len(input_spec.shape) > 1 and isinstance(input_spec.shape[1], int)) else 6
             )
-            # Matches v1's own 6-feature legacy / 9-feature multi-threat / 11-feature
+            # Matches the earlier engine's own 6-feature legacy / 9-feature multi-threat / 11-feature
             # ARP-sweep+DNS-evasion shape handling -- an older exported model still
             # loads and runs correctly on whichever shape it was actually trained
             # with, it just won't have the newer-dimension signal until retrained.

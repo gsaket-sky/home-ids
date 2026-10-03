@@ -13,7 +13,7 @@ published normally, never suppressed). The evidence stays in the graph for the n
 lets the health manager report the failure. A fallback to a different engine would decide that cycle under
 different rules -- a predictable no-action result is safer.
 
-GRAPH WRITE + WINDOWED READ (v13 full-architecture plan, Phase 1): when `device_id` is
+GRAPH WRITE + WINDOWED READ: when `device_id` is
 supplied, every call also (a) queries `RollingWindowView.evidence_in_window()` for that
 device's persisted history and merges it with this cycle's fresh evidence before
 deciding, and (b) writes this cycle's fresh evidence + the resulting decision into the
@@ -22,7 +22,7 @@ decision, only means this cycle is missing from the durable trail (logged loudly
 silent). `device_id=None` (the default) skips both entirely, unchanged from before this
 existed -- so existing callers that don't pass it keep working exactly as they do today.
 The decision row is deduped by (state, decision_path) per device (`_last_decision_key`,
-mirroring `src/v13/ingest/daemon.py`'s own `only_persist_if_changed_from` pattern) -- a
+mirroring `src/argus/ingest/daemon.py`'s own `only_persist_if_changed_from` pattern) -- a
 real fix found live on `.94`'s first restart with this wiring: without it, every device
 writes a new decisions-table row every ~2s poll cycle regardless of whether the verdict
 actually changed (611 rows observed in well under a minute of real runtime before this
@@ -30,9 +30,9 @@ was added). Evidence itself is never deduped this way -- every fresh item is a r
 observation worth recording.
 
 WHY QUERY UP TO THE LONGEST TTL, NOT A SHORTER "ROLLING WINDOW": confirmed by reading
-`src/v13/hypotheses/engine.py`'s own `compute_freshness()` -- it already discards
+`src/argus/hypotheses/engine.py`'s own `compute_freshness()` -- it already discards
 anything older than 600s (default) / 86400s (reputation family) per item, matching
-v-current's `EvidenceStore` TTLs exactly. Querying a shorter window than that would only
+the detector `EvidenceStore` TTLs exactly. Querying a shorter window than that would only
 ever return a SUBSET of what scoring already considers fresh; querying up to the longest
 TTL and letting `compute_freshness()` do the real trimming is simpler and strictly
 correct. The actual new capability this unlocks is NOT "see further back in time than a
@@ -81,7 +81,7 @@ _v13_engine = V13DecisionEngine()
 _GRAPH_DB_PATH = "state/v13_graph.db"
 _graph_store: Optional[GraphStore] = None
 
-# Mirrors src/v13/ingest/daemon.py's own _last_decision_key dict + compute_decision()'s
+# Mirrors src/argus/ingest/daemon.py's own _last_decision_key dict + compute_decision()'s
 # only_persist_if_changed_from param exactly (see that docstring) -- without this, every
 # device gets a NEW decisions-table row every single ~2s poll cycle regardless of
 # whether the verdict actually changed (confirmed live: 611 decision rows after well
@@ -91,7 +91,7 @@ _graph_store: Optional[GraphStore] = None
 # nothing about it changed.
 _last_decision_key: Dict[str, Tuple[str, str]] = {}
 
-# v13 full-architecture plan, alert/decision unification (Phase 2): the most
+# alert/decision unification (Phase 2): the most
 # recently WRITTEN decision_id per device, regardless of which cycle wrote it.
 # pipeline.py's alert-worthy gate (300s/60s+risk-delta re-alert cadence) fires on
 # many cycles where decision["state"]/decision_path haven't themselves "changed"
@@ -103,7 +103,7 @@ _last_decision_key: Dict[str, Tuple[str, str]] = {}
 # later update_decision_payload() call always has a real target.
 _last_decision_id: Dict[str, str] = {}
 
-# v13 full-architecture plan, Phase 1a -- the new graph-only-possible capabilities'
+# the graph-engine migration, Phase 1a -- the new graph-only-possible capabilities'
 # tuning constants. Each mirrors a value already established elsewhere in this codebase
 # rather than inventing a new number: the coordinated-targeting window matches
 # RollingWindowView's own SHORT_WINDOW_SECONDS ("within a short window," the plan's own
@@ -138,14 +138,14 @@ _FIRST_CONTACT_LOOKBACK_SECONDS = DEFAULT_EVIDENCE_RETENTION_DAYS * 86400
 
 # device_id -> set of content keys already written to the graph. A MUCH more serious
 # bug than the decision-dedup above, found the same minute on the same restart:
-# EvidenceStore.get_for_device() returns the SAME still-fresh v1 item on EVERY cycle
+# EvidenceStore.get_for_device() returns the SAME still-fresh detector item on EVERY cycle
 # for up to its full TTL (600s default, 86400s reputation -- ~300 cycles at the 2s poll
 # interval for a behavioral item alone), and evidence/ingest.py's convert() assigns a
 # FRESH, non-deterministic evidence_id on every call with no content-based dedup. Naive
 # per-cycle insertion of "this cycle's fresh_v2" therefore re-writes the SAME real
 # observation as a brand-new graph row every single cycle it remains in EvidenceStore --
 # confirmed live: 12,766 evidence rows / 28.7MB after 9 minutes of real runtime, ~2
-# orders of magnitude more than the real observation rate. v1 Evidence has no id field
+# orders of magnitude more than the real observation rate. Detector Evidence has no id field
 # of its own, so (device, type, source, timestamp) is used as a stable content key --
 # EvidenceStore never mutates an item's timestamp after creation, so the SAME real
 # observation produces the SAME key every cycle it's returned. Pruned against each
@@ -156,7 +156,7 @@ _written_evidence_keys: Dict[str, set] = {}
 
 
 def _content_key(ev) -> tuple:
-    """Same stable identity for both v1 Evidence (.type/.device) and v2 Evidence
+    """Same stable identity for both detector Evidence (.type/.device) and v2 Evidence
     (.evidence_type/.device_id) -- needed to recognize a v2 item (already converted)
     against the SAME real observation converted again in a later cycle."""
     device = getattr(ev, "device_id", None) or getattr(ev, "device", None)
@@ -170,15 +170,15 @@ _GRAPH_HARDWARE_PROFILE: Optional[str] = None
 def configure(graph_db_path: str, hardware_profile: Optional[str] = None) -> None:
     """Optional: call once at startup to point the live graph store somewhere other
     than the default 'state/v13_graph.db' (relative to the process's CWD, matching
-    every other v13 ops file's own state_dir convention). Safe to call before any
+    every other argus ops file's own state_dir convention). Safe to call before any
     real evaluate() call; if never called, the default path is opened lazily on
     first use with a device_id.
 
-    hardware_profile (v13 full-architecture plan, Phase 10b, optional): passed
+    hardware_profile: passed
     straight through to GraphStore's own PRAGMA cache_size tuning -- this is the
     ONE long-lived GraphStore singleton actually serving the live per-cycle path,
     so it's the one place hardware-driven query-performance tuning actually
-    matters (every other v13 ops job's own GraphStore is a short-lived,
+    matters (every other argus ops job's own GraphStore is a short-lived,
     once-per-run construction where cache_size has far less to work with).
     Omitting it (the default) leaves SQLite's own default cache_size untouched,
     identical to this function's behavior before this param existed."""
@@ -285,7 +285,7 @@ def merge_device_in_own_connection(orphan_id: str, canonical_id: str) -> None:
 
 def get_graph_store() -> GraphStore:
     """Public accessor for the SAME lazily-initialized GraphStore singleton this
-    module's own evaluate() uses -- v13 full-architecture plan, Phase 3:
+    module's own evaluate() uses -- 
     LiveIdentityManager needs the same graph (one file, one source of truth per
     process) for its own anchor-MAC persistence, rather than opening a second,
     independent connection to the same db file."""
@@ -333,8 +333,8 @@ def _tuned_rep_vector(rep_vector, device_id: Optional[str], autotune: AutotuneEn
 
     Deliberately does NOT touch core/pipeline.py's own `rep_vector` (the
     object this function returns a NEW instance built from, never mutated)
-    -- pipeline.py's own alert text / v-current's decision path keep reading
-    the untouched original, so this only ever affects v13's OWN decision
+    -- pipeline.py's own alert text keeps reading
+    the untouched original, so this only ever affects argus's OWN decision
     call a few lines below. See classifier.py's own classify() docstring for
     why this reclassify-in-the-caller approach was chosen over editing
     pipeline.py's shared classify() call site directly."""
@@ -380,7 +380,7 @@ def record_device_traffic(device_id: str, destination_ids, now: Optional[float] 
 
 
 def _convert_active_evidence(v1_evidence_list, features: dict):
-    """Converts this cycle's v1 evidence as-is. P0 (architecture review 2026-10-02): there is no longer a
+    """Converts this cycle's detector evidence as-is. P0 (architecture review 2026-10-02): there is no longer a
     last_dest_ip fallback for destination-less zeek_exfiltration/zeek_beaconing evidence -- it stamped the device's
     most recent connection onto every such item in the batch, so one IP collected evidence from unrelated traffic
     and false corroboration followed. The detectors now attribute to what actually fired (the dominant byte
@@ -430,7 +430,7 @@ def _write_graph(device_id: str, timestamp: float, fresh_v2: List, merged_v2: Li
     own module-level comment for why this matters -- without it, the same real
     observation gets re-written every cycle it remains in EvidenceStore). The
     decision row is separately deduped by (state, decision_path) via
-    _last_decision_key, matching src/v13/ingest/daemon.py's own
+    _last_decision_key, matching src/argus/ingest/daemon.py's own
     only_persist_if_changed_from pattern. Skips the graph entirely (no transaction
     opened at all) when there's neither new evidence nor a changed decision."""
     written = _written_evidence_keys.setdefault(device_id, set())
@@ -639,7 +639,7 @@ def _is_lan_destination(dest: str) -> bool:
 def _inject_graph_derived_evidence(device_id: str, destinations: set, ts: float,
                                       fresh_evidence: Optional[List[Evidence]] = None,
                                       geoip_engine=None) -> List[Evidence]:
-    """v13 full-architecture plan, Phase 1a: computes the three new graph-only-possible
+    """computes the three new graph-only-possible
     signals for THIS cycle's decision -- cross-device correlation, reputation
     propagation, and genuine first-contact scoring (see graph/window.py's
     devices_targeting()/domain_seen_before() and graph/store.py's
@@ -848,7 +848,7 @@ def _cached_distinct_destination_count(store, device_id: str, ts: float) -> int:
 def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float) -> List[Evidence]:
     """Release 14, net-new capability N2: "does this device deviate from
     similar devices" -- groups devices by device_type (already computed by
-    v-current's own identity/pipeline code, passed straight through here) and
+    core/identity.py and pipeline.py, passed straight through here) and
     compares THIS device's own distinct-destination count (the last 7 days)
     against its cohort's average. Persists device_type onto this device's own
     graph metadata as a side effect (best-effort, mirrors how trust-anchor MAC
@@ -1045,7 +1045,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              geoip_engine=None) -> Dict[str, Any]:
     """The live call site `pipeline.py` uses in place of
     `argus/decision/engine.py`'s `DecisionEngine.evaluate()`. Same positional/keyword
-    shape as v-current's own `evaluate()` (plus the new, optional `device_id`/`now`)
+    shape as the earlier engine's own `evaluate()` (plus the new, optional `device_id`/`now`)
     so the original call site swap in pipeline.py stayed a one-line change; passing
     `device_id` is what opts a call into the graph read/write behavior described in
     this module's own docstring above -- omitting it (the default) is unaffected by
@@ -1193,7 +1193,7 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             _last_risk_score[device_id] = float(
                 decision.get("hypotheses", {}).get("attack", {}).get("score", 0.0) or 0.0)
             _write_graph(device_id, ts, fresh_v2, merged_v2, decision)
-            # v13 full-architecture plan, alert/decision unification (Phase 2): the
+            # alert/decision unification (Phase 2): the
             # most recently written decision_id for this device, whether or not
             # THIS cycle itself wrote a new row (see _last_decision_id's own
             # module-level comment) -- gives pipeline.py a real target for later

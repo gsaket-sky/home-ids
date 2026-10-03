@@ -1,6 +1,6 @@
 """
-live_llm_review.py - schedules v13's own LLM-review (src/v13/llm_review/) against
-`.94`'s own live graph (v13 full-architecture plan, Phase 5).
+live_llm_review.py - schedules argus's own LLM-review (src/argus/llm_review/) against
+`.94`'s own live graph.
 
 DESIGN DECISION (2026-09-07, user confirmed): batch-script shape (a separate scheduled
 subprocess), NOT in-cycle invocation from pipeline.py. Lower risk, ships the
@@ -30,10 +30,10 @@ Gated by config.yaml's detection_engine.llm_review_enabled (default true) --
 main() no-ops immediately if disabled, read fresh at the top of every scheduled
 run since each run is a separate subprocess, not the long-running soc.service.
 
-WHAT IT REVIEWS: v13's own decisions (state/v13_graph.db), not v-current's
-alerts.json -- v13's DeterministicValidator.build_ground_truth() is already built to
-consume a v13 DecisionEngine.evaluate() result + Evidence list directly (see that
-module's own docstring), not v-current's alert_payload dict shape. Reviews every
+WHAT IT REVIEWS: argus's own decisions (state/v13_graph.db), not the pipeline's
+alerts.json -- argus's DeterministicValidator.build_ground_truth() is already built to
+consume a argus DecisionEngine.evaluate() result + Evidence list directly (see that
+module's own docstring), not the pipeline's alert_payload dict shape. Reviews every
 SUSPICIOUS/HIGH/CRITICAL decision from the lookback window that hasn't been reviewed
 yet (tracked by decision_id in the output file itself -- no separate cache needed),
 up to a per-run cap.
@@ -46,7 +46,7 @@ time in a plain sequential loop -- never threaded/async -- respecting the standi
 construction, not by an explicit lock (nothing in this process ever issues a second
 request before the first returns).
 
-v13 full-architecture plan, Phase 8 (added after this module's initial Phase 5
+the graph-engine migration, Phase 8 (added after this module's initial Phase 5
 build): 8a pattern-level persistent caching (a recurring pattern across SEPARATE
 decision rows is now served from cache, not re-queried -- see _persistent_cache_key()
 below) and 8d a Telegram digest per run (build_llm_review_digest_message()), both
@@ -54,7 +54,7 @@ now wired in. 8b (alert dedup/grouping) is deliberately NOT a separate mechanism
 see _persistent_cache_key()'s own docstring for why 8a's design already provides it
 for free, as a direct consequence rather than a second implementation of the same
 idea. 8c (INDEPENDENCE_FAMILY_MAP validation) lives in its own module,
-v13/ops/independence_family_report.py -- a genuinely separate concern (divergence-
+argus/ops/independence_family_report.py -- a genuinely separate concern (divergence-
 data analysis, not LLM review), not this file's job.
 
 NOT YET IMPLEMENTED (each a real, separately-scoped follow-up): local-model triage
@@ -66,7 +66,7 @@ Release 14, Workstream 4 (2026-09-07): cross-device campaign correlation and
 GeoIP-enriched reporting are now both wired in.
 - Cross-device correlation: a structural gap, not a missing feature -- this script
   reviews a decision's PERSISTED graph evidence (window.evidence_in_window()), but
-  v13's own live decision path (live_engine.py's _inject_graph_derived_evidence())
+  argus's own live decision path (live_engine.py's _inject_graph_derived_evidence())
   deliberately NEVER persists its synthetic coordinated_targeting/first_contact/
   reputation-propagation evidence (writing it would recreate the exact
   evidence-duplication bug Phase 1's own incident already fixed). So a decision
@@ -143,7 +143,7 @@ JOB_NAME = "live_llm_review"
 DEADLINE_MARGIN_SECONDS = 60.0      # finish + write results this long before the budget ends
 DEFAULT_MIN_QUERY_SECONDS = 120.0   # don't start a remote call with less time than this left
 
-# What actually gets reviewed -- matches what v-current's own pipeline surfaces to
+# What actually gets reviewed -- matches what the pipeline surfaces to
 # ollama_soc.py in practice (published alerts), not BENIGN/ANOMALOUS noise.
 _REVIEWABLE_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})
 
@@ -242,8 +242,8 @@ def _inject_coordinated_targeting(store: GraphStore, window: RollingWindowView, 
 def _representative_destination(evidence_list: List[Evidence]) -> str:
     """Best-effort pick of the one destination most worth naming in a human-facing
     report -- the highest-confidence real (non-NO_DESTINATION) destination among
-    the evidence actually reviewed. v13 decisions are per-DEVICE, not per-
-    destination the way v-current's alert_payload carries a single canonical
+    the evidence actually reviewed. argus decisions are per-DEVICE, not per-
+    destination the way the pipeline's alert_payload carries a single canonical
     target, so this is a first-pass heuristic, not a claim of a single "the"
     target -- documented as such rather than silently presented as authoritative."""
     real_items = [e for e in evidence_list if e.destination_id and e.destination_id != NO_DESTINATION]
@@ -253,7 +253,7 @@ def _representative_destination(evidence_list: List[Evidence]) -> str:
 
 
 def _geo_note(geoip_engine: Optional[GeoIPEngine], ip: str) -> str:
-    """Matches scripts/retro_hunter.py's/v13/ops/live_retro_hunter.py's own
+    """Matches scripts/retro_hunter.py's/argus/ops/live_retro_hunter.py's own
     _geo_note() exactly: ' (Org, Country)' for a raw IP via local mmdb lookups, or
     '' if unavailable/not an IP (e.g. a domain name, which this has no lookup
     path for). A small local copy, matching that script's own established
@@ -277,7 +277,7 @@ def _geo_note(geoip_engine: Optional[GeoIPEngine], ip: str) -> str:
 
 
 def _evidence_fingerprint(evidence_list) -> str:
-    """v13-native analogue of ollama_soc.py's own _evidence_fingerprint(): a
+    """argus-native analogue of ollama_soc.py's own _evidence_fingerprint(): a
     content hash of the ATTACK-shaped evidence actually present for this
     decision (family_for(...) not in NON_ATTACK_FAMILIES, matching
     decision/engine.py's own attack_evidence filter), so a genuinely NEW piece
@@ -286,8 +286,8 @@ def _evidence_fingerprint(evidence_list) -> str:
     persistent cache even when the pattern key below stayed the same. Presence
     (which evidence_types are present) plus confidence rounded to 1 decimal
     place (bucketed, so minor fluctuation doesn't invalidate the cache on
-    every run) -- same two-part shape as v1's own real fingerprint, adapted to
-    v13's Evidence model rather than v1's raw features dict."""
+    every run) -- same two-part shape as the earlier engine's own real fingerprint, adapted to
+    argus's Evidence model rather than the pipeline's raw features dict."""
     attack_items = [e for e in evidence_list if family_for(e.evidence_type) not in NON_ATTACK_FAMILIES]
     presence = sorted({e.evidence_type for e in attack_items})
     bucketed = sorted(round(float(e.confidence or 0.0), 1) for e in attack_items)
@@ -296,9 +296,9 @@ def _evidence_fingerprint(evidence_list) -> str:
 
 
 def _persistent_cache_key(decision: Dict[str, Any], device_id: str, evidence_list) -> str:
-    """v13-native port of ollama_soc.py's own _persistent_cache_key() shape:
+    """argus-native port of ollama_soc.py's own _persistent_cache_key() shape:
     a coarse "same pattern" key (device | winning attack hypothesis | decision
-    path -- v13's analogue of v1's device|target|signature incident_key) plus
+    path -- argus's analogue of the pipeline's device|target|signature incident_key) plus
     the evidence fingerprint above plus VALIDATOR_SCHEMA_VERSION, so upgrading
     DeterministicValidator.validate()'s own logic makes every previously-cached
     verdict unreachable by lookup immediately rather than silently trusting a
@@ -326,7 +326,7 @@ def _load_persistent_cache(output_path: Path, now: float,
     persistent_cache_key (only written by this phase onward -- an entry from
     before this phase existed is gracefully skipped, not an error) and a real
     `recommendation` (an error entry never caches) are eligible; an entry
-    older than ttl_seconds is excluded, matching v1's own TTL discipline.
+    older than ttl_seconds is excluded, matching the earlier engine's own TTL discipline.
     Iterates the file in its own natural (chronological, append-only) order
     and lets a later entry overwrite an earlier one sharing the same key, so
     the result is always the MOST RECENT still-valid verdict per pattern."""
@@ -355,7 +355,7 @@ def _load_persistent_cache(output_path: Path, now: float,
     return cache
 
 
-# Phase 8d: v13-native adaptation of ollama_soc.py's own build_ollama_digest_message()
+# Phase 8d: argus-native adaptation of ollama_soc.py's own build_ollama_digest_message()
 # shape (character-budgeted detail entries, never truncated mid-sentence -- entries
 # that don't fit fold into a "...and N more" counter instead of a hard [:4000] slice
 # cutting mid-entry, the exact live bug that function's own docstring documents fixing).
@@ -376,7 +376,7 @@ def build_llm_review_digest_message(entries: List[Dict[str, Any]],
     accepted = sum(1 for e in entries if e.get("validator_accepted") is True)
     rejected = [e for e in entries if e.get("validator_accepted") is False]
 
-    lines = [f"\U0001f916 <b>v13 LLM review run: {reviewed} decision(s) reviewed</b>", ""]
+    lines = [f"\U0001f916 <b>LLM review run: {reviewed} decision(s) reviewed</b>", ""]
     if cache_hits:
         lines.append(f"⚡ {cache_hits} served from the persistent pattern cache (no Ollama call)")
     if accepted:
@@ -544,7 +544,7 @@ def main() -> None:
                     continue
                 elif queries_made >= max_queries:
                     # Query budget exhausted this run and no cache hit available --
-                    # deferred to next run, matching v1's own FIFO-fairness
+                    # deferred to next run, matching the earlier engine's own FIFO-fairness
                     # discipline (still a candidate next time, since nothing is
                     # written for it here).
                     continue

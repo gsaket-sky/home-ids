@@ -1,5 +1,5 @@
 """
-v13/synthetic/injector.py -- Release 15 Sheet 01: runs attacks.py's
+argus/synthetic/injector.py -- Release 15 Sheet 01: runs attacks.py's
 generators through the REAL DecisionEngine, against an ISOLATED in-memory
 clone of a device's own recent graph state -- never the live database. This
 is the exact safety boundary the plan calls for: synthetic evidence must be

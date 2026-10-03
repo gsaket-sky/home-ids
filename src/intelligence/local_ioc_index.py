@@ -31,7 +31,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 LOGGER = logging.getLogger("home_ids.local_ioc")
 
-# 2: JA3 hashes are only taken from rules where the hash is the whole condition. A cached v1 index still holds
+# 2: JA3 hashes are only taken from rules where the hash is the whole condition. A cached version-1 index still holds
 # hashes of conditional rules (stock Windows TLS fingerprints), so it is rejected and rebuilt.
 INDEX_SCHEMA_VERSION = 2
 

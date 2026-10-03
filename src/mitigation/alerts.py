@@ -382,7 +382,7 @@ class AlertManager:
                 # unreachable via this path now, not deleted -- a real, separate
                 # cleanup once no stale buttons can plausibly remain). Real
                 # sensitivity tuning is now Sheet 03a's autotuner
-                # (src/v13/autotune/engine.py), backtest-gated and independent of
+                # (src/argus/autotune/engine.py), backtest-gated and independent of
                 # any Telegram tap.
                 msg_text = (
                     "ℹ️ This approval flow has been retired — sensitivity tuning is now "

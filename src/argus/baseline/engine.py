@@ -1,5 +1,5 @@
 """
-v13/baseline/engine.py -- Release 15 Sheet 00 orchestration layer: wires
+argus/baseline/engine.py -- Release 15 Sheet 00 orchestration layer: wires
 baseline/bayesian.py's pure conjugate/BOCPD models to GraphStore persistence,
 derives the cross-detector "activity state" for MarkovBaseline, and turns
 model output into Evidence rows -- all subject to the no-learning-during-an-
@@ -212,7 +212,7 @@ class BaselineEngine:
         # passes _SAVE_MIN_INTERVAL_SECONDS so routine updates are batched; call flush() on shutdown.
         self.save_min_interval = float(save_min_interval)
         # Release 15 Sheet 03a live wiring (closes that module's own former
-        # honest gap: "not yet wired to make v13/decision/engine.py actually
+        # honest gap: "not yet wired to make argus/decision/engine.py actually
         # READ these promoted values"): bocpd_hazard_rate is the one
         # TUNABLE_PARAMETERS entry this engine itself owns the meaning of.
         # get_active_value() falls back to _DEFAULT_HAZARD_RATE (this
@@ -275,7 +275,7 @@ class BaselineEngine:
         """Design Invariant 06: no baseline/regime/Markov update while a
         device sits at SUSPICIOUS/HIGH/CRITICAL, and not immediately on
         return to BENIGN either. `compute_decision()` only persists a new
-        decisions row when the verdict CHANGES (v13/ingest/sources.py's
+        decisions row when the verdict CHANGES (argus/ingest/sources.py's
         only_persist_if_changed_from) -- so the latest row's own timestamp
         already IS "when this device most recently left/avoided an incident
         state," and a plain elapsed-time check against it is the correct
@@ -591,7 +591,7 @@ class BaselineEngine:
         changepoint) -- or None if learning is currently paused (Design
         Invariant 06) or the observation is a no-op.
 
-        Uses NO_DESTINATION (v13/evidence/model.py) unconditionally: these
+        Uses NO_DESTINATION (argus/evidence/model.py) unconditionally: these
         are aggregate, per-device features, not single-connection evidence,
         and this is the DIRECT application of the red-team finding that new
         evidence emitters must never guess a "last known destination"
