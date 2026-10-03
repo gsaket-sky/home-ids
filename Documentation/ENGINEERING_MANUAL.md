@@ -308,7 +308,7 @@ for that hypothesis's own destination, not the device's busiest destination.
 | DNS evasion / policy bypass | Traffic the device's own DNS cannot explain |
 | Signature-matched threat | A Suricata signature match |
 | Coordinated targeting | Several devices sharing an unusual destination, TLS fingerprint or DGA seed |
-| Peer-cohort deviation | Seven-day destination count at least three times the device type's average; capped at 3 |
+| Peer-cohort deviation | Seven-day destination count at least three times the device type's average; scores only when the device also has attack-shaped evidence (on its own it is context and creates no alert); capped at 3 |
 
 | Benign hypothesis | When it applies |
 |---|---|

@@ -377,7 +377,10 @@ if my_count >= min_count:
 ```
 
 The cohort is every other device with the same device-type label; unknown types are never pooled. The hypothesis is
-capped at 3, and its family never counts as a witness, so peer deviation alone can never reach HIGH.
+capped at 3, and its family never counts as a witness. It scores only when the same device also has attack-shaped
+evidence (DGA, tunnelling, lateral scan, malicious fingerprint, exfiltration, beaconing, connection abuse, ARP sweep,
+DNS evasion, a medium-or-stronger Zeek notice); on its own it is context and creates no alert. On the reference
+network that removed about 96% of its alerts (2,812 a day to 115).
 
 ---
 
