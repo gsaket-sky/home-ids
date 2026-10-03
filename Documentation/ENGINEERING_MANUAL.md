@@ -412,10 +412,20 @@ until they are ready, Stage 2 gives a neutral score and Stage 3 uses fixed vendo
 corrections validated by the AI advisor, suppressions made by the engine itself, and trust-cache hits. Confirmed
 threats are counted per device and alert type. A correction also raises the device's own detection thresholds when
 the alert was about connection volume (ARP sweeps, rejected connections, long connections), or trusts the
-destination otherwise, and slightly widens the device's sensitivity. A nightly job retrains the classifier from this
-history (the engine picks up the new model as soon as the file changes, without a restart) and recalibrates the suppression, uncertainty and ARP-sweep
+destination otherwise. A nightly job retrains the classifier from this history and recalibrates the suppression, uncertainty and ARP-sweep
 thresholds, globally and per device. A threshold only moves towards what the evidence supports, never below its
-floor, and refuses to move when corrected and uncorrected scores overlap. Every change goes through the autotuner
+floor, and refuses to move when corrected and uncorrected scores overlap.
+
+**Model quality gate.** A retrained classifier is installed only if, on a held-out quarter of the data it never
+trained on, it is clearly better than chance on both classes (balanced accuracy at least 0.65) and no single feature
+separates the classes almost perfectly (0.98), which would mean a label leaked into the features rather than a
+pattern was learned. Training uses balanced class weights; the "already trusted" flag is excluded from training
+(every trusted destination is itself a false-positive example, so it would repeat the label), and repeated hits on
+the same trusted destination count once per device and alert type. A rejected model is not installed and the
+reasons are kept in `fp_classifier_rejected.json`. The engine uses a classifier only when
+`fp_classifier_quality.json` vouches for exactly that file (checksum) and feature version, and picks up a new one
+without a restart. On a new installation there is no classifier until enough real alerts and corrections exist for the gate to
+verify one; until then Stage 2 gives a neutral score and the other stages decide. Every change goes through the autotuner
 (section 10), so it is versioned, canaried and reversible like any other.
 
 ---

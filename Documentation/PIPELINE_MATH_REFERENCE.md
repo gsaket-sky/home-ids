@@ -442,7 +442,7 @@ def combine_scores(lgbm_prob, embed_sim, embed_threshold=0.82):
 ```
 combined >= suppress threshold (0.80)            -> FALSE_POSITIVE, suppressed
 uncertain threshold (0.55) <= combined < 0.80    -> UNCERTAIN, published with a low-confidence flag
-combined < 0.55                                  -> CONFIRMED_THREAT, sensitivity tightened
+combined < 0.55                                  -> CONFIRMED_THREAT, sensitivity shift tightened (recorded only, see 11d)
 ```
 
 Both thresholds are read on every alert, in layers: the configured value (`fp_combined_suppress_threshold`,
@@ -459,7 +459,8 @@ on CONFIRMED_THREAT: shift = max(shift - 0.50, -1.5)        # tighten fast
 on FALSE_POSITIVE:   shift = min(shift + 0.25,  2.0)        # relax slowly
 ```
 
-Tightening is twice as fast as relaxing.
+Tightening is twice as fast as relaxing. The shift is recorded per device and shown on the dashboards, but no
+detector reads it yet, so it does not change detection; wiring it into the baseline thresholds is an open decision.
 
 Verdict thresholds are fixed values that the autotuner adjusts. No calibrated probability is used to make the
 decision.
