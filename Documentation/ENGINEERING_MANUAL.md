@@ -563,7 +563,11 @@ Another device contacting it later is a confirmed threat immediately. It is one 
 (`state/local_confirmed_intel.json`) for the engine, the nightly retro-hunt and the maintenance tools; every writer
 re-reads it when another process changed it and saves atomically. The memory covers addresses and registrable
 domains. Shared telemetry domains and protected infrastructure addresses are never recorded, so the memory cannot be
-poisoned into blocking something essential. DNS
+poisoned into blocking something essential. Protected addresses include public DNS resolvers and the resolvers of VPN
+and DNS-filtering services (NordVPN, Mullvad, NextDNS, Control D); a device using one instead of the local resolver
+is still reported as a policy finding, it just never becomes a network-wide threat. An entry lasts 30 days from its
+last *independent* confirmation: a hard stop caused only by the memory match itself does not renew it, so a single
+mistaken confirmation cannot keep itself alive. DNS
 blocks also apply to every device, because they all use the same resolver.
 
 **The look-back (retro-hunt).** Every night the scheduler re-scans the graph's history of destinations each device
