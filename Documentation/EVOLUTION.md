@@ -35,7 +35,8 @@ or contradicted it, replayed against new code, or hunted across all devices. The
 graph edges as well, so "why is this trusted?" has an answer.
 
 The graph engine first ran in shadow beside the original one, and was compared on live traffic before it took over.
-The earlier engine is kept as a configuration-level rollback.
+Once it had proven itself, the switch back was removed: the earlier engine now only steps in, for a single cycle,
+if the graph engine ever raises an error.
 
 ## 3. Identity that follows devices
 

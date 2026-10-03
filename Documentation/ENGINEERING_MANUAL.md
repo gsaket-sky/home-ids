@@ -359,6 +359,9 @@ flowchart TD
     ML -->|no| BN[BENIGN]
 ```
 
+If the graph-based engine ever raises an error, that one cycle is decided by the earlier, simpler engine
+(`core/decision_engine.py`) instead of being dropped; the same holds for the false-positive engine (section 9).
+
 Every decision carries a reasoning trail (hard-stop checks, reputation context, network owner, hypothesis scores,
 families) and a plain-language explanation built from the same evidence labels the console shows.
 
@@ -503,7 +506,9 @@ for days may be lower than its bar shows.
 
 **One device protects the others.** When a destination is confirmed malicious for any device (a Stage-1 threat or a
 two-family HIGH/CRITICAL verdict), its address or domain is recorded in the local confirmed-intel memory for 30 days.
-Another device contacting it later is a confirmed threat immediately. The memory covers addresses and registrable
+Another device contacting it later is a confirmed threat immediately. It is one shared store
+(`state/local_confirmed_intel.json`) for the engine, the nightly retro-hunt and the maintenance tools; every writer
+re-reads it when another process changed it and saves atomically. The memory covers addresses and registrable
 domains. Shared telemetry domains and protected infrastructure addresses are never recorded, so the memory cannot be
 poisoned into blocking something essential. DNS
 blocks also apply to every device, because they all use the same resolver.
