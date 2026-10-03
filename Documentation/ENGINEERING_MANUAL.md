@@ -837,8 +837,11 @@ how to enable it.
   real detections and false positives (NTP, update checks) can be measured first. Planned only after resource
   measurements on Raspberry Pi hardware.
 - **False-positive classifier, next version.** Every input recorded with the alert, so training sees exactly what
-  the engine saw. Each optional source as its own input with an "available" flag, so "switched off" never reads as
-  "clean": Tranco, AbuseIPDB, VirusTotal, keyed feeds, Suricata scans, router capture. New inputs: the device's own
+  the engine saw. Each optional source as its own input, missing when switched off, so "switched off" never reads as
+  "clean": Tranco, AbuseIPDB, VirusTotal, keyed feeds, Suricata scans, router capture. A model type that handles
+  missing values natively (scikit-learn's histogram gradient boosting); its ONNX export needs a small workaround for
+  a converter bug with current protobuf versions, verified to match scikit-learn to 1e-7, and every install is checked
+  for ONNX/scikit-learn parity. New inputs: the device's own
   familiarity with the destination, how typical the current hour is for this device (from its per-hour baselines),
   device age. The "already trusted" column replaced by leak-free history: earlier corrections made before the alert,
   from other records. Labels weighted by source (user above AI advisor above the engine's own suppressions), a
