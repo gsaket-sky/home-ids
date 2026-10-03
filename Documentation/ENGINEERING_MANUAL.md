@@ -425,7 +425,28 @@ the same trusted destination count once per device and alert type. A rejected mo
 reasons are kept in `fp_classifier_rejected.json`. The engine uses a classifier only when
 `fp_classifier_quality.json` vouches for exactly that file (checksum) and feature version, and picks up a new one
 without a restart. On a new installation there is no classifier until enough real alerts and corrections exist for the gate to
-verify one; until then Stage 2 gives a neutral score and the other stages decide. Every change goes through the autotuner
+verify one; until then Stage 2 gives a neutral score and the other stages decide.
+
+**How the classifier is trained** (`scripts/train_fp_classifier.py`, nightly; exact formulas in the pipeline-math
+reference, section 11e):
+
+| Item | Value |
+|---|---|
+| Model | scikit-learn gradient-boosted trees, 50 trees of depth 3, learning rate 0.1, after a standard scaler; exported to ONNX for the engine |
+| Class balance | Each row weighted `n / (2 × size of its class)` |
+| Inputs | 11 numbers per alert: local or Tranco popularity, name randomness, name length, outbound-volume z-score, device-type weight, lateral moves, rejected connections, application-protocol weight, ARP-sweep count, DNS-evasion ratio, and a retired "already trusted" column held at 0 |
+| "Threat" examples | The newest 5,000 published alerts, minus suppressed ones, ones escalated only by persistence, ones later corrected, and rows with a known-bad domain attribution |
+| "False positive" examples | The newest 5,000 correction records: user corrections, AI-validated corrections, the engine's own suppressions, and trust-cache hits (one per device, destination and alert type) |
+| Split | 75 % training, 25 % held out, stratified; at least 40 held-out rows with both classes |
+| Quality gate | Held-out balanced accuracy ≥ 0.65 and no single input separating the classes at ≥ 0.98 |
+| Calibration | Isotonic curve on the held-out rows, kept for the record (not used for decisions) |
+| Schedule | 03:00 daily (`autotune_schedule_cron`), 40-minute limit, pausable; "Retrain now" on the System page |
+
+**Known limits of the current classifier.** The "threat" class is every uncorrected alert, which makes it a weak
+label. Most "false positive" examples are the engine's own earlier suppressions, so the model partly learns to agree
+with itself. Input 0 means locally learned popularity, or Tranco's global rank when Tranco is enabled; switching
+Tranco on changes the meaning of that input. An optional data source that is switched off reads as 0, the same as
+"clean". Section 24 lists the planned next version. Every change goes through the autotuner
 (section 10), so it is versioned, canaried and reversible like any other.
 
 ---
@@ -768,6 +789,7 @@ how to enable it.
 | AbuseIPDB | **Off (licence)** | Abuse blacklist and per-address abuse scores (can reach tier 5) | Same script, plus key |
 | VirusTotal | **Off (licence)** | Antivirus-engine verdicts per destination | Same script, plus key |
 | MaxMind GeoLite2 | Off | City-level location in alerts and maps (country and owner are built in) | Setup → Threat data: key or file |
+| Tranco top-1M list | **Off (licence: includes CC BY-NC data)** | Global popularity ranks for the allowlist and for input 0 of the false-positive classifier, instead of popularity learned on this network | `tranco_enabled: true` (personal, non-commercial use) |
 | Dashboards (Grafana, Loki, Promtail) | Off (heavy on small boards) | Pre-built Grafana dashboards and log search | Add `dashboards` to `COMPOSE_PROFILES` |
 | Unbound forwarding | Recursive by default | Forward DNS to chosen resolvers over TLS | `UNBOUND_MODE=forward` |
 | More decoy addresses | One | Decoys on other subnets or VLANs | `honeypot_ips` |
@@ -814,7 +836,14 @@ how to enable it.
   per-destination connection times). It will run in shadow mode as an evidence source that never counts alone, so its
   real detections and false positives (NTP, update checks) can be measured first. Planned only after resource
   measurements on Raspberry Pi hardware.
-- Mark-as-safe from the web interface.
+- **False-positive classifier, next version.** Every input recorded with the alert, so training sees exactly what
+  the engine saw. Each optional source as its own input with an "available" flag, so "switched off" never reads as
+  "clean": Tranco, AbuseIPDB, VirusTotal, keyed feeds, Suricata scans, router capture. New inputs: the device's own
+  familiarity with the destination, how typical the current hour is for this device (from its per-hour baselines),
+  device age. The "already trusted" column replaced by leak-free history: earlier corrections made before the alert,
+  from other records. Labels weighted by source (user above AI advisor above the engine's own suppressions), a
+  time-ordered held-out split, and a gate that also requires no held-out confirmed threat to be suppressed. A model
+  trained for a different set of enabled sources is not used until it is retrained.
 - Built-in Trends page replacing Grafana; Loki and Promtail removed.
 - Remaining JSON stores (learned profiles, alerts) moved into SQLite.
 - Managed-switch and VLAN isolation (UniFi, MikroTik); more router integrations.

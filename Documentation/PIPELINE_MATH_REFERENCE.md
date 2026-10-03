@@ -470,6 +470,38 @@ decision.
 
 ---
 
+### 11e. Classifier training
+
+Input vector (11 values; `f` = the alert's `features`):
+
+```
+x0  = 1 − rank/1,000,000 if rank > 0 else 0      # rank: Tranco when tranco_enabled, else local popularity
+x1  = min(entropy(first label) / 5, 1)
+x2  = min(max_label_length / 60, 1)
+x3  = min(max(outbound_bytes_z, 0) / 10, 1)
+x4  = device-type weight (laptop/desktop 0.5, phone/tablet 0.4, TV/console 0.3, printer/NAS 0.2, IoT/camera 0.1, unknown 0.3)
+x5  = 0                                           # retired "already trusted" flag (it reproduced the label)
+x6  = min(zeek_lateral_moves / 10, 1)
+x7  = min(zeek_s0_rej_count / 50, 1)
+x8  = clamp(zeek_app_protocol_weight, 0, 1)       # 0.2 when absent
+x9  = min(zeek_arp_sweep_count / 20, 1)
+x10 = clamp(zeek_dns_evasion_ratio, 0, 1)
+```
+
+Training:
+
+```
+weight(row)    = n / (2 · n_class(row))
+model          = StandardScaler → GradientBoosting(n_estimators=50, max_depth=3, learning_rate=0.1)
+split          = 75/25 stratified, seed 42 (needs ≥ 40 held-out rows and both classes)
+install if       balanced_accuracy(held-out) ≥ 0.65
+             and max over inputs j of balanced_accuracy(best threshold on x_j alone) < 0.98
+```
+
+On the reference network the first gated model (2026-10-03) reached a held-out balanced accuracy of 0.97, with the
+best single input at 0.84 (rejected connections). Replayed over the previous 24 hours of alerts, it would have
+suppressed 1.4 %.
+
 ## 12. The AI advisor's validator
 
 **File:** `src/argus/llm_review/validator.py`. A "benign" opinion from the local model is rejected if:
