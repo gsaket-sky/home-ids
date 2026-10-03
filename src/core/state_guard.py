@@ -416,7 +416,7 @@ class StateManager:
         MAC/IP reverse-index entries pointing at it, so a stale index never resolves to a
         pruned device_id (same defensive pattern get_device_id_for_mac/_ip already use).
         Caller is responsible for the matching cleanup in the sibling JSON side files
-        (device_fp_profiles.json, fp_sigma_shifts.json, device_labels.json) -- this method
+        (device_labels.json) and the graph -- this method
         only owns in-memory/persisted StateManager state."""
         with self._global_lock:
             existed = device_id in self._states
@@ -490,7 +490,7 @@ class StateManager:
                 self._mac_to_device_id[mac_key] = new_id
 
     def merge_into_canonical(self, orphan_id: str, canonical_id: str,
-                              ml_registry: Any = None, fp_engine: Any = None) -> bool:
+                              ml_registry: Any = None, familiarity: Any = None) -> bool:
         """Folds an ORPHAN device_id into an already-existing, richer CANONICAL identity
         -- the opposite direction from migrate_device_id(). migrate_device_id() assumes
         its destination (new_id) does NOT already exist yet (it overwrites
@@ -639,8 +639,8 @@ class StateManager:
 
         if ml_registry is not None:
             ml_registry.discard_device(orphan_id, reason="merge")
-        if fp_engine is not None:
-            fp_engine.discard_device_profile(orphan_id, reason="merge")
+        if familiarity is not None:
+            familiarity.discard_device_profile(orphan_id, reason="merge")
         return True
 
     def get_all_device_ids(self) -> List[str]:
@@ -702,7 +702,7 @@ class StateManager:
     def record_action(self, action_id: str, action_type: str, target: str, device_id: str,
                        hostname: str = "unknown", ttl_seconds: float = 86400.0,
                        extra: Optional[Dict[str, Any]] = None) -> None:
-        """Records an autonomous action (e.g. an fp_engine domain immunization) so an
+        """Records an autonomous action (e.g. a CL-AFPE domain immunization) so an
         operator can revoke it later via revoke_action(). `ttl_seconds` bounds how long the
         revoke option stays offered — after expiry prune_expired_actions() drops it, since
         an action nobody objected to within that window is presumed correct.

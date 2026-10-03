@@ -5,7 +5,7 @@ live_manager.py - the actual swap-in for `.94`'s live `DeviceIdentityManager`
 Real investigation before writing this (not assumed): `core/identity.py`'s
 `DeviceIdentityManager` is NOT just `resolve_device_id()` -- `process_dns_identities()`/
 `process_zeek_identities()` also do Fritz!Box hosts-webhook enrichment, orphan-merge
-detection/cleanup (notifying `ml_registry`/`fp_engine`/`ips_mitigator`/`evidence_store`/
+detection/cleanup (notifying `ml_registry`/`familiarity`/`ips_mitigator`/`evidence_store`/
 `metrics_exporter`), and `device_type` inference, all sharing the same `StateManager`
 and internal locks. None of that needed reinventing -- it's real, already-correct,
 already-tested machinery, and reinventing it in parallel would risk silently dropping a
@@ -313,15 +313,15 @@ class LiveIdentityManager(DeviceIdentityManager):
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
         ))
 
-    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
+    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
                                       ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
         """Runs the real v1 merge unchanged (every side effect -- ml_registry/
-        fp_engine/ips_mitigator/evidence_store/metrics_exporter cleanup -- still
+        familiarity/ips_mitigator/evidence_store/metrics_exporter cleanup -- still
         happens exactly as before), then mirrors the SAME merge into the v13
         graph if it actually happened. See this module's own top-of-file item 5
         for the full design rationale."""
         orphan_id = super()._merge_orphan_if_fragmented(
-            client_ip, dev_id, ml_registry, fp_engine, ips_mitigator, evidence_store, metrics_exporter,
+            client_ip, dev_id, ml_registry, familiarity, ips_mitigator, evidence_store, metrics_exporter,
         )
         if orphan_id is None or self._graph_store is None:
             return orphan_id

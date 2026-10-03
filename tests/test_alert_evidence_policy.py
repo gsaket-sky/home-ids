@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from argus.decision.engine import _count_independent_sources  # noqa: E402
 from extractors.dns_features import FeatureExtractor  # noqa: E402
 from intelligence import threat_intel  # noqa: E402
-from intelligence.fp_engine import AutonomousFPEngine as FPEngine  # noqa: E402
+from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
+from argus.graph.store import GraphStore  # noqa: E402
 from utils import classify_zeek_notice  # noqa: E402
 
 
@@ -53,12 +54,9 @@ def test_old_sslbl_listings_are_ignored():
 
 
 def _stage1(features):
-    fp = FPEngine.__new__(FPEngine)
-    fp.config = {}
-    fp.local_intel = type("L", (), {"check": staticmethod(lambda *a, **k: None)})()
-    fp._is_ip_protected_from_confirmed_intel = lambda *a, **k: True
-    fp._extract_base_domain = lambda d: d
-    return fp._stage1_hard_stop(features, None, "host", "", "203.0.113.9")
+    import tempfile
+    fp = ClAfpeEngine(GraphStore(str(Path(tempfile.mkdtemp()) / "graph.db")))   # no confirmed-intel store
+    return fp._stage1_hard_stop(features, "host", "", "203.0.113.9", "")
 
 
 def test_fingerprint_alone_is_not_a_hard_stop():

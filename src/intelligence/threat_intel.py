@@ -162,7 +162,7 @@ class ThreatIntel:
         # keyed feeds could not work even with advanced_keyed_feeds on (found 2026-10-02). Sent only to those feeds.
         self.abusech_auth_key = (abusech_auth_key or "").strip()
         self.local_popularity = None
-        self.fp_engine = None  # Bound dynamically by pipeline at boot
+        self.trust_cache_provider = None  # the CL-AFPE engine, bound by the pipeline at boot (get_dynamic_trust_cache())
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
         self._load_cache()
@@ -214,9 +214,9 @@ class ThreatIntel:
                     return True
                     
             # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains)
-            if self.fp_engine:
+            if self.trust_cache_provider:
                 try:
-                    trust_cache = self.fp_engine.get_dynamic_trust_cache()
+                    trust_cache = self.trust_cache_provider.get_dynamic_trust_cache()
                     base_dom = ".".join(parts[-2:]) if len(parts) >= 2 else domain
                     if base_dom in trust_cache or domain in trust_cache:
                         LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", base_dom)
@@ -525,7 +525,7 @@ class ThreatIntel:
 
     def _refresh_tranco_trust_list(self) -> None:
         cache_file = self.cache_dir / "tranco_top10k.cache"
-        # BUGFIX: fp_engine.py's Stage-2 LightGBM feature vector and
+        # BUGFIX: the CL-AFPE's Stage-2 LightGBM feature vector and
         # train_fp_classifier.py's training-time feature extraction both read
         # features["tranco_rank"] (Feature 0 of 11, f0_tranco_rank_norm) -- but nothing
         # anywhere ever WROTE that key, so it was permanently 0 for every alert, ever,
@@ -590,7 +590,7 @@ class ThreatIntel:
 
     def get_tranco_rank(self, domain: str) -> int:
         """Returns this domain's Tranco Top-1M rank (1 = most popular), or 0 if the
-        domain isn't ranked at all -- matches fp_engine.py's/train_fp_classifier.py's
+        domain isn't ranked at all -- matches the CL-AFPE's/train_fp_classifier.py's
         existing `tranco_rank > 0` convention for "unranked."
 
         BUGFIX: Tranco's list ranks registrable (eTLD+1) domains only -- e.g. "netflix.com",
@@ -599,7 +599,7 @@ class ThreatIntel:
         this feature evaluate to 0 for effectively all real traffic -- confirmed live: 92/92
         alerts in the first production window after this feature shipped, including
         subdomains of Netflix/Amazon/Microsoft, all scored tranco_rank=0. Falls back to the
-        eTLD+1 base domain (utils.etld1(), the same shared helper fp_engine.py/local_intel.py
+        eTLD+1 base domain (utils.etld1(), the same shared helper the CL-AFPE/local_intel.py
         already use) when the exact FQDN isn't ranked -- deliberately NOT applied to
         is_allowlisted()'s Tranco check above, which is a security-relevant trust decision
         where subdomain-of-a-trusted-base-domain is a real bypass risk; this is a continuous

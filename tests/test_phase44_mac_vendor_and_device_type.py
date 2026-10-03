@@ -8,7 +8,7 @@ devices were typed "laptop", and 12 of those 13 (92%) actually had hostname="unk
 -- infer_device_type() (utils.py) has always had hostname/User-Agent/mac_vendor layers
 plus a hardcoded final fallback, but its only real caller (identity.py's
 apply_device_type()) never passed mac_vendor at all, and the fallback was
-unconditionally "laptop" rather than the "unknown" fp_engine.py's own dev_type_weights
+unconditionally "laptop" rather than the "unknown" the false-positive model's dev_type_weights
 dict already expected. Real production MACs were checked directly against the `manuf`
 package this fix adds (e.g. 24:6f:28:xx:xx:xx -> "Espressif Inc.", an IoT device
 currently mis-typed "laptop"; 00:11:32:xx:xx:xx -> "Synology Incorporated", a NAS).
@@ -146,13 +146,14 @@ check("SOURCE-GUARD: apply_device_type() actually calls get_mac_vendor() and pas
       and "infer_device_type(hostname, mac_vendor=mac_vendor)" in _identity_src)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section F: source-guard -- fp_engine.py's pre-existing "unknown" weight bucket this
-# fix activates (read-only confirmation, not modified by this fix)
+# Section F: source-guard -- the false-positive model's "unknown" device-type weight bucket this fix makes
+# reachable (the feature vector at inference and in training)
 # ═══════════════════════════════════════════════════════════════════════════════════
-_fp_engine_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "fp_engine.py").read_text(encoding="utf-8")
-check("SOURCE-GUARD: fp_engine.py's dev_type_weights dict still has its 'unknown' "
-      "entry -- this fix's whole point is making it reachable, not adding it",
-      '"unknown": 0.3' in _fp_engine_src)
+_src_root = _PathForSysPath(__file__).resolve().parent.parent / "src"
+_scoring_src = (_src_root / "argus" / "cl_afpe" / "ml_scoring.py").read_text(encoding="utf-8")
+_train_src = (_src_root / "scripts" / "train_fp_classifier.py").read_text(encoding="utf-8")
+check("SOURCE-GUARD: the device-type weights (inference and training) still have their 'unknown' entry",
+      '"unknown": 0.3' in _scoring_src and '"unknown": 0.3' in _train_src)
 
 
 print()

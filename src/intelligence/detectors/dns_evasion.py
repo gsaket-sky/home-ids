@@ -23,11 +23,11 @@ Without recognizing known VPN infrastructure, this detector would flag every VPN
 on the network. See utils.is_vpn_provider_org() for how that's handled (ASN
 organization-name matching, not a brittle IP/CIDR list).
 
-Deliberately evidence-based, not a Stage-1 hard-stop (see fp_engine.py): finding an
+Deliberately evidence-based, not a Stage-1 hard-stop (see the CL-AFPE): finding an
 unexplained connection proves a detection GAP existed, not that the device is
 compromised. It needs to reach the same 2-independent-source bar as every other
 hypothesis before it can influence containment or a Telegram alert -- see
-DNSEvasionHypothesis in hypotheses/engine.py and Phase A's Telegram-gating change.
+DNSEvasionHypothesis in argus/hypotheses/engine.py and Phase A's Telegram-gating change.
 """
 import ipaddress
 from dataclasses import dataclass, field
@@ -123,7 +123,7 @@ def _is_private_lan_ip(ip: str) -> bool:
 # short, stable, name-brand list -- these IPs are as close to universally-recognized
 # internet infrastructure as exists, unlike a general "trust this cloud provider" list
 # that would create a real blind spot for C2 hosted on the same infrastructure.
-# Moved to utils.py (KNOWN_PUBLIC_DNS_RESOLVERS) so fp_engine.py's confirmed-intel
+# Moved to utils.py (KNOWN_PUBLIC_DNS_RESOLVERS) so the CL-AFPE's confirmed-intel
 # write/read guards can share the exact same list -- see that constant's docstring.
 _KNOWN_PUBLIC_DNS_RESOLVERS = KNOWN_PUBLIC_DNS_RESOLVERS
 
@@ -188,15 +188,15 @@ def _reverse_dns_explains(ip: str, queried_domains: Set[str], geoip_engine, ti_e
 
 
 def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
-                  ti_engine=None, fp_engine=None) -> List[Evidence]:
+                  ti_engine=None, familiarity=None) -> List[Evidence]:
     """Audits one device's burst data for real connections its own DNS history can't
     explain. Returns zero or one Evidence -- one dns_evasion_anomaly summarizing the
     whole device's gap, not one per unexplained IP (a dozen near-identical evidence
     entries aren't more informative than one with the right numbers in its note).
 
-    fp_engine (VERSION 11, P1, review #9/#10): optional. When supplied, damps
+    familiarity (intelligence/device_familiarity.py, optional): When supplied, damps
     confidence by this device's own LEARNED familiarity with each unexplained IP's
-    ASN owner (AutonomousFPEngine.get_baseline_familiarity(), fp_engine.py) -- an ASN
+    ASN owner (DeviceFamiliarity.get_baseline_familiarity()) -- an ASN
     this device has legitimately talked to many times before, without ever reaching
     CONFIRMED_THREAT, is real self-healing counter-evidence, continuous rather than a
     hard include/exclude list. Same spirit as the VPN/CDN exemptions above, just
@@ -301,7 +301,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
                     reputation_hits.append(ip)
             except Exception:
                 pass
-        if fp_engine is not None:
+        if familiarity is not None:
             owner = None
             if geoip_engine:
                 try:
@@ -310,7 +310,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
                 except Exception:
                     owner = None
             try:
-                familiarity_scores.append(fp_engine.get_baseline_familiarity(device_id, asn_owner=owner))
+                familiarity_scores.append(familiarity.get_baseline_familiarity(device_id, asn_owner=owner))
             except Exception:
                 pass
 
@@ -337,7 +337,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
                       # still make one direct bypass connection).
                       + (0.2 if has_policy_bypass else 0.0))
     # VERSION 11: dampen by this device's own learned baseline familiarity with the
-    # unexplained IPs' ASN owners (see fp_engine parameter docstring above).
+    # unexplained IPs' ASN owners (see familiarity parameter docstring above).
     avg_familiarity = sum(familiarity_scores) / len(familiarity_scores) if familiarity_scores else 0.0
     confidence = max(0.0, confidence - 0.5 * avg_familiarity)
 
@@ -375,7 +375,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
     # resolved before this capture burst started) is the weakest, most ambiguous
     # case. Collapsing all three into the same "DNS_EVASION" name was flagged by a
     # third-party review as misleading for the weaker cases.
-    # hypotheses/engine.py's DNSEvasionHypothesis reads this tag to name the
+    # argus/hypotheses/engine.py's DNSEvasionHypothesis reads this tag to name the
     # hypothesis accordingly; detection power/thresholds are unchanged either way.
     if has_policy_bypass:
         gap_subtag = "policy_bypass"
@@ -416,7 +416,7 @@ def audit_device(device_id: str, audit: DeviceBurstAudit, geoip_engine=None,
 
 
 def audit_burst(devices: Dict[str, DeviceBurstAudit], capture_ts: float,
-                 geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, List[Evidence]]:
+                 geoip_engine=None, ti_engine=None, familiarity=None) -> Dict[str, List[Evidence]]:
     """Runs audit_device() for every device present in a completed capture burst --
     the actual point of a burst covering the whole radio, not a side effect: a burst
     triggered by one device's suspicion still gets every OTHER device present in it
@@ -424,7 +424,7 @@ def audit_burst(devices: Dict[str, DeviceBurstAudit], capture_ts: float,
     {device_id: [Evidence]} for only the devices that produced a real finding."""
     out: Dict[str, List[Evidence]] = {}
     for device_id, audit in devices.items():
-        evidence = audit_device(device_id, audit, geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
+        evidence = audit_device(device_id, audit, geoip_engine=geoip_engine, ti_engine=ti_engine, familiarity=familiarity)
         if not evidence:
             continue
         for e in evidence:

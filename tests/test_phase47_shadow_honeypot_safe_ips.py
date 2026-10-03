@@ -65,7 +65,7 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from core.decision_engine import DecisionEngine
+from argus_scenarios import DecisionEngine
 from intelligence.reputation.classifier import ReputationVector
 
 de = DecisionEngine()

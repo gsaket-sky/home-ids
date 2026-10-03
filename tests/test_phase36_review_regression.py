@@ -9,18 +9,18 @@ change" test suite. Most of its findings turned out to already be covered by
 existing tests (test_phase24_dns_evasion.py, test_phase27_local_intel_and_confirmed_tuning.py,
 test_phase33_tunneling_dga_domain_attribution.py, test_phase34/35) written for
 earlier bugfixes -- this file exists specifically for the review findings that had
-NO prior test coverage: the fp_engine.py Stage-1/decision_engine.py dual-verdict
+NO prior test coverage: the CL-AFPE Stage-1/decision_engine.py dual-verdict
 problem (review #12) and its two concrete live false positives (a bare weak
 ThreatIntel score hard-stopping independently of decision_engine.py's own tier
 logic, and an exfiltration-burst check missing the absolute-byte floor + telemetry
 exemption threat_signals.py's equivalent check already had).
 
 Covers:
-  A. fp_engine.py Stage-1 Check 0 -- decision_engine.py's own CRITICAL verdict is
+  A. CL-AFPE Stage-1 Check 0 -- decision_engine.py's own CRITICAL verdict is
      recognized directly, not re-derived.
-  B. fp_engine.py Stage-1 Check 1 -- ti_risk threshold now matches
+  B. CL-AFPE Stage-1 Check 1 -- ti_risk threshold now matches
      classifier.py's confirmed_ioc bar (>2.0), not the old, more aggressive >0.
-  C. fp_engine.py Stage-1 Check 6 -- exfiltration-burst hard-stop now requires the
+  C. CL-AFPE Stage-1 Check 6 -- exfiltration-burst hard-stop now requires the
      same absolute-byte floor + telemetry/vendor-cloud exemption
      threat_signals.py's zeek_exfiltration evidence generator already has (this is
      the live bug found in this session's own alerts.json audit: a TCP:8883 AWS
@@ -50,12 +50,17 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
+
+
+def _cl_afpe(tmpdir):
+    return ClAfpeEngine(GraphStore(str(_PathForSysPath(tmpdir) / "graph.db")))
 from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.threat_signals import ThreatSignalDetector
-from intelligence.hypotheses.engine import DNSTunnelingV2Hypothesis
+from argus_scenarios import DNSTunnelingV2Hypothesis
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore
-from core.decision_engine import DecisionEngine
+from argus_scenarios import DecisionEngine
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -65,7 +70,7 @@ from core.decision_engine import DecisionEngine
 # features with a separately-drifting threshold.
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = _cl_afpe(tmpdir)
 
     alert = {
         "device": {"id": "dev_critical", "hostname": "some-device"},
@@ -73,7 +78,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "Layer-2 ARP Spoofing Detected",
     }
     critical_decision = {"state": "CRITICAL", "explanation": "Layer-2 ARP Spoofing Detected"}
-    verdict = fp.evaluate(alert, {}, risk_score=10.0, ti_engine=None, decision=critical_decision)
+    verdict = fp.evaluate(alert, {}, decision=critical_decision)
     check("Check 0: a decision_engine.py CRITICAL verdict is recognized as an "
           "immediate Stage-1 hard-stop even with an otherwise completely quiet "
           "features dict",
@@ -90,7 +95,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "DNS_EVASION",
     }
     suspicious_decision = {"state": "SUSPICIOUS", "explanation": "DNS_EVASION"}
-    verdict2 = fp.evaluate(alert2, {}, risk_score=4.0, ti_engine=None, decision=suspicious_decision)
+    verdict2 = fp.evaluate(alert2, {}, decision=suspicious_decision)
     check("REGRESSION GUARD: a SUSPICIOUS (non-CRITICAL) decision does NOT trip "
           "Check 0 on its own",
           verdict2["stage"] != "STAGE_1_HARD_STOP" or verdict2["verdict"] != "CONFIRMED_THREAT",
@@ -102,13 +107,13 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 # confirmed_ioc bar (>2.0), not the old, independently-drifting >0.
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = _cl_afpe(tmpdir)
     weak_ti_alert = {
         "device": {"id": "dev_weak_ti", "hostname": "weak-ti-device"},
         "network_context": {"queried_domain": "some-domain.example", "destination_ip": "8.8.4.4"},
         "signature": "DNS_TUNNELING",
     }
-    weak_verdict = fp.evaluate(weak_ti_alert, {"ti_risk": 0.5}, risk_score=4.0, ti_engine=None)
+    weak_verdict = fp.evaluate(weak_ti_alert, {"ti_risk": 0.5})
     check("THE FIX: a weak ti_risk=0.5 (below classifier.py's confirmed_ioc bar of "
           "2.0) no longer hard-stops on its own -- the exact class of threshold "
           "mismatch a third-party review's alerts.json audit found between "
@@ -119,7 +124,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 
     strong_ti_alert = dict(weak_ti_alert)
     strong_ti_alert["device"] = {"id": "dev_strong_ti", "hostname": "strong-ti-device"}
-    strong_verdict = fp.evaluate(strong_ti_alert, {"ti_risk": 3.5}, risk_score=9.0, ti_engine=None)
+    strong_verdict = fp.evaluate(strong_ti_alert, {"ti_risk": 3.5})
     check("REGRESSION GUARD: a genuine ti_risk=3.5 (above the 2.0 bar) still "
           "hard-stops as before -- the fix only removed the OVER-aggressive part "
           "of Check 1, not real IOC detection",
@@ -137,7 +142,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 # precisely the two-subsystems-disagree shape review #12 describes.
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = _cl_afpe(tmpdir)
 
     live_bug_alert = {
         "device": {"id": "dev_echo", "hostname": "example_smartspeaker_fritz_box"},
@@ -145,7 +150,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "DNS_EVASION",
     }
     live_bug_features = {"outbound_bytes_z": 9.33, "zeek_outbound_bytes": 261}  # no absolute floor cleared
-    live_bug_verdict = fp.evaluate(live_bug_alert, live_bug_features, risk_score=4.0, ti_engine=None)
+    live_bug_verdict = fp.evaluate(live_bug_alert, live_bug_features)
     check("THE FIX (live bug): a z-score spike with only 261 bytes actually moved "
           "(far below the 2.5MB absolute floor) no longer hard-stops via Check 6",
           live_bug_verdict["verdict"] != "CONFIRMED_THREAT" or live_bug_verdict["stage"] != "STAGE_1_HARD_STOP",
@@ -157,7 +162,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "DATA_EXFILTRATION",
     }
     telemetry_exempt_features = {"outbound_bytes_z": 8.0, "zeek_outbound_bytes": 5_000_000}
-    telemetry_verdict = fp.evaluate(telemetry_exempt_alert, telemetry_exempt_features, risk_score=8.0, ti_engine=None)
+    telemetry_verdict = fp.evaluate(telemetry_exempt_alert, telemetry_exempt_features)
     check("THE FIX: a genuinely large burst (5MB, clears the floor) to a recognized "
           "telemetry domain is still exempted from Check 6, matching "
           "threat_signals.py's own is_telemetry_domain/_is_cdn_or_cloud_domain "
@@ -171,7 +176,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "DATA_EXFILTRATION",
     }
     genuine_exfil_features = {"outbound_bytes_z": 8.0, "zeek_outbound_bytes": 5_000_000}
-    genuine_verdict = fp.evaluate(genuine_exfil_alert, genuine_exfil_features, risk_score=8.0, ti_engine=None)
+    genuine_verdict = fp.evaluate(genuine_exfil_alert, genuine_exfil_features)
     check("REGRESSION GUARD: a genuine large burst (5MB, clears the floor) to a "
           "non-telemetry, non-CDN destination still hard-stops as before -- the fix "
           "only added guards, it didn't remove real detection power",
@@ -254,14 +259,14 @@ check("REGRESSION GUARD: the SAME 63-char label length on a genuinely unrecogniz
 # approve/reject from.
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_f:
-    fp_f = AutonomousFPEngine(config={}, state_dir=tmpdir_f)
+    fp_f = _cl_afpe(tmpdir_f)
     uncertain_alert = {
         "device": {"id": "dev_f", "hostname": "device1"},
         "network_context": {"queried_domain": "unknown", "destination_ip": "104.156.84.32"},
         "signature": "DNS_POLICY_BYPASS",
     }
-    verdict_f = fp_f.evaluate(uncertain_alert, {}, risk_score=6.0, ti_engine=None)
-    check("fp_engine.evaluate()'s returned dict has a 'calibrated_confidence' key "
+    verdict_f = fp_f.evaluate(uncertain_alert, {})
+    check("the CL-AFPE evaluate()'s returned dict has a 'calibrated_confidence' key "
           "(not just buried in the reasons text) for every Stage-2/3-scored branch",
           "calibrated_confidence" in verdict_f, f"got keys={list(verdict_f.keys())}")
     check("with no calibration file loaded (the common case until a retrain has run "

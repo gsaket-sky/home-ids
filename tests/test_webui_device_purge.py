@@ -1,7 +1,8 @@
 """
 Standalone runtime test for /api/ipc/device/{id}/purge (PRODUCTIZATION_ROADMAP.md
 Phase 4 Maintenance page). Confirms a purge removes the device from
-StateManager AND all three side files, and leaves other devices untouched.
+StateManager, its learned false-positive values in the graph and its label, and leaves
+other devices untouched.
 Run directly: `python3 test_webui_device_purge.py`.
 """
 import json
@@ -41,32 +42,36 @@ check("MAC index no longer resolves to the purged device", sm.get_device_id_for_
 existed_again = sm.remove_device("dev_purge")
 check("remove_device() returns False for an already-purged device", existed_again is False)
 
-# ── webui_ipc.py's endpoint cascades to the side files ───────────────────────
+# ── webui_ipc.py's endpoint clears the device's learned values and label ─────
 state_dir = _tmp / "cascade"
 state_dir.mkdir()
-(state_dir / "device_fp_profiles.json").write_text(json.dumps({
-    "dev_purge": {"fp_combined_suppress_threshold": {"value": 0.9}},
-    "dev_keep": {"fp_combined_suppress_threshold": {"value": 0.8}},
-}))
-(state_dir / "fp_sigma_shifts.json").write_text(json.dumps({"dev_purge": 1.5, "dev_keep": 0.5}))
 
-from middleware.routers.webui_ipc import _purge_fp_engine_device_files
-from core.device_labels import set_label, get_label
+from argus.graph.store import GraphStore
+from middleware.routers.webui_ipc import _purge_learned_fp_values
+from core.device_labels import set_label, get_label, remove_label
 
+store = GraphStore(str(state_dir / "v13_graph.db"))
+for dev, thr, shift in (("dev_purge", 0.9, 1.5), ("dev_keep", 0.8, 0.5)):
+    store.update_device_metadata(dev, {"fp_profile": {"fp_combined_suppress_threshold": {"value": thr}},
+                                       "sigma_shift": shift, "confirmed_threat_counts": {"_total": 2}}, timestamp=1.0)
+store.close()
 set_label("dev_purge", "phone", str(state_dir))
 set_label("dev_keep", "nas", str(state_dir))
 
-_purge_fp_engine_device_files(str(state_dir), "dev_purge")
-from core.device_labels import remove_label
+_purge_learned_fp_values(str(state_dir), "dev_purge")
 remove_label("dev_purge", str(state_dir))
 
-fp_profiles = json.loads((state_dir / "device_fp_profiles.json").read_text())
-sigma_shifts = json.loads((state_dir / "fp_sigma_shifts.json").read_text())
-
-check("purge removes the device from device_fp_profiles.json", "dev_purge" not in fp_profiles)
-check("purge leaves other devices in device_fp_profiles.json", "dev_keep" in fp_profiles)
-check("purge removes the device from fp_sigma_shifts.json", "dev_purge" not in sigma_shifts)
-check("purge leaves other devices in fp_sigma_shifts.json", "dev_keep" in sigma_shifts)
+store = GraphStore(str(state_dir / "v13_graph.db"))
+purged, kept = store.get_device_metadata("dev_purge"), store.get_device_metadata("dev_keep")
+check("purge clears the device's per-device thresholds", purged.get("fp_profile") == {})
+check("purge clears the device's sensitivity shift", purged.get("sigma_shift") == 0.0)
+check("purge clears the device's confirmed-threat counts", purged.get("confirmed_threat_counts") == {})
+check("purge leaves other devices' learned values",
+      kept.get("fp_profile", {}).get("fp_combined_suppress_threshold", {}).get("value") == 0.8
+      and kept.get("sigma_shift") == 0.5)
+_purge_learned_fp_values(str(state_dir), "never_seen")
+check("purging an unknown device adds nothing to the graph", store.get_device_metadata("never_seen") == {})
+store.close()
 check("purge removes the device's WebUI label", get_label("dev_purge", str(state_dir)) is None)
 check("purge leaves other devices' WebUI labels", get_label("dev_keep", str(state_dir)) == "nas")
 

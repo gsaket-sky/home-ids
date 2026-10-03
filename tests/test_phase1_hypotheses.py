@@ -20,9 +20,9 @@ def check(name, cond, detail=""):
 
 from intelligence.detectors.threat_signals import ThreatSignalDetector
 from intelligence.hypotheses.evidence import EvidenceStore
-from intelligence.hypotheses.engine import HypothesisEngine
+from argus_scenarios import HypothesisEngine
 from intelligence.reputation.classifier import ReputationClassifier
-from core.decision_engine import DecisionEngine, DecisionState
+from argus_scenarios import DecisionEngine, DecisionState
 
 detector = ThreatSignalDetector()
 rc = ReputationClassifier()
@@ -258,9 +258,9 @@ names = {h.name for h in hyp.attack_hypotheses}
 expected = {"DNS_TUNNELING", "NETWORK_INTRUSION", "DGA_BOTNET_C2", "DATA_EXFILTRATION",
             "C2_BEACONING", "DNS_COVERT_TUNNELING", "CONNECTION_ABUSE", "DNS_EVASION",
             "SIGNATURE_MATCHED_THREAT"}
-check("all 9 attack hypotheses (2 pre-existing + 5 Phase 1 ports + Phase 21C2's DNS_EVASION "
-      "+ VERSION 11's Suricata signature hypothesis) are registered in HypothesisEngine",
-      names == expected, f"got={names}")
+check("all 9 of these attack hypotheses are registered in HypothesisEngine (argus registers more on top: "
+      "coordinated targeting, peer-cohort deviation)",
+      expected <= names, f"got={names}")
 
 print()
 if FAILURES:

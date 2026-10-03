@@ -15,7 +15,7 @@ below) and then silently discarded.
 This detector reads that same already-computed `features` dict — no new feature
 extraction, no new I/O — and turns each category into Evidence objects so the new
 Phase 1 Hypothesis subclasses (DGAHypothesis, ExfiltrationHypothesis, BeaconingHypothesis,
-DNSTunnelingV2Hypothesis, ConnectionAbuseHypothesis) in hypotheses/engine.py can actually
+DNSTunnelingV2Hypothesis, ConnectionAbuseHypothesis) in argus/hypotheses/engine.py can actually
 see them.
 """
 import ipaddress
@@ -332,7 +332,7 @@ class ThreatSignalDetector:
         # fallback_context workaround (which already does the same thing
         # unconditionally for these two evidence types), so not a regression.
         # BUGFIX (external architecture review, 2026-09-09): subtag= was never passed
-        # to any of these 3 branches -- BeaconingHypothesis (hypotheses/engine.py) had
+        # to any of these 3 branches -- BeaconingHypothesis (argus/hypotheses/engine.py) had
         # no way to tell "genuine interval-regularity evidence" (the tdr branch below,
         # matching the audit's own "regular/near-regular intervals + similar byte
         # counts" bar) apart from two much thinner signals (a raw sequence count, a
@@ -371,7 +371,7 @@ class ThreatSignalDetector:
         # from a real single-target brute-force (which also repeats against few IPs) --
         # what actually distinguishes them is THIS device's own blocked/nxdomain ratio
         # being elevated in the same window, so that's the dampener, not the ratio
-        # alone. s0_rej_unique_threshold is per-device LEARNED (fp_engine.py's
+        # alone. s0_rej_unique_threshold is per-device LEARNED (the CL-AFPE's
         # get_device_conn_abuse_unique_ip_threshold(), same self-healing shape as the
         # existing arp_sweep_threshold parameter) rather than the old hardcoded 5.
         s0_rej = float(features.get("zeek_s0_rej_count", 0.0) or 0.0)

@@ -57,7 +57,7 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.hypotheses.engine import (
+from argus_scenarios import (
     HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, DNSTunnelingHypothesis, NetworkIntrusionHypothesis,
     DGAHypothesis, ExfiltrationHypothesis, BeaconingHypothesis, DNSTunnelingV2Hypothesis,
     ConnectionAbuseHypothesis, DNSEvasionHypothesis, SuricataSignatureHypothesis,
@@ -78,16 +78,15 @@ check("all 9 attack hypothesis classes declare a non-empty RELEVANT_EVIDENCE_TYP
       "(none silently left on the base class's empty default)",
       all(cls.RELEVANT_EVIDENCE_TYPES for cls in _ALL_ATTACK_CLASSES))
 
-check("registry has all 14 name entries (9 classes, 5 of which have 1 extra alias "
-      "each: NetworkIntrusion x2, ConnectionAbuse x3, DNSEvasion x3, "
-      "the rest x1 -- 2+3+3+1+1+1+1+1+1 = 14)",
-      len(HYPOTHESIS_RELEVANT_EVIDENCE_TYPES) == 14)
+check("registry has all 16 name entries (11 classes; NetworkIntrusion x2, ConnectionAbuse x3, DNSEvasion x3, "
+      "the rest x1, including the cross-device COORDINATED_TARGETING and PEER_COHORT_DEVIATION)",
+      len(HYPOTHESIS_RELEVANT_EVIDENCE_TYPES) == 16)
 
 _expected_names = {
     "DNS_TUNNELING", "NETWORK_INTRUSION", "LATERAL_MOVEMENT", "DGA_BOTNET_C2",
     "DATA_EXFILTRATION", "C2_BEACONING", "DNS_COVERT_TUNNELING", "CONNECTION_ABUSE",
     "PORT_SCAN", "INTERNAL_RECONNAISSANCE", "DNS_POLICY_BYPASS", "DNS_EVASION",
-    "DNS_ATTRIBUTION_GAP", "SIGNATURE_MATCHED_THREAT",
+    "DNS_ATTRIBUTION_GAP", "SIGNATURE_MATCHED_THREAT", "COORDINATED_TARGETING", "PEER_COHORT_DEVIATION",
 }
 check("registry keys match the expected full name set exactly",
       set(HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.keys()) == _expected_names)

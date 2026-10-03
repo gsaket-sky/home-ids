@@ -23,7 +23,7 @@ def check(name, cond, detail=""):
 
 from extractors.zeek_features import ZeekFeatureExtractor
 from intelligence.detectors.threat_signals import ThreatSignalDetector
-from intelligence.hypotheses.engine import ConnectionAbuseHypothesis
+from argus_scenarios import ConnectionAbuseHypothesis
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.reputation.classifier import ReputationVector
 
@@ -127,9 +127,9 @@ both_categories = arp_only + [
              device="dev1", value=30.0, confidence=0.8, independence_group="zeek_network"),
 ]
 score_both = hyp.evaluate(both_categories, neutral_rep)
-check("arp_sweep + zeek_conn_abuse (two distinct categories corroborating) reaches the "
-      "'strong' bonus score, matching the original both-scan-hits-and-long-hits intent",
-      score_both == 4.0, f"got {score_both}")
+check("arp_sweep + zeek_conn_abuse (two categories) reaches 3.0 but not the 4.0 ceiling: co-occurrence alone is "
+      "not enough, the top rung needs genuine within-category intensity (weight >= 0.85)",
+      score_both == 3.0, f"got {score_both}")
 
 trusted_rep = ReputationVector(domain="", tier=1)
 score_trusted = hyp.evaluate(arp_only, trusted_rep)

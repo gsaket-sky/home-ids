@@ -103,6 +103,28 @@ def sanitize_hostname(host):
         return "unknown"
     return host.lower().replace(".", "_").replace("-", "_")[:40]
 
+def etld1_strict(domain) -> str:
+    """eTLD+1 for TRUST decisions: like etld1(), but fails closed. Without a public-suffix list (tldextract) a
+    last-two-labels guess turns "mail.example.co.uk" into "co.uk" -- trusting that would trust every .co.uk domain.
+    Returns "" when no public-suffix list is available; callers then fall back to the exact address."""
+    if not domain or tldextract is None:
+        return ""
+    try:
+        ipaddress.ip_address(str(domain).strip("."))
+        return ""
+    except ValueError:
+        pass
+    try:
+        ext = tldextract.extract(domain)
+    except Exception:
+        return ""
+    if ext.domain and ext.suffix:
+        return f"{ext.domain}.{ext.suffix}"
+    # A suffix the public-suffix list does not know (a private or reserved TLD) cannot be a multi-part public
+    # suffix, so the plain last-two-labels result is safe here.
+    return etld1(domain)
+
+
 def etld1(domain):
     """Extracts the base domain and suffix (e.g., mail.google.com -> google.com)."""
     if not domain:
@@ -111,7 +133,7 @@ def etld1(domain):
     # eTLD+1. tldextract correctly returns an empty domain/suffix for IPs, but the naive
     # last-two-labels fallback below doesn't know that and happily chops one into a fake
     # 2-octet "domain" (e.g. "149.154.166.110" -> "166.110") — this silently populated
-    # fp_engine's trust cache with a meaningless, collision-prone key (found sitting in
+    # the CL-AFPE's trust cache with a meaningless, collision-prone key (found sitting in
     # state/fp_trust_cache.json as literally "166.110"). Reject IP-shaped input up front.
     try:
         ipaddress.ip_address(domain.strip("."))
@@ -131,7 +153,7 @@ def etld1(domain):
     # BUGFIX (2026-09-03, live audit): a single-label, no-dot input (the sentinel
     # "unknown" pipeline.py uses for a raw-IP alert with no resolved hostname, or any
     # other non-domain junk) used to fall through to `return domain` here -- returning
-    # it VERBATIM as if it were a valid eTLD+1. Confirmed live: fp_engine.py's
+    # it VERBATIM as if it were a valid eTLD+1. Confirmed live: the CL-AFPE's
     # mark_false_positive() then treated "unknown" as a real (truthy) base_domain,
     # calling _immunize_domain("unknown", ...) which correctly rejected it internally
     # but left the caller's own base_domain variable non-empty -- so the caller's
@@ -438,7 +460,7 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     # PHASE 9.0.1 FIX: found via a live state-folder audit -- these were poisoning
     # local_confirmed_intel.json as "confirmed malicious" (200/44/19/1/1/4/1
     # confirmations respectively), cascading into Stage-1 hard-stops for every device
-    # legitimately using Amazon/Alexa infrastructure. See fp_engine.py's
+    # legitimately using Amazon/Alexa infrastructure. See the CL-AFPE's
     # _is_domain_causal_hard_stop() -- the underlying attribution bug is fixed there;
     # these are the already-known-safe domains that bug happened to poison in
     # production before the fix landed.
@@ -471,7 +493,7 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     # PHASE 9.0.1 FIX: same live audit -- sharepoint.com/microsoftonline.com/
     # vscode-cdn.net (Microsoft's own dev-tooling CDN) and malwarebytes.com (an
     # antivirus VENDOR being flagged as "confirmed malicious" is the clearest possible
-    # symptom of the non-causal-attribution bug fixed in fp_engine.py).
+    # symptom of the non-causal-attribution bug fixed in the CL-AFPE).
     "sharepoint.com", "microsoftonline.com", "vscode-cdn.net", "malwarebytes.com",
     
     # Smart Home, Synology, IoT & Streaming Platforms
@@ -503,7 +525,7 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     # confidence) rather than fully excluded (see that list's own comment: "a broad
     # match here would create a real blind spot"). Adding it here would silently defeat
     # that existing, deliberate design boundary. Its confirmed-intel entry ages out via
-    # normal TTL instead -- the root-cause fix in fp_engine.py's
+    # normal TTL instead -- the root-cause fix in the CL-AFPE's
     # _is_domain_causal_hard_stop() already stops it from being re-poisoned.
 
     # Global CDNs & Security Ingestion
@@ -595,7 +617,7 @@ _CLOUD_CDN_ORG_KEYWORDS = frozenset({
     "netflix", "digitalocean", "ovh", "hetzner", "oracle corporation", "alibaba",
     "tencent", "fly.io", "linode", "akamai technologies",
     # BUGFIX (2026-08-29, live retro-hunter audit): this method's own docstring/callers
-    # already claimed Apple-owned IPs were covered (fp_engine.py's
+    # already claimed Apple-owned IPs were covered (the CL-AFPE's
     # _is_ip_protected_from_confirmed_intel comment), but "apple" was never actually in
     # this list -- confirmed live: 17.57.146.55/17.57.146.59 (Apple Push Notification
     # infrastructure, touched by every iPhone/Apple Watch on the network) had been
@@ -638,7 +660,7 @@ def is_cloud_cdn_provider_org(org_name: str) -> bool:
 # QUERY traffic to a well-known public resolver, e.g. a Chromecast querying 8.8.8.8
 # directly, was guaranteed to be flagged as "unexplained" -- the connection itself IS
 # how domain resolution happens, so no domain lookup can ever explain it). Shared here
-# so fp_engine.py's confirmed-intel write/read guards can protect the exact same IPs --
+# so the CL-AFPE's confirmed-intel write/read guards can protect the exact same IPs --
 # found live: 8.8.8.8 itself had 64 "confirmed malicious" recordings in production,
 # from devices whose OWN direct-resolver traffic (the same DNS_POLICY_BYPASS shape)
 # kept re-confirming Google's public resolver as attacker infrastructure.
@@ -667,7 +689,7 @@ def is_local_or_multicast_destination(dest: str) -> bool:
     private unicast LAN host can still be real corroborating signal, unlike a
     protocol group address.
 
-    Same classification `fp_engine.py::_is_ip_protected_from_confirmed_intel()`
+    Same classification ClAfpeEngine._is_ip_protected_from_confirmed_intel()`
     already applies for the local confirmed-intel store, after that store was found
     poisoned hundreds of times over by exactly this traffic shape (ff02::fb,
     224.0.0.22, 224.0.0.251 -- see that method's own docstring). Centralized here so
@@ -974,7 +996,7 @@ def infer_device_type(hostname: str, user_agent: str = "", mac_vendor: str = "")
     # those 13 (92%) actually had hostname="unknown", i.e. NO real signal was ever
     # found by any layer above. "laptop" was silently functioning as "unclassified,"
     # not a real detection, and this has real behavioral effect (not just cosmetic) --
-    # fp_engine.py's dev_type_weights dict already defines an "unknown": 0.3 entry that
+    # the false-positive model's dev_type_weights dict already defines an "unknown": 0.3 entry that
     # was never reachable before this fix, because this function never returned
     # "unknown"; misclassified devices instead got laptop's 0.5 weight. Returning
     # "unknown" here activates that already-intended bucket instead of inventing a new

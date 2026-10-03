@@ -670,7 +670,7 @@ def check_arp_sweep_retroactive_misses_and_rollback(store: GraphStore, now: Opti
 
 
 _FP_COMBINED_PARAMETER = "fp_combined_suppress_threshold"
-_FP_COMBINED_DEFAULT_THRESHOLD = 0.80  # matches fp_engine.py's own _DEFAULT_COMBINED_SUPPRESS_THRESHOLD
+_FP_COMBINED_DEFAULT_THRESHOLD = 0.80  # the CL-AFPE's DEFAULT_COMBINED_SUPPRESS_THRESHOLD
 
 
 def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float] = None,

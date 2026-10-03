@@ -1,7 +1,6 @@
 """
 resource_gate.py -- "is there room to start one more scheduled subprocess job right
-now" signal, shared by scripts/scheduler.py (a separate OS process) and
-intelligence/fp_engine.py's weekly-retrain thread (running inside main.py's process).
+now" signal for scripts/scheduler.py (a separate OS process).
 
 Deliberately independent from health_manager.py's own pressure classifier: that one
 answers "is THIS process itself in danger" (tuned against this process's own RSS,

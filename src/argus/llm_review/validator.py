@@ -9,7 +9,7 @@ check, the destination-ownership/baseline-familiarity check, the hypothesis-
 independence check, the empty-supporting-evidence check, the self-contradiction
 check, and the circular-reasoning-on-malicious check. Constants
 (ATTACK_SHAPED_EVIDENCE_TYPES, FAMILIARITY_TRUST_BAR) are the SAME ones already
-ported onto v13's DeviceProfileBenignHypothesis (hypotheses/engine.py) -- imported
+ported onto v13's DeviceProfileBenignHypothesis (argus/hypotheses/engine.py) -- imported
 from there, not redefined, so the two consumers can never silently drift apart the
 way Gap 6 found they had in v-current before the fix.
 

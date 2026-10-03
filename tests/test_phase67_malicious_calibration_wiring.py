@@ -1,7 +1,7 @@
 """
 Standalone runtime test for Phase 67 (HEE_ROADMAP.md item 6, malicious-track
 calibration wiring)'s surviving, still-live half: `local_intel.py`'s per-entry TTL
-override and `fp_engine.py`'s `record_confirmed_threat()` threading it through.
+override and the CL-AFPE's `record_confirmed_threat()` threading it through.
 
 v16 NOTE: this file originally also covered a Section C -- `ConfidenceCalibrator`'s
 malicious-track self-activation and `ollama_soc.py`'s `_apply_confidence_calibration()`
@@ -31,7 +31,9 @@ def check(name, cond, detail=""):
 
 
 from intelligence.local_intel import LocalConfirmedIntel, DEFAULT_TTL_SECONDS
-from intelligence.fp_engine import AutonomousFPEngine
+from pathlib import Path
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -65,7 +67,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 # Section B: record_confirmed_threat() threads ttl_seconds through to BOTH branches
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = ClAfpeEngine(GraphStore(str(Path(tmpdir) / "graph.db")), local_intel=LocalConfirmedIntel(tmpdir))
     # NOTE: RFC 5737 documentation-range addresses (198.51.100.0/24 etc.) will NOT
     # work here -- Python's ipaddress module classifies them as is_private=True, which
     # _is_ip_protected_from_confirmed_intel() correctly refuses (by design, this store
@@ -86,7 +88,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     fp.record_confirmed_threat("dev_y", "another-domain.example", "45.33.32.157", reason="TEST")
     default_entry = fp.local_intel.check("domain", "another-domain.example")
     check("REGRESSION GUARD: omitting ttl_seconds (every existing caller, e.g. "
-          "fp_engine's own internal Stage-1 hard-stop path) still works exactly as "
+          "the engine's own Stage-1 hard-stop path) still works exactly as "
           "before -- falls back to the instance default",
           default_entry is not None and default_entry.get("ttl_seconds") == DEFAULT_TTL_SECONDS,
           f"got {default_entry}")

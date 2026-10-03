@@ -39,7 +39,7 @@ _DEFAULT_DECAY_FACTOR = 0.995
 # VERSION 11 (P3, review #22): "RECON"/"C2"/"LATERAL"/"EXFIL" read as confirmed
 # kill-chain stages to anyone seeing them on a dashboard, but they're purely
 # heuristic feature-threshold guesses (see _determine_killchain_phase below) --
-# nothing in decision_engine.py or hypotheses/engine.py ever reads this value, it's
+# nothing in argus/decision/engine.py or argus/hypotheses/engine.py ever reads this value, it's
 # display/Grafana-telemetry only, but a human staring at "EXFIL" on a panel has no
 # way to know that from the label alone. Prefixed SUSPECTED_ (except NORMAL, which
 # needs no hedging) so the uncertainty is visible in the label itself, matching the
@@ -268,7 +268,7 @@ class FeatureExtractor:
             return "SUSPECTED_C2"
             
         # B7 (2026-10-01): one connection to one host (a NAS share, a single SSH login) is not lateral
-        # movement; same distinct-target bar the hard-stop uses (fp_engine, lateral_movement_unique_targets).
+        # movement; same distinct-target bar the hard-stop uses (the CL-AFPE, lateral_movement_unique_targets).
         if (features.get("zeek_lateral_moves", 0) > 0 and features.get("zeek_lateral_unique_targets", 0) >= 2) \
                 or features.get("zeek_s0_rej_count", 0) > 20:
             return "SUSPECTED_LATERAL"

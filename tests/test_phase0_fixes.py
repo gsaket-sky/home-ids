@@ -7,14 +7,13 @@ Covers:
   1. Reputation classifier eTLD+1 boundary-safe matching (the endswith substring bug).
   2. ml_engine.reject_threat() real exclusion window (was a no-op log statement).
   3. config.resolve_home_subnets() multi-subnet schema + legacy fallback.
-  4. fp_engine._extract_base_domain() fail-closed behavior when tldextract is unavailable.
-  5. decision_engine.py no longer has the dead dns_rate_anomaly branch (source check,
-     since the live detector never emits that type — this is a "can't regress" guard).
+  4. utils.etld1_strict() (used by the CL-AFPE for trust) fails closed when tldextract is unavailable.
   6. ThreatIntel.get_tranco_rank() -- real, wired-up tranco_rank feature (was always 0).
 """
 import sys
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
+import tempfile
 import time
 
 FAILURES = []
@@ -174,25 +173,22 @@ check("fully-empty config resolves to an empty subnet list (not a crash)",
       resolve_home_subnets(cfg_empty_all) == [])
 
 
-# ── Test 4: fp_engine._extract_base_domain() fails closed without tldextract ───────
+# ── Test 4: trust decisions use a base domain that fails closed without tldextract ───
 import utils as _utils_mod
 _orig_tldextract = _utils_mod.tldextract
 _utils_mod.tldextract = None  # simulate "tldextract not installed" for this check
-
-from intelligence.fp_engine import AutonomousFPEngine
-import tempfile
-
-with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
-    base = fp._extract_base_domain("mail.example.co.uk")
-    check("base-domain extraction fails CLOSED (returns '') when tldextract is unavailable, "
-          "instead of the dangerous naive 'co.uk' last-two-labels fallback",
-          base == "", f"got base_domain={base!r}")
-
-    base_empty_input = fp._extract_base_domain("")
-    check("empty domain input returns '' without raising", base_empty_input == "")
-
+base = _utils_mod.etld1_strict("mail.example.co.uk")
+check("etld1_strict() fails CLOSED (returns '') when tldextract is unavailable, "
+      "instead of the dangerous naive 'co.uk' last-two-labels fallback",
+      base == "", f"got base_domain={base!r}")
+check("empty domain input returns '' without raising", _utils_mod.etld1_strict("") == "")
 _utils_mod.tldextract = _orig_tldextract  # restore
+if _orig_tldextract is not None:
+    check("with tldextract present, etld1_strict() handles a multi-part public suffix correctly",
+          _utils_mod.etld1_strict("mail.example.co.uk") == "example.co.uk")
+_clafpe_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "argus" / "cl_afpe" / "engine.py").read_text(encoding="utf-8")
+check("the CL-AFPE (immunization and trust lookups) uses the fail-closed variant",
+      "etld1_strict as etld1" in _clafpe_src)
 
 
 # ── Test 5: ThreatIntel.get_tranco_rank() -- real (non-zero, non-dead) tranco_rank ──

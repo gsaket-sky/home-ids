@@ -77,7 +77,7 @@ check("local_context (local_device_discovery, benign-only) is deliberately exclu
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: decision_engine.py -- the real corroboration-counting behavior
 # ═══════════════════════════════════════════════════════════════════════════════════
-from core.decision_engine import DecisionEngine
+from argus_scenarios import DecisionEngine
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.reputation.classifier import ReputationVector
 

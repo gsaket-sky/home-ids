@@ -7,7 +7,7 @@ same mechanism as live_prune.py). v16: the sole retro-hunt job -- v-current's ow
 scripts/retro_hunter.py was retired the same release once its findings/local-intel-store
 activity stayed flat across multiple live checks while this job (which by then had reached
 full feature parity: local-intel cross-reference, Telegram notification, and the
-fp_engine-sigma-tuning-equivalent loop-closing action below) kept running as the sole
+sensitivity-tuning loop-closing action below) kept running as the sole
 engine. This job re-scans Argus's OWN graph-backed destination history (state/v13_graph.db,
 Phase 1) against fresh threat intel and writes any newly-confirmed-malicious destination back
 as a real `reputation` Evidence item for the device that touched it -- picked up by that

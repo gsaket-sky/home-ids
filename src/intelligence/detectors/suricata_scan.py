@@ -24,12 +24,12 @@ policy, not the full noisy feed) -- this module only runs whatever rules that fi
 contains and turns real MATCHES into Evidence.
 
 Deliberately evidence-based like every other detector here (see
-SuricataSignatureHypothesis in hypotheses/engine.py) -- EXCEPT for a genuinely
-high-severity match (Suricata's own severity=1/"high"), which decision_engine.py
+SuricataSignatureHypothesis in argus/hypotheses/engine.py) -- EXCEPT for a genuinely
+high-severity match (Suricata's own severity=1/"high"), which argus/decision/engine.py
 treats as an explicit hard-stop (has_confirmed_exploit), matching the review's own
 "known malware signature" / "confirmed exploit" hard-stop categories. A real rule
 match against a curated ruleset is close to definitional, not a fuzzy heuristic --
-unlike everything fp_engine.py's Stage-1 used to independently re-derive from raw
+unlike everything the CL-AFPE's Stage-1 used to independently re-derive from raw
 features (VERSION 11's earlier fix), this is genuinely new information no other
 detector here can produce.
 """
@@ -49,7 +49,7 @@ LOGGER = logging.getLogger("home_ids.suricata_scan")
 
 # Suricata's own severity convention (alert.severity in eve.json): 1 = high priority
 # (most severe), 2 = medium, 3 = low. Mapped to Evidence.confidence -- 0.9+ is what
-# decision_engine.py's has_confirmed_exploit hard-stop requires, so only a genuine
+# argus/decision/engine.py's has_confirmed_exploit hard-stop requires, so only a genuine
 # severity=1 match reaches that bar; 2/3 are real evidence, not a hard-stop.
 _SEVERITY_TO_CONFIDENCE = {1: 0.95, 2: 0.70, 3: 0.45}
 _DEFAULT_CONFIDENCE = 0.5

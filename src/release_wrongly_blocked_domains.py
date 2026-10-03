@@ -27,8 +27,8 @@ Usage (from anywhere -- resolves state relative to config.yaml's state_path):
   2. Actually release the SAFE_RECOGNIZED + SAFE_REVIEWED domains:
        python3 src/release_wrongly_blocked_domains.py --apply
   Releasing uses the exact same path as the real "Mark False Positive" Telegram
-  button: fp_engine.mark_false_positive() (immunizes the base domain, writes the
-  training correction) + IPSMitigator.unblock_by_base_domain() (sweeps every blocked
+  button: the CL-AFPE engine's mark_false_positive() (immunizes the base domain, writes the
+  training record) + IPSMitigator.unblock_by_base_domain() (sweeps every blocked
   FQDN under that base domain, not just an exact-string match).
 """
 import re
@@ -43,7 +43,8 @@ from config import CONFIG
 from utils import is_telemetry_domain, etld1
 from core.state_guard import StateManager
 from mitigation.ips import IPSMitigator
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
 
 # Built from manually reviewing every non-is_telemetry_domain() entry in this exact
 # production blocklist (see this file's module docstring for why this stays separate
@@ -148,7 +149,7 @@ def main():
               f"SUSPICIOUS and UNCLASSIFIED entries are never touched by this script.")
         return
 
-    fp = AutonomousFPEngine(config=CONFIG, state_dir=str(Path(state_path).parent))
+    fp = ClAfpeEngine(GraphStore(str(Path(state_path).parent / "v13_graph.db")))
     ips = IPSMitigator(config=CONFIG, state_manager=sm)
 
     total_released = 0
@@ -159,9 +160,12 @@ def main():
         # so it's ONE well-tested code path, not a bespoke direct-immunize call.
         hostname = entries[0][1].get("hostname", "unknown")
         device_id = entries[0][1].get("device", {}).get("id") if isinstance(entries[0][1].get("device"), dict) else entries[0][1].get("device_id", "unknown")
-        alert_payload = {"signature": "", "device": {"id": device_id}}
-        result = fp.mark_false_positive(alert_payload, hostname, base, source="operator")
-        released = ips.unblock_by_base_domain(result.get("base_domain", base))
+        alert_payload = {"signature": "", "device": {"id": device_id, "hostname": hostname},
+                         "network_context": {"queried_domain": base, "destination_ip": ""}}
+        result = fp.mark_false_positive(alert_payload, source="operator")
+        if result.refused:   # e.g. the device that triggered the block is gone: still trust the domain itself
+            fp.immunize(base, source="operator")
+        released = ips.unblock_by_base_domain(base)
         total_released += len(released)
         print(f"Released {len(released)} FQDN(s) under '{base}': {', '.join(released) if released else '(none matched -- already released?)'}")
 

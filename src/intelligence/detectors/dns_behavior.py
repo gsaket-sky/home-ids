@@ -26,7 +26,7 @@ class DNSBehaviorDetector:
                 # real domain actually driving this rate burst (dns_features.py's
                 # new top_rate_domain), the same "real evidence-linked domain, not
                 # an unrelated fallback" fix already applied to dns_entropy above --
-                # see hypotheses/engine.py's AdvertisingBurstHypothesis for why a
+                # see argus/hypotheses/engine.py's AdvertisingBurstHypothesis for why a
                 # dns_rate Evidence with no .domain made its own rep_vector.tier
                 # gate a structural no-op.
                 domain=features.get("top_rate_domain") or None,

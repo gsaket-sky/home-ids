@@ -20,7 +20,7 @@ from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
 import re
 
-from core.decision_engine import DecisionState
+from argus_scenarios import DecisionState
 
 FAILURES = []
 

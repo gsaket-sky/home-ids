@@ -173,33 +173,33 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section E: fp_engine.py -- local confirmed-intel metrics
+# Section E: local confirmed-intel metrics (CL-AFPE verdict accounting + periodic gauge export)
 # ═══════════════════════════════════════════════════════════════════════════════════
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
+from argus.graph.store import GraphStore  # noqa: E402
+from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
+from core.pipeline import record_cl_afpe_verdict  # noqa: E402
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir3:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir3)
-    fp.record_confirmed_threat("dev_metrics_test", "malicious-metrics-test.example", "6.6.6.6",
-                                reason="unit_test")
-
-    check("record_confirmed_threat() updates local_confirmed_intel_size for domains",
-          gauge_value(local_confirmed_intel_size, kind="domain") >= 1.0)
-    check("record_confirmed_threat() updates local_confirmed_intel_size for ips",
-          gauge_value(local_confirmed_intel_size, kind="ip") >= 1.0)
-
-    before_hits = counter_value(local_confirmed_intel_hits_total)
+    fp = ClAfpeEngine(GraphStore(str(Path(tmpdir3) / "graph.db")), local_intel=LocalConfirmedIntel(tmpdir3))
+    fp.record_confirmed_threat("dev_metrics_test", "malicious-metrics-test.example", "6.6.6.6", reason="unit_test")
     safe_features = {"ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
-                      "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
-                      "outbound_bytes_z": 0.0}
-    later_alert = {
-        "device": {"id": "dev_different", "hostname": "different-host"},
-        "network_context": {"queried_domain": "malicious-metrics-test.example", "destination_ip": "1.1.1.1"},
-        "signature": "", "timestamp": time.time(),
-    }
-    fp.evaluate(later_alert, safe_features, risk_score=5.0, ti_engine=None)
+                     "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
+                     "outbound_bytes_z": 0.0}
+    later_alert = {"device": {"id": "dev_different", "hostname": "different-host"},
+                   "network_context": {"queried_domain": "malicious-metrics-test.example", "destination_ip": "1.1.1.1"},
+                   "signature": "", "timestamp": time.time()}
+    verdict = fp.evaluate(later_alert, safe_features)
+    check("a different device touching the confirmed domain is a Stage-1 CONFIRMED_THREAT",
+          verdict["verdict"] == "CONFIRMED_THREAT" and verdict["stage"] == "STAGE_1_HARD_STOP", f"got {verdict}")
+    before_hits = counter_value(local_confirmed_intel_hits_total)
+    record_cl_afpe_verdict(verdict, later_alert)
     check("THE CORE FIX: a cross-device local-intel hard-stop increments local_confirmed_intel_hits_total",
           counter_value(local_confirmed_intel_hits_total) == before_hits + 1.0)
 
+_pipe_src = (Path(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+check("the pipeline exports local_confirmed_intel_size per kind with its periodic gauges",
+      "local_confirmed_intel_size.labels(kind=kind).set(len(self.local_intel.all_confirmed(kind)))" in _pipe_src)
 
 if FAILURES:
     print(f"\n{len(FAILURES)} Phase 29 check(s) FAILED: {FAILURES}")

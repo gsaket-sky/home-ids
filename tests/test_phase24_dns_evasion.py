@@ -19,7 +19,7 @@ def check(name, cond, detail=""):
 
 from utils import is_vpn_provider_org
 from intelligence.detectors.dns_evasion import DeviceBurstAudit, audit_device, audit_burst
-from intelligence.hypotheses.engine import DNSEvasionHypothesis, HypothesisEngine
+from argus_scenarios import DNSEvasionHypothesis, HypothesisEngine
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.reputation.classifier import ReputationVector
 
@@ -227,8 +227,10 @@ trusted_rep = ReputationVector(domain="", tier=1)
 
 check("no evidence at all -> hypothesis doesn't fire", hyp.evaluate([], neutral_rep) == 0.0)
 
+# A classified shape (no DNS history at all); the ambiguous "attribution gap" shape is capped, see below.
 anomaly_only = [Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
-                          device=DEV, value=1.0, confidence=0.7, independence_group="blindspot_audit")]
+                          device=DEV, value=1.0, confidence=0.7, independence_group="blindspot_audit",
+                          provenance="detector:dns_evasion:no_dns_history:test")]
 score_alone = hyp.evaluate(anomaly_only, neutral_rep)
 check("dns_evasion_anomaly alone satisfies the required condition and scores >= 2.0",
       score_alone >= 2.0, f"got {score_alone}")
@@ -242,6 +244,13 @@ corroborated = anomaly_only + [
 score_corroborated = hyp.evaluate(corroborated, neutral_rep)
 check("dns_evasion_anomaly + a second independent evidence type reaches the 'strong' bonus score",
       score_corroborated == 4.0, f"got {score_corroborated}")
+
+ambiguous = [Evidence(type="dns_evasion_anomaly", source="dns_evasion", timestamp=time.time(),
+                      device=DEV, value=1.0, confidence=0.7, independence_group="blindspot_audit",
+                      provenance="detector:dns_evasion:partial_attribution_gap:test")] + corroborated[1:]
+score_ambiguous = hyp.evaluate(ambiguous, neutral_rep)
+check("the ambiguous DNS_ATTRIBUTION_GAP shape stays capped at 2.0 even when corroborated",
+      score_ambiguous == 2.0 and hyp.name == "DNS_ATTRIBUTION_GAP", f"got {score_ambiguous} ({hyp.name})")
 
 score_trusted = hyp.evaluate(anomaly_only, trusted_rep)
 check("a tier-1/2 trusted reputation context dampens the score below the untrusted case",

@@ -1,7 +1,7 @@
 """
 job_coordinator.py -- single global mutex + priority + pause/resume + orphan
-reconciliation for every scheduled subprocess job (scripts/scheduler.py's cron jobs and
-intelligence/fp_engine.py's weekly retrain), so at most one runs at a time system-wide
+reconciliation for every scheduled subprocess job (scripts/scheduler.py's cron jobs), so at
+most one runs at a time system-wide
 and a higher-priority job can preempt (SIGSTOP) a lower-priority *pausable* one instead
 of just waiting behind it.
 
@@ -81,8 +81,8 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 
 
 def _acquire_claim(state_dir) -> bool:
-    """Atomic O_CREAT|O_EXCL claim on a sentinel file so two processes (scheduler.py
-    and fp_engine.py's retrain thread) racing to update the slot can't both succeed.
+    """Atomic O_CREAT|O_EXCL claim on a sentinel file so two processes racing to update
+    the slot can't both succeed.
     The sentinel's own content records ITS claimant's pid+timestamp so a claimant that
     died mid-claim can be recognized and cleared rather than wedging every future
     claim forever."""
@@ -435,7 +435,7 @@ def clear_deferral(state_dir, job_name: str) -> None:
 
 def reconcile_on_boot(state_dir) -> Optional[dict]:
     """Call once at the very top of every coordinator participant's startup
-    (scripts/scheduler.py's main(), and fp_engine.py's retrain-thread startup) BEFORE
+    (scripts/scheduler.py's main()) BEFORE
     doing anything else -- AND ALSO call every scheduler tick / retrain poll
     thereafter (the name reflects its original motivating case, but it's a general
     watchdog, not boot-only: this is what turns "a job denied the slot for too long"

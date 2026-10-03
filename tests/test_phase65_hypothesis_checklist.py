@@ -36,7 +36,7 @@ def check(name, cond, detail=""):
 
 
 from intelligence.hypotheses.evidence import Evidence
-from intelligence.hypotheses.engine import HypothesisEngine
+from argus_scenarios import HypothesisEngine
 from intelligence.reputation.classifier import ReputationVector
 
 hyp = HypothesisEngine()

@@ -1107,7 +1107,7 @@ class GraphStore:
         Also links `evidence_ids` (the SAME capped list insert_decision() already
         received) to the WINNING hypothesis via 'supports' (already-allowed,
         zero schema risk). Deliberately NOT attempted for the losing hypothesis:
-        decision_engine.py's HEE does not compute a per-evidence-item hypothesis
+        argus/decision/engine.py's HEE does not compute a per-evidence-item hypothesis
         attribution anywhere today (confirmed by reading it) -- an evidence->
         losing-hypothesis 'contradicts' edge would be inventing data this
         codebase doesn't actually have, not recovering it.
@@ -1615,9 +1615,9 @@ class GraphStore:
         LAN legitimately, constantly sends to these addresses as ordinary service
         discovery, so "which OTHER devices also touched this destination" is always
         true and means nothing; the SAME traffic shape already poisoned
-        fp_engine.py's confirmed-intel store before that store got this exact guard
+        the CL-AFPE's confirmed-intel store before that store got this exact guard
         (see is_local_or_multicast_destination()'s own docstring). Without this,
-        CoordinatedTargetingHypothesis (hypotheses/engine.py) scores ordinary mDNS/
+        CoordinatedTargetingHypothesis (argus/hypotheses/engine.py) scores ordinary mDNS/
         SSDP/multicast chatter as cross-device attack corroboration -- confirmed live:
         83% of non-suppressed HIGH alerts in a 6h sample were exactly this shape.
 
@@ -1765,6 +1765,21 @@ class GraphStore:
                 continue
             if meta.get(key) == value:
                 out.append(r["device_id"])
+        return out
+
+    def get_device_metadata_values(self, key: str) -> Dict[str, Any]:
+        """{device_id: metadata_json[key]} for every non-merged device that has `key` (same full scan as
+        get_devices_with_metadata_value())."""
+        rows = self._conn.execute(
+            "SELECT device_id, metadata_json FROM devices WHERE merged_into_device_id IS NULL").fetchall()
+        out = {}
+        for r in rows:
+            try:
+                meta = json.loads(r["metadata_json"]) if r["metadata_json"] else {}
+            except (TypeError, ValueError):
+                continue
+            if key in meta:
+                out[r["device_id"]] = meta[key]
         return out
 
     def get_device_type_cohorts(self) -> Dict[str, List[str]]:

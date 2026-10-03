@@ -16,7 +16,7 @@ which days. Queries Pi-hole blocked are ignored (ad/tracker lists must not becom
                  (see is_allowlisted there): a learned list can be poisoned (malware several devices talk to daily),
                  so it only overrides suffix matches and weak indicators.
   rank        -- 1 = most used, ordering by distinct devices, then distinct days; 0 = not ranked. Same convention as
-                 the Tranco rank it replaces (fp_engine's feature 0: 1 - rank/1e6, 0 when unranked).
+                 the Tranco rank it replaces (the false-positive model's feature 0: 1 - rank/1e6, 0 when unranked).
 
 Storage: SQLite (owner requirement: no JSON state files), capped at MAX_ROWS names, pruned by last-seen. The hot path
 (observe) only touches an in-memory dict; a flush every FLUSH_SECONDS merges into the database and rebuilds the

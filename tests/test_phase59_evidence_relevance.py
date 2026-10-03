@@ -66,7 +66,7 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.hypotheses.engine import (
+from argus_scenarios import (
     HYPOTHESIS_RELEVANT_EVIDENCE_TYPES, DNSTunnelingHypothesis, NetworkIntrusionHypothesis,
     AdvertisingBurstHypothesis,
 )
@@ -88,9 +88,8 @@ check("NetworkIntrusionHypothesis declares exactly its own required evidence typ
           "zeek_notice_weak", "zeek_notice_medium", "zeek_notice_strong", "zeek_notice_highly_deterministic",
       }))
 
-check("a hypothesis that hasn't declared an override (AdvertisingBurstHypothesis) "
-      "inherits the base class's empty default -- not covered, not an error",
-      AdvertisingBurstHypothesis.RELEVANT_EVIDENCE_TYPES == frozenset())
+check("benign hypotheses declare their relevance too (AdvertisingBurstHypothesis: the DNS rate it explains)",
+      AdvertisingBurstHypothesis.RELEVANT_EVIDENCE_TYPES == frozenset({"dns_rate"}))
 
 check("registry contains NETWORK_INTRUSION and DNS_TUNNELING",
       "NETWORK_INTRUSION" in HYPOTHESIS_RELEVANT_EVIDENCE_TYPES

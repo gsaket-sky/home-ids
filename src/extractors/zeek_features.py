@@ -665,7 +665,7 @@ class ZeekFeatureExtractor:
         if existing_mac and existing_mac != mac:
             last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
             # BUGFIX (production false-positive, feeds a Stage-0 HARD-STOP that bypasses
-            # CL-AFPE entirely -- decision_engine.py's has_arp_spoof branch, single evidence
+            # CL-AFPE entirely -- argus/decision/engine.py's has_arp_spoof branch, single evidence
             # item, zero corroboration required): a genuine ARP-spoofing attacker hijacks an
             # IP and HOLDS it -- it would be self-defeating for them to keep handing control
             # back to the real device and re-attacking every ~15-20s, since that's exactly
@@ -1107,7 +1107,7 @@ class ZeekFeatureExtractor:
         # example_pc_fritz_box tarpit alert, verified against this exact code) --
         # zeek_lateral_moves is a raw COUNT of connections to LATERAL_PORTS, with no
         # distinction between "one legitimate SMB/SSH/RDP connection" and "a genuine
-        # multi-target scan." fp_engine.py's Stage-1 hard-stop and pipeline.py's
+        # multi-target scan." the CL-AFPE's Stage-1 hard-stop and pipeline.py's
         # lateral_threat (which authorizes Layer-2 tarpit, bypassing the normal
         # risk>=9.0 floor) both gate on a bare `> 0` check against this same count --
         # confirmed live: a single connection (zeek_lateral_moves=1) was sufficient to

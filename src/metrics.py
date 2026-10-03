@@ -155,7 +155,7 @@ ndr_max_duration_metric = Gauge("home_ids_zeek_max_duration", "Maximum continuou
 ndr_honeypot_hits_metric = Gauge("home_ids_zeek_honeypot_hits", "Connections to internal deception honeypots", _DEV_LABELS)
 # PHASE 21-METRICS: ARP host-discovery sweep count and DNS-evasion unexplained-connection
 # ratio were computed and fed into detection (threat_signals.py's arp_sweep evidence,
-# fp_engine's LightGBM feature 9/10) but had no Prometheus visibility at all -- an
+# the CL-AFPE's LightGBM feature 9/10) but had no Prometheus visibility at all -- an
 # operator watching Grafana had no way to see either signal for any device, ever.
 ndr_arp_sweep_metric = Gauge("home_ids_zeek_arp_sweep_count", "Distinct hosts ARP-requested by this device in the current window (host-discovery sweep signal)", _DEV_LABELS)
 ndr_dns_evasion_ratio_metric = Gauge("home_ids_zeek_dns_evasion_ratio", "Most recent reactive-capture blind-spot-audit unexplained-connection ratio [0.0-1.0] for this device", _DEV_LABELS)
@@ -249,7 +249,7 @@ fp_engine_sigma_shifts_total = Counter("home_ids_fp_sigma_shifts_total", "Total 
 # ===========================================================================
 # PHASE 18: Decision-Path Transparency (Brain 1 / HEE)
 # ===========================================================================
-# Which branch of decision_engine.py's decision order actually resolved each
+# Which branch of argus/decision/engine.py's decision order actually resolved each
 # evaluation -- the direct "is the system getting smarter over time" signal: watching
 # hard_stop/tier5 share shrink and benign share grow across weeks is exactly what
 # autonomous healing is supposed to produce. Fixed 9-value enum, safe cardinality.
@@ -350,6 +350,7 @@ reactive_capture_degraded = Gauge("home_ids_reactive_capture_degraded", "1 if th
 # ===========================================================================
 local_confirmed_intel_size = Gauge("home_ids_local_confirmed_intel_size", "Current non-expired entry count in the self-growing local confirmed-threat store", ["kind"])
 local_confirmed_intel_hits_total = Counter("home_ids_local_confirmed_intel_hits_total", "Stage-1 hard-stops fired by a match against a PREVIOUSLY-confirmed IOC (a different device benefiting from another device's confirmed threat)")
+engine_errors_total = Gauge("home_ids_engine_errors", "Decision / false-positive engine errors since the engine started -- each one is a cycle not evaluated (no action) or an alert published unsuppressed", ["engine"])
 
 # ===========================================================================
 # PHASE 18: Ollama (Brain 3) Run Transparency
@@ -378,12 +379,9 @@ retro_hunt_findings_total = Gauge("home_ids_retro_hunt_findings_total", "Cumulat
 # ===========================================================================
 # Same shape as autotune_arp_sweep_threshold_effective above -- these two thresholds
 # (threat_signals.py's zeek_conn_abuse s0_rej_unique check and its zeek_long_conn
-# max_duration check) are only ever corrected reactively, in-process, via
-# fp_engine.py's mark_false_positive() -- but that function is called from the
-# FastAPI webhook subprocess (middleware/routers/pihole_api.py), a SEPARATE process
-# from the one running this registry. Synced via the device_fp_profiles.json relay
-# in metrics_sync.py, same mtime-skip mechanism as autotune_stats.json/
-# ollama_run_stats.json/job_health.json.
+# max_duration check) are only ever corrected reactively, via the CL-AFPE's
+# mark_false_positive() (often in the API process). The values live in the graph
+# (device fp_profile); pipeline.py's _export_cl_afpe_gauges() reads them from there.
 autotune_conn_abuse_threshold_effective = Gauge("home_ids_autotune_conn_abuse_threshold_effective", "Live effective per-device conn_abuse_unique_ip_threshold, only set for devices with their own reactively-corrected profile", ["device", "hostname"])
 autotune_long_conn_threshold_effective = Gauge("home_ids_autotune_long_conn_threshold_effective", "Live effective per-device long_conn_duration_threshold, only set for devices with their own reactively-corrected profile", ["device", "hostname"])
 # Generic per-key correction-count gauge covering EVERY apply_device_fp_profile() key
@@ -458,9 +456,8 @@ pihole_gravity_last_success_timestamp = Gauge("home_ids_pihole_gravity_last_succ
 # 2026-09-23: Argus-architecture observability (Documentation/ARGUS_OBSERVABILITY_PLAN.md)
 # Every value below is set directly in this process from its real source -- no relay file.
 # ===========================================================================
-# CL-AFPE (false-positive filter) under cl_afpe_engine=argus. The home_ids_fp_* counters
-# above were only ever written inside the legacy intelligence/fp_engine.py, which never
-# runs once Argus CL-AFPE is live -- pipeline.py now sets them from the Argus verdict too.
+# CL-AFPE (false-positive filter). pipeline.py sets the home_ids_fp_* metrics above and this one from each
+# verdict (record_cl_afpe_verdict) and once a minute (_export_cl_afpe_gauges).
 cl_afpe_verdicts_total = Counter("home_ids_cl_afpe_verdicts_total", "Argus CL-AFPE verdicts by the stage that decided and the verdict it reached", ["stage", "verdict"])
 
 # Per-device decision detail from the live Argus decision (same device labels as the

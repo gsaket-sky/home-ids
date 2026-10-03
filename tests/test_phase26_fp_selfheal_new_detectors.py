@@ -3,25 +3,29 @@ Standalone runtime test for Phase 26 (Phase D2 of the reactive-capture plan:
 self-healing integration for the new evidence-driven detectors). Not part of the
 pytest suite -- run directly: `python3 test_phase26_fp_selfheal_new_detectors.py`.
 
-Background: mark_false_positive() originally assumed every correction means
+Background: a correction ("mark as false positive") originally assumed every correction means
 "immunize a domain" -- true for regular DNS-driven alerts, but structurally wrong for
-two new evidence types with no domain by definition:
+two evidence types with no domain by definition:
   - DNS_EVASION (dns_evasion.py's blind-spot audit): the signal itself IS "no matching
     DNS history"; the correctable thing is the specific unexplained destination IP.
   - CONNECTION_ABUSE (covers arp_sweep evidence among others): a domain immunization
     does nothing for a device that legitimately ARP-scans the LAN; what needs
     correcting is that device's OWN arp_sweep threshold.
-Exercises the real AutonomousFPEngine and its real evaluate()/mark_false_positive()
-closed loop, no mocks -- proves the correction actually changes future behavior, not
-just that a function returns a plausible-looking dict.
+
+Exercises the live CL-AFPE (argus/cl_afpe/engine.py) and its real evaluate()/mark_false_positive()
+closed loop, no mocks -- proves the correction actually changes future behaviour, not just that a
+function returns a plausible-looking result. Section E covers EnginePipeline._device_threshold(), which
+reads the per-device thresholds the engine raises.
 """
 import sys
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
-import time
+
 import tempfile
+import time
 
 FAILURES = []
+
 
 def check(name, cond, detail=""):
     status = "PASS" if cond else "FAIL"
@@ -30,144 +34,117 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
+from argus.graph.store import GraphStore  # noqa: E402
+
+
+def _engine(tmpdir, *device_ids):
+    store = GraphStore(str(_PathForSysPath(tmpdir) / "graph.db"))
+    for d in device_ids:                       # the identity guard only accepts known devices
+        store.upsert_device(d, timestamp=time.time())
+    return ClAfpeEngine(store)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section A: get_device_arp_sweep_threshold -- layered fallback, same shape as
-# get_device_suppress_threshold()
+# Section A: per-device ARP-sweep threshold -- own value, else the caller's default
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
-
+    fp = _engine(tmpdir, "dev_no_profile", "dev_with_profile")
     check("a device with no profile yet falls back to the caller-supplied default",
           fp.get_device_arp_sweep_threshold("dev_no_profile", default=8.0) == 8.0)
-
     fp.apply_device_fp_profile("dev_with_profile", "arp_sweep_unique_targets_threshold",
-                                15.0, baseline=8.0, set_by="operator", reason="test", sample_count=1)
+                               15.0, baseline=8.0, set_by="operator", reason="test", sample_count=1)
     check("a device with a calibrated profile returns its OWN value, not the default",
           fp.get_device_arp_sweep_threshold("dev_with_profile", default=8.0) == 15.0)
     check("a DIFFERENT device with no profile is unaffected by another device's calibration",
           fp.get_device_arp_sweep_threshold("dev_no_profile", default=8.0) == 8.0)
 
-
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: mark_false_positive() -- DNS_EVASION signature routes to IP immunization
+# Section B: DNS_EVASION corrections immunize the destination IP; the closed loop
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     device_id, hostname, unexplained_ip = "dev_iphone_vpn", "iphone-gs", "5.6.7.8"
+    fp = _engine(tmpdir, device_id, "dev_no_ip")
 
-    dns_evasion_alert = {
-        "device": {"id": device_id, "hostname": hostname},
-        "network_context": {"queried_domain": "", "destination_ip": unexplained_ip},
-        "signature": "DNS_EVASION",
-        "timestamp": time.time(),
-    }
-    result = fp.mark_false_positive(dns_evasion_alert, hostname, source="operator")
+    def _evasion_alert():
+        return {
+            "device": {"id": device_id, "hostname": hostname},
+            "network_context": {"queried_domain": "", "destination_ip": unexplained_ip},
+            "signature": "DNS_EVASION",
+            # two independent evidence families -> composite trust can build (it needs two)
+            "hee_evidence_families": ["dns_behavior", "network_behavior"],
+            "hee_evidence_types": ["dns_evasion_anomaly", "zeek_conn_abuse"],
+            "timestamp": time.time(),
+        }
 
-    check("a DNS_EVASION correction does NOT extract/immunize a base domain (there is none)",
-          result["base_domain"] == "", f"got={result}")
-    check("THE CORE FIX: a DNS_EVASION correction DOES immunize the alert's destination_ip",
-          result["ip_immunized"] == unexplained_ip, f"got={result}")
-    check("the immunized IP actually lands in the same dynamic trust cache evaluate() checks",
-          unexplained_ip in fp.get_dynamic_trust_cache(), f"cache={fp.get_dynamic_trust_cache()}")
-    check("sigma shift still widens for this device (the generic dampener runs regardless of branch)",
+    result = fp.mark_false_positive(_evasion_alert(), source="operator")
+    check("THE CORE FIX: a DNS_EVASION correction immunizes the alert's destination IP (there is no domain)",
+          not result.refused and result.immunized_destination == unexplained_ip, f"got={result}")
+    check("the immunized IP lands in the dynamic trust cache evaluate() checks",
+          unexplained_ip in fp.get_dynamic_trust_cache())
+    check("the sensitivity shift widens for this device (the generic dampener runs regardless of branch)",
           fp.get_sigma_shift(device_id) > 0.0)
 
-    # Closed-loop proof: a LATER alert against the SAME dest_ip must now hit the trust
-    # cache fast path in evaluate(), not re-run full Stage 1-3 inference.
-    later_alert = {
-        "device": {"id": device_id, "hostname": hostname},
-        "network_context": {"queried_domain": "", "destination_ip": unexplained_ip},
-        "signature": "DNS_EVASION",
-        "timestamp": time.time(),
-    }
-    verdict = fp.evaluate(later_alert, features={}, risk_score=5.0, ti_engine=None)
-    check("THE CLOSED LOOP: a later alert against the SAME corrected IP is now suppressed "
-          "via the trust-cache fast path, proving the correction actually changes future "
-          "behavior, not just this one alert",
+    for _ in range(4):   # composite trust: +0.15 per family per correction (less a tiny decay); 5 clear the 0.6 bar
+        fp.mark_false_positive(_evasion_alert(), source="operator")
+    verdict = fp.evaluate(_evasion_alert(), features={},
+                          decision={"evidence_types": ["dns_evasion_anomaly", "zeek_conn_abuse"],
+                                    "evidence_families": ["dns_behavior", "network_behavior"]})
+    check("THE CLOSED LOOP: once two evidence families corroborate the corrections, a later alert against the SAME "
+          "corrected IP is suppressed via the trust-cache fast path",
           verdict["stage"] == "TRUST_CACHE" and verdict["suppress"] is True, f"got={verdict}")
 
-    # Missing/absent destination_ip must degrade gracefully, not crash.
-    no_ip_alert = {
-        "device": {"id": "dev_no_ip", "hostname": "host-no-ip"},
-        "network_context": {"queried_domain": "", "destination_ip": ""},
-        "signature": "DNS_EVASION",
-        "timestamp": time.time(),
-    }
-    result_no_ip = fp.mark_false_positive(no_ip_alert, "host-no-ip", source="operator")
-    check("a DNS_EVASION alert with no usable destination_ip degrades gracefully (no crash, "
-          "no immunization) instead of raising",
-          result_no_ip["ip_immunized"] == "" and result_no_ip["base_domain"] == "")
-
+    no_ip_alert = {"device": {"id": "dev_no_ip", "hostname": "host-no-ip"},
+                   "network_context": {"queried_domain": "", "destination_ip": ""},
+                   "signature": "DNS_EVASION", "timestamp": time.time()}
+    result_no_ip = fp.mark_false_positive(no_ip_alert, source="operator")
+    check("a DNS_EVASION alert with no usable destination degrades gracefully (no crash, nothing immunized)",
+          result_no_ip.immunized_destination == "", f"got={result_no_ip}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section C: mark_false_positive() -- CONNECTION_ABUSE signature routes to threshold bump
+# Section C: CONNECTION_ABUSE corrections raise the device's own threshold
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
     device_id, hostname = "dev_smart_hub", "smart-home-hub"
-
-    connection_abuse_alert = {
-        "device": {"id": device_id, "hostname": hostname},
-        "network_context": {"queried_domain": "", "destination_ip": ""},
-        "signature": "CONNECTION_ABUSE",
-        "timestamp": time.time(),
-    }
+    fp = _engine(tmpdir, device_id)
+    connection_abuse_alert = {"device": {"id": device_id, "hostname": hostname},
+                              "network_context": {"queried_domain": "", "destination_ip": ""},
+                              "signature": "CONNECTION_ABUSE", "timestamp": time.time()}
     before = fp.get_device_arp_sweep_threshold(device_id, default=8.0)
-    result = fp.mark_false_positive(connection_abuse_alert, hostname, source="operator")
+    result = fp.mark_false_positive(connection_abuse_alert, source="operator")
     after = fp.get_device_arp_sweep_threshold(device_id, default=8.0)
-
-    check("a CONNECTION_ABUSE correction does NOT immunize any domain or IP (nothing to immunize)",
-          result["base_domain"] == "" and result["ip_immunized"] == "", f"got={result}")
-    check("THE CORE FIX: a CONNECTION_ABUSE correction raises THIS device's own "
-          "arp_sweep_unique_targets_threshold", result["threshold_bumped"] is True and after > before,
-          f"before={before} after={after}")
-    check("a DIFFERENT device's threshold is completely unaffected by this device's correction",
-          fp.get_device_arp_sweep_threshold("some_other_device", default=8.0) == 8.0)
-    check("sigma shift still widens for this device too",
-          fp.get_sigma_shift(device_id) > 0.0)
-
+    check("a CONNECTION_ABUSE correction immunizes nothing (there is nothing to immunize)",
+          result.immunized_destination == "", f"got={result}")
+    check("THE CORE FIX: a CONNECTION_ABUSE correction raises THIS device's own arp_sweep_unique_targets_threshold",
+          result.threshold_bumped is True and after > before, f"before={before} after={after}")
+    check("a DIFFERENT device's threshold is unaffected", fp.get_device_arp_sweep_threshold("other", default=8.0) == 8.0)
+    check("the sensitivity shift widens for this device too", fp.get_sigma_shift(device_id) > 0.0)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section D: regression guard -- a signature-less (regular) alert keeps the EXACT
-# domain-based behavior from before Phase 21D2
+# Section D: regression guard -- a signature-less alert keeps the domain-based behaviour
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
-    regular_alert = {
-        "device": {"id": "dev_regular", "hostname": "regular-host"},
-        "network_context": {"queried_domain": "sub.some-regular-fp.com", "destination_ip": "1.1.1.1"},
-        "timestamp": time.time(),
-        # no "signature" key at all -- matches how many older/synthetic alerts look
-    }
-    result = fp.mark_false_positive(regular_alert, "regular-host", source="operator")
-    check("a signature-less alert still extracts and immunizes the base domain exactly as before",
-          result["base_domain"] == "some-regular-fp.com" and result["is_new_immunization"] is True,
+    fp = _engine(tmpdir, "dev_regular")
+    regular_alert = {"device": {"id": "dev_regular", "hostname": "regular-host"},
+                     "network_context": {"queried_domain": "sub.some-regular-fp.com", "destination_ip": "1.1.1.1"},
+                     "timestamp": time.time()}
+    result = fp.mark_false_positive(regular_alert, source="operator")
+    check("a signature-less alert immunizes the base domain",
+          result.immunized_destination == "some-regular-fp.com" and result.is_new_immunization is True,
           f"got={result}")
-    check("a signature-less alert never touches ip_immunized/threshold_bumped (new fields "
-          "stay inert for the unchanged default path)",
-          result["ip_immunized"] == "" and result["threshold_bumped"] is False)
-
+    check("a signature-less alert never bumps a threshold", result.threshold_bumped is False)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section E: pipeline.py -- source-level guard for the per-device threshold wiring
+# Section E: EnginePipeline._device_threshold() reads what the engine raised
 # ═══════════════════════════════════════════════════════════════════════════════════
-with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
-    pipeline_src = f.read()
-
-check("pipeline.py's arp_sweep_threshold computation consults the per-device FP profile "
-      "before falling back to the global config default",
+pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+check("pipeline.py's arp_sweep_threshold computation uses the per-device threshold (autotuned)",
       '"arp_sweep_unique_targets_threshold", global_arp_sweep_threshold, autotuned=True)' in pipeline_src)
 
-# Behaviour of EnginePipeline._device_threshold(): the live CL-AFPE's own profile (graph) first, then the older
-# AutonomousFPEngine profile, then the default; for an autotuned key a promoted autotuner value wins over all three.
-import tempfile as _tf  # noqa: E402
 import argus.ops.live_engine as _live  # noqa: E402
 from core.pipeline import EnginePipeline  # noqa: E402
 
-_tmp = _PathForSysPath(_tf.mkdtemp(prefix="phase26_threshold_"))
+_tmp = _PathForSysPath(tempfile.mkdtemp(prefix="phase26_threshold_"))
 _live.configure(str(_tmp / "graph.db"))
 _live.configure_cl_afpe(model_dir=str(_tmp / "models"), local_intel_dir=str(_tmp / "state"))
 
@@ -180,12 +157,9 @@ class _FakeAutotune:
         return self.value if self.value is not None else default
 
 
-class _FakeFP:
-    def __init__(self, profile, autotune):
-        self.profile, self.autotune = profile, autotune
-
-    def _get_device_profile_value(self, dev, key, default):
-        return self.profile.get((dev, key), default)
+class _FakeClAfpe:
+    def __init__(self):
+        self.autotune = _FakeAutotune()
 
     def _get_autotune_engine(self):
         return self.autotune
@@ -196,17 +170,15 @@ class _P:
 
 
 _p = _P()
-_p.fp_engine = _FakeFP({("devA", "conn_abuse_unique_ip_threshold"): 7.0}, _FakeAutotune())
+_p.cl_afpe = _FakeClAfpe()
 _thr = EnginePipeline._device_threshold
-check("_device_threshold: falls back to the older profile when the live CL-AFPE has none",
-      _thr(_p, "devA", "conn_abuse_unique_ip_threshold", 5.0) == 7.0)
-check("_device_threshold: falls back to the default when neither profile has a value",
+check("_device_threshold: the default when the engine has no value for this device",
       _thr(_p, "devB", "conn_abuse_unique_ip_threshold", 5.0) == 5.0)
 _live.get_graph_store().upsert_device("devA", timestamp=1.0)
-_live._get_cl_afpe_engine().apply_device_fp_profile("devA", "conn_abuse_unique_ip_threshold", 11.0, 5.0, "t", "r", now=2.0)
-check("_device_threshold: the live CL-AFPE's own profile value wins over the older store",
+_live.get_cl_afpe_engine().apply_device_fp_profile("devA", "conn_abuse_unique_ip_threshold", 11.0, 5.0, "t", "r", now=2.0)
+check("_device_threshold: the value the engine raised after corrections",
       _thr(_p, "devA", "conn_abuse_unique_ip_threshold", 5.0) == 11.0)
-_p.fp_engine.autotune = _FakeAutotune(20.0)
+_p.cl_afpe.autotune = _FakeAutotune(20.0)
 check("_device_threshold: a promoted autotuner value wins for an autotuned key",
       _thr(_p, "devA", "arp_sweep_unique_targets_threshold", 8.0, autotuned=True) == 20.0)
 check("_device_threshold: the autotuner is not consulted for a key that is not autotuned",

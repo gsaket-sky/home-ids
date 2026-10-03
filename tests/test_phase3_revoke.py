@@ -31,78 +31,8 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.fp_engine import AutonomousFPEngine
-
-with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
-
-    # ── Test 1: trust-cache fast path re-runs Stage 1 hard-stop on every hit ───────
-    base_domain = "immunized-example.com"
-    is_new = fp._immunize_domain(base_domain, "test-host")
-    check("_immunize_domain() reports True for a genuinely NEW immunization", is_new is True)
-
-    is_new_again = fp._immunize_domain(base_domain, "test-host")
-    check("_immunize_domain() reports False on a repeat call (TTL refresh, not new)",
-          is_new_again is False)
-
-    alert_payload = {
-        "device": {"id": "dev1", "hostname": "test-host"},
-        "network_context": {"queried_domain": f"sub.{base_domain}", "destination_ip": "1.2.3.4"},
-    }
-    # No hard-stop signals present -> trust cache hit should suppress as before.
-    benign_features = {"ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
-                        "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
-                        "outbound_bytes_z": 0.0}
-    verdict_benign = fp.evaluate(alert_payload, benign_features, risk_score=6.5, ti_engine=None)
-    check("trust-cache hit with NO hard-stop signals still suppresses as FALSE_POSITIVE "
-          "(unchanged happy-path behavior)",
-          verdict_benign["verdict"] == "FALSE_POSITIVE" and verdict_benign["suppress"] is True,
-          f"got {verdict_benign}")
-    check("benign trust-cache-hit verdict stage is TRUST_CACHE (not overridden)",
-          verdict_benign["stage"] == "TRUST_CACHE", f"got stage={verdict_benign['stage']}")
-
-    # NOW: same immunized domain, but this alert ALSO carries a hard-stop signal
-    # (ti_risk > 0 = confirmed ThreatIntel IOC match). Pre-fix, the trust-cache fast path
-    # would have suppressed this unconditionally since the domain is immunized. Post-fix,
-    # it must override the cache and report CONFIRMED_THREAT.
-    malicious_features = dict(benign_features)
-    malicious_features["ti_risk"] = 5.0
-    verdict_override = fp.evaluate(alert_payload, malicious_features, risk_score=8.0, ti_engine=None)
-    check("PHASE 3 non-negotiable fix: an immunized domain carrying a hard-stop signal "
-          "(ThreatIntel IOC match) is CONFIRMED_THREAT, NOT silently suppressed by the "
-          "trust cache — this was the audit's core closed-loop safety gap",
-          verdict_override["verdict"] == "CONFIRMED_THREAT" and verdict_override["suppress"] is False,
-          f"got {verdict_override}")
-    check("overridden verdict's stage clearly identifies the trust-cache override path",
-          verdict_override["stage"] == "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
-          f"got stage={verdict_override['stage']}")
-    check("overridden verdict surfaces the actual hard-stop reason (ThreatIntel IOC) to the operator",
-          any("ThreatIntel" in r for r in verdict_override["reasons"]),
-          f"got reasons={verdict_override['reasons']}")
-
-    # ── Test 2: revoke_immunization() ───────────────────────────────────────────────
-    revoked = fp.revoke_immunization(base_domain)
-    check("revoke_immunization() returns True for a domain that WAS in the trust cache",
-          revoked is True)
-    check("revoke_immunization() actually removes the domain from the in-memory trust cache",
-          base_domain not in fp._trust_cache)
-
-    revoked_again = fp.revoke_immunization(base_domain)
-    check("revoke_immunization() is idempotent — returns False for an already-revoked/unknown domain",
-          revoked_again is False)
-
-    # Post-revoke: the SAME benign alert must no longer be trust-cache-suppressed.
-    verdict_post_revoke = fp.evaluate(alert_payload, benign_features, risk_score=6.5, ti_engine=None)
-    check("after revoke, the same domain no longer hits the trust-cache fast path "
-          "(verdict stage is no longer TRUST_CACHE)",
-          verdict_post_revoke["stage"] != "TRUST_CACHE", f"got stage={verdict_post_revoke['stage']}")
-
-    # ── Test 3: _immunize_domain() rejects invalid/empty domains ───────────────────
-    check("_immunize_domain('') is rejected (returns False, not treated as new)",
-          fp._immunize_domain("", "test-host") is False)
-    check("_immunize_domain('unknown') is rejected as an invalid placeholder value",
-          fp._immunize_domain("unknown", "test-host") is False)
-
+# Tests 1-3 (trust-cache hard-stop override, new-vs-refresh immunization, revoke) are covered against the live
+# CL-AFPE in test_argus_cl_afpe.py.
 
 # ── Test 4: StateManager action ledger ──────────────────────────────────────────────
 from core.state_guard import StateManager

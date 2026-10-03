@@ -315,7 +315,7 @@ class DeviceIdentityManager:
         return self.state_manager.resolve_merge_redirect(result)
 
     def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
-                                ips_mitigator: Any = None, fp_engine: Any = None,
+                                ips_mitigator: Any = None, familiarity: Any = None,
                                 evidence_store: Any = None, metrics_exporter: Any = None) -> List[str]:
         if not dns_rows:
             return []
@@ -346,7 +346,7 @@ class DeviceIdentityManager:
             # exact client_ip was ALREADY tracked under (e.g. its MAC just became known
             # for the first time and resolves to a different, richer canonical identity)
             # -- fold that now-orphaned identity in before creating/reusing dev_id below.
-            self._merge_orphan_if_fragmented(client_ip, dev_id, ml_registry, fp_engine,
+            self._merge_orphan_if_fragmented(client_ip, dev_id, ml_registry, familiarity,
                                               ips_mitigator, evidence_store, metrics_exporter)
             # PHASE 6: publish/refresh the MAC->device_id binding as soon as we know it, so
             # the NEXT address family (or the next batch's IPv6 row for this same device)
@@ -407,7 +407,7 @@ class DeviceIdentityManager:
             return
         ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
 
-    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, fp_engine: Any,
+    def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
         """DEVICE-IDENTITY FRAGMENTATION FIX: resolve_device_id() can return a DIFFERENT
         device_id for client_ip than whatever it was already tracked under -- most
@@ -444,7 +444,7 @@ class DeviceIdentityManager:
         orphan_id = self.state_manager.get_device_id_for_ip(client_ip)
         if not orphan_id or orphan_id == dev_id:
             return None
-        merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, fp_engine=fp_engine)
+        merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, familiarity=familiarity)
         if not merged:
             return None
         LOGGER.warning(
@@ -497,7 +497,7 @@ class DeviceIdentityManager:
                 locked_state.ja4_seen.add(ja4_hash)
 
     def process_zeek_identities(self, zeek_events: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
-                                 ips_mitigator: Any = None, fp_engine: Any = None,
+                                 ips_mitigator: Any = None, familiarity: Any = None,
                                  evidence_store: Any = None, metrics_exporter: Any = None) -> List[str]:
         if not zeek_events:
             return []
@@ -525,7 +525,7 @@ class DeviceIdentityManager:
             dev_id = self.resolve_device_id(src_ip, mac_addr, hostname)
             # DEVICE-IDENTITY FRAGMENTATION FIX: see matching comment in
             # process_dns_identities() above.
-            self._merge_orphan_if_fragmented(src_ip, dev_id, ml_registry, fp_engine,
+            self._merge_orphan_if_fragmented(src_ip, dev_id, ml_registry, familiarity,
                                               ips_mitigator, evidence_store, metrics_exporter)
             # PHASE 6: see matching comment in process_dns_identities() above.
             if mac_addr and mac_addr != "unknown":

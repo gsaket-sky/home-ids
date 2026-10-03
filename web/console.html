@@ -1592,7 +1592,7 @@ function renderAutonomyView(){
 
   var buildingRows = buildingTrust.length
     ? buildingTrust.map(function(row){
-        var pct = Math.round((row.progress_fraction||0)*100);
+        var pct = Math.floor((row.progress_fraction||0)*100 + 1e-9);
         var bar = '<div style="width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;">'
           + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
         return '<tr><td class="cell-mono" title="'+esc(row.device_id||'')+'">'+esc(row.device_display||row.device_id||'')+'</td>'
@@ -1688,7 +1688,7 @@ function renderAutonomyByDevicePanel(){
     var buildingDetail = dev.building_trust.length
       ? '<table style="width:100%;"><thead><tr><th>Hypothesis</th><th>Destination class / family</th><th>Progress</th><th>Updated</th></tr></thead><tbody>'
         + dev.building_trust.map(function(row){
-            var pct = Math.round((row.progress_fraction||0)*100);
+            var pct = Math.floor((row.progress_fraction||0)*100 + 1e-9);
             var bar = '<div style="width:80px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;display:inline-block;vertical-align:middle;">'
               + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
             return '<tr><td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'

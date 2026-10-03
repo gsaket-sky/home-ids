@@ -47,7 +47,7 @@ FEATURE MATRIX EXTRACTED (11 normalized dimensions):
 
 USAGE:
   Manual run:      python src/scripts/train_fp_classifier.py
-  Automated run:   Scheduled periodically by fp_engine.py (~7-day interval)
+  Automated run:   nightly by scripts/scheduler.py (scheduled_jobs.autotune_*)
 ======================================================================================
 """
 
@@ -69,7 +69,7 @@ if str(SRC_DIR) not in sys.path:
 
 from utils import entropy as compute_entropy, write_job_health, is_resource_pressure_active
 from config import CONFIG
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
 from argus.graph.store import GraphStore
 from argus.autotune.engine import AutotuneEngine
 
@@ -133,9 +133,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
     (OOM, a forced restart, or -- new with resource-aware scheduling -- a SIGKILL of
     this job while SIGSTOP-paused mid-write) can never leave a truncated/corrupt file
     at `path`: either the old good version or the new complete one, never a partial
-    one. `path` is fp_calibration.json, read by fp_engine.py's _load_calibration()
-    every boot and every hot-reload -- a torn write here silently degrades FP
-    suppression until the next successful retrain, not something to risk."""
+    one. `path` is fp_calibration.json (kept with the model for the record; the live
+    engine does not apply calibration)."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, path)
@@ -143,8 +142,8 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Same guarantee as _atomic_write_text(), for fp_classifier.onnx -- the model
-    file fp_engine.py's _load_lgbm_model() loads into onnxruntime every boot and every
-    hot-reload."""
+    file argus/cl_afpe/ml_scoring.py's MLScorer loads into onnxruntime at start and
+    reloads whenever the file changes."""
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_bytes(data)
     os.replace(tmp, path)
@@ -337,7 +336,7 @@ AUTOTUNE_ABSOLUTE_FLOOR = 0.60    # never auto-suppress below this regardless of
 # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G4): the old
 # state/autonomous_muted.jsonl was read with NO time filter at all -- genuinely
 # unbounded, "cumulative... ever". Its graph-backed replacement (decisions rows
-# carrying a raw_payload_json.fp_suppression_log, see fp_engine.py's
+# carrying a raw_payload_json.fp_suppression_log, see the CL-AFPE's
 # _write_muted_log()) queries a table that also holds EVERY OTHER decision this
 # process has ever made, not just suppression events, so an unfiltered scan is a
 # real, growing cost at production scale. 90 days is a deliberate, generous-but-
@@ -351,7 +350,7 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
                                  strict: bool = False) -> list:
     """Graph-backed replacement for reading every line of the old
     state/autonomous_muted.jsonl -- queries `decisions` for rows carrying a
-    raw_payload_json.fp_suppression_log (written live by fp_engine.py's
+    raw_payload_json.fp_suppression_log (written live by the CL-AFPE's
     _write_muted_log(), or migrated from pre-existing history by
     backfill_muted_log_to_graph.py) and returns just that inner dict per row.
     Deliberately returns the EXACT SAME per-entry shape
@@ -592,7 +591,7 @@ def calibrate_suppress_threshold(corrected_fp_scores: list, uncorrected_uncertai
 
 
 # 2026-09-27 (Phase 3 of the autonomy-completion effort): combined_uncertain_threshold's
-# own calibration -- allowlisted and consumed live (fp_engine.py's
+# own calibration -- allowlisted and consumed live (the CL-AFPE's
 # get_device_uncertain_threshold()) since this same phase, previously a pure config
 # value with zero autotune wiring at all. Deliberately a SEPARATE evidence population
 # from calibrate_suppress_threshold() above: that one needs UNCERTAIN-verdict
@@ -738,7 +737,7 @@ def _collect_connection_abuse_corrections(state_dir: Path, muted_docs: list = No
             continue
         original = doc.get("original_alert", {}) or {}
         # VERSION 12 (G7): INTERNAL_RECONNAISSANCE is ConnectionAbuseHypothesis's own
-        # dynamic name (hypotheses/engine.py) for the arp_sweep-ONLY case that used to
+        # dynamic name (argus/hypotheses/engine.py) for the arp_sweep-ONLY case that used to
         # always be named "CONNECTION_ABUSE" -- this is exactly the case this arp-sweep
         # calibration pass cares about, so it must count both names. Deliberately does
         # NOT add "PORT_SCAN" (the OTHER new dynamic name, for a zeek_conn_abuse-only
@@ -1070,6 +1069,26 @@ def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: s
                       f"(device_id={device_id}, device_type={device_type}, non-fatal): {exc}")
 
 
+def _device_profile_default(cl_afpe, device_id: str, key: str, global_default: float) -> float:
+    """The device's own CL-AFPE profile value for `key` (raised after corrections), else the global default -- the
+    `default` the autotuner's per-device value layers over."""
+    if cl_afpe is None:
+        return global_default
+    try:
+        return float(cl_afpe._get_device_profile_value(device_id, key, global_default))
+    except Exception:
+        return global_default
+
+
+def _active_value(engine, parameter: str, device_id: str, default: float) -> float:
+    if engine is None:
+        return default
+    try:
+        return float(engine.get_active_value(parameter, device_id=device_id, default=default))
+    except Exception:
+        return default
+
+
 def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     """Entry point called from main() after the model retrain. Never allowed to raise past
     this function — a calibration failure must never be mistaken for (or cause) a
@@ -1078,14 +1097,11 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     PHASE 13: runs TWO passes over the same evidence — global (unchanged from Phase 12,
     still the fallback for devices without enough of their own history) and per-device
     (new: devices with "strongly different profiles" get their own calibrated threshold
-    once their OWN evidence supports it, via AutonomousFPEngine's device-profile state —
-    see fp_engine.py's get_device_suppress_threshold()).
+    once their OWN evidence supports it, via the CL-AFPE per-device profile and the
+    autotuner's per-device value).
 
     PHASE 18: also writes state/autotune_stats.json (see _write_autotune_relay_stats())
-    and updates job_health.json -- this function is the single code path BOTH the daily
-    cron trigger (via main()) AND fp_engine.py's independent in-process weekly retrain
-    thread converge on, so hooking the relay write here (rather than in main()) is what
-    makes job-health/calibration metrics correctly reflect activity from either trigger.
+    and updates job_health.json.
     """
     run_start = time.time()
     autotune_now = now if now is not None else run_start
@@ -1096,7 +1112,6 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     device_confirmed_counts: dict = {}
     arp_sweep_outcomes: dict = {}
     arp_sweep_evidence: dict = {}
-    fp_engine = None  # lazily created by whichever pass below needs it first
 
     # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase C): one GraphStore/
     # AutotuneEngine pair for this whole run, shared by all three passes below.
@@ -1106,17 +1121,19 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     try:
         store = _get_graph_store(state_dir)
         engine = AutotuneEngine(store)
+        cl_afpe = ClAfpeEngine(store)   # per-device profiles and confirmed-threat counts (graph metadata)
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] Failed to open GraphStore/AutotuneEngine for this run "
                       f"(threshold_history writes will be skipped entirely this run): {exc}")
         store = None
         engine = None
+        cl_afpe = None
 
     # 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause
     # for new candidate generation -- see utils.is_resource_pressure_active()'s own
-    # docstring for why this is a cross-process scrape (this function runs either
-    # via the daily cron trigger or fp_engine.py's own weekly-retrain subprocess,
-    # never in-process with the live pipeline whose OWN resource state this checks).
+    # docstring for why this is a cross-process scrape (this function runs from the
+    # nightly scheduler job, never in-process with the live pipeline whose OWN resource
+    # state this checks).
     # Every pass below bundles propose+opportunistic-promote in one call
     # (_propose_and_promote()'s own docstring) -- unlike backtest_job.py's
     # run_backtest(), which separates proposal from promotion cleanly enough to
@@ -1162,8 +1179,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         # Reads through AutotuneEngine's own global tier first (a promoted value from
         # a PRIOR run of this same pass), falling back to config.yaml/config-override
         # only if nothing has ever been promoted yet -- same effective-value framing
-        # as fp_engine.py's get_device_suppress_threshold(None) tier, without needing
-        # an AutonomousFPEngine instance just for this one global read.
+        # as the engine's global suppress-threshold tier.
         global_current = (
             engine.get_active_value("fp_combined_suppress_threshold", device_id=None, default=config_default)
             if engine is not None else config_default
@@ -1202,10 +1218,7 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
             _collect_uncertain_calibration_evidence(state_dir, muted_docs=calibration_muted_docs)
         uncertain_evidence = (len(corrected_confirmed_scores), len(uncorrected_confirmed_scores))
 
-        # 0.55 matches fp_engine.py's own _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD (not
-        # imported -- this file's sibling suppress-threshold pass above uses the same
-        # plain-literal-default convention rather than importing fp_engine.py's
-        # private constants).
+        # 0.55 = the engine's default when config has no value.
         uncertain_config_default = float(CONFIG.get("fp_combined_uncertain_threshold", 0.55))
         uncertain_global_current = (
             engine.get_active_value("combined_uncertain_threshold", device_id=None, default=uncertain_config_default)
@@ -1263,17 +1276,15 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         if not device_ids:
             LOGGER.info("[AUTOTUNE » PER-DEVICE] No per-device evidence this run.")
         else:
-            # CONFIG (config.py's LiveConfig singleton) already exposes .get(key, default) —
-            # the exact interface AutonomousFPEngine's config properties expect — so it can be
-            # passed directly, no need to reach into its internals.
-            fp_engine = fp_engine or AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
+            global_suppress_default = float(CONFIG.get("fp_combined_suppress_threshold", 0.80))
             for device_id in sorted(device_ids):
                 dev_corrected = per_device_corrected.get(device_id, [])
                 dev_uncorrected = per_device_uncorrected.get(device_id, [])
                 device_evidence[device_id] = (len(dev_corrected), len(dev_uncorrected))
-                device_confirmed_counts[device_id] = fp_engine.get_confirmed_count(device_id)
-                dev_current = fp_engine.get_device_suppress_threshold(device_id)
-                dev_suppress_default = fp_engine.get_device_suppress_threshold_legacy_default(device_id)
+                device_confirmed_counts[device_id] = cl_afpe.get_confirmed_count(device_id) if cl_afpe else 0
+                dev_suppress_default = _device_profile_default(
+                    cl_afpe, device_id, "fp_combined_suppress_threshold", global_suppress_default)
+                dev_current = _active_value(engine, "fp_combined_suppress_threshold", device_id, dev_suppress_default)
                 new_value, reason = calibrate_suppress_threshold(
                     dev_corrected, dev_uncorrected,
                     current=dev_current, min_samples=AUTOTUNE_DEVICE_MIN_SAMPLES,
@@ -1312,7 +1323,6 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         if not arp_device_ids:
             LOGGER.info("[AUTOTUNE » ARP-SWEEP] No per-device evidence this run.")
         else:
-            fp_engine = fp_engine or AutonomousFPEngine(config=CONFIG, state_dir=str(state_dir))
             global_arp_sweep_default = float(CONFIG.get("arp_sweep_unique_targets_threshold", 8.0))
             for device_id in sorted(arp_device_ids):
                 corrected_count = connection_abuse_corrections.get(device_id, 0)
@@ -1321,13 +1331,13 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
                 # _collect_connection_abuse_corrections()'s own comment for why PORT_SCAN is
                 # deliberately excluded).
                 confirmed_count = (
-                    fp_engine.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
-                    + fp_engine.get_confirmed_count(device_id, signature="INTERNAL_RECONNAISSANCE")
-                )
+                    cl_afpe.get_confirmed_count(device_id, signature="CONNECTION_ABUSE")
+                    + cl_afpe.get_confirmed_count(device_id, signature="INTERNAL_RECONNAISSANCE")
+                ) if cl_afpe else 0
                 arp_sweep_evidence[device_id] = (corrected_count, confirmed_count)
-                dev_current = fp_engine.get_device_arp_sweep_threshold(device_id, default=global_arp_sweep_default)
-                dev_arp_sweep_default = fp_engine.get_device_arp_sweep_threshold_legacy_default(
-                    device_id, global_arp_sweep_default)
+                dev_arp_sweep_default = _device_profile_default(
+                    cl_afpe, device_id, "arp_sweep_unique_targets_threshold", global_arp_sweep_default)
+                dev_current = _active_value(engine, "arp_sweep_unique_targets_threshold", device_id, dev_arp_sweep_default)
                 new_value, reason = calibrate_arp_sweep_threshold(corrected_count, confirmed_count, dev_current)
                 arp_sweep_outcomes[device_id] = _classify_outcome(new_value, reason)
                 if new_value is not None:
@@ -1363,23 +1373,12 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     # subprocess per scheduler.py's own dispatch model), so the OS would reclaim the
     # handle anyway -- but closing explicitly avoids leaving a dangling WAL/SHM lock on
     # state/v13_graph.db that could interfere with the concurrently-running main
-    # pipeline process's own long-lived connection to the SAME file, and matters for
-    # any in-process caller (fp_engine.py's own weekly retrain thread calls this
-    # function directly, not via a subprocess -- see this function's own docstring).
+    # pipeline process's own long-lived connection to the SAME file.
     if store is not None:
         try:
             store.close()
         except Exception as exc:
             LOGGER.debug(f"[AUTOTUNE] Failed to close GraphStore cleanly (non-fatal): {exc}")
-    # fp_engine (constructed lazily by the per-device/ARP-sweep passes above) opens
-    # its OWN separate GraphStore connection to the same file for its Phase B
-    # autotune-aware reads -- see AutonomousFPEngine.close()'s own docstring for why
-    # this needs an explicit close too, not just `store` above.
-    if fp_engine is not None:
-        try:
-            fp_engine.close()
-        except Exception as exc:
-            LOGGER.debug(f"[AUTOTUNE] Failed to close fp_engine's GraphStore cleanly (non-fatal): {exc}")
 
 
 def _load_training_row_exclusions(state_dir: Path) -> set:
@@ -1410,13 +1409,13 @@ def load_dataset(state_dir: Path) -> tuple:
     to correct an entry that was later determined to be a false positive. Two concrete
     ways that happened:
       1. pipeline.py writes EVERY evaluated alert to the alert stream unconditionally
-         (`self.alert_writer.write(alert_payload)`), including ones fp_engine itself
+         (`self.alert_writer.write(alert_payload)`), including ones the CL-AFPE itself
          already autonomously suppressed as FALSE_POSITIVE that cycle (flagged via
          `alert_payload["suppressed"] = True` right before the write). Those were being
          trained as label=0 AND label=1 (from autonomous_muted.jsonl) in the same run —
          directly contradictory signal for the exact same event.
       2. An alert an OPERATOR later marks false positive via the "🛡️ Mark False Positive"
-         Telegram button (fp_engine.mark_false_positive()) writes a label=1 correction to
+         Telegram button (the CL-AFPE's mark_false_positive()) writes a label=1 correction to
          autonomous_muted.jsonl, but the original alerts.json entry stayed labeled
          label=0 forever — so the weekly retrain kept reinforcing the exact pattern the
          operator just corrected, meaning FP-reduction-through-operator-feedback couldn't
@@ -1472,7 +1471,7 @@ def load_dataset(state_dir: Path) -> tuple:
         if payload.get("escalated_via_persistence"):
             # BUGFIX (live audit): this alert's HIGH state/confidence came from the SAME
             # single, uncorroborated hypothesis simply recurring for suspicious_escalation_
-            # seconds -- decision_engine.py never found a 2nd independent evidence source.
+            # seconds -- argus/decision/engine.py never found a 2nd independent evidence source.
             # Training it as a clean label=0 "this is what a genuine HIGH looks like"
             # sample would reinforce exactly the pattern pipeline.py's own confidence cap
             # (0.55, well below a real hypothesis_high's 0.85) already treats as weaker
@@ -1505,7 +1504,7 @@ def load_dataset(state_dir: Path) -> tuple:
 def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
     """Trains GradientBoostingClassifier on 11 features and exports fp_classifier.onnx +
     fp_calibration.json to model_dir (default: derived from config.yaml's model_path,
-    the SAME directory fp_engine.py's own loader reads from -- must stay the same
+    the SAME directory the engine's MLScorer reads from -- must stay the same
     directory on both sides or a retrained model is silently never picked up)."""
     if model_dir is None:
         model_dir = Path(CONFIG.get("model_path", "models/ids_model.pkl")).parent
@@ -1567,7 +1566,7 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
         # VERSION 11 (P2): isotonic calibration -- maps the raw classifier score to
         # an actually-calibrated probability, fit against the HELD-OUT split above
         # (never seen during training). Saved as a small breakpoint JSON, not a
-        # pickled sklearn object, so fp_engine.py's lean ONNX-only runtime inference
+        # pickled sklearn object, so the CL-AFPE's lean ONNX-only runtime inference
         # path can apply it via plain linear interpolation -- no sklearn import
         # needed at inference time, matching this project's existing train-with-
         # sklearn / infer-with-ONNX split.
@@ -1590,8 +1589,7 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
         else:
             # Not enough held-out data for a trustworthy calibration curve -- an
             # explicit "unreliable" marker, not a silently-stale or fabricated-from-
-            # too-few-points curve. fp_engine.py must fall back to the raw,
-            # explicitly-labeled-as-uncalibrated score when this is present.
+            # too-few-points curve.
             _atomic_write_text(calibrator_path, json.dumps({
                 "reliable": False,
                 "reason": f"only {len(X_calib)} held-out sample(s) available "
@@ -1599,8 +1597,7 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
                 "fit_at": time.time(),
             }, indent=2))
             LOGGER.warning("⚠️ Not enough held-out data (%d sample(s)) for reliable calibration -- "
-                           "wrote an explicit 'unreliable' marker; fp_engine.py will use the raw, "
-                           "uncalibrated score (FP_MODEL_SCORE) instead of a fabricated calibration.",
+                           "wrote an explicit 'unreliable' marker instead of a fabricated calibration.",
                            len(X_calib))
 
         # Convert to ONNX format (zipmap=False outputs clean 2D numpy probability arrays)

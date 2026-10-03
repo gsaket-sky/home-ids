@@ -1,31 +1,14 @@
 """
-v13 DecisionEngine (Phase 1/3 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+DecisionEngine: turns one device's scored hypotheses into a decision state (BENIGN / ANOMALOUS / SUSPICIOUS / HIGH /
+CRITICAL) with a decision_path, an explanation and a confidence.
 
-Faithful port of core/decision_engine.py (495 lines, read in full this session
-before writing anything). Scoring thresholds, the Gap-64 domain-linkage reputation
-redesign, and every branch's decision_path/explanation/confidence are copied
-exactly. Two structural changes, both deliberate and matching the plan, not
-accidents:
-
-1. NO SHADOW-MODE MACHINERY. v-current's shadow_state/shadow_explanation/
-   shadow_decision_path/shadow_changed apparatus exists to compare "live vs a
-   proposed fix" WITHIN v-current's own incremental-flip history -- a mechanism
-   specific to that project's evidentiary discipline for flipping ONE mechanism
-   at a time. v13 doesn't need an internal shadow concept: v13's own verdict IS
-   the "shadow" relative to v-current during the whole-system parallel run (the
-   plan's own comparator job, not something to duplicate inside this file).
-
-2. HARD-STOPS ARE A PLUGGABLE REGISTRY, FRESHNESS-AWARE BY DEFAULT. v-current
-   still hardcodes 4 elif branches, and only honeypot's freshness check is live
-   (arp_spoof/geofence/confirmed_exploit's freshness checks exist but stay
-   shadow-only, pending real divergence evidence -- Gap 3, DECISION_LOGIC_DEPENDENCY_MAP.md).
-   v13 uses DEFAULT_HARD_STOP_REGISTRY (a plain list, extensible without touching
-   this function) and makes every rule freshness-aware from day one -- this is a
-   genuine behavioral difference from v-current's CURRENT LIVE behavior (though
-   it matches v-current's own SHADOW computation for these three), and is exactly
-   what the parallel run's divergence log is for: generating the live evidence
-   Gap 3 has been waiting on, as a side effect of this rewrite rather than a
-   separate effort.
+Order:
+  1. Hard stops -- a pluggable registry (DEFAULT_HARD_STOP_REGISTRY: decoy host, ARP spoofing, geofencing, confirmed
+     exploit), each freshness-aware: only evidence seen within _HARD_STOP_FRESHNESS_SECONDS can trigger one.
+  2. Reputation, with domain linkage: a destination's bad reputation counts only when this device's own evidence
+     actually points at that destination.
+  3. The attack-vs-benign hypothesis competition, needing independent evidence families to escalate (one family
+     stays SUSPICIOUS; two or more can reach HIGH/CRITICAL).
 """
 import time
 from dataclasses import dataclass, field
@@ -38,15 +21,10 @@ from argus.hypotheses.engine import (
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP, NON_ATTACK_FAMILIES, family_for
 from utils import ZEEK_NOTICE_EVIDENCE_TYPES, ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
-# Same 120s value core/decision_engine.py's own (now-removed, 2026-09-07 cleanup)
-# shadow-only freshness constant used -- this is v13's real, LIVE equivalent.
+# How recent evidence must be to trigger a hard stop.
 _HARD_STOP_FRESHNESS_SECONDS = 120
 
-# Matches decision_engine.py's partial_support family set -- adapted for v13's finer
-# family split (independence.py's own documented discrepancy from v-current's
-# EVIDENCE_FAMILIES): v1's {"dns_behavior", "zeek_network", "reputation", "honeypot"}
-# becomes these five v13 families to cover the same conceptual ground now that
-# "zeek_network" is split three ways and "honeypot" is named "direct_observation".
+# Families whose evidence gives an attack hypothesis partial support (independence.py's family split).
 _PARTIAL_SUPPORT_FAMILIES = frozenset({
     "dns_behavior", "tls_fingerprint", "network_behavior", "data_transfer_pattern",
     "reputation", "direct_observation",
@@ -299,7 +277,7 @@ class DecisionEngine:
         ]
 
         # Gap-64 domain-linkage redesign, originally ported from
-        # decision_engine.py:100-129, EXTENDED 2026-09-11 (user-identified, from a
+        # EXTENDED 2026-09-11 (user-identified, from a
         # real PEER_COHORT_DEVIATION alert: 3 evidence items about 3 unrelated
         # destinations -- one about Telegram's IP, one about Google's IP, one about
         # a Datacamp IP -- all counted as "independent evidence families" for a
@@ -342,7 +320,7 @@ class DecisionEngine:
         # present, then trivially pass the very check meant to verify it's
         # related to the anchor -- confirmed live on a DATA_EXFILTRATION verdict
         # "corroborated" by a reputation hit about a totally unrelated S3
-        # bucket. HYPOTHESIS_ANCHOR_EVIDENCE_TYPES (hypotheses/engine.py) is the
+        # bucket. HYPOTHESIS_ANCHOR_EVIDENCE_TYPES (argus/hypotheses/engine.py) is the
         # narrower, correct registry -- see its own docstring for the full
         # incident and why only DATA_EXFILTRATION/C2_BEACONING actually differ
         # from HYPOTHESIS_RELEVANT_EVIDENCE_TYPES.

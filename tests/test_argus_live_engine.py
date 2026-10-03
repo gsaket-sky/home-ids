@@ -12,8 +12,8 @@ Sections:
   C. The zeek_exfiltration/zeek_beaconing fallback_context split -- mirrors
      src/v13/ingest/sources.py's own A2 behavior exactly, using v-current's real
      Evidence shape as the input
-  D. Fail-safe: an engine that raises falls back to v-current's own evaluate(), loudly
-     logged, never silent
+  D. Fail-safe: an engine that raises returns a "not evaluated" decision (no action), counted for the
+     health manager, never another engine's verdict
   E. Graph read/write (v13 full-architecture plan, Phase 1): a windowed merge across
      two separate evaluate() calls reaches a verdict neither call alone could reach
      from its own fresh evidence -- the concrete "behavioral pattern across cycles"
@@ -46,12 +46,10 @@ def check(name, cond, detail=""):
 
 from intelligence.hypotheses.evidence import Evidence as V1Evidence  # noqa: E402
 from intelligence.reputation.classifier import ReputationVector  # noqa: E402
-from core.decision_engine import DecisionEngine as VCurrentDecisionEngine  # noqa: E402
 import argus.ops.live_engine as live_engine  # noqa: E402
 from argus.evidence.model import Evidence, NO_DESTINATION  # noqa: E402
 
 now = time.time()
-vcurrent_engine = VCurrentDecisionEngine()
 
 
 # --- A. Same call shape as v-current's own evaluate() ---
@@ -80,12 +78,8 @@ two_family_ev = [
     V1Evidence(type="zeek_notice_medium", source="zeek", timestamp=now, device="d1", value=1.0,
                 confidence=0.75, independence_group="zeek_network", domain="evil.example.com"),
 ]
-r_vcurrent = vcurrent_engine.evaluate(list(two_family_ev), ReputationVector(domain="evil.example.com", tier=3))
 r_v13 = live_engine.evaluate(list(two_family_ev), ReputationVector(domain="evil.example.com", tier=3))
-check("B: v-current's live verdict on this real two-family case stays SUSPICIOUS (as documented, A10)",
-      r_vcurrent["state"] == "SUSPICIOUS" and r_vcurrent["decision_path"] == "hypothesis_suspicious")
-check("B: since 2026-10-01 (open item B6) two Zeek-derived families count as ONE independent source, so v13 "
-      "agrees with v-current here: SUSPICIOUS, not HIGH",
+check("B: two Zeek-derived signals count as ONE independent source, so this stays SUSPICIOUS, not HIGH",
       r_v13["state"] == "SUSPICIOUS" and r_v13["decision_path"] == "hypothesis_suspicious")
 
 
@@ -163,29 +157,17 @@ class _AlwaysRaises:
 
 live_engine._v13_engine = _AlwaysRaises()
 
-_fallback_calls = []
-
-
-def _fake_fallback(active_evidence, rep, device_type, baseline_familiarity, features=None, is_safe=False):
-    _fallback_calls.append(True)
-    return vcurrent_engine.evaluate(active_evidence, rep, device_type, baseline_familiarity,
-                                      features=features, is_safe=is_safe)
-
-
-r_failsafe = live_engine.evaluate([], ReputationVector(domain="", tier=0), features={},
-                                     fallback_evaluate=_fake_fallback)
-check("D: when v13's engine raises, the adapter falls back to v-current's own evaluate() instead of crashing",
-      len(_fallback_calls) == 1 and r_failsafe["state"] == "BENIGN")
-
-_no_fallback_calls = []
-try:
-    live_engine.evaluate([], ReputationVector(domain="", tier=0), features={})
-    _raised = False
-except RuntimeError:
-    _raised = True
-check("D: with no fallback_evaluate supplied at all, the original exception propagates "
-      "(never silently swallowed into a made-up verdict)",
-      _raised)
+_errors_before = live_engine.engine_error_status().get("decision", {}).get("count", 0)
+r_failsafe = live_engine.evaluate([], ReputationVector(domain="", tier=0), features={})
+check("D: when the engine raises, the cycle is 'not evaluated': BENIGN, no action, decision_path engine_error",
+      r_failsafe["state"] == "BENIGN" and r_failsafe["action"] == "none"
+      and r_failsafe["decision_path"] == "engine_error" and r_failsafe.get("_engine_error") is True)
+check("D: the not-evaluated decision carries every key a real decision has (pipeline.py reads them)",
+      all(k in r_failsafe for k in ("state", "action", "explanation", "threat_confidence", "decision_path",
+                                     "hypotheses", "independent_sources", "reasoning_trail", "attack_evidence",
+                                     "evidence_families", "evidence_types", "winning_evidence")))
+check("D: the error is counted for the health manager",
+      live_engine.engine_error_status().get("decision", {}).get("count", 0) == _errors_before + 1)
 
 live_engine._v13_engine = _orig_v13_engine
 

@@ -48,10 +48,10 @@ from intelligence.detectors.suricata_scan import (
     run_suricata_on_pcap, _parse_eve_json_alerts, build_ip_to_device_map,
     suricata_alerts_to_evidence,
 )
-from intelligence.hypotheses.engine import SuricataSignatureHypothesis, HypothesisEngine
+from argus_scenarios import SuricataSignatureHypothesis, HypothesisEngine
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore, EVIDENCE_FAMILIES, ATTACK_EVIDENCE_FAMILIES
 from intelligence.reputation.classifier import ReputationVector
-from core.decision_engine import DecisionEngine
+from argus_scenarios import DecisionEngine
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -305,12 +305,21 @@ store = EvidenceStore()
 store.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
                     device="dev_exploit", value=1.0, confidence=0.95, independence_group="suricata"))
 decision_high_sev = de.evaluate(store.get_for_device("dev_exploit"), ReputationVector(domain="", tier=3))
-check("a severity=1/confidence>=0.9 Suricata match is an explicit CRITICAL hard-stop, "
-      "matching the review's 'known malware signature'/'confirmed exploit' hard-stop category",
-      decision_high_sev["state"] == "CRITICAL" and decision_high_sev["action"] == "block",
+check("a lone severity=1/confidence>=0.9 Suricata match (no second evidence family) is HIGH/alert, never an "
+      "automatic block -- one rule match can be a noisy false positive",
+      decision_high_sev["state"] == "HIGH" and decision_high_sev["action"] == "alert",
       f"got {decision_high_sev['state']}/{decision_high_sev['action']}")
-check("the hard-stop path is recorded as such (decision_path == 'hard_stop')",
-      decision_high_sev["decision_path"] == "hard_stop", f"got {decision_high_sev['decision_path']}")
+check("the uncorroborated hard-stop path is recorded as such",
+      decision_high_sev["decision_path"] == "suricata_uncorroborated", f"got {decision_high_sev['decision_path']}")
+store_corr = EvidenceStore()
+store_corr.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),
+                        device="dev_exploit2", value=1.0, confidence=0.95, independence_group="suricata"))
+store_corr.add(Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(),
+                        device="dev_exploit2", value=40.0, confidence=0.9, independence_group="zeek_network"))
+decision_corr = de.evaluate(store_corr.get_for_device("dev_exploit2"), ReputationVector(domain="", tier=3))
+check("the same match corroborated by an independent evidence family (lateral scanning) is CRITICAL/block",
+      decision_corr["state"] == "CRITICAL" and decision_corr["action"] == "block",
+      f"got {decision_corr['state']}/{decision_corr['action']} ({decision_corr.get('decision_path')})")
 
 store2 = EvidenceStore()
 store2.add(Evidence(type="suricata_signature_match", source="suricata", timestamp=time.time(),

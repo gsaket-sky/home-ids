@@ -7,7 +7,7 @@ WHAT THIS PATTERN IS
 =====================================================================================
 local_confirmed_intel.json's network-effect learning is supposed to work like this:
 one device confirms a real threat -> a DIFFERENT device touching the SAME IOC later
-gets an immediate hard-stop instead of re-earning evidence from scratch (fp_engine.py's
+gets an immediate hard-stop instead of re-earning evidence from scratch (the CL-AFPE's
 Stage-1 Check 7). That's valuable *only if* the original confirmation was itself
 trustworthy.
 

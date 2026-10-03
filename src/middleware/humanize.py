@@ -92,7 +92,7 @@ def label_evidence_type(evidence_type: str) -> Tuple[str, str]:
 
 def label_hypothesis(name: Optional[str]) -> Tuple[str, str]:
     """Same contract as label_evidence_type(), for attack/benign hypothesis names
-    (intelligence/hypotheses/engine.py). Returns ("", "") for a falsy/missing name so
+    (argus/hypotheses/engine.py). Returns ("", "") for a falsy/missing name so
     callers can omit the field entirely rather than show a nonsense label."""
     if not name:
         return "", ""

@@ -29,7 +29,7 @@ Sections:
   C. G6 -- shadow computation agrees with live (no spurious Gap-3 divergence)
   D. G7 -- ConnectionAbuseHypothesis's three dynamic names
   E. G7 -- NetworkIntrusionHypothesis's two dynamic names
-  F. Source-level wiring checks (pipeline.py attribution, fp_engine.py routing,
+  F. Source-level wiring checks (pipeline.py attribution, CL-AFPE routing,
      train_fp_classifier.py calibration collection)
 """
 import sys
@@ -47,9 +47,9 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from core.decision_engine import DecisionEngine, DecisionState
+from argus_scenarios import DecisionEngine, DecisionState
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore
-from intelligence.hypotheses.engine import ConnectionAbuseHypothesis, NetworkIntrusionHypothesis
+from argus_scenarios import ConnectionAbuseHypothesis, NetworkIntrusionHypothesis
 from intelligence.reputation.classifier import ReputationVector
 
 de = DecisionEngine()
@@ -109,10 +109,10 @@ check("the uncorroborated case gets its own decision_path, distinct from 'hard_s
 # _STRONG_ATTACK_DECISION_PATHS with equivalent coverage in
 # tests/test_argus_llm_review_validator.py.
 
-_fp_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "fp_engine.py").read_text(encoding="utf-8")
-check("REGRESSION GUARD: fp_engine.py's _HARD_STOP_SIGNATURES still contains the exact "
-      "unsuffixed 'Geofencing Policy Violation' string",
-      '"Geofencing Policy Violation",' in _fp_src)
+from argus.cl_afpe import engine as _clafpe  # noqa: E402
+check("REGRESSION GUARD: the CL-AFPE's hard-stop signature set (mark-as-safe is refused for these) still contains "
+      "the exact unsuffixed 'Geofencing Policy Violation' string",
+      "Geofencing Policy Violation" in _clafpe._HARD_STOP_SIGNATURES)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: G6 -- REMOVED (2026-09-07, Workstream 1 of
@@ -183,18 +183,6 @@ check("REGRESSION GUARD: lateral scan alongside OTHER corroborating evidence sti
       "when corroborated by something else",
       nih.name == "LATERAL_MOVEMENT", f"got {nih.name}")
 
-# Shadow-mode naming consistency (see class docstring's own reasoning): live evaluate()
-# and evaluate_shadow() write the SAME shared self.name for the SAME evidence, since
-# naming depends only on has_lateral_scan (identical in both use_gap2_fix branches).
-nih.evaluate(lateral_only, neutral_rep)
-name_after_live = nih.name
-nih.evaluate_shadow(lateral_only, neutral_rep)
-name_after_shadow = nih.name
-check("REGRESSION GUARD: evaluate() and evaluate_shadow() agree on self.name for "
-      "identical evidence -- shared mutable instance state never disagrees with itself",
-      name_after_live == name_after_shadow == "LATERAL_MOVEMENT",
-      f"live={name_after_live} shadow={name_after_shadow}")
-
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section F: source-level wiring checks
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -213,10 +201,9 @@ check("pipeline.py's WHY block now labels each evidence line with its family nam
       "(zip(why_families, why_lines))",
       "zip(why_families, why_lines)" in _pipeline_src)
 
-check("fp_engine.py's mark_false_positive() routing widened to also catch "
-      "PORT_SCAN/INTERNAL_RECONNAISSANCE (both the threshold-bump branch and the "
-      "report-reasons branch)",
-      _fp_src.count('signature in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE")') == 2)
+check("the CL-AFPE's mark_false_positive() routes PORT_SCAN/INTERNAL_RECONNAISSANCE like CONNECTION_ABUSE "
+      "(the per-device threshold-bump branch)",
+      _clafpe._CONNECTION_ABUSE_SIGNATURES == frozenset({"CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"}))
 
 _train_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "scripts" / "train_fp_classifier.py").read_text(encoding="utf-8")
 check("train_fp_classifier.py's arp-sweep-correction collector widened to also catch "

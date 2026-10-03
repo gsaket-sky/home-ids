@@ -7,7 +7,6 @@ from pathlib import Path
 from middleware.auth import verify_token, CONFIG, LOGGER
 from core.state_guard import StateManager
 from mitigation.ips import IPSMitigator
-from intelligence.fp_engine import AutonomousFPEngine
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.graph.store import GraphStore
 
@@ -16,38 +15,8 @@ router = APIRouter()
 class IPCTargetRequest(BaseModel):
     target: str = Field(..., description="Target domain or IP")
 
-# BUGFIX (live audit, 2026-09-09): _ipc_immunize_logic()/_ipc_revoke_logic() used to
-# construct a brand-new AutonomousFPEngine() on EVERY request -- unlike the per-request
-# StateManager()/IPSMitigator() pattern used elsewhere in this file (cheap, no background
-# work), AutonomousFPEngine.__init__() spawns 3 background daemon threads (including two
-# ONNX-based ML model loaders) and is never torn down, so every "Mark False Positive"/
-# "revoke" Telegram button tap leaked threads + a duplicate copy of both models into this
-# API subprocess indefinitely. Lazily built once per process instead.
-_fp_engine_singleton: Optional[AutonomousFPEngine] = None
-_fp_engine_lock = threading.Lock()
-
-def _get_fp_engine() -> AutonomousFPEngine:
-    global _fp_engine_singleton
-    if _fp_engine_singleton is None:
-        with _fp_engine_lock:
-            if _fp_engine_singleton is None:
-                state_path = CONFIG.get("state_path", "state/ids_state.json")
-                _fp_engine_singleton = AutonomousFPEngine(
-                    config=CONFIG, state_dir=str(Path(state_path).parent)
-                )
-    return _fp_engine_singleton
-
-# Argus's own CL-AFPE engine (2026-09-15, full migration): the three human-interactive
-# actions below (immunize/revoke/approve-tune-down) previously only ever touched
-# AutonomousFPEngine (fp_engine.py, the legacy/rollback engine) -- an isolated store
-# `cl_afpe_engine: argus` (the live default since 2026-09-08) never reads from. A human
-# tapping "Mark False Positive" in Telegram had no effect on what actually governs live
-# suppression. Kept as a SEPARATE singleton, additive to the legacy call at each site
-# (never replacing it) -- the legacy call still matters for its own real side effect
-# (train_fp_classifier.py's weekly retrain reads its correction-sample labeling; the
-# ONNX/FastEmbed models themselves are the one artifact both engines already share
-# read-only). Best-effort at each call site: a failure here must never break the
-# existing, working Telegram-button response.
+# The CL-AFPE engine behind the three operator actions below (mark safe, revoke, approve tune-down): one instance
+# per API process, on the same graph db the engine uses. Each action is also written as a training record.
 _argus_cl_afpe_singleton: Optional[ClAfpeEngine] = None
 _argus_cl_afpe_lock = threading.Lock()
 
@@ -56,9 +25,7 @@ def _get_argus_cl_afpe_engine() -> ClAfpeEngine:
     if _argus_cl_afpe_singleton is None:
         with _argus_cl_afpe_lock:
             if _argus_cl_afpe_singleton is None:
-                # Same state_path -> state dir derivation _get_fp_engine() uses above,
-                # not a new config key -- matches live_engine.py's own default
-                # ("state/v13_graph.db" alongside ids_state.json), the actual live path.
+                # The graph db next to ids_state.json, the same file the engine uses.
                 state_path = CONFIG.get("state_path", "state/ids_state.json")
                 db_path = str(Path(state_path).parent / "v13_graph.db")
                 store = GraphStore(db_path)
@@ -110,6 +77,15 @@ def ipc_immunize(payload: IPCTargetRequest, token: str = Depends(verify_token)):
 def ipc_immunize_get(target: str, token: str = Depends(verify_token)):
     return _ipc_immunize_logic(target)
 
+def _looks_like_ip(value: str) -> bool:
+    import ipaddress
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
 def _ipc_immunize_logic(action_id: str):
     """PHASE 6 (operator-driven self-healing, closed loop): IPC endpoint for the "🛡️ Mark
     False Positive" Telegram button on a published alert. `action_id` refers to the
@@ -145,30 +121,19 @@ def _ipc_immunize_logic(action_id: str):
         hostname = entry.get("hostname", "unknown")
         alert_payload = entry.get("extra", {}).get("alert_payload", {}) or {}
 
-        fp = _get_fp_engine()
-        result = fp.mark_false_positive(alert_payload, hostname, target)
-
-        # BUGFIX: mark_false_positive() now refuses hard-stop/verifiable-fact alerts
-        # (honeypot, arp_spoofing, geofencing, confirmed exploit, tier-5 confirmed IOC)
-        # outright -- must not fall through to the blast-radius fp_count reset / Pi-hole
-        # unblock below when it did, or a refused correction would still silently
-        # unblock a genuinely malicious domain.
-        if result.get("refused"):
+        # CL-AFPE records the correction (trust edge, per-device threshold, sensitivity shift, training record).
+        # It refuses hard-stop/verifiable-fact alerts (decoy, ARP spoofing, geofencing, confirmed exploit, tier-5
+        # IOC) -- those must not fall through to the fp_count reset / Pi-hole unblock below.
+        result = _get_argus_cl_afpe_engine().mark_false_positive(alert_payload, source="operator")
+        if result.refused:
             return {
                 "status": "refused",
                 "action_id": action_id,
-                "reason": result.get("refused_reason", "Cannot mark this alert as a false positive."),
+                "reason": result.refused_reason or "Cannot mark this alert as a false positive.",
                 "device_id": device_id,
             }
-
-        # Argus's own live effect (additive, best-effort -- see _get_argus_cl_afpe_engine's
-        # docstring above). The legacy call above already decided "refused" authoritatively
-        # for the HTTP response and training-data labeling; this only needs to also apply
-        # the correction to what actually governs live suppression today.
-        try:
-            _get_argus_cl_afpe_engine().mark_false_positive(alert_payload, source="operator")
-        except Exception as exc:
-            LOGGER.warning("Argus CL-AFPE mark_false_positive (additive) failed, non-fatal: %s", exc)
+        immunized = result.immunized_destination or ""
+        base_domain = "" if _looks_like_ip(immunized) else immunized
 
         # FIX #1 (blast radius): only the device this specific alert was about, not every
         # tracked device on the network.
@@ -190,7 +155,6 @@ def _ipc_immunize_logic(action_id: str):
         # 'samsungapps.com' never touched an actual block on 'vas.samsungapps.com').
         # unblock_by_base_domain() sweeps every blocked entry under this base domain.
         unblocked_domains = []
-        base_domain = result.get("base_domain", "")
         if base_domain:
             try:
                 ips = IPSMitigator(config=CONFIG, state_manager=sm)
@@ -202,12 +166,12 @@ def _ipc_immunize_logic(action_id: str):
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
         _record_operator_action(entry, "immunize", {
-            "immunized": base_domain or result.get("domain", target), "unblocked": unblocked,
+            "immunized": immunized or target, "unblocked": unblocked,
         })
         return {
             "status": "success",
             "action_id": action_id,
-            "immunized": base_domain or result.get("domain", target),
+            "immunized": immunized or target,
             "device_id": device_id,
             "unblocked": unblocked,
         }
@@ -247,12 +211,7 @@ def _ipc_revoke_logic(action_id: str):
         result = {"status": "success", "action_id": action_id, "type": entry.get("type"), "target": entry.get("target")}
 
         if entry.get("type") == "immunize_domain":
-            fp = _get_fp_engine()
-            fp.revoke_immunization(entry.get("target", ""))
-            try:
-                _get_argus_cl_afpe_engine().revoke(entry.get("target", ""))
-            except Exception as exc:
-                LOGGER.warning("Argus CL-AFPE revoke (additive) failed, non-fatal: %s", exc)
+            _get_argus_cl_afpe_engine().revoke(entry.get("target", ""))
 
         device_id = entry.get("device_id", "")
         if device_id and sm.has_device(device_id):
@@ -320,14 +279,7 @@ def _ipc_approve_tune_down_logic(device_id: str):
         with sm.lock_device(device_id) as state:
             hostname = getattr(state, "hostname", "unknown") or "unknown"
 
-        fp = _get_fp_engine()
-        fp._apply_sigma_shift(device_id, hostname, direction="TUNE_DOWN", source="llm_pending_approval")
-        try:
-            _get_argus_cl_afpe_engine()._apply_sigma_shift(
-                device_id, direction="TUNE_DOWN", source="llm_pending_approval",
-            )
-        except Exception as exc:
-            LOGGER.warning("Argus CL-AFPE sigma-shift (additive) failed, non-fatal: %s", exc)
+        _get_argus_cl_afpe_engine()._apply_sigma_shift(device_id, direction="TUNE_DOWN", source="llm_pending_approval")
 
         ips = IPSMitigator(config=CONFIG, state_manager=sm)
         released = ips.release_device(device_id)

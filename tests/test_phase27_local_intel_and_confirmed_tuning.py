@@ -6,7 +6,7 @@ directly: `python3 test_phase27_local_intel_and_confirmed_tuning.py`.
 
 Covers:
   A. local_intel.py's LocalConfirmedIntel -- record/check/prune/TTL, real object.
-  B. fp_engine.py's record_confirmed_threat() -- feeds local_intel AND the (overall
+  B. the CL-AFPE's record_confirmed_threat() -- feeds local_intel AND the (overall
      and signature-scoped) confirmed counter; the new Stage-1 check #7 hard-stops a
      DIFFERENT device touching a previously-confirmed IOC.
   C. retro_hunter.py's check_local_intel_history() -- cross-device retroactive match,
@@ -34,7 +34,26 @@ def check(name, cond, detail=""):
 
 
 from intelligence.local_intel import LocalConfirmedIntel
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
+from intelligence.local_intel import LocalConfirmedIntel as _LCI
+
+
+def _effective_arp_sweep_threshold(fp, device_id, default=8.0):
+    """What the pipeline uses (EnginePipeline._device_threshold): the engine's own per-device value, with a promoted
+    autotuner value taking precedence."""
+    return fp._get_autotune_engine().get_active_value(
+        "arp_sweep_unique_targets_threshold", device_id=device_id,
+        default=fp.get_device_arp_sweep_threshold(device_id, default=default))
+
+
+def _fp(state_dir, safe_ips=None):
+    """The live CL-AFPE on the same graph file the nightly calibration reads (state/v13_graph.db), with the shared
+    confirmed-intel store in state_dir."""
+    from pathlib import Path as _P
+    _P(state_dir).mkdir(parents=True, exist_ok=True)
+    return ClAfpeEngine(GraphStore(str(_P(state_dir) / "v13_graph.db")), local_intel=_LCI(str(state_dir)),
+                        safe_ips=set(safe_ips or []))
 from argus.graph.store import GraphStore
 
 
@@ -75,10 +94,10 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: fp_engine.py -- record_confirmed_threat() + Stage-1 check #7
+# Section B: CL-AFPE -- record_confirmed_threat() + Stage-1 check #7
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = _fp(tmpdir)
 
     fp.record_confirmed_threat("dev_A", "malicious-c2.example", "6.6.6.6",
                                 reason="STAGE_1_HARD_STOP", signature="DATA_EXFILTRATION")
@@ -133,7 +152,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
         "outbound_bytes_z": 0.0,
     }
-    poisoned_verdict = fp.evaluate(poisoned_alert, poisoned_alert_safe_features, risk_score=4.0, ti_engine=None)
+    poisoned_verdict = fp.evaluate(poisoned_alert, poisoned_alert_safe_features)
     check("THE CORE FIX (read side): an ALREADY-poisoned known-safe base domain "
           "(netflix.com, simulating what production actually found on disk) is no "
           "longer honored as a Stage-1 hard-stop match, even though it's still "
@@ -185,7 +204,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "network_context": {"queried_domain": "unknown", "destination_ip": "192.168.1.1"},
         "signature": "", "timestamp": time.time(),
     }
-    poisoned_ip_verdict = fp.evaluate(poisoned_ip_alert, poisoned_alert_safe_features, risk_score=4.0, ti_engine=None)
+    poisoned_ip_verdict = fp.evaluate(poisoned_ip_alert, poisoned_alert_safe_features)
     check("THE CORE FIX (read side, IP): an ALREADY-poisoned private IP (192.168.1.1, "
           "the router) is no longer honored as a Stage-1 hard-stop match",
           poisoned_ip_verdict["stage"] != "STAGE_1_HARD_STOP", f"got={poisoned_ip_verdict}")
@@ -195,7 +214,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # protected, matching safe_ips' own documented promise ("NEVER treated as suspicious
     # ... even if flagged elsewhere").
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir2:
-        fp_with_config = AutonomousFPEngine(config={"safe_ips": ["203.0.113.50"]}, state_dir=tmpdir2)
+        fp_with_config = _fp(tmpdir2, safe_ips=["203.0.113.50"])
         fp_with_config.record_confirmed_threat("dev_J", "", "203.0.113.50", reason="STAGE_1_HARD_STOP")
         check("an explicitly-configured safe_ips entry (a PUBLIC IP, not automatically "
               "private) is also refused -- safe_ips' own documented promise, honored for "
@@ -232,7 +251,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     safe_features = {"ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
                       "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
                       "outbound_bytes_z": 0.0}
-    verdict = fp.evaluate(later_alert, safe_features, risk_score=5.0, ti_engine=None)
+    verdict = fp.evaluate(later_alert, safe_features)
     check("THE CORE FIX: a DIFFERENT device (dev_B) touching a domain dev_A already "
           "confirmed hard-stops as CONFIRMED_THREAT with NO hard-stop signal of its own",
           verdict["verdict"] == "CONFIRMED_THREAT" and verdict["stage"] == "STAGE_1_HARD_STOP",
@@ -247,7 +266,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
         "signature": "",
         "timestamp": time.time(),
     }
-    verdict_clean = fp.evaluate(clean_alert, safe_features, risk_score=5.0, ti_engine=None)
+    verdict_clean = fp.evaluate(clean_alert, safe_features)
     check("an unrelated domain/IP with no confirmed-intel match does NOT hard-stop via check #7",
           verdict_clean["stage"] != "STAGE_1_HARD_STOP", f"got={verdict_clean}")
 
@@ -269,7 +288,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 # this fix stops the wrong domain from ever being fed in in the first place.
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
-    fp_b2 = AutonomousFPEngine(config={}, state_dir=tmpdir_b2)
+    fp_b2 = _fp(tmpdir_b2)
 
     def _make_alert(domain, features):
         return {
@@ -283,8 +302,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
     # evidence) -- must NOT be recorded, even though the alert IS a genuine confirmed
     # threat (dest_ip DOES get recorded).
     lateral_alert = _make_alert("sharepoint.com", {})
-    verdict_b2 = fp_b2.evaluate(lateral_alert, {"zeek_lateral_moves": 5, "zeek_lateral_unique_targets": 3},
-                                 risk_score=9.0, ti_engine=None)
+    verdict_b2 = fp_b2.evaluate(lateral_alert, {"zeek_lateral_moves": 5, "zeek_lateral_unique_targets": 3})
     check("Check 2 (lateral movement) alone reaches CONFIRMED_THREAT as before",
           verdict_b2["verdict"] == "CONFIRMED_THREAT", f"got={verdict_b2}")
     check("THE FIX: a lateral-movement-only hard-stop does NOT poison the bystander "
@@ -296,7 +314,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
 
     # Check 5 (AbuseIPDB) fires; different innocent bystander domain.
     abuse_alert = _make_alert("coinbase.com", {})
-    fp_b2.evaluate(abuse_alert, {"abuseipdb_risk": 8.0}, risk_score=9.0, ti_engine=None)
+    fp_b2.evaluate(abuse_alert, {"abuseipdb_risk": 8.0})
     check("an AbuseIPDB-only hard-stop does NOT poison its bystander domain either",
           fp_b2.local_intel.check("domain", "coinbase.com") is None)
 
@@ -304,19 +322,17 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir_b2:
     # have a real causal link -- a genuine domain-blacklist hit must still poison the
     # domain as before, or the fix would have thrown out real detection value too.
     ti_alert = _make_alert("actually-malicious-c2.example", {})
-    fp_b2.evaluate(ti_alert, {"ti_risk": 3.5}, risk_score=9.0, ti_engine=None)
+    fp_b2.evaluate(ti_alert, {"ti_risk": 3.5})
     check("REGRESSION GUARD: a genuine ThreatIntel IOC hit still records its domain "
           "as confirmed-malicious -- the fix is scoped to non-domain-causal checks only",
           fp_b2.local_intel.check("domain", "actually-malicious-c2.example") is not None)
 
     # REGRESSION GUARD: the trust-cache-override path (a SECOND call site with the
     # identical bug) gets the same fix.
-    fp_b2_cached = AutonomousFPEngine(config={}, state_dir=tmpdir_b2 + "_2")
-    with fp_b2_cached._lock:
-        fp_b2_cached._trust_cache["nflximg.com"] = time.time()
+    fp_b2_cached = _fp(tmpdir_b2 + "_2")
+    fp_b2_cached.immunize("nflximg.com", source="operator")
     cached_alert = _make_alert("nflximg.com", {})
-    fp_b2_cached.evaluate(cached_alert, {"zeek_lateral_moves": 3, "zeek_lateral_unique_targets": 2},
-                           risk_score=9.0, ti_engine=None)
+    fp_b2_cached.evaluate(cached_alert, {"zeek_lateral_moves": 3, "zeek_lateral_unique_targets": 2})
     check("REGRESSION GUARD: the trust-cache-override path (a trusted domain overridden "
           "by a fresh non-domain-causal hard-stop) also does not re-poison the domain",
           fp_b2_cached.local_intel.check("domain", "nflximg.com") is None)
@@ -491,7 +507,7 @@ check("the lowered threshold never goes below its floor",
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     state_dir = Path(tmpdir)
-    fp = AutonomousFPEngine(config={}, state_dir=str(state_dir))
+    fp = _fp(str(state_dir))
     device_id = "dev_smart_hub_autocal"
     d2_store = fp._get_autotune_engine().store
 
@@ -511,16 +527,16 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
             "timestamp": alert_ts,
         }
         d2_store.insert_decision(device_id, alert_ts, "SUSPICIOUS", "hypothesis_suspicious", 0.5, 5.0)
-        fp.mark_false_positive(alert, "smart-hub", source="operator")
+        fp.mark_false_positive(alert, source="operator")
 
     corrections = _collect_connection_abuse_corrections(state_dir)
     check("_collect_connection_abuse_corrections() correctly counts real mark_false_positive() writes",
           corrections.get(device_id, 0) == ARP_SWEEP_MIN_CORRECTED_SAMPLES, f"got={corrections}")
 
-    before = fp.get_device_arp_sweep_threshold(device_id, default=8.0)
+    before = _effective_arp_sweep_threshold(fp, device_id)
     run1_now = time.time()
     run_threshold_calibration(state_dir, now=run1_now)
-    fp.close()
+    fp.store.close()
 
     # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase C): the write side now
     # routes through AutotuneEngine's own propose -> canary -> promote lifecycle instead
@@ -540,12 +556,12 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
           f"got={dict(proposed_row) if proposed_row else None}, before={before}")
     store.close()
 
-    fp_immediate = AutonomousFPEngine(config={}, state_dir=str(state_dir))
-    immediate_value = fp_immediate.get_device_arp_sweep_threshold(device_id, default=8.0)
+    fp_immediate = _fp(str(state_dir))
+    immediate_value = _effective_arp_sweep_threshold(fp_immediate, device_id)
     check("...and get_device_arp_sweep_threshold() still returns the UNCHANGED value while "
           "the proposal is only in canary -- no premature effect before promotion",
           immediate_value == before, f"got={immediate_value}, before={before}")
-    fp_immediate.close()
+    fp_immediate.store.close()
 
     # ...then, once the canary window has elapsed, a SECOND run (same recurring cron this
     # script already runs on) opportunistically promotes it -- see _propose_and_promote()'s
@@ -553,14 +569,14 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     run2_now = run1_now + 6.0 * 3600.0 + 1.0
     run_threshold_calibration(state_dir, now=run2_now)
 
-    fp2 = AutonomousFPEngine(config={}, state_dir=str(state_dir))  # fresh instance, forces a real disk reload
-    after = fp2.get_device_arp_sweep_threshold(device_id, default=8.0)
-    fp2.close()
+    fp2 = _fp(str(state_dir))  # fresh instance, forces a real disk reload
+    after = _effective_arp_sweep_threshold(fp2, device_id)
+    fp2.store.close()
 
     check("THE CORE INTEGRATION ('enable per device tuning'): a SECOND run.threshold_"
           "calibration() pass, after the canary window elapses, actually PROMOTES this "
           "device's own arp_sweep_unique_targets_threshold end-to-end, from real correction "
-          "evidence on disk, reloadable by a completely fresh AutonomousFPEngine instance",
+          "evidence on disk, as a completely fresh engine instance sees it",
           after > before, f"before={before} after={after}")
 
     autotune_stats_path = state_dir / "autotune_stats.json"
@@ -582,12 +598,12 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py", "r", encoding="utf-8") as f:
     pipeline_src = f.read()
 
-check("pipeline.py's HIGH/CRITICAL bar feeds record_confirmed_threat() as the second "
-      "confirmation path (fp_engine's own Stage-1 hard-stop is the first, internal one)",
-      "self.fp_engine.record_confirmed_threat(" in pipeline_src)
+check("pipeline.py's HIGH/CRITICAL bar feeds the CL-AFPE's record_confirmed_threat() as the second "
+      "confirmation path (its own Stage-1 hard-stop is the first, internal one)",
+      "self.cl_afpe.record_confirmed_threat(" in pipeline_src)
 check("the HIGH/CRITICAL feed is gated on the same not-suppressed condition as the "
       "reactive-capture trigger and Telegram send",
-      'if telegram_worthy and not fp_verdict["suppress"] and self.fp_engine:' in pipeline_src)
+      'if telegram_worthy and not fp_verdict["suppress"]:' in pipeline_src)
 check("the HIGH/CRITICAL feed passes the alert's own signature through for "
       "signature-scoped confirmed-count tracking",
       "signature=primary_sig," in pipeline_src)

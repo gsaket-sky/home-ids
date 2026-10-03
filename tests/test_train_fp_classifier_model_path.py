@@ -2,17 +2,13 @@
 Regression test for the P0-2 model-path-mismatch bug (2026-09-07,
 Documentation/V13_FULL_ARCHITECTURE_SHIFT_PLAN.md): train_fp_classifier.py's
 train_and_export_onnx() used to hardcode state_dir/"models" as its output
-directory, while fp_engine.py's own _load_lgbm_model()/_load_calibration() read
-from Path(config["model_path"]).parent instead -- two different directories, so
+directory, while the live loader read from Path(config["model_path"]).parent instead -- two different directories, so
 every retrained model was silently never picked up by live inference. Confirmed
 live on .94: state/models/fp_classifier.onnx was hours-old while the file
 actually loaded (top-level models/fp_classifier.onnx) was weeks-stale.
 
 Fix: train_and_export_onnx() now takes an explicit model_dir param (default:
-derived from CONFIG["model_path"], the same fallback fp_engine.py's own loader
-uses), and fp_engine.py's weekly-retrain call site passes the SAME model_dir its
-own _load_lgbm_model() reads from -- proven here by construction, not just by
-independently re-deriving the same default twice.
+derived from CONFIG["model_path"]), the same directory pipeline.py points the CL-AFPE MLScorer at.
 """
 import sys
 from pathlib import Path
@@ -61,40 +57,21 @@ def test_train_and_export_onnx_default_model_dir_matches_config(tmp_path, monkey
 
 
 def test_model_dir_is_single_source_shared_by_reader_and_writer(tmp_path):
-    """BUGFIX proof: _load_lgbm_model() (the reader) and the weekly retrain loop
-    (the writer) must resolve to the identical directory by construction -- both
-    now call the same self._model_dir() helper, so this can no longer drift the
-    way it did when each side independently hardcoded its own default/path."""
-    from intelligence import fp_engine as fp_engine_module
+    """The reader (the CL-AFPE MLScorer, pointed by pipeline.py at Path(model_path).parent) and the writer
+    (train_and_export_onnx()'s default) resolve to the same directory, and a model the writer produces there is
+    the one the reader loads."""
+    from argus.cl_afpe.ml_scoring import MLScorer
 
     fake_model_path = tmp_path / "models" / "ids_model.pkl"
-    engine = fp_engine_module.AutonomousFPEngine.__new__(fp_engine_module.AutonomousFPEngine)
-    engine.config = {"model_path": str(fake_model_path)}
-
-    reader_dir = engine._model_dir()  # what _load_lgbm_model() reads from
-    assert reader_dir == fake_model_path.parent
-
-    # The real weekly-retrain call site passes exactly this same method's return
-    # value as train_and_export_onnx's model_dir -- verified by calling the real
-    # (not mocked) function against it.
-    ok = train_fp_classifier.train_and_export_onnx(
-        tmp_path / "state", model_dir=engine._model_dir()
-    )
+    reader = MLScorer(str(Path(fake_model_path).parent))      # what pipeline.py configures
+    ok = train_fp_classifier.train_and_export_onnx(tmp_path / "state", model_dir=Path(fake_model_path).parent)
     assert ok is True
-    assert (reader_dir / "fp_classifier.onnx").exists()
+    assert reader.score_stage2({"tranco_rank": 0}, "", is_trust_cached=False) is not None
 
 
-def test_model_dir_default_falls_back_consistently(tmp_path, monkeypatch):
-    """Both _model_dir() and train_and_export_onnx()'s own default must fall back
-    to the SAME literal ("models/ids_model.pkl") when model_path is absent --
-    previously one side defaulted to "state/ids_model.pkl" instead, a latent
-    inconsistency even though config.py always supplies model_path in practice."""
-    from intelligence import fp_engine as fp_engine_module
-
-    engine = fp_engine_module.AutonomousFPEngine.__new__(fp_engine_module.AutonomousFPEngine)
-    engine.config = {}  # model_path absent -- exercises the fallback default
-
-    assert engine._model_dir() == Path("models")
-
+def test_model_dir_default_falls_back_consistently(monkeypatch):
+    """pipeline.py and train_and_export_onnx() both fall back to "models/ids_model.pkl" when model_path is absent."""
+    pipeline_src = (SRC_DIR / "core" / "pipeline.py").read_text(encoding="utf-8")
+    assert 'Path(self.config.get("model_path", "models/ids_model.pkl")).parent' in pipeline_src
     monkeypatch.delitem(train_fp_classifier.CONFIG._config, "model_path", raising=False)
     assert Path(train_fp_classifier.CONFIG.get("model_path", "models/ids_model.pkl")).parent == Path("models")

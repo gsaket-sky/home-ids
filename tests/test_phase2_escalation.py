@@ -37,7 +37,7 @@ def check(name, cond, detail=""):
 from intelligence.detectors.threat_signals import ThreatSignalDetector
 from intelligence.hypotheses.evidence import EvidenceStore
 from intelligence.reputation.classifier import ReputationClassifier
-from core.decision_engine import DecisionEngine, DecisionState
+from argus_scenarios import DecisionEngine, DecisionState
 
 detector = ThreatSignalDetector()
 rc = ReputationClassifier()

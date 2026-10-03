@@ -1,43 +1,98 @@
 """
-v13 CL-AFPE ML scoring (Phase 6d -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+CL-AFPE model scoring: Stage 2 (a LightGBM classifier exported to ONNX) and Stage 3 (FastEmbed similarity of a
+destination name to known vendor telemetry), plus text embedding for the alert search.
 
-Reuses v-current's ALREADY-TRAINED LightGBM ONNX model and FastEmbed vendor-pattern
-embeddings, read-only -- no separate training pipeline. Ported from a direct read of
-fp_engine.py's real _stage2_lgbm()/_parse_onnx_prob()/_stage3_embed()/
-_stage3_rule_fallback()/_load_lgbm_model()/_load_embed_model() (lines 1279-1498,
-2515-2726).
+The models are trained by src/scripts/train_fp_classifier.py (nightly) into the model dir (Path(config
+["model_path"]).parent): fp_classifier.onnx and fastembed_cache/. This module only reads them:
 
-THE DESIGN DECISION THIS MODULE EXISTS TO PROVE OUT: loads from the SAME model_dir
-v-current already writes to (Path(config["model_path"]).parent, matching v1's own
-path resolution exactly) -- train_fp_classifier.py's weekly retrain keeps producing
-fp_classifier.onnx/fp_calibration.json/the fastembed_cache regardless of who reads
-them. This module is a READER, not a second trainer -- there is no training-data-
-continuity problem to solve, unlike what the original full-architecture plan feared
-before this file existed.
-
-Deliberately NOT ported: placeholder-model generation (_generate_placeholder_lgbm).
-If v-current hasn't produced a real model yet, this degrades to Stage 2 unavailable
-(None) -- the same "model not ready" fallback v1 itself uses while ITS OWN loader
-thread is still warming up. Generating a SEPARATE placeholder here would violate
-the single-source-of-truth design this whole phase exists to establish.
-
-Vendor patterns for Stage 3 are reused directly from fp_engine.py's own
-_build_safe_vendor_patterns() -- called as an UNBOUND method
-(AutonomousFPEngine._build_safe_vendor_patterns(None)), confirmed by reading the
-method body to return a pure static list that never touches `self`. This avoids
-duplicating ~80 lines of vendor-pattern data that would silently drift from v1's
-own maintained list, and avoids ever constructing a real AutonomousFPEngine
-instance (whose __init__ starts 3 background daemon threads -- never something v13
-should trigger as a side effect of reading a static list).
+  - warm_up_async() loads both in a background thread at start-up, so the first alert never waits for a model load
+    or download inside the detection loop;
+  - the ONNX model is reloaded when the nightly retrain replaces the file (checked at most every
+    _MODEL_RECHECK_SECONDS), so scoring always uses the latest model;
+  - a model that is not available yet degrades to None (Stage 2) or the static rule fallback (Stage 3).
 """
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-LOGGER = logging.getLogger("v13_cl_afpe_ml_scoring")
+LOGGER = logging.getLogger("home_ids.cl_afpe.ml")
 
-# Matches fp_engine.py's real combination weights/sentinel exactly (its evaluate()
-# method's weighted-combination logic, confirmed via direct read).
+_MODEL_RECHECK_SECONDS = 60.0
+EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+
+# Reference set for Stage 3: known-legitimate vendor telemetry names. A queried destination whose name embeds close to
+# one of these looks like routine telemetry. Add entries here; they are re-embedded at the next start.
+SAFE_VENDOR_PATTERNS: List[Dict[str, str]] = [
+    # Developer error tracking & APM
+    {"label": "Sentry Ingest US", "text": "o1234.ingest.us.sentry.io"},
+    {"label": "Sentry Ingest EU", "text": "o9999.ingest.de.sentry.io"},
+    {"label": "Sentry API", "text": "sentry.io"},
+    {"label": "Datadog APM", "text": "trace.agent.datadoghq.com"},
+    {"label": "New Relic APM", "text": "collector.newrelic.com"},
+    {"label": "Grafana Telemetry", "text": "telemetry.grafana.com"},
+    # Browsers
+    {"label": "Brave Usage Ping", "text": "usage-ping.brave.com"},
+    {"label": "Firefox Telemetry", "text": "incoming.telemetry.mozilla.org"},
+    {"label": "Chrome SafeBrowsing", "text": "safebrowsing.googleapis.com"},
+    {"label": "Chrome Update", "text": "update.googleapis.com"},
+    # Antivirus & security cloud
+    {"label": "Bitdefender NIMBUS", "text": "nimbus.bitdefender.net"},
+    {"label": "Bitdefender EU NIMBUS", "text": "eu.nimbus.bitdefender.net"},
+    {"label": "Bitdefender Telemetry", "text": "telemetry.bitdefender.com"},
+    {"label": "Norton Cloud", "text": "lookup.norton.com"},
+    {"label": "Malwarebytes Telemetry", "text": "telemetry.malwarebytes.com"},
+    # Apple
+    {"label": "Apple Push Notification", "text": "32-courier.push.apple.com"},
+    {"label": "Apple iCloud Sync", "text": "p12-caldav.icloud.com"},
+    {"label": "Apple Software Update", "text": "swscan.apple.com"},
+    {"label": "Apple Device Activation", "text": "albert.apple.com"},
+    {"label": "Apple Diagnostics", "text": "radarsubmissions.apple.com"},
+    # Google
+    {"label": "Google GMS Check-in", "text": "android.clients.google.com"},
+    {"label": "Google Optimization Guide", "text": "optimizationguide-pa.googleapis.com"},
+    {"label": "Firebase Database", "text": "project.firebaseio.com"},
+    # Microsoft / Windows
+    {"label": "Windows Update", "text": "windowsupdate.microsoft.com"},
+    {"label": "Microsoft NCSI", "text": "www.msftncsi.com"},
+    {"label": "Office 365", "text": "outlook.office365.com"},
+    # Amazon / Alexa
+    {"label": "Amazon Captive Portal", "text": "captive.amazon.com"},
+    {"label": "FireTV Captive Portal", "text": "firetvcaptiveportal.com"},
+    {"label": "Alexa Smart Home", "text": "alexa.amazon.com"},
+    # CDN & infrastructure
+    {"label": "Cloudflare", "text": "cloudflare.com"},
+    {"label": "Fastly CDN", "text": "fastly.net"},
+    {"label": "Akamai CDN", "text": "akamaized.net"},
+    {"label": "Let's Encrypt ACME", "text": "acme-v02.api.letsencrypt.org"},
+    # Package registries & developer APIs
+    {"label": "Wordnik Dictionary API", "text": "www.wordnik.com"},
+    {"label": "NPM Registry", "text": "registry.npmjs.org"},
+    {"label": "PyPI Package Index", "text": "pypi.org"},
+    {"label": "GitHub API", "text": "api.github.com"},
+    {"label": "DockerHub", "text": "registry-1.docker.io"},
+    # Smart home & IoT
+    {"label": "TP-Link Tapo Cloud", "text": "euw1-api.tplinkcloud.com"},
+    {"label": "Tuya Smart Home", "text": "a1.tuyaus.com"},
+    {"label": "Synology QuickConnect", "text": "global.quickconnect.to"},
+    {"label": "Sonos Music", "text": "music.sonos.com"},
+    {"label": "Samsung SmartThings", "text": "samsungcloud.com"},
+    # Streaming
+    {"label": "Netflix CDN", "text": "nflxvideo.net"},
+    {"label": "Spotify CDN", "text": "scdn.co"},
+    # Router & local services
+    {"label": "Fritz!Box Local UI", "text": "fritz.box"},
+    {"label": "Fritz!Box MyFRITZ! DDNS", "text": "myfritz.net"},
+    {"label": "Local Grafana Dashboard", "text": "grafana.lan"},
+    {"label": "Local Prometheus", "text": "prometheus.lan"},
+    {"label": "Local Pi-hole", "text": "pihole.lan"},
+    {"label": "Home Assistant Local", "text": "homeassistant.local"},
+    # App analytics
+    {"label": "Napps2 App Backend", "text": "tp.napps-2.com"},
+]
+
+# Stage 2/3 combination weights, and the score Stage 2 gives when no classifier is loaded.
 LGBM_WEIGHT = 0.45
 EMBED_WEIGHT = 0.55
 NEUTRAL_LGBM_SCORE = 0.50
@@ -140,31 +195,41 @@ def combine_scores(lgbm_prob: Optional[float], embed_sim: Optional[float],
 
 
 class MLScorer:
-    """Lazily loads and calls v-current's REAL, already-trained ONNX/FastEmbed
-    artifacts read-only -- never trains, never writes to model_dir. A model that
-    isn't ready yet (missing file, or its library isn't installed) degrades to
-    None/rule-fallback, matching v1's own real-production behavior during its own
-    loader threads' warm-up window. Load attempts happen at most once per instance
-    (not retried every call) -- matches v1's own one-shot background-thread loader
-    shape, just synchronous/lazy instead of threaded, since v13 has no equivalent
-    background-loader infrastructure yet."""
+    """Reads the trained ONNX classifier and the FastEmbed model from `model_dir`; never trains or writes there."""
 
     def __init__(self, model_dir: str):
         self.model_dir = Path(model_dir)
+        self._lock = threading.Lock()
         self._lgbm_session = None
-        self._lgbm_load_attempted = False
+        self._lgbm_mtime = None
+        self._lgbm_checked_at = 0.0
         self._embed_model = None
         self._safe_vendor_embeddings = None
         self._safe_vendor_labels: List[str] = []
         self._embed_load_attempted = False
 
-    def _ensure_lgbm_loaded(self) -> None:
-        if self._lgbm_load_attempted:
+    # --- loading -------------------------------------------------------------------------------------------
+    def warm_up_async(self) -> None:
+        """Loads both models in a daemon thread (start-up), so no detection cycle waits for them."""
+        def _run():
+            self._ensure_lgbm_loaded(force_check=True)
+            self._ensure_embed_loaded()
+        threading.Thread(target=_run, name="cl-afpe-model-warmup", daemon=True).start()
+
+    def ready(self) -> Dict[str, bool]:
+        return {"classifier": self._lgbm_session is not None, "embeddings": self._embed_model is not None}
+
+    def _ensure_lgbm_loaded(self, force_check: bool = False) -> None:
+        now = time.time()
+        if not force_check and now - self._lgbm_checked_at < _MODEL_RECHECK_SECONDS:
             return
-        self._lgbm_load_attempted = True
+        self._lgbm_checked_at = now
         onnx_path = self.model_dir / "fp_classifier.onnx"
-        if not onnx_path.exists():
-            LOGGER.info("No fp_classifier.onnx at %s yet -- Stage 2 unavailable this cycle.", onnx_path)
+        try:
+            mtime = onnx_path.stat().st_mtime
+        except OSError:
+            return  # not trained yet: Stage 2 unavailable
+        if mtime == self._lgbm_mtime and self._lgbm_session is not None:
             return
         try:
             import onnxruntime as ort
@@ -172,51 +237,73 @@ class MLScorer:
             sess_opts.intra_op_num_threads = 1
             sess_opts.inter_op_num_threads = 1
             sess_opts.log_severity_level = 3
-            self._lgbm_session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts)
-            LOGGER.info("Loaded LightGBM ONNX from %s (v-current's own real, continuously-retrained model).", onnx_path)
+            session = ort.InferenceSession(str(onnx_path), sess_options=sess_opts)
+            with self._lock:
+                self._lgbm_session, self._lgbm_mtime = session, mtime
+            LOGGER.info("Loaded the false-positive classifier from %s", onnx_path)
         except ImportError:
             LOGGER.warning("onnxruntime not installed -- Stage 2 unavailable.")
+            self._lgbm_mtime = mtime
         except Exception as e:
             LOGGER.error("Failed to load %s: %s", onnx_path, e, exc_info=True)
+            self._lgbm_mtime = mtime   # don't retry a broken file every cycle; a new file has a new mtime
 
     def _ensure_embed_loaded(self) -> None:
-        if self._embed_load_attempted:
-            return
-        self._embed_load_attempted = True
+        with self._lock:
+            if self._embed_load_attempted:
+                return
+            self._embed_load_attempted = True
         try:
             from fastembed import TextEmbedding
             import numpy as np
-            from intelligence.fp_engine import AutonomousFPEngine
 
-            cache_dir = str(self.model_dir / "fastembed_cache")
-            model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5", cache_dir=cache_dir)
-
-            patterns = AutonomousFPEngine._build_safe_vendor_patterns(None)
-            labels = [p["label"] for p in patterns]
-            texts = [p["text"] for p in patterns]
-            raw_embeddings = list(model.embed(texts))
-            embed_matrix = np.array(raw_embeddings, dtype=np.float32)
+            model = TextEmbedding(model_name=EMBED_MODEL_NAME, cache_dir=str(self.model_dir / "fastembed_cache"))
+            labels = [p["label"] for p in SAFE_VENDOR_PATTERNS]
+            embed_matrix = np.array(list(model.embed([p["text"] for p in SAFE_VENDOR_PATTERNS])), dtype=np.float32)
             norms = np.linalg.norm(embed_matrix, axis=1, keepdims=True) + 1e-9
-
-            self._embed_model = model
             self._safe_vendor_embeddings = embed_matrix / norms
             self._safe_vendor_labels = labels
-            LOGGER.info("Loaded FastEmbed BAAI/bge-small-en-v1.5, %d vendor patterns (v-current's own).", len(patterns))
+            self._embed_model = model
+            LOGGER.info("Loaded FastEmbed %s with %d vendor patterns.", EMBED_MODEL_NAME, len(labels))
         except ImportError:
             LOGGER.warning("fastembed not installed -- Stage 3 falls back to static rules.")
         except Exception as e:
             LOGGER.error("Failed to load FastEmbed: %s", e, exc_info=True)
 
+    # --- helpers for callers outside evaluate() ------------------------------------------------------------------
+    def embed_text(self, text: str) -> Optional[bytes]:
+        """float32 bytes of `text`'s embedding (alert search), or None while the model is not loaded."""
+        if self._embed_model is None or not text:
+            return None
+        try:
+            import numpy as np
+            return np.array(list(self._embed_model.embed([text]))[0], dtype=np.float32).tobytes()
+        except Exception as exc:
+            LOGGER.debug("embed_text failed (the alert just won't be searchable): %s", exc)
+            return None
+
+    def vendor_similarity(self, domain: str) -> Tuple[float, str]:
+        """(similarity, best label) of a destination name to known vendor telemetry; the static rule fallback while
+        FastEmbed is not loaded; (0.0, ...) for a placeholder name. Never blocks on a model load."""
+        if not domain or domain.strip().lower() in ("unknown", "null", "none"):
+            return 0.0, "N/A (no resolved hostname/domain)"
+        if self._embed_model is not None:
+            sim, label = self.score_stage3(domain)
+            if sim is not None:
+                return sim, label
+        return stage3_rule_fallback(domain)
+
     def score_stage2(self, features: Dict[str, Any], domain: str, is_trust_cached: bool) -> Optional[float]:
         """Returns P(FP) in [0,1], or None if the model isn't ready -- caller
         substitutes the neutral 0.50 sentinel, matching v1 exactly."""
         self._ensure_lgbm_loaded()
-        if self._lgbm_session is None:
+        session = self._lgbm_session
+        if session is None:
             return None
         try:
             import numpy as np
             feat_vec_full = build_feature_vector(features, domain, is_trust_cached)
-            input_spec = self._lgbm_session.get_inputs()[0]
+            input_spec = session.get_inputs()[0]
             expected_feats = (
                 input_spec.shape[1] if (len(input_spec.shape) > 1 and isinstance(input_spec.shape[1], int)) else 6
             )
@@ -231,7 +318,7 @@ class MLScorer:
             else:
                 feat_vec = np.array([feat_vec_full[:9]], dtype=np.float32)
             input_name = input_spec.name
-            outputs = self._lgbm_session.run(None, {input_name: feat_vec})
+            outputs = session.run(None, {input_name: feat_vec})
             return parse_onnx_prob(outputs)
         except Exception as e:
             LOGGER.error("Stage 2 ONNX inference error: %s", e, exc_info=True)

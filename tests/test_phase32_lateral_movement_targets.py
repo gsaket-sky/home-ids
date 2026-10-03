@@ -29,6 +29,7 @@ import sys
 from pathlib import Path as _PathForSysPath
 sys.path.insert(0, str(_PathForSysPath(__file__).resolve().parent.parent / "src"))
 import tempfile
+from pathlib import Path
 import time
 
 FAILURES = []
@@ -92,9 +93,10 @@ check("REGRESSION GUARD: no lateral-port connections at all -> both metrics are 
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: fp_engine.py's Stage-1 Check 2 -- requires a genuine distinct-target count
+# Section B: the CL-AFPE's Stage-1 Check 2 -- requires a genuine distinct-target count
 # ═══════════════════════════════════════════════════════════════════════════════════
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
 
 def _alert(domain="unrelated-domain.example"):
     return {
@@ -104,12 +106,12 @@ def _alert(domain="unrelated-domain.example"):
     }
 
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = ClAfpeEngine(GraphStore(str(Path(tmpdir) / 'graph.db')))
 
     # THE CORE FIX: a single-target connection (the real production shape found live --
     # a laptop with ONE SMB connection to its own NAS) must NOT hard-stop.
     single_target_features = {"zeek_lateral_moves": 1, "zeek_lateral_unique_targets": 1}
-    verdict_single = fp.evaluate(_alert(), single_target_features, risk_score=8.5, ti_engine=None)
+    verdict_single = fp.evaluate(_alert(), single_target_features)
     check("THE CORE FIX: a single-target lateral connection (zeek_lateral_moves=1, "
           "zeek_lateral_unique_targets=1) does NOT reach Stage-1 CONFIRMED_THREAT -- "
           "this is the exact real production case that was wrongly hard-stopping",
@@ -117,14 +119,14 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 
     # Even repeated connections to the SAME single target must not hard-stop.
     repeat_single_features = {"zeek_lateral_moves": 5, "zeek_lateral_unique_targets": 1}
-    verdict_repeat = fp.evaluate(_alert(), repeat_single_features, risk_score=8.5, ti_engine=None)
+    verdict_repeat = fp.evaluate(_alert(), repeat_single_features)
     check("REGRESSION GUARD: even 5 repeat connections to ONE target still does not "
           "hard-stop -- the fix keys on distinct targets, not raw connection count",
           verdict_repeat["stage"] != "STAGE_1_HARD_STOP", f"got={verdict_repeat}")
 
     # A genuine multi-target scan (>= the default threshold of 2) still hard-stops.
     multi_target_features = {"zeek_lateral_moves": 3, "zeek_lateral_unique_targets": 3}
-    verdict_multi = fp.evaluate(_alert(), multi_target_features, risk_score=8.5, ti_engine=None)
+    verdict_multi = fp.evaluate(_alert(), multi_target_features)
     check("REGRESSION GUARD: a genuine multi-target scan (3 distinct targets) still "
           "reaches Stage-1 CONFIRMED_THREAT as before -- the fix doesn't weaken real "
           "detection, only the single-target false-positive shape",
@@ -133,7 +135,7 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
 
     # Exactly at the default threshold (2) fires; one below (1) does not.
     at_threshold_features = {"zeek_lateral_moves": 2, "zeek_lateral_unique_targets": 2}
-    verdict_at = fp.evaluate(_alert(), at_threshold_features, risk_score=8.5, ti_engine=None)
+    verdict_at = fp.evaluate(_alert(), at_threshold_features)
     check("exactly at the default threshold (2 distinct targets) DOES hard-stop",
           verdict_at["stage"] == "STAGE_1_HARD_STOP", f"got={verdict_at}")
 
@@ -141,14 +143,15 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     # (e.g. a feature dict built before this fix existed) must fail closed -- not
     # treated as "unlimited targets", but as "0 known targets" (missing key -> 0).
     missing_key_features = {"zeek_lateral_moves": 5}
-    verdict_missing = fp.evaluate(_alert(), missing_key_features, risk_score=8.5, ti_engine=None)
+    verdict_missing = fp.evaluate(_alert(), missing_key_features)
     check("a features dict missing zeek_lateral_unique_targets entirely fails CLOSED "
           "(treated as 0 distinct targets), not open",
           verdict_missing["stage"] != "STAGE_1_HARD_STOP", f"got={verdict_missing}")
 
     # Custom, stricter config threshold is honored.
-    fp_strict = AutonomousFPEngine(config={"lateral_movement_unique_targets_threshold": 5}, state_dir=tmpdir + "_2")
-    verdict_strict = fp_strict.evaluate(_alert(), multi_target_features, risk_score=8.5, ti_engine=None)
+    fp_strict = ClAfpeEngine(GraphStore(str(Path(tmpdir) / "graph2.db")),
+                             lateral_targets_threshold=lambda: 5)   # live_engine passes config's value this way
+    verdict_strict = fp_strict.evaluate(_alert(), multi_target_features)
     check("a stricter configured threshold (5) is honored -- 3 distinct targets no "
           "longer hard-stops under that config",
           verdict_strict["stage"] != "STAGE_1_HARD_STOP", f"got={verdict_strict}")
@@ -205,7 +208,7 @@ check("THE THIRD FIX: the zeek_lateral_scan evidence-emission site also now requ
 # decision_engine.py's attack-vs-benign scoring, not just alert-display context.
 # ═══════════════════════════════════════════════════════════════════════════════════
 from core.pipeline import _count_local_device_discovery_requests, _LOCAL_DEVICE_DISCOVERY_URI_PATTERNS
-from intelligence.hypotheses.engine import LocalDeviceDiscoveryHypothesis, HypothesisEngine
+from argus_scenarios import LocalDeviceDiscoveryHypothesis, HypothesisEngine
 from intelligence.hypotheses.evidence import Evidence
 from intelligence.reputation.classifier import ReputationVector
 

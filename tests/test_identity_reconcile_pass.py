@@ -100,7 +100,7 @@ def main() -> None:
         fake_self = SimpleNamespace(
             state_manager=sm,
             ml_registry=None,
-            fp_engine=None,
+            familiarity=None,
             identity_manager=identity_manager,
             ips_mitigator=_FakeIpsMitigator(),
             evidence_store=_FakeEvidenceStore(),

@@ -102,7 +102,7 @@ check("safety: merge_into_canonical(x, x) is a no-op", sm.merge_into_canonical("
 
 fake_ml = _FakeMLRegistry()
 fake_fp = _FakeFPEngine()
-merged = sm.merge_into_canonical("orphan_id", "canon_id", ml_registry=fake_ml, fp_engine=fake_fp)
+merged = sm.merge_into_canonical("orphan_id", "canon_id", ml_registry=fake_ml, familiarity=fake_fp)
 check("merge_into_canonical() succeeds for a real orphan/canonical pair", merged)
 check("the orphan's own DeviceState is discarded (not blended)", not sm.has_device("orphan_id"))
 check("the canonical DeviceState survives untouched (still tracked)", sm.has_device("canon_id"))
@@ -116,7 +116,7 @@ check("the reverse _ip_to_device_id index now points the orphan's address at can
 check("ml_registry.discard_device() was called for the orphan with reason=\"merge\" (not "
       "migrate_device — that would have wrongly overwritten canonical's own live model)",
       fake_ml.discarded == [("orphan_id", "merge")] and fake_ml.migrated == [], f"discarded={fake_ml.discarded} migrated={fake_ml.migrated}")
-check("fp_engine.discard_device_profile() was called for the orphan with reason=\"merge\"",
+check("familiarity.discard_device_profile() was called for the orphan with reason=\"merge\"",
       fake_fp.discarded == [("orphan_id", "merge")])
 
 canon_after_merge = sm.get_or_create("canon_id", IPV4, "smart-tv")

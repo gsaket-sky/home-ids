@@ -37,7 +37,7 @@ INDEX_SCHEMA_VERSION = 2
 
 # --- confidence per source category ---------------------------------------------------------
 # HOW THIS STEERS THE ENGINE: ThreatIntel turns confidence into ti_risk as confidence * 4.0, and
-# fp_engine's Stage-1 hard-stop fires at ti_risk >= 2.0, i.e. confidence >= 0.5 => a single hit can
+# the CL-AFPE's Stage-1 hard-stop fires at ti_risk >= 2.0, i.e. confidence >= 0.5 => a single hit can
 # CONFIRM a threat on its own. So only indicators that are specific to malware/C2 get >= 0.5.
 # Everything that is merely "poor reputation" or "context" stays below 0.5: it still creates
 # reputation evidence (weak corroboration, needs a second independent evidence family), but can

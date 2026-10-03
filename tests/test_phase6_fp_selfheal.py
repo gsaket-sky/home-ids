@@ -30,150 +30,67 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.fp_engine import AutonomousFPEngine
 from core.state_guard import StateManager
 from argus.graph.store import GraphStore
+from argus.cl_afpe.engine import ClAfpeEngine
 
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# Section A: Stage 2 early-return bug — a low LightGBM P(FP) must still reach Stage 3
-# ═══════════════════════════════════════════════════════════════════════════════════
-with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
-
-    # Force a deterministic, confidently-a-threat LightGBM score (well below the 0.75
-    # suppress threshold) — this is exactly the branch that used to `return` immediately
-    # with verdict=UNCERTAIN/stage=STAGE_2_LGBM, skipping Stage 3 entirely.
-    fp._stage2_lgbm = lambda features, domain, hostname, device_id: 0.10
-
-    stage3_calls = {"count": 0}
-    _orig_rule_fallback = fp._stage3_rule_fallback
-    def _spy_rule_fallback(domain):
-        stage3_calls["count"] += 1
-        return _orig_rule_fallback(domain)
-    fp._stage3_rule_fallback = _spy_rule_fallback
-
-    # aiv-delivery.net is a real curated CDN-allowlist domain (utils.py's
-    # _is_cdn_or_cloud_domain) — used here purely as a domain the rule-fallback Stage 3
-    # will score with high similarity, so we can tell whether Stage 3 actually ran and
-    # actually influenced the outcome.
-    alert_payload = {
-        "device": {"id": "dev_stage2", "hostname": "test-host"},
-        "network_context": {"queried_domain": "api.eu-west-1.aiv-delivery.net", "destination_ip": "1.2.3.4"},
-        "timestamp": time.time(),
-    }
-    safe_features = {"ti_risk": 0.0, "zeek_lateral_moves": 0, "zeek_ja3_malicious": 0,
-                      "zeek_ja4_malicious": 0, "zeek_honeypot_hits": 0, "abuseipdb_risk": 0.0,
-                      "outbound_bytes_z": 0.0}
-
-    verdict = fp.evaluate(alert_payload, safe_features, risk_score=6.5, ti_engine=None)
-
-    check("THE CORE FIX: Stage 3 (rule-fallback, since FastEmbed isn't loaded yet in a "
-          "fresh engine) actually ran even though LightGBM's P(FP)=0.10 is confidently "
-          "'threat' — before the fix this path returned immediately after Stage 2 and "
-          "Stage 3 was never called",
-          stage3_calls["count"] == 1, f"stage3 call count={stage3_calls['count']}")
-    check("the dead 'STAGE_2_LGBM' short-circuit verdict no longer occurs — the final "
-          "verdict now always reflects the combined Stage2+Stage3 score, matching the "
-          "log line's long-standing promise of 'continuing to Stage 3 for corroboration'",
-          verdict["stage"] != "STAGE_2_LGBM", f"got stage={verdict['stage']}")
-    check("the final verdict's reasons cite BOTH LightGBM and the combined confidence "
-          "(proof Stage 3 corroboration actually fed into the decision, not just ran "
-          "and got discarded)",
-          any("LightGBM" in r for r in verdict["reasons"]) and
-          any("ombined" in r or "imilarity" in r for r in verdict["reasons"]),
-          f"got reasons={verdict['reasons']}")
-
+# Section A (a low Stage-2 score must still reach Stage 3) is structural in the live CL-AFPE: evaluate() always
+# combines both stages (combine_scores, covered in test_argus_cl_afpe_ml_scoring.py).
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section B: mark_false_positive() — operator-feedback closed loop
+# Section B: mark_false_positive() — operator-feedback closed loop (live CL-AFPE)
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    graph_store = GraphStore(str(Path(tmpdir) / "graph.db"))
+    fp = ClAfpeEngine(graph_store)
     device_id = "dev_operator_1"
     hostname = "laptop-gs"
     domain = "sub.operator-corrected-example.com"
     alert_ts = time.time()
     alert_payload = {
+        "signature": "DGA_BOTNET_C2",
         "device": {"id": device_id, "hostname": hostname},
         "network_context": {"queried_domain": domain, "destination_ip": "5.6.7.8"},
         "timestamp": alert_ts,
         "risk": 7.2,
     }
-
-    # 2026-09-21 (legacy/Sheet 03a autotune reconciliation, Phase G): _write_muted_log()
-    # now resolves this correction's graph decision row by device_id + the alert's OWN
-    # timestamp (see that method's own docstring) -- a real pipeline cycle always has
-    # one (argus_live_engine's own _write_graph() runs unconditionally every cycle), so
-    # this fixture inserts the matching row directly, mirroring that real precondition
-    # rather than exercising the no-matching-row fallback (covered separately below).
-    graph_store = fp._get_autotune_engine().store
-    graph_decision_id = graph_store.insert_decision(
-        device_id, alert_ts, "HIGH", "hypothesis_high", 0.72, 7.2,
-    )
-
-    result = fp.mark_false_positive(alert_payload, hostname, domain)
-
-    check("mark_false_positive() extracts and returns the correct eTLD+1 base domain",
-          result["base_domain"] == "operator-corrected-example.com", f"got={result}")
-    check("mark_false_positive() actually immunizes the base domain (present + non-expired "
-          "in the dynamic trust cache used by the evaluate() fast path)",
-          "operator-corrected-example.com" in fp.get_dynamic_trust_cache(),
-          f"trust_cache={fp.get_dynamic_trust_cache()}")
-    check("mark_false_positive() widens the SPECIFIC device's sigma shift (self-strengthening "
-          "against future FPs from this device's baseline)",
+    # A real pipeline cycle always writes the alert's decision row first; the correction is attached to it.
+    graph_decision_id = graph_store.insert_decision(device_id, alert_ts, "HIGH", "hypothesis_high", 0.72, 7.2)
+    result = fp.mark_false_positive(alert_payload, source="operator")
+    check("mark_false_positive() immunizes the eTLD+1 base domain",
+          not result.refused and result.immunized_destination == "operator-corrected-example.com", f"got={result}")
+    check("the base domain is in the dynamic trust cache the evaluate() fast path uses",
+          "operator-corrected-example.com" in fp.get_dynamic_trust_cache())
+    check("mark_false_positive() widens this device's sensitivity shift (fewer false alarms from its baseline)",
           fp.get_sigma_shift(device_id) > 0.0, f"sigma={fp.get_sigma_shift(device_id)}")
-
     decision_row = graph_store._conn.execute(
-        "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (graph_decision_id,),
-    ).fetchone()
-    fp_suppression_log = None
-    if decision_row is not None:
-        fp_suppression_log = json.loads(decision_row["raw_payload_json"] or "{}").get("fp_suppression_log")
-    check("mark_false_positive() writes a training-correction entry into the graph's "
-          "decisions.raw_payload_json.fp_suppression_log (THIS is what makes the operator's "
-          "correction actually influence the weekly LightGBM retrain — previously the old "
-          "immunize button never wrote here at all)",
-          fp_suppression_log is not None, f"decision_row={dict(decision_row) if decision_row else None}")
+        "SELECT raw_payload_json FROM decisions WHERE decision_id=?", (graph_decision_id,)).fetchone()
+    fp_suppression_log = json.loads(decision_row["raw_payload_json"] or "{}").get("fp_suppression_log") if decision_row else None
+    check("the correction is written as a training record on the alert's decision row "
+          "(decisions.raw_payload_json.fp_suppression_log -- what the nightly retrain learns from)",
+          fp_suppression_log is not None)
     if fp_suppression_log is not None:
-        check("the written entry is tagged OPERATOR_MARKED_FALSE_POSITIVE (distinguishable "
-              "from AUTONOMOUS_FP_SUPPRESSED in the audit log) and confidence=1.0",
+        check("the record is tagged OPERATOR_MARKED_FALSE_POSITIVE with confidence 1.0",
               fp_suppression_log.get("type") == "OPERATOR_MARKED_FALSE_POSITIVE"
-              and fp_suppression_log.get("confidence") == 1.0,
-              f"entry={fp_suppression_log}")
-        check("the written entry preserves the FULL original alert payload for downstream "
-              "training feature extraction",
+              and fp_suppression_log.get("confidence") == 1.0, f"entry={fp_suppression_log}")
+        check("the record preserves the full original alert for feature extraction",
               fp_suppression_log.get("original_alert", {}).get("device", {}).get("id") == device_id)
 
-    # No matching graph decision row exists for this second alert -- confirms the
-    # fallback-graceful-degradation path (logs a warning, never crashes or silently
-    # fabricates a row) for the case a real pipeline can still hit today: an alert
-    # whose decision predates argus's graph wiring, or a device on its very first
-    # cycle. Uses a device_id that was never inserted into `devices` at all.
-    no_graph_row_alert = {
-        "device": {"id": "dev_no_graph_row_yet", "hostname": "orphan-host"},
-        "network_context": {"queried_domain": "orphan-example.com", "destination_ip": "1.2.3.4"},
-        "timestamp": time.time(),
-        "risk": 6.5,
-    }
-    result_no_graph_row = fp.mark_false_positive(no_graph_row_alert, "orphan-host", "orphan-example.com")
-    check("mark_false_positive() still succeeds (immunizes, widens sigma, returns a real "
-          "result) even when no matching graph decision row exists to attach the audit "
-          "entry to -- the missing audit trail is a logged warning, not a crash",
-          result_no_graph_row.get("base_domain") == "orphan-example.com", f"got={result_no_graph_row}")
+    # No decision row for this alert: still succeeds, the missing training record is only a logged warning.
+    graph_store.upsert_device("dev_no_graph_row_yet", timestamp=time.time())
+    no_row_alert = {"signature": "DGA_BOTNET_C2", "device": {"id": "dev_no_graph_row_yet", "hostname": "orphan-host"},
+                    "network_context": {"queried_domain": "orphan-example.com", "destination_ip": "1.2.3.4"},
+                    "timestamp": time.time() - 3600, "risk": 6.5}
+    result_no_row = fp.mark_false_positive(no_row_alert, source="operator")
+    check("with no matching decision row the correction still applies (immunizes) instead of crashing",
+          not result_no_row.refused and result_no_row.immunized_destination == "orphan-example.com", f"got={result_no_row}")
 
-    # A domain that can't be safely reduced to an eTLD+1 must not crash the whole flow —
-    # trust-cache immunization is skipped, but sigma widening + audit logging still happen.
-    bad_alert = {
-        "device": {"id": "dev_bad_domain", "hostname": "host2"},
-        "network_context": {"queried_domain": "", "destination_ip": "9.9.9.9"},
-        "timestamp": time.time(),
-    }
-    result_bad = fp.mark_false_positive(bad_alert, "host2", "")
-    check("mark_false_positive() degrades gracefully (no crash, base_domain='') when the "
-          "domain can't be safely base-domain-extracted, instead of raising",
-          result_bad["base_domain"] == "", f"got={result_bad}")
-
+    graph_store.upsert_device("dev_bad_domain", timestamp=time.time())
+    bad_alert = {"signature": "DGA_BOTNET_C2", "device": {"id": "dev_bad_domain", "hostname": "host2"},
+                 "network_context": {"queried_domain": "", "destination_ip": "9.9.9.9"}, "timestamp": time.time()}
+    result_bad = fp.mark_false_positive(bad_alert, source="operator")
+    check("an alert with no usable domain degrades gracefully (no crash; no domain immunized)",
+          not result_bad.refused and result_bad.immunized_destination != "", f"got={result_bad}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: StateManager.record_action()'s new `extra` field

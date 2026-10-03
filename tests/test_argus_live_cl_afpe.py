@@ -10,8 +10,12 @@ Sections:
   E. LocalConfirmedIntel across processes: a write by another process is seen on the next operation, and saves
      are atomic (no temp file left behind).
   F. Per-device values come from the engine's graph metadata (sigma shift, profile thresholds).
-  D. evaluate_cl_afpe_live(): returns the engine's verdict; a raising engine falls back to fallback_evaluate with
-     the full context; with no fallback it re-raises instead of returning a fabricated verdict.
+  G. Device familiarity shared between the pipeline and the engine, persisted.
+  H. Confirmed-threat counts per device/signature; corrections written as training records.
+  I. One-time import of the earlier engine's flat files.
+  J. False-positive thresholds read from config, layered with the device profile and the autotuner.
+  D. evaluate_cl_afpe_live(): returns the engine's verdict; an engine error yields UNCERTAIN (never suppressed)
+     and is counted for the health manager.
 """
 import json
 import os
@@ -99,85 +103,119 @@ check("F: a profile entry the engine wrote is returned",
       live_engine.get_device_profile_threshold("pipeline_dev", "conn_abuse_unique_ip_threshold", 5.0) == 9.0)
 
 
+# --- G. shared device familiarity ---
+from intelligence.device_familiarity import DeviceFamiliarity  # noqa: E402
+fam = DeviceFamiliarity(str(state_dir))
+live_engine.configure_cl_afpe(model_dir=model_dir, local_intel=shared, familiarity=fam)
+engine = live_engine.get_cl_afpe_engine()
+check("G: the engine uses the injected familiarity store", engine.familiarity is fam)
+for _ in range(5):
+    fam.record_device_baseline_observation("pipeline_dev", domain_base="vendor.example")
+check("G: what the pipeline records is what the engine reads (5 observations = fully familiar)",
+      engine.get_baseline_familiarity("pipeline_dev", domain_base="vendor.example") == 1.0)
+fam.flush(force=True)
+check("G: familiarity survives a restart (saved atomically to state/device_familiarity.json)",
+      DeviceFamiliarity(str(state_dir)).get_baseline_familiarity("pipeline_dev", domain_base="vendor.example") == 1.0)
+
+# --- H. confirmed-threat counts and training records ---
+engine.record_confirmed_threat("pipeline_dev", "bad-c2.example", "", reason="test", signature="CONNECTION_ABUSE")
+check("H: a confirmed threat is counted per device, overall and per signature",
+      engine.get_confirmed_count("pipeline_dev") >= 1
+      and engine.get_confirmed_count("pipeline_dev", signature="CONNECTION_ABUSE") == 1)
+decision_id = _store.insert_decision("pipeline_dev", NOW + 50, "SUSPICIOUS", "hypothesis_suspicious", 0.4, 4.0)
+alert_h = _alert(signature="DGA_BOTNET_C2", domain="vendor-telemetry.example", features={})
+alert_h["timestamp"] = NOW + 50
+result_h = engine.mark_false_positive(alert_h, source="operator", now=NOW + 60)
+row = _store._conn.execute("SELECT raw_payload_json FROM decisions WHERE decision_id=?", (decision_id,)).fetchone()
+payload_h = json.loads(row["raw_payload_json"] or "{}")
+check("H: an operator correction is written as a training record on the alert's own decision row",
+      not result_h.refused and payload_h.get("fp_suppression_log", {}).get("type") == "OPERATOR_MARKED_FALSE_POSITIVE",
+      str(result_h))
+
+# --- I. one-time import of the earlier engine's flat files ---
+from argus.cl_afpe.state_import import import_legacy_state  # noqa: E402
+imp_dir = tmpdir / "import_state"
+imp_dir.mkdir()
+(imp_dir / "device_fp_profiles.json").write_text(json.dumps({
+    "old_dev": {"conn_abuse_unique_ip_threshold": {"value": 12.0, "baseline": 5.0},
+                "_baseline": {"ports": {"443": {"count": 7, "first_seen": 1, "last_seen": 2}}}}}), encoding="utf-8")
+(imp_dir / "fp_sigma_shifts.json").write_text(json.dumps({"old_dev": 0.75}), encoding="utf-8")
+(imp_dir / "confirmed_threat_counts.json").write_text(json.dumps({"old_dev": 3, "old_dev||PORT_SCAN": 2}), encoding="utf-8")
+fam_i = DeviceFamiliarity(str(imp_dir))
+stats_i = import_legacy_state(imp_dir, _store, fam_i)
+meta_i = _store.get_device_metadata("old_dev")
+check("I: thresholds, sensitivity shift and confirmed counts are imported into the graph",
+      meta_i.get("fp_profile", {}).get("conn_abuse_unique_ip_threshold", {}).get("value") == 12.0
+      and meta_i.get("sigma_shift") == 0.75
+      and meta_i.get("confirmed_threat_counts") == {"_total": 3, "PORT_SCAN": 2}, str(stats_i))
+check("I: familiarity counts are imported", fam_i.get_baseline_familiarity("old_dev", dest_port=443) == 1.0)
+check("I: each file is renamed so the import runs once",
+      not (imp_dir / "device_fp_profiles.json").exists() and (imp_dir / "device_fp_profiles.json.imported").exists())
+check("I: a second run imports nothing", not any(import_legacy_state(imp_dir, _store, fam_i).values()))
+
+# --- J. False-positive thresholds: config, then the device profile, then the autotuner ---
+from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
+
+
+class _FakeAutotuneJ:
+    def __init__(self):
+        self.values = {}
+
+    def get_active_value(self, parameter, device_id=None, default=None):
+        return self.values.get((parameter, device_id), self.values.get((parameter, None), default))
+
+
+_cfg_j = {"fp_combined_suppress_threshold": 0.9, "fp_combined_uncertain_threshold": 0.4}
+eng_j = ClAfpeEngine(_store, config_get=lambda k, d=None: _cfg_j.get(k, d))
+eng_j._autotune_engine = _FakeAutotuneJ()
+check("J: the configured global suppress threshold is used (not the built-in 0.80)",
+      eng_j.get_device_suppress_threshold("pipeline_dev") == 0.9)
+_cfg_j["fp_combined_suppress_threshold"] = 0.85
+check("J: a config change applies on the next read", eng_j.get_device_suppress_threshold("pipeline_dev") == 0.85)
+eng_j.apply_device_fp_profile("pipeline_dev", "fp_combined_suppress_threshold", 0.95, 0.85, "t", "r", now=NOW)
+check("J: the device's own profile value beats the global value",
+      eng_j.get_device_suppress_threshold("pipeline_dev") == 0.95)
+eng_j._autotune_engine.values[("fp_combined_suppress_threshold", "pipeline_dev")] = 0.7
+check("J: a promoted autotuner value (nightly calibration) wins",
+      eng_j.get_device_suppress_threshold("pipeline_dev") == 0.7)
+check("J: the uncertain threshold comes from config", eng_j.get_device_uncertain_threshold("pipeline_dev") == 0.4)
+eng_j._autotune_engine.values[("combined_uncertain_threshold", None)] = 0.5
+check("J: ...and a promoted autotuner value wins there too",
+      eng_j.get_device_uncertain_threshold("pipeline_dev") == 0.5)
+_profiles_j = _store.get_device_metadata_values("fp_profile")
+check("J: every device's corrected thresholds can be read in one pass (the dashboard gauges)",
+      _profiles_j.get("pipeline_dev", {}).get("fp_combined_suppress_threshold", {}).get("value") == 0.95)
+check("J: the live engine reads config", live_engine.get_cl_afpe_engine()._config_get is not None)
+
+# --- D. an engine error never suppresses: the alert is published as UNCERTAIN ---
+
+
 class _ExplodingEngine:
     def evaluate(self, *a, **kw):
         raise RuntimeError("simulated CL-AFPE failure")
 
 
-_real_get_engine = live_engine._get_cl_afpe_engine
-
-# --- D. evaluate_cl_afpe_live() (Workstream 2 live-flip adapter) ---
-
 alert_d = _alert(device_id="pipeline_dev", features={"zeek_honeypot_hits": 1})
 live_result = live_engine.evaluate_cl_afpe_live(
     alert_payload=alert_d, features=alert_d["features"],
-    decision={"state": "CRITICAL", "explanation": "Internal Honeypot Accessed"},
-    now=NOW + 10,
-)
-check("D: evaluate_cl_afpe_live() returns v13's OWN real computed verdict directly "
-      "(this IS the real suppression decision once flipped, not a comparison)",
+    decision={"state": "CRITICAL", "explanation": "Internal Honeypot Accessed"}, now=NOW + 10)
+check("D: evaluate_cl_afpe_live() returns the engine's own verdict",
       live_result.get("verdict") == "CONFIRMED_THREAT" and live_result.get("stage") == "STAGE_1_HARD_STOP")
-check("D: the returned shape matches AutonomousFPEngine.evaluate()'s real shape exactly "
-      "(verdict/confidence/calibrated_confidence/stage/reasons/suppress) -- a genuine "
-      "drop-in replacement, not an approximation pipeline.py would need adapting for",
+check("D: the verdict has the shape pipeline.py reads",
       set(live_result.keys()) >= {"verdict", "confidence", "calibrated_confidence", "stage", "reasons", "suppress"})
 
-# Fail-safe: a raising CL-AFPE engine falls back to fallback_evaluate, with the exact
-# params a real AutonomousFPEngine.evaluate() call needs (risk_score/ti_engine included,
-# even though ClAfpeEngine.evaluate() itself never uses them -- they only matter for
-# the fallback call pipeline.py's real fp_engine.evaluate() would need).
-fallback_calls = []
-
-
-def _fake_fallback(alert_payload, features, risk_score, ti_engine, decision, asn_owner):
-    fallback_calls.append({
-        "alert_payload": alert_payload, "features": features, "risk_score": risk_score,
-        "ti_engine": ti_engine, "decision": decision, "asn_owner": asn_owner,
-    })
-    return {"verdict": "UNCERTAIN", "confidence": 0.5, "calibrated_confidence": None,
-            "stage": "FALLBACK", "reasons": ["v13 raised, fell back to v1"], "suppress": False}
-
-
-live_engine._get_cl_afpe_engine = lambda: _ExplodingEngine()
+_real_get_engine = live_engine.get_cl_afpe_engine
+_before = live_engine.engine_error_status().get("cl_afpe", {}).get("count", 0)
+live_engine.get_cl_afpe_engine = lambda: _ExplodingEngine()
 try:
-    fallback_result = live_engine.evaluate_cl_afpe_live(
-        alert_payload=alert_d, features=alert_d["features"], risk_score=7.5,
-        ti_engine="sentinel_ti_engine", decision={"state": "CRITICAL"}, asn_owner="Google LLC",
-        fallback_evaluate=_fake_fallback, now=NOW + 11,
-    )
+    err_result = live_engine.evaluate_cl_afpe_live(alert_payload=alert_d, features=alert_d["features"], now=NOW + 11)
 finally:
-    live_engine._get_cl_afpe_engine = _real_get_engine
-
-check("D: a raising CL-AFPE engine falls back to fallback_evaluate() instead of "
-      "propagating -- pipeline.py's real alert publish must never crash because v13's "
-      "CL-AFPE had a bug, exactly the same safety property the main decision-engine "
-      "adapter (evaluate()) already has",
-      len(fallback_calls) == 1 and fallback_result.get("stage") == "FALLBACK")
-check("D: the fallback call received the REAL risk_score/ti_engine/asn_owner this cycle "
-      "had -- a fallback that silently dropped them would call v1's real fp_engine.evaluate() "
-      "with wrong context",
-      fallback_calls[0]["risk_score"] == 7.5
-      and fallback_calls[0]["ti_engine"] == "sentinel_ti_engine"
-      and fallback_calls[0]["asn_owner"] == "Google LLC")
-
-# No fallback provided -- must re-raise, never silently return None/{} that pipeline.py
-# could mistake for a real (falsy-suppress) verdict.
-live_engine._get_cl_afpe_engine = lambda: _ExplodingEngine()
-raised_no_fallback = False
-try:
-    live_engine.evaluate_cl_afpe_live(
-        alert_payload=alert_d, features=alert_d["features"], now=NOW + 12,
-    )
-except RuntimeError:
-    raised_no_fallback = True
-finally:
-    live_engine._get_cl_afpe_engine = _real_get_engine
-
-check("D: REGRESSION GUARD -- with no fallback_evaluate supplied, a raising engine "
-      "re-raises rather than returning a fabricated verdict pipeline.py could act on "
-      "by mistake",
-      raised_no_fallback is True)
-
+    live_engine.get_cl_afpe_engine = _real_get_engine
+check("D: a raising engine yields UNCERTAIN and is never suppressed -- the alert is published normally",
+      err_result.get("verdict") == "UNCERTAIN" and err_result.get("suppress") is False
+      and err_result.get("stage") == "ENGINE_ERROR")
+check("D: the error is counted for the health manager",
+      live_engine.engine_error_status().get("cl_afpe", {}).get("count", 0) == _before + 1)
 
 print()
 if FAILURES:

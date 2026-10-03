@@ -1,6 +1,6 @@
 """Builds the real EnginePipeline in a temp dir (no network services needed) and checks its argus wiring: the
-identity manager, ONE shared local confirmed-intel store for the argus CL-AFPE and the pipeline's HIGH/CRITICAL feed,
-the one-time merge of the store the argus CL-AFPE kept while it ran in shadow, and the per-device lookups.
+identity manager, the CL-AFPE engine sharing the pipeline's confirmed-intel and familiarity stores, the one-time merge
+of the store the argus CL-AFPE kept while it ran in shadow, and the per-device lookups.
 
 Run directly: `python tests/test_pipeline_argus_wiring.py` (exits via os._exit: the pipeline starts daemon threads)."""
 import json, os, sys, tempfile, time
@@ -36,14 +36,19 @@ def check(name, cond):
 
 
 check("identity manager is the argus LiveIdentityManager", isinstance(p.identity_manager, LiveIdentityManager))
-engine = live._get_cl_afpe_engine()
-check("argus CL-AFPE uses the pipeline's own confirmed-intel store", engine.local_intel is p.fp_engine.local_intel)
-check("retired argus store merged into the shared one", p.fp_engine.local_intel.check("ip", "198.51.100.7") is not None)
+engine = live.get_cl_afpe_engine()
+check("the pipeline's CL-AFPE is the engine singleton", p.cl_afpe is engine)
+check("CL-AFPE uses the pipeline's confirmed-intel store", engine.local_intel is p.local_intel)
+check("CL-AFPE uses the pipeline's familiarity store", engine.familiarity is p.familiarity)
+check("threat intel's trust-cache allowlist reads CL-AFPE", getattr(p.ti_engine, "trust_cache_provider", engine) is engine)
+check("retired argus store merged into the shared one", p.local_intel.check("ip", "198.51.100.7") is not None)
 check("retired store renamed", (state / "v13_cl_afpe" / "local_confirmed_intel.json.merged").exists())
-p.fp_engine.local_intel.record("domain", "pipeline-feed.test", "devX", reason="HIGH_CRITICAL_DECISION")
-check("HIGH/CRITICAL feed (fp_engine store) is visible to the argus Stage-1 check",
-      engine.local_intel.check("domain", "pipeline-feed.test") is not None)
-check("sigma shift comes from the argus engine", live.get_device_sigma_shift("nobody") == 0.0)
+engine.record_confirmed_threat("devX", "pipeline-feed.test", "", reason="HIGH_CRITICAL_DECISION", signature="X")
+check("HIGH/CRITICAL feed is visible to the CL-AFPE Stage-1 check", engine.local_intel.check("domain", "pipeline-feed.test") is not None)
+check("sigma shift comes from CL-AFPE", live.get_device_sigma_shift("nobody") == 0.0)
 check("_device_threshold default path", p._device_threshold("nobody", "conn_abuse_unique_ip_threshold", 5.0) == 5.0)
+check("no earlier-engine attributes remain", not hasattr(p, "fp_engine") and not hasattr(p, "decision_engine"))
+p._export_cl_afpe_gauges()
+check("gauge export runs", True)
 print("SMOKE", "OK" if ok else "FAILED")
 sys.stdout.flush(); os._exit(0 if ok else 1)

@@ -275,7 +275,7 @@ DEFAULT_CONFIG = {
     # uninterrupted before it's escalated to HIGH.
     "suspicious_escalation_seconds": 600.0,
     # PHASE 3 (closed-loop autonomous actions): non-blocking "🔔 Auto-action" Telegram
-    # notifications with a one-tap [Revoke] button, sent whenever fp_engine autonomously
+    # notifications with a one-tap [Revoke] button, sent whenever the CL-AFPE autonomously
     # immunizes a NEW domain. fp_revoke_action_ttl_seconds bounds how long the revoke
     # option stays offered.
     "fp_revoke_notifications_enabled": True,

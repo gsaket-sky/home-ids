@@ -14,7 +14,7 @@ for entries that should never have been recordable as "confirmed malicious":
     string/structural tests -- degrades gracefully (skips this category, doesn't
     crash) if the ASN mmdb isn't configured/available.
 
-fp_engine.py's record_confirmed_threat() and Stage-1 Check 7 already refuse to ever
+the CL-AFPE's record_confirmed_threat() and Stage-1 Check 7 already refuse to ever
 write or honor any of these three categories going forward -- this tool exists for two
 ongoing reasons, not just one-time historical cleanup:
   1. Those guards only protect entries ALREADY recognized as safe. A different,

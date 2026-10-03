@@ -67,8 +67,8 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.hypotheses.evidence import ATTACK_SHAPED_EVIDENCE_TYPES
-from intelligence.hypotheses.engine import DeviceProfileBenignHypothesis
+from argus.hypotheses.engine import DeviceProfileBenignHypothesis
+ATTACK_SHAPED_EVIDENCE_TYPES = DeviceProfileBenignHypothesis.ATTACK_SHAPED_EVIDENCE_TYPES
 
 
 # ═══════════════════════════════════════════════════════════════════════════════════
@@ -76,9 +76,10 @@ from intelligence.hypotheses.engine import DeviceProfileBenignHypothesis
 # ═══════════════════════════════════════════════════════════════════════════════════
 print("--- Section A: ATTACK_SHAPED_EVIDENCE_TYPES single source of truth ---")
 
-check("DeviceProfileBenignHypothesis's class attribute IS the shared module-level "
-      "constant (same object, not a re-declared duplicate that could drift)",
-      DeviceProfileBenignHypothesis._ATTACK_SHAPED_EVIDENCE_TYPES is ATTACK_SHAPED_EVIDENCE_TYPES)
+_validator_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "argus" / "llm_review" / "validator.py").read_text(encoding="utf-8")
+check("the AI advisor's validator reads the SAME set the benign device-profile hypothesis uses "
+      "(one definition, no re-declared duplicate that could drift)",
+      "DeviceProfileBenignHypothesis.ATTACK_SHAPED_EVIDENCE_TYPES" in _validator_src)
 
 check("the set is non-trivial and includes the exact types the live incident involved "
       "(arp_sweep, zeek_lateral_scan) plus zeek_notice_medium/malicious_ja3/ja4 -- "

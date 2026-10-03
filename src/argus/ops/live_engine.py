@@ -1,21 +1,17 @@
 """
-live_engine.py - the actual swap-in adapter `pipeline.py` calls instead of
-`core/decision_engine.py`'s `DecisionEngine.evaluate()`, per the v13 fast-cutover plan
-(Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md, the entry recording this cutover).
+live_engine.py - the engine's decision path: pipeline.py calls evaluate() for every device cycle and
+evaluate_cl_afpe_live() for every alert.
 
-Converts v-current's real per-cycle Evidence/features into v13 Evidence v2 (mirroring
-`src/v13/ingest/sources.py`'s own `fallback_context` split exactly, since pipeline.py's
-real detectors have the same `zeek_exfiltration`/`zeek_beaconing` destination gap
-`sources.py` already works around -- see that file's own A2 comment) and calls v13's
-own `DecisionEngine.evaluate()`, now the LIVE decision path, not a shadow comparison.
+evaluate() converts the cycle's Evidence/features into graph Evidence (the detectors' destination gap for
+zeek_exfiltration/zeek_beaconing is filled from features), merges it with the device's recent graph history, adds
+graph-derived evidence (coordinated targeting, peer deviation, ...) and baseline evidence, and calls the argus
+DecisionEngine.
 
-Dependency direction stays one-way (core -> v13, never v13 -> core): this module never
-imports `core.decision_engine` itself. The caller (`pipeline.py`) passes its own
-v-current `evaluate` as `fallback_evaluate`, used ONLY if v13's engine raises. This is
-the one piece of the old per-mechanism-flip caution machinery kept from the superseded
-plan -- a fail-safe costs nothing and this project always keeps an escape hatch. Any
-fallback firing is logged loudly (never silent) since it should never happen in normal
-operation and would mean something needs investigating.
+IF THE ENGINE RAISES, the cycle is not decided by anything else: evaluate() returns a "not evaluated" decision
+(BENIGN, no action, decision_path "engine_error") and evaluate_cl_afpe_live() returns UNCERTAIN (the alert is
+published normally, never suppressed). The evidence stays in the graph for the next cycle, and engine_error_status()
+lets the health manager report the failure. A fallback to a different engine would decide that cycle under
+different rules -- a predictable no-action result is safer.
 
 GRAPH WRITE + WINDOWED READ (v13 full-architecture plan, Phase 1): when `device_id` is
 supplied, every call also (a) queries `RollingWindowView.evidence_in_window()` for that
@@ -68,13 +64,14 @@ from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import MLScorer
 from config import CONFIG
 from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.device_familiarity import DeviceFamiliarity
 from intelligence.reputation.classifier import ReputationClassifier
 from utils import is_cloud_cdn_provider_org
 
 LOGGER = logging.getLogger("home_ids.v13_live_engine")
 
 
-# The longest TTL hypotheses/engine.py's own compute_freshness() honors (the
+# The longest TTL argus/hypotheses/engine.py's own compute_freshness() honors (the
 # "reputation" independence_family, 86400s) -- see the module docstring above for why
 # querying up to this bound, not a shorter one, is the correct design.
 _GRAPH_QUERY_WINDOW_SECONDS = 86400
@@ -110,7 +107,7 @@ _last_decision_id: Dict[str, str] = {}
 # tuning constants. Each mirrors a value already established elsewhere in this codebase
 # rather than inventing a new number: the coordinated-targeting window matches
 # RollingWindowView's own SHORT_WINDOW_SECONDS ("within a short window," the plan's own
-# phrasing); the reputation-propagation TTL matches hypotheses/engine.py's own
+# phrasing); the reputation-propagation TTL matches argus/hypotheses/engine.py's own
 # _REPUTATION_TTL_SECONDS (the same 86400s bound compute_freshness() already applies to
 # every other "reputation" family item, so a propagated verdict ages out on the same
 # schedule a directly-observed one would); the first-contact lookback matches
@@ -865,7 +862,7 @@ def _inject_peer_deviation_evidence(device_id: str, device_type: str, ts: float)
     well-established, low-false-positive correlation concepts) -- real cohort
     variance (two very different real-world usage patterns sharing one
     device_type) could produce a real false positive with no live tuning data
-    yet. PeerDeviationHypothesis (hypotheses/engine.py) is deliberately capped
+    yet. PeerDeviationHypothesis (argus/hypotheses/engine.py) is deliberately capped
     at a SUSPICIOUS ceiling on its own, never independently reaching HIGH,
     reflecting that lower confidence explicitly rather than silently trusting
     an unvalidated number the way an established signal would be.
@@ -1043,11 +1040,11 @@ def _inject_baseline_evidence(device_id: str, features: dict, fresh_v2: List, ts
 
 def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
              baseline_familiarity: float = 0.0, features: Optional[dict] = None,
-             is_safe: bool = False, fallback_evaluate=None,
+             is_safe: bool = False,
              device_id: Optional[str] = None, now: Optional[float] = None,
              geoip_engine=None) -> Dict[str, Any]:
     """The live call site `pipeline.py` uses in place of
-    `core/decision_engine.py`'s `DecisionEngine.evaluate()`. Same positional/keyword
+    `argus/decision/engine.py`'s `DecisionEngine.evaluate()`. Same positional/keyword
     shape as v-current's own `evaluate()` (plus the new, optional `device_id`/`now`)
     so the original call site swap in pipeline.py stayed a one-line change; passing
     `device_id` is what opts a call into the graph read/write behavior described in
@@ -1209,23 +1206,47 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         return decision
     except Exception as e:
         LOGGER.error(
-            "Argus decision engine raised %s -- falling back to core/decision_engine.py for this cycle. "
-            "This should never happen in normal operation; investigate.",
-            e, exc_info=True,
+            "Decision engine raised %s -- this cycle is not evaluated (no action); the evidence stays for the "
+            "next cycle. This should never happen in normal operation; investigate.", e, exc_info=True,
         )
-        if fallback_evaluate is not None:
-            return fallback_evaluate(
-                active_evidence_v1, rep_vector, device_type, baseline_familiarity,
-                features=features, is_safe=is_safe,
-            )
-        raise
+        _note_engine_error("decision", e)
+        return not_evaluated_decision(str(e))
+
+
+# --- engine errors (read by the health manager) --------------------------------------------------------------------
+
+_engine_errors: Dict[str, Dict[str, Any]] = {}
+
+
+def _note_engine_error(engine: str, exc: Exception) -> None:
+    entry = _engine_errors.setdefault(engine, {"count": 0})
+    entry["count"] += 1
+    entry["last_error_at"] = time.time()
+    entry["last_error"] = f"{type(exc).__name__}: {exc}"[:300]
+
+
+def engine_error_status() -> Dict[str, Dict[str, Any]]:
+    """{"decision"|"cl_afpe": {"count", "last_error_at", "last_error"}} since this process started."""
+    return {k: dict(v) for k, v in _engine_errors.items()}
+
+
+def not_evaluated_decision(reason: str) -> Dict[str, Any]:
+    """The result of a cycle the decision engine could not evaluate: no alert, no action."""
+    return {
+        "state": "BENIGN", "action": "none", "threat_confidence": 0.0,
+        "explanation": "Not evaluated (decision engine error)", "decision_path": "engine_error",
+        "independent_sources": 0, "evidence_families": [], "evidence_types": [], "winning_evidence": [],
+        "attack_evidence": [], "hypotheses": {}, "hypothesis_destination_ids": [], "hypothesis_weight": 0.0,
+        "evidence_verification_required": False,
+        "reasoning_trail": [f"Decision engine error: {reason}"], "_engine_error": True,
+    }
 
 
 # ==============================================================================
 # CL-AFPE (the false-positive engine) wiring
 #
 # The engine's verdict is computed at a later point in pipeline.py's per-cycle flow than the decision above, so it
-# has its own entry point here, evaluate_cl_afpe_live(), with the same fail-safe fallback shape as evaluate().
+# has its own entry point here, evaluate_cl_afpe_live(), with the same no-fallback error handling as evaluate().
 #
 # Shared threat memory: the local confirmed-intel store (intelligence/local_intel.py) is ONE store,
 # state/local_confirmed_intel.json, used by this engine's Stage-1 check, by pipeline.py's HIGH/CRITICAL feed, by the
@@ -1249,20 +1270,30 @@ _RETIRED_LOCAL_INTEL_SUBDIR = "v13_cl_afpe"
 
 _cl_afpe_engine: Optional[ClAfpeEngine] = None
 _shared_local_intel: Optional[LocalConfirmedIntel] = None
+_shared_familiarity: Optional[DeviceFamiliarity] = None
+
+
+class _ConfiguredSafeIps:
+    """config.yaml's safe_ips (router, NAS, this host, ...), read live: never recorded as confirmed threats."""
+    def __contains__(self, ip) -> bool:
+        return ip in set(CONFIG.get("safe_ips", []) or [])
 
 
 def configure_cl_afpe(model_dir: Optional[str] = None, local_intel_dir: Optional[str] = None,
-                      local_intel: Optional[LocalConfirmedIntel] = None) -> None:
-    """Call once at startup. `local_intel` shares the caller's LocalConfirmedIntel instance (one store, one
-    in-memory copy per process); `local_intel_dir` points a fresh one at another directory. Forces re-init of the
-    lazy singleton."""
-    global _CL_AFPE_MODEL_DIR, _CL_AFPE_LOCAL_INTEL_DIR, _cl_afpe_engine, _shared_local_intel
+                      local_intel: Optional[LocalConfirmedIntel] = None,
+                      familiarity: Optional[DeviceFamiliarity] = None) -> None:
+    """Call once at startup. `local_intel` / `familiarity` share the caller's instances (one store, one in-memory
+    copy per process); `local_intel_dir` points a fresh confirmed-intel store at another directory. Forces re-init
+    of the lazy singleton."""
+    global _CL_AFPE_MODEL_DIR, _CL_AFPE_LOCAL_INTEL_DIR, _cl_afpe_engine, _shared_local_intel, _shared_familiarity
     if model_dir is not None:
         _CL_AFPE_MODEL_DIR = model_dir
     if local_intel_dir is not None:
         _CL_AFPE_LOCAL_INTEL_DIR = local_intel_dir
     if local_intel is not None:
         _shared_local_intel = local_intel
+    if familiarity is not None:
+        _shared_familiarity = familiarity
     _cl_afpe_engine = None
 
 
@@ -1281,20 +1312,28 @@ def merge_retired_local_intel(local_intel: LocalConfirmedIntel, state_dir) -> in
     return merged
 
 
-def _get_cl_afpe_engine() -> ClAfpeEngine:
+def get_cl_afpe_engine() -> ClAfpeEngine:
+    """The process's false-positive engine (lazy singleton on the configured graph store)."""
     global _cl_afpe_engine
     if _cl_afpe_engine is None:
         store = _get_graph_store()
         local_intel = _shared_local_intel or LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
         ml_scorer = MLScorer(_CL_AFPE_MODEL_DIR)
-        _cl_afpe_engine = ClAfpeEngine(store, local_intel=local_intel, ml_scorer=ml_scorer)
+        _cl_afpe_engine = ClAfpeEngine(
+            store, local_intel=local_intel, ml_scorer=ml_scorer, familiarity=_shared_familiarity,
+            safe_ips=_ConfiguredSafeIps(),
+            lateral_targets_threshold=lambda: int(CONFIG.get("lateral_movement_unique_targets_threshold", 2)),
+            config_get=CONFIG.get)
     return _cl_afpe_engine
+
+
+_get_cl_afpe_engine = get_cl_afpe_engine   # older name, kept for callers and tests
 
 
 def get_device_sigma_shift(device_id: str) -> float:
     """The device's cumulative sensitivity shift, as the false-positive engine maintains it (graph metadata)."""
     try:
-        return _get_cl_afpe_engine().get_sigma_shift(device_id)
+        return get_cl_afpe_engine().get_sigma_shift(device_id)
     except Exception as e:
         LOGGER_CL_AFPE.warning("sigma shift lookup failed for %s: %s", device_id, e)
         return 0.0
@@ -1304,7 +1343,7 @@ def get_device_profile_threshold(device_id: str, key: str, default: float) -> Op
     """A per-device threshold the false-positive engine raised after corrections (graph metadata `fp_profile`), or
     None when it has none for this device -- the caller then falls back to older stores / its own default."""
     try:
-        engine = _get_cl_afpe_engine()
+        engine = get_cl_afpe_engine()
         sentinel = object()
         value = engine._get_device_profile_value(device_id, key, sentinel)
         return None if value is sentinel else float(value)
@@ -1313,28 +1352,20 @@ def get_device_profile_threshold(device_id: str, key: str, default: float) -> Op
         return None
 
 
-def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float = 0.0,
-                            ti_engine=None, decision: Optional[dict] = None, asn_owner: str = "",
-                            fallback_evaluate=None, now: Optional[float] = None) -> Dict[str, Any]:
+def evaluate_cl_afpe_live(alert_payload: dict, features: dict, decision: Optional[dict] = None,
+                          asn_owner: str = "", now: Optional[float] = None) -> Dict[str, Any]:
     """The false-positive engine's verdict for one alert -- the value pipeline.py acts on (suppress/publish,
-    ML-registry learn/reject, alerts.json's fp_verdict). `risk_score`/`ti_engine` are only passed through to
-    `fallback_evaluate` (the earlier AutonomousFPEngine) if this engine raises, so a failure degrades to the older
-    verdict for that cycle instead of dropping the alert."""
+    ML-registry learn/reject, alerts.json's fp_verdict). If the engine raises, the alert is published normally as
+    UNCERTAIN (never suppressed) and the failure is reported to the health manager."""
     ts = now if now is not None else time.time()
     try:
-        engine = _get_cl_afpe_engine()
-        return engine.evaluate(alert_payload, features, decision=decision, asn_owner=asn_owner, now=ts)
+        return get_cl_afpe_engine().evaluate(alert_payload, features, decision=decision, asn_owner=asn_owner, now=ts)
     except Exception as e:
-        LOGGER_CL_AFPE.error(
-            "CL-AFPE evaluation raised %s -- falling back to AutonomousFPEngine for this cycle. "
-            "This should never happen in normal operation; investigate.", e, exc_info=True,
-        )
-        if fallback_evaluate is not None:
-            return fallback_evaluate(
-                alert_payload=alert_payload, features=features, risk_score=risk_score,
-                ti_engine=ti_engine, decision=decision, asn_owner=asn_owner,
-            )
-        raise
+        LOGGER_CL_AFPE.error("CL-AFPE evaluation raised %s -- alert published unsuppressed (UNCERTAIN). "
+                             "This should never happen in normal operation; investigate.", e, exc_info=True)
+        _note_engine_error("cl_afpe", e)
+        return {"verdict": "UNCERTAIN", "confidence": 0.5, "calibrated_confidence": None, "stage": "ENGINE_ERROR",
+                "reasons": [f"False-positive engine error: {e}"], "suppress": False}
 
 
 _shadow_evaluator = None

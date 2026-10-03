@@ -51,10 +51,12 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from core.decision_engine import DecisionEngine
+from argus_scenarios import DecisionEngine
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore
 from intelligence.reputation.classifier import ReputationClassifier, ReputationVector
-from intelligence.fp_engine import AutonomousFPEngine
+from argus.cl_afpe.engine import ClAfpeEngine
+from argus.graph.store import GraphStore
+from intelligence.local_intel import LocalConfirmedIntel
 from utils import is_cloud_cdn_provider_org
 
 de = DecisionEngine()
@@ -88,7 +90,7 @@ check("REGRESSION GUARD: an unrelated hosting provider is NOT swept in by the ne
 # end-to-end -- an Apple-owned IP is refused, an unrelated one is still recorded
 # ═══════════════════════════════════════════════════════════════════════════════════
 with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-    fp = AutonomousFPEngine(config={}, state_dir=tmpdir)
+    fp = ClAfpeEngine(GraphStore(str(_PathForSysPath(tmpdir) / 'graph.db')), local_intel=LocalConfirmedIntel(tmpdir))
 
     apple_protected = fp._is_ip_protected_from_confirmed_intel("17.57.146.55", asn_owner="Apple Inc.")
     check("_is_ip_protected_from_confirmed_intel('17.57.146.55', asn_owner='Apple Inc.') is now True",
@@ -142,10 +144,19 @@ lateral_scan_evidence = fresh_store([
     Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_corrob5",
              value=5.0, confidence=0.9, independence_group="zeek_network"),
 ], "dev_corrob5")
-decision_corroborated = de.evaluate(lateral_scan_evidence, rep_bare_abuse)
-check("verified_ioc=False but corroborated by real behavioral evidence (attack_score > "
-      "benign_score, >=1 independent source) reaches CRITICAL / 'Corroborated Reputation "
-      "Signal' -- a real signal, just not a genuine curated IOC match",
+decision_one_family = de.evaluate(lateral_scan_evidence, rep_bare_abuse)
+check("verified_ioc=False with only ONE independent behavioural family stays SUSPICIOUS -- an unverified "
+      "tier-5 score needs two independent families before it may block",
+      decision_one_family["state"] == "SUSPICIOUS", f"got {decision_one_family}")
+two_family_evidence = fresh_store([
+    Evidence(type="zeek_lateral_scan", source="zeek", timestamp=time.time(), device="dev_corrob5b",
+             value=5.0, confidence=0.9, independence_group="zeek_network"),
+    Evidence(type="dns_dga_burst", source="threat_signals", timestamp=time.time(), device="dev_corrob5b",
+             value=20.0, confidence=0.9, independence_group="dns"),
+], "dev_corrob5b")
+decision_corroborated = de.evaluate(two_family_evidence, rep_bare_abuse)
+check("verified_ioc=False corroborated by two independent behavioural families (attack > benign) reaches "
+      "CRITICAL / 'Corroborated Reputation Signal' -- a real signal, just not a curated IOC match",
       decision_corroborated["state"] == "CRITICAL"
       and decision_corroborated["explanation"] == "Corroborated Reputation Signal",
       f"got {decision_corroborated}")

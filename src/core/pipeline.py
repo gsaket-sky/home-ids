@@ -38,7 +38,7 @@ from intelligence.reputation.classifier import ReputationClassifier
 from intelligence.detectors.dns_behavior import DNSBehaviorDetector
 from intelligence.detectors.zeek_network import ZeekNetworkDetector
 from intelligence.detectors.threat_signals import ThreatSignalDetector  # PHASE 1
-from core.decision_engine import DecisionEngine, DecisionState
+from argus.decision.engine import DecisionState
 from core.incident_tracker import IncidentTracker  # VERSION 10 (incident aggregation)
 from incident_key import incident_key as _incident_key
 from mitigation.alerts import AlertManager, AlertJSONWriter
@@ -48,7 +48,9 @@ from middleware.humanize import resolve_destination_info
 from intelligence.threat_intel import ThreatIntel, AbuseIPDB, VirusTotalClient
 from intelligence.geoip import GeoIPEngine
 from intelligence.ml_engine import MLRegistry
-from intelligence.fp_engine import AutonomousFPEngine  # CL-AFPE: Closed-Loop Autonomous FP Engine
+from intelligence.device_familiarity import DeviceFamiliarity
+from intelligence.local_intel import LocalConfirmedIntel
+from argus.cl_afpe.state_import import import_legacy_state
 from argus.ops import live_engine as argus_live_engine  # argus fast cutover -- see Documentation/ARGUS_ARCHITECTURE.md
 from argus.identity.live_manager import LiveIdentityManager  # v13 full-architecture plan, Phase 3
 from argus.config.trust_anchors import bootstrap_trust_anchors, load_hardware_profile  # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors is now auto-discovered/authoritative, not hand-configured-only (see bootstrap_trust_anchors()'s own docstring for the gateway-continuity safety guard)
@@ -81,6 +83,10 @@ from metrics import alerts_total, ti_ioc_hits_total, ips_pihole_status, ips_rout
 from metrics import (
     fp_engine_evaluations_total, fp_engine_suppressed_total, fp_engine_confirmed_threats_total,
     fp_engine_confidence_score, fp_engine_domains_immunized_total, cl_afpe_verdicts_total,
+    fp_engine_stage3_embed_hits, fp_engine_stage2_lgbm_hits, fp_engine_trust_cache_size, fp_engine_lgbm_model_status,
+    fp_engine_embed_model_status, local_confirmed_intel_size, local_confirmed_intel_hits_total, engine_errors_total,
+    autotune_conn_abuse_threshold_effective, autotune_long_conn_threshold_effective,
+    autotune_device_profile_correction_total,
 )
 
 # Argus CL-AFPE stages that mean "hard-stopped: strong evidence, never suppressible".
@@ -88,14 +94,8 @@ CL_AFPE_HARD_STOP_STAGES = frozenset({"STAGE_1_HARD_STOP", "TRUST_CACHE_OVERRIDD
 
 
 def record_cl_afpe_verdict(fp_verdict: dict, alert_payload: dict) -> None:
-    """Prometheus accounting for one Argus CL-AFPE verdict (2026-09-23).
-
-    The home_ids_fp_* counters were only ever incremented inside the legacy
-    intelligence/fp_engine.py evaluate(), which no longer runs once
-    cl_afpe_engine=argus -- so every false-positive panel read a false 0 while ~330
-    alerts/day were really being suppressed. Kept out of argus/ itself (which stays
-    free of Prometheus); the caller skips this when Argus fell back to the legacy
-    engine, since that path already counts for itself."""
+    """Prometheus accounting for one CL-AFPE verdict (the home_ids_fp_* metrics). Kept out of argus/ itself,
+    which stays free of Prometheus."""
     try:
         stage = str(fp_verdict.get("stage") or "UNKNOWN")
         verdict = str(fp_verdict.get("verdict") or "UNKNOWN")
@@ -103,8 +103,14 @@ def record_cl_afpe_verdict(fp_verdict: dict, alert_payload: dict) -> None:
         cl_afpe_verdicts_total.labels(stage=stage, verdict=verdict).inc()
         if fp_verdict.get("suppress"):
             fp_engine_suppressed_total.inc()
+            if fp_verdict.get("stage_hit") == "embed":
+                fp_engine_stage3_embed_hits.inc()
+            elif fp_verdict.get("stage_hit") == "lgbm":
+                fp_engine_stage2_lgbm_hits.inc()
         if stage in CL_AFPE_HARD_STOP_STAGES:
             fp_engine_confirmed_threats_total.inc()
+            if any(str(r).startswith("Local confirmed-threat match") for r in fp_verdict.get("reasons") or []):
+                local_confirmed_intel_hits_total.inc()   # another device's confirmed threat protected this one
         confidence = fp_verdict.get("confidence")
         device = alert_payload.get("device") or {}
         if isinstance(confidence, (int, float)):
@@ -166,7 +172,7 @@ def _count_local_device_discovery_requests(zeek_fx, client_ip: str) -> int:
     see _LOCAL_DEVICE_DISCOVERY_URI_PATTERNS. Reuses the exact same zeek_fx.
     get_http_reqs() data source pipeline.py's own alert-display code (recent_http_reqs)
     already reads; this just also reads it at evidence-gathering time, not only at
-    alert-build time, so decision_engine.py's benign-hypothesis track can weigh it."""
+    alert-build time, so argus/decision/engine.py's benign-hypothesis track can weigh it."""
     if not zeek_fx or not client_ip:
         return 0
     count = 0
@@ -630,7 +636,7 @@ def _reapply_device_type_overrides(state_manager: Any, identity_manager: Any,
 # real fired alert): every CL-AFPE Stage-1 hard-stop got the identical "matched a
 # known-bad signature directly" confidence text below, regardless of WHICH of the
 # 6-8 checks in _stage1_hard_stop() actually fired (argus/cl_afpe/engine.py and
-# intelligence/fp_engine.py, same trigger-message wording in both, confirmed by
+# argus/cl_afpe/engine.py, same trigger-message wording in both, confirmed by
 # direct read). Most of those checks genuinely are a signature/indicator match
 # (ThreatIntel IOC, malicious JA3/JA4 fingerprint, a real honeypot touch, an
 # AbuseIPDB blacklist hit, a prior locally-confirmed threat) -- but two are purely
@@ -932,7 +938,6 @@ class EnginePipeline:
         self.dns_detector = DNSBehaviorDetector()
         self.zeek_detector = ZeekNetworkDetector()
         self.threat_signal_detector = ThreatSignalDetector()  # PHASE 1
-        self.decision_engine = DecisionEngine()
         self.alert_writer = shared_alert_writer or AlertJSONWriter(path=self.config.get("alert_json_path", str(state_dir / "alerts.json")), max_bytes=int(self.config.get("alert_json_max_bytes", 1073741824)))
         self.alert_manager = AlertManager(
             token=self.config.get("telegram_token", ""), 
@@ -973,28 +978,28 @@ class EnginePipeline:
         self._last_reactive_spotcheck_ts = time.time()
 
         # -----------------------------------------------------------------------
-        # Closed-Loop Autonomous FP Engine (CL-AFPE)
-        # Instantiated here so it boots its background ML loader threads immediately.
-        # The engine runs in the same process but offloads model inference to daemon
-        # threads so the pipeline timing is unaffected during cold-start warm-up.
+        # Closed-loop false-positive engine (argus CL-AFPE) and the two stores it shares with this pipeline:
+        # the local confirmed-intel store (state/local_confirmed_intel.json -- its Stage-1 check, this pipeline's
+        # HIGH/CRITICAL feed and the expiry prune) and device familiarity (state/device_familiarity.json -- recorded
+        # here from BENIGN/ANOMALOUS cycles, read by the decision engine, the DNS-evasion audit and CL-AFPE).
+        # Models load in the background, so no detection cycle waits for them.
         # -----------------------------------------------------------------------
-        LOGGER.info("🤖 Booting Autonomous False-Positive Elimination Engine (CL-AFPE)...")
-        self.fp_engine = AutonomousFPEngine(
-            config=self.config,
-            state_dir=str(state_dir),
-            state_manager=self.state_manager,
-        )
+        self.local_intel = LocalConfirmedIntel(
+            str(state_dir), ttl_seconds=float(self.config.get("local_confirmed_intel_ttl_seconds", 30 * 86400.0)))
+        self.familiarity = DeviceFamiliarity(state_dir)
+        argus_live_engine.configure_cl_afpe(
+            model_dir=str(Path(self.config.get("model_path", "models/ids_model.pkl")).parent),
+            local_intel=self.local_intel, familiarity=self.familiarity)
+        self.cl_afpe = argus_live_engine.get_cl_afpe_engine()
+        if self.cl_afpe.ml_scorer is not None:
+            self.cl_afpe.ml_scorer.warm_up_async()
         if self.ti_engine:
-            self.ti_engine.fp_engine = self.fp_engine
-        # One shared local confirmed-intel store (state/local_confirmed_intel.json): the argus
-        # CL-AFPE's Stage-1 check, this pipeline's HIGH/CRITICAL feed (fp_engine.record_confirmed_threat)
-        # and the expiry prune all use this same instance. The store the argus engine kept while it
-        # ran in shadow is merged in once.
-        argus_live_engine.configure_cl_afpe(local_intel=self.fp_engine.local_intel)
+            self.ti_engine.trust_cache_provider = self.cl_afpe
         try:
-            argus_live_engine.merge_retired_local_intel(self.fp_engine.local_intel, state_dir)
+            argus_live_engine.merge_retired_local_intel(self.local_intel, state_dir)
+            import_legacy_state(state_dir, self.cl_afpe.store, self.familiarity)
         except Exception as e:
-            LOGGER.warning("Merging the retired confirmed-intel store failed (non-fatal): %s", e)
+            LOGGER.warning("Importing earlier false-positive state failed (non-fatal): %s", e)
 
         self._last_flush = time.time()
         self._last_prune = time.time()
@@ -1031,7 +1036,7 @@ class EnginePipeline:
         # reconciliation worker, matching IPSMitigator's own established
         # background-worker pattern (_router_reconcile_worker, ips.py) exactly --
         # daemon thread, started here (after every collaborator it needs --
-        # state_manager/ml_registry/fp_engine/identity_manager/ips_mitigator/
+        # state_manager/ml_registry/familiarity/identity_manager/ips_mitigator/
         # evidence_store/metrics_exporter -- already exists on self).
         #
         # Deliberately NOT a scheduled_jobs.scheduler entry (the pattern
@@ -1051,17 +1056,46 @@ class EnginePipeline:
         threading.Thread(target=self._identity_reconcile_worker, daemon=True, name="identity_reconcile_worker").start()
 
     def _device_threshold(self, dev_id: str, key: str, default: float, autotuned: bool = False) -> float:
-        """A per-device detection threshold: the value the live CL-AFPE (argus) raised after corrections, else the
-        older AutonomousFPEngine profile, else `default`; for autotuned keys, a promoted autotuner value wins."""
+        """A per-device detection threshold: the value CL-AFPE raised after corrections, else `default`; for
+        autotuned keys, a promoted autotuner value wins."""
         value = argus_live_engine.get_device_profile_threshold(dev_id, key, default)
         if value is None:
-            value = self.fp_engine._get_device_profile_value(dev_id, key, default) if self.fp_engine else default
-        if autotuned and self.fp_engine:
+            value = default
+        if autotuned:
             try:
-                value = self.fp_engine._get_autotune_engine().get_active_value(key, device_id=dev_id, default=value)
+                value = self.cl_afpe._get_autotune_engine().get_active_value(key, device_id=dev_id, default=value)
             except Exception as e:
                 LOGGER.warning("autotuned %s lookup failed for %s, using %s: %s", key, dev_id, value, e)
         return value
+
+    def _export_cl_afpe_gauges(self) -> None:
+        """Model status, trust-cache size, confirmed-intel size, engine errors and per-device corrected thresholds
+        for the dashboards (once a minute)."""
+        try:
+            ready = self.cl_afpe.ml_scorer.ready() if self.cl_afpe.ml_scorer else {}
+            fp_engine_lgbm_model_status.set(1.0 if ready.get("classifier") else 0.0)
+            fp_engine_embed_model_status.set(1.0 if ready.get("embeddings") else 0.0)
+            fp_engine_trust_cache_size.set(len(self.cl_afpe.get_dynamic_trust_cache()))
+            for kind in ("ip", "domain"):
+                local_confirmed_intel_size.labels(kind=kind).set(len(self.local_intel.all_confirmed(kind)))
+            for engine, status in argus_live_engine.engine_error_status().items():
+                engine_errors_total.labels(engine=engine).set(status.get("count", 0))
+            # Per-device thresholds raised by corrections (graph fp_profile). The suppress and ARP-sweep thresholds
+            # have their own autotune gauges.
+            profile_gauges = {"conn_abuse_unique_ip_threshold": autotune_conn_abuse_threshold_effective,
+                              "long_conn_duration_threshold": autotune_long_conn_threshold_effective}
+            for dev_id, profile in self.cl_afpe.store.get_device_metadata_values("fp_profile").items():
+                for key, gauge in profile_gauges.items():
+                    entry = (profile or {}).get(key)
+                    if not entry or "value" not in entry:
+                        continue
+                    hostname = entry.get("hostname") or "unknown"
+                    gauge.labels(device=dev_id, hostname=hostname).set(entry["value"])
+                    autotune_device_profile_correction_total.labels(
+                        device=dev_id, hostname=hostname, key=key, set_by=entry.get("set_by", "unknown")
+                    ).set(entry.get("correction_count", 0))
+        except Exception as exc:
+            LOGGER.debug("CL-AFPE gauge export failed (non-fatal): %s", exc)
 
     def _identity_reconcile_worker(self) -> None:
         """Periodically finds and merges device-identity fragmentation (the same
@@ -1088,7 +1122,7 @@ class EnginePipeline:
         self.identity_manager's own _release_stale_isolation_if_merged()/
         _cleanup_merged_orphan(), rather than reimplementing that cleanup a second
         time. This closes a real gap the offline script itself flags: it has no
-        live ml_registry/fp_engine/ips_mitigator/evidence_store/metrics_exporter
+        live ml_registry/familiarity/ips_mitigator/evidence_store/metrics_exporter
         to pass through, so orphan ML model files and stale isolation/metric state
         are left behind; this worker has all of them as real, live self.*
         references.
@@ -1127,7 +1161,7 @@ class EnginePipeline:
                     continue
                 if self.state_manager.merge_into_canonical(
                     orphan["device_id"], canonical["device_id"],
-                    ml_registry=self.ml_registry, fp_engine=self.fp_engine,
+                    ml_registry=self.ml_registry, familiarity=self.familiarity,
                 ):
                     merged_count += 1
                     try:
@@ -1232,7 +1266,7 @@ class EnginePipeline:
                 self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="spotcheck",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                     )
                 # Disk-safety sweep, piggybacked on this same interval rather than a
                 # separate timer -- catches any raw pcap/Zeek scratch directory
@@ -1270,15 +1304,15 @@ class EnginePipeline:
                 self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="wired_probe",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                     )
 
         active_ids_dns = self.identity_manager.process_dns_identities(
             dns_rows, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator,
-            fp_engine=self.fp_engine, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
+            familiarity=self.familiarity, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
         active_ids_zeek = self.identity_manager.process_zeek_identities(
             zeek_events, self.zeek_fx, self.ml_registry, ips_mitigator=self.ips_mitigator,
-            fp_engine=self.fp_engine, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
+            familiarity=self.familiarity, evidence_store=self.evidence_store, metrics_exporter=self.metrics_exporter)
         all_active_ids = set(active_ids_dns + active_ids_zeek)
         LOGGER.debug("Identity mapping complete: %d active devices tracking", len(all_active_ids))
 
@@ -1315,7 +1349,7 @@ class EnginePipeline:
                     self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="new_device",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                     )
 
                 # PHASE 21D trigger: get_or_create() just found a MAC-rotation candidate
@@ -1332,7 +1366,7 @@ class EnginePipeline:
                         self.reactive_capture.try_dispatch(
                         self.config, self.zeek_fx, trigger_reason="ambiguous_reidentify",
                         state_manager=self.state_manager, evidence_store=self.evidence_store,
-                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                        geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                     )
 
             with self.state_manager.lock_device(dev_id) as state:
@@ -1541,7 +1575,7 @@ class EnginePipeline:
                 # used to gate on a bare `dest_ip and dest_ip != "unknown"` check with no
                 # multicast/broadcast/link-local exclusion -- unlike every OTHER IP-touching path in
                 # this codebase (GraphStore.get_devices_targeting(),
-                # get_distinct_destination_count(), fp_engine.py's confirmed-intel guard,
+                # get_distinct_destination_count(), the CL-AFPE's confirmed-intel guard,
                 # all already excluded this exact traffic shape, see 1ff6c97/graph/
                 # store.py's own docstring). A multicast dest_ip (mDNS 224.0.0.251/ff02::fb,
                 # SSDP 239.255.255.250, etc. -- extremely common, this device's OWN cycle
@@ -1594,7 +1628,7 @@ class EnginePipeline:
 
                 features["ti_risk"] = ti_risk
                 features["ti_match"] = ti_match
-                # BUGFIX: fp_engine.py Stage-2 and train_fp_classifier.py both read
+                # BUGFIX: the CL-AFPE Stage-2 and train_fp_classifier.py both read
                 # features["tranco_rank"] for Feature 0 of the 11-dim LightGBM vector, but
                 # nothing ever wrote it -- permanently 0 for every alert since this feature
                 # was introduced. threat_intel.py's Tranco loader already downloads the
@@ -1659,7 +1693,7 @@ class EnginePipeline:
                 # --- Version 7 Integration ---
                 # 1. Check for Layer-2 ARP Spoofing
                 # BUGFIX: found via a live state-folder audit -- this is a CRITICAL/block
-                # hard-stop (decision_engine.py's has_arp_spoof branch, threat_confidence=1.0,
+                # hard-stop (argus/decision/engine.py's has_arp_spoof branch, threat_confidence=1.0,
                 # zero corroboration required) that was never gated on is_safe/safe_ips at
                 # all, unlike every other behavioral noise source. Confirmed live: this
                 # network's own mesh Wi-Fi repeaters (192.168.1.2/.3, both explicitly in
@@ -1756,7 +1790,7 @@ class EnginePipeline:
                         self.reactive_capture.try_dispatch(
                             self.config, self.zeek_fx, trigger_reason="arp_sweep",
                             state_manager=self.state_manager, evidence_store=self.evidence_store,
-                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                         )
 
                     if ml_score > 0.90:
@@ -1794,9 +1828,9 @@ class EnginePipeline:
                     # BUGFIX: found via a third-party review of a real tarpit alert, verified
                     # against production data -- this fed NetworkIntrusionHypothesis's own
                     # "Hard escalate for lateral scans (very rarely benign on a home network)"
-                    # branch (hypotheses/engine.py), which force-escalates to HIGH whenever
+                    # branch (argus/hypotheses/engine.py), which force-escalates to HIGH whenever
                     # this evidence's value > 0 -- the SAME raw-connection-count gap already
-                    # fixed at fp_engine.py's Stage-1 hard-stop and this file's lateral_threat
+                    # fixed at the CL-AFPE's Stage-1 hard-stop and this file's lateral_threat
                     # (tarpit authorization), just missed here. A single legitimate SMB/SSH/
                     # RDP connection to one internal device is not "very rarely benign" --
                     # it's routine. Same distinct-target threshold as those two fixes.
@@ -1812,7 +1846,7 @@ class EnginePipeline:
                     # purposes (Spotify Connect app discovery, Chromecast/UPnP device
                     # descriptors) were only ever surfaced as alert-display context
                     # (recent_http_reqs, computed after scoring already finished) -- never as
-                    # an actual benign signal decision_engine.py's hypothesis competition could
+                    # an actual benign signal argus/decision/engine.py's hypothesis competition could
                     # weigh. A device browsing for Spotify/Chromecast targets on its own LAN is
                     # not "more suspicious network activity"; it's exactly why HEE has a benign
                     # hypothesis track (see AdvertisingBurstHypothesis) rather than only ever
@@ -1890,11 +1924,11 @@ class EnginePipeline:
                         # this max TI/VT/AbuseIPDB score (the same causal-attribution fix
                         # documented in this file's own reputation-target-selection comments),
                         # so attaching it here is just exposing an already-correct value on
-                        # the Evidence item, not a new computation. Lets decision_engine.py
+                        # the Evidence item, not a new computation. Lets argus/decision/engine.py
                         # tell "this reputation hit is about the SAME destination the winning
                         # attack hypothesis's own evidence points at" apart from "some
                         # unrelated domain elsewhere in this device's rolling window also has
-                        # a nonzero reputation score" -- see decision_engine.py's own comment
+                        # a nonzero reputation score" -- see argus/decision/engine.py's own comment
                         # for how this is consumed.
                         self.evidence_store.add(Evidence(
                             type="reputation",
@@ -1945,7 +1979,7 @@ class EnginePipeline:
                     # gate accepted this parameter but the ONE real production caller never
                     # actually computed it, so CL-AFPE's Stage 3 text-embedding signal never
                     # factored into a live reputation-tier decision at all. Only bothers
-                    # calling FastEmbed (reusing fp_engine.py's already-loaded model, no
+                    # calling FastEmbed (reusing the CL-AFPE's already-loaded model, no
                     # second model load -- but still a real, non-trivial per-call cost, this
                     # codebase's own hard-won lesson about main-loop latency) when
                     # reputation_target_is_trusted_infra (computed just above) already says
@@ -1955,9 +1989,9 @@ class EnginePipeline:
                     # (an ordinary, non-cloud-ASN destination) changes no outcome and keeps
                     # every other cycle exactly as cheap as before this fix.
                     afpe_score = 0.0
-                    if self.fp_engine and reputation_target_is_trusted_infra:
+                    if self.cl_afpe.ml_scorer is not None and reputation_target_is_trusted_infra:
                         try:
-                            afpe_score, _ = self.fp_engine.get_stage3_vendor_similarity(reputation_target)
+                            afpe_score, _ = self.cl_afpe.ml_scorer.vendor_similarity(reputation_target)
                         except Exception:
                             afpe_score = 0.0
                     rep_vector = self.rep_classifier.classify(reputation_target, vt_score=vt_risk, afpe_score=afpe_score, ti_score=ti_risk, abuse_score=abuse_risk, asn_owner=reputation_target_asn_owner)
@@ -2009,8 +2043,8 @@ class EnginePipeline:
                     # WRITE side (recording this cycle into the baseline) happens further
                     # below, gated on this cycle's own verdict -- see that comment for why.
                     baseline_familiarity = 0.0
-                    if self.fp_engine:
-                        baseline_familiarity = self.fp_engine.get_baseline_familiarity(
+                    if self.familiarity:
+                        baseline_familiarity = self.familiarity.get_baseline_familiarity(
                             dev_id,
                             dest_port=features.get("last_dest_port"),
                             asn_owner=asn_owner if asn_owner != "Unknown" else None,
@@ -2022,18 +2056,18 @@ class EnginePipeline:
                     # smart TV/IoT/NAS/router-category device gets a named benign explanation
                     # instead of falling through to the generic UNKNOWN_BENIGN catch-all.
                     # BUGFIX (2026-09-01, shadow-divergence flood): is_safe now threaded
-                    # through so the shadow honeypot check (decision_engine.py's
+                    # through so the shadow honeypot check (argus/decision/engine.py's
                     # fresh_honeypot) can mirror the SAME "and not is_safe" exemption this
                     # evidence's own creation gate uses a few hundred lines below (~line
                     # 1033) -- without it, a safe_ips device (the router) touching the
                     # honeypot for a benign reason diverged CRITICAL in shadow on every
                     # single cycle it happened, live BENIGN, with nothing wrong.
                     # The argus engine (argus/ops/live_engine.py: evidence graph, hypotheses, decision) makes
-                    # the decision. core/decision_engine.py is only its in-process fallback if it raises.
+                    # the decision. If it raises, the cycle is "not evaluated" (no action) and reported to the
+                    # health manager -- there is no second engine.
                     decision = argus_live_engine.evaluate(
                         active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
                         features=features, is_safe=is_safe,
-                        fallback_evaluate=self.decision_engine.evaluate,
                         device_id=dev_id, now=now, geoip_engine=self.geoip_engine,
                     )
 
@@ -2057,11 +2091,11 @@ class EnginePipeline:
                     # currently considers SUSPICIOUS or worse. Without this gate, a device
                     # beaconing to a C2 host every cycle would "launder" itself into a
                     # trusted baseline through sheer repetition, which would be exactly
-                    # backwards for a self-healing mechanism. fp_engine persists this
-                    # per-device, fully autonomously, no human step -- see
-                    # AutonomousFPEngine.record_device_baseline_observation()'s docstring.
-                    if self.fp_engine and decision["state"] in (DecisionState.BENIGN, DecisionState.ANOMALOUS):
-                        self.fp_engine.record_device_baseline_observation(
+                    # backwards for a self-healing mechanism. Persisted per device, no human
+                    # step (intelligence/device_familiarity.py). A not-evaluated cycle records nothing.
+                    if decision["state"] in (DecisionState.BENIGN, DecisionState.ANOMALOUS) \
+                            and not decision.get("_engine_error"):
+                        self.familiarity.record_device_baseline_observation(
                             dev_id,
                             dest_port=features.get("last_dest_port"),
                             asn_owner=asn_owner if asn_owner != "Unknown" else None,
@@ -2151,8 +2185,7 @@ class EnginePipeline:
                                             # stays graph-uninvolved until that's worth solving properly.
                                             decision = argus_live_engine.evaluate(
                                                 active_evidence, rep_vector, getattr(state, "device_type", ""),
-                                                fallback_evaluate=self.decision_engine.evaluate,
-                                            )
+                                                                    )
                                             risk = decision["threat_confidence"] * 10.0
                                             factors = [{"name": decision["explanation"], "score": risk}]
                                 
@@ -2171,7 +2204,7 @@ class EnginePipeline:
                     # PHASE 18: after the geofencing loop above (which can re-evaluate `decision`
                     # per contacted IP), this is the FINAL decision for the cycle -- the same one
                     # everything downstream (baselines already updated above, alert-building,
-                    # fp_engine.evaluate()) treats as authoritative. One increment per cycle, not
+                    # ClAfpeEngine.evaluate()) treats as authoritative. One increment per cycle, not
                     # per re-evaluation, using decision_path from whichever branch actually won.
                     try:
                         decision_path_total.labels(device=dev_id, hostname=hostname, path=decision.get("decision_path", "benign")).inc()
@@ -2188,7 +2221,7 @@ class EnginePipeline:
                         self.reactive_capture.try_dispatch(
                             self.config, self.zeek_fx, trigger_reason="dns_suspicion",
                             state_manager=self.state_manager, evidence_store=self.evidence_store,
-                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                         )
 
                     primary_sig = factors[0]["name"] if factors else "Threshold Exceeded"
@@ -2234,7 +2267,7 @@ class EnginePipeline:
                                 # the gate -- exactly the "block only after genuine corroboration"
                                 # guarantee the gate exists to provide. Tagging it here lets the
                                 # mitigate() call site downstream tell "genuinely corroborated HIGH"
-                                # (decision_engine.py's own >=2-independent-sources scoring) apart from
+                                # (argus/decision/engine.py's own >=2-independent-sources scoring) apart from
                                 # "escalated via persistence alone" -- only the former may contain.
                                 # Alert visibility/urgency (this whole block's original purpose) is
                                 # untouched: confidence, explanation text, and Telegram severity still
@@ -2249,7 +2282,7 @@ class EnginePipeline:
                                     ).inc()
                                 decision["explanation"] = f"{decision['explanation']} (persisted {int(persisted_for)}s)"
                                 # BUGFIX (live audit): 0.75 put a persistence-escalated alert's
-                                # confidence in the SAME range as decision_engine.py's genuine
+                                # confidence in the SAME range as argus/decision/engine.py's genuine
                                 # 2-independent-source HIGH (0.85) -- indistinguishable in the
                                 # number itself, only in a text suffix a human/LLM/downstream
                                 # model reader might not weight properly. This is honestly a
@@ -2323,7 +2356,7 @@ class EnginePipeline:
                             # DNS_EVASION has no domain and can flag SEVERAL unexplained IPs
                             # at once, so "most recent connection" isn't necessarily one of
                             # them. Without this, mark_false_positive()'s IP-immunization
-                            # routing (fp_engine.py) could immunize the wrong IP on a
+                            # routing (the CL-AFPE) could immunize the wrong IP on a
                             # DNS_EVASION correction -- the actual unexplained one stays
                             # unaddressed and can keep re-firing. dns_evasion.py attaches one
                             # representative unexplained IP onto its Evidence.domain field
@@ -2336,7 +2369,7 @@ class EnginePipeline:
                             # as fresh ones. See primary_sig_base's own comment above for the
                             # full incident writeup.
                             # VERSION 11: DNS_ATTRIBUTION_GAP is DNSEvasionHypothesis's other
-                            # possible name (see hypotheses/engine.py) -- same evidence type,
+                            # possible name (see argus/hypotheses/engine.py) -- same evidence type,
                             # same "no domain, dest_ip is the real target" shape, just a
                             # weaker/more honestly-named sub-case, so it needs the identical
                             # attribution handling as DNS_EVASION in every branch below.
@@ -2402,7 +2435,7 @@ class EnginePipeline:
                             elif primary_sig_base in ("DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS"):
                                 alert_target_domain = "unknown"
                             # BUGFIX: found via a live third-party review of a real CRITICAL
-                            # alert -- decision_engine.py's tier-5 reputation escalation
+                            # alert -- argus/decision/engine.py's tier-5 reputation escalation
                             # ("Confirmed Malicious IOC", rep.tier==5) is a SEPARATE verdict
                             # path from the hypothesis competition above; it never got a
                             # branch here either, so it stayed on target_malicious_domain
@@ -2416,8 +2449,8 @@ class EnginePipeline:
                             # than a domain, so route it to whichever field actually fits.
                             # SECURITY FIX (alert/evidence/decision-engine consistency audit,
                             # 2026-09-28): "Confirmed Malicious IOC" is only ONE of four
-                            # explanation strings decision_engine.py's tier-4/tier-5 reputation
-                            # branches can produce (src/core/decision_engine.py's rep.tier==5/
+                            # explanation strings argus/decision/engine.py's tier-4/tier-5 reputation
+                            # branches can produce (argus/decision/engine.py's rep.tier==5/
                             # rep.tier==4 branches; identical strings in src/argus/decision/
                             # engine.py, the live default) -- "Corroborated Reputation Signal"
                             # (tier5, corroborated-but-not-verified-IOC) and both "Elevated
@@ -2453,7 +2486,7 @@ class EnginePipeline:
                             # this just consumes it, same pattern as every branch above.
                             # VERSION 12 (G7): PORT_SCAN/INTERNAL_RECONNAISSANCE are
                             # ConnectionAbuseHypothesis's own dynamic names for a single-category
-                            # zeek_conn_abuse-only / arp_sweep-only finding (hypotheses/engine.py) --
+                            # zeek_conn_abuse-only / arp_sweep-only finding (argus/hypotheses/engine.py) --
                             # same evidence types, same attribution logic applies regardless of
                             # which of the three names this cycle's finding actually got.
                             elif primary_sig_base in ("CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"):
@@ -2477,7 +2510,7 @@ class EnginePipeline:
                                     alert_target_domain = "unknown"
                             # VERSION 12 (G7): LATERAL_MOVEMENT is NetworkIntrusionHypothesis's own
                             # dynamic name whenever zeek_lateral_scan drove the finding
-                            # (hypotheses/engine.py) -- same evidence types, same attribution logic.
+                            # (argus/hypotheses/engine.py) -- same evidence types, same attribution logic.
                             elif primary_sig_base in ("NETWORK_INTRUSION", "LATERAL_MOVEMENT"):
                                 # BUGFIX (explicit user request, 2026-09-09): "zeek_notice"
                                 # fragmented into 4 evidence_type values by tier -- ev.type ==
@@ -2537,7 +2570,7 @@ class EnginePipeline:
                             # HYPOTHESIS_RELEVANT_EVIDENCE_TYPES name found 4 more signatures
                             # falling through to the same generic dest_ip fallback with no branch
                             # of their own -- DNS_TUNNELING, DATA_EXFILTRATION, C2_BEACONING,
-                            # SIGNATURE_MATCHED_THREAT (plus decision_engine.py's own hard-stop
+                            # SIGNATURE_MATCHED_THREAT (plus argus/decision/engine.py's own hard-stop
                             # name for the same underlying evidence, "Confirmed Exploit/Malware
                             # Signature (Suricata)"). DNS_TUNNELING's own evidence
                             # (dns_rate/dns_entropy/dns_unique_ratio, detectors/dns_behavior.py)
@@ -2585,7 +2618,7 @@ class EnginePipeline:
                                         break
                             # SIGNATURE_MATCHED_THREAT (SuricataSignatureHypothesis, a
                             # corroborating-evidence-tier Suricata match) and "Confirmed Exploit/
-                            # Malware Signature (Suricata)" (decision_engine.py's own hard-stop
+                            # Malware Signature (Suricata)" (argus/decision/engine.py's own hard-stop
                             # name for a high-confidence Suricata match) are two different verdict
                             # PATHS over the exact same suricata_signature_match evidence
                             # (detectors/suricata_scan.py), which already sets a real .domain
@@ -2594,7 +2627,7 @@ class EnginePipeline:
                             # winning_evidence needed.
                             # SECURITY FIX (alert/evidence/decision-engine consistency audit,
                             # 2026-09-28): "Confirmed Exploit/Malware Signature (Suricata,
-                            # Uncorroborated)" -- decision_engine.py's HIGH/alert-tier variant of
+                            # Uncorroborated)" -- argus/decision/engine.py's HIGH/alert-tier variant of
                             # the same hard-stop, fired when a real severity=1 Suricata match
                             # isn't independently corroborated -- was missing from this tuple, so
                             # it fell through to the generic fallback exactly like the four
@@ -2622,7 +2655,7 @@ class EnginePipeline:
                                         alert_dest_ip = ev.domain
                                         alert_target_domain = "unknown"
                                         break
-                            # VERSION 12 (G6): "(Uncorroborated)" is decision_engine.py's own
+                            # VERSION 12 (G6): "(Uncorroborated)" is argus/decision/engine.py's own
                             # suffix for the demoted HIGH case (geography alone, no behavioral
                             # corroboration) -- same evidence type/attribution applies either way.
                             elif primary_sig_base in ("Geofencing Policy Violation", "Geofencing Policy Violation (Uncorroborated)"):
@@ -2671,7 +2704,7 @@ class EnginePipeline:
                                 "reasoning_trail": decision.get("reasoning_trail", []),
                                 "incident_id": incident_id,
                                 # PHASE 50 (ollama_soc.py HEE ground-truth wiring): persists the
-                                # SAME attack-vs-benign hypothesis competition decision_engine.py just
+                                # SAME attack-vs-benign hypothesis competition argus/decision/engine.py just
                                 # computed for this alert -- previously only reachable in-memory via the
                                 # `decision` dict, discarded once this cycle ended. Closes the "Known
                                 # limitation" this doc's own dependency map already flagged (reasoning_trail
@@ -2704,7 +2737,7 @@ class EnginePipeline:
                                 # Unioned (not replaced) with decision's own values so v-current
                                 # (whose decision dict lacks these keys, .get(...,[]) degrades to
                                 # today's behavior unchanged) and any evidence type not read by
-                                # decision_engine.py's attack_evidence (e.g. local_context/
+                                # argus/decision/engine.py's attack_evidence (e.g. local_context/
                                 # novelty_context families, deliberately excluded there) are never
                                 # lost -- purely additive, can only ADD what was missing.
                                 "hee_evidence_families": sorted({
@@ -2767,31 +2800,21 @@ class EnginePipeline:
                             # the 3-stage FP engine evaluates whether this is a real threat.
                             # =============================================================
                             # VERSION 11 (P0 fix): pass the HEE's own already-computed verdict
-                            # through so fp_engine's Stage-1 hard-stop can recognize a
-                            # decision_engine.py hard-stop (honeypot/ARP-spoof/geofence/tier-5
+                            # through so the CL-AFPE's Stage-1 hard-stop can recognize a
+                            # argus/decision/engine.py hard-stop (honeypot/ARP-spoof/geofence/tier-5
                             # IOC) directly instead of independently re-deriving the same
                             # signal from raw features with its own, separately-drifting
-                            # thresholds -- see fp_engine.evaluate()'s docstring.
-                            # The argus CL-AFPE (argus/cl_afpe/engine.py) decides; AutonomousFPEngine is only
-                            # its in-process fallback if it raises.
-                            legacy_fallback_used = []
-
-                            def _legacy_fallback(**kwargs):
-                                legacy_fallback_used.append(True)
-                                return self.fp_engine.evaluate(**kwargs)
-
+                            # thresholds.
+                            # The argus CL-AFPE (argus/cl_afpe/engine.py) decides. If it raises, the verdict is
+                            # UNCERTAIN (never suppressed) and the error is reported to the health manager.
                             fp_verdict = argus_live_engine.evaluate_cl_afpe_live(
                                 alert_payload=alert_payload,
                                 features=features,
-                                risk_score=risk,
-                                ti_engine=self.ti_engine,
                                 decision=decision,
                                 asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                fallback_evaluate=_legacy_fallback,
                                 now=now,
                             )
-                            if not legacy_fallback_used:
-                                record_cl_afpe_verdict(fp_verdict, alert_payload)
+                            record_cl_afpe_verdict(fp_verdict, alert_payload)
 
                             # PHASE 12: persist CL-AFPE's own combined confidence into the alert
                             # record. Previously this number existed only in memory for the
@@ -2804,7 +2827,7 @@ class EnginePipeline:
                                 "verdict": fp_verdict.get("verdict"),
                                 "confidence": fp_verdict.get("confidence"),
                                 # VERSION 11 (P2 follow-up): None whenever no reliable
-                                # calibration is loaded -- see fp_engine.py's _apply_calibration().
+                                # calibration is loaded -- see the CL-AFPE's _apply_calibration().
                                 "calibrated_confidence": fp_verdict.get("calibrated_confidence"),
                                 "stage": fp_verdict.get("stage"),
                             }
@@ -2843,7 +2866,7 @@ class EnginePipeline:
                                 # It posts a non-blocking, one-tap-revoke notification so a
                                 # human can catch a bad auto-suppression without having been
                                 # in the loop for the action itself. Only fires on a genuinely
-                                # NEW immunization (fp_engine already dedupes repeat hits).
+                                # NEW immunization (the CL-AFPE already dedupes repeat hits).
                                 # ═══════════════════════════════════════════════════════
                                 action_info = fp_verdict.get("action")
 
@@ -2862,7 +2885,7 @@ class EnginePipeline:
                                 # whether the domain was actually blocked, so an unconditional
                                 # call would both waste API traffic on every immunization and
                                 # make an inaccurate "released" log claim. Only on a genuinely
-                                # NEW immunization, matching the same dedup fp_engine already
+                                # NEW immunization, matching the same dedup the CL-AFPE already
                                 # applies before offering a revoke.
                                 if action_info and action_info.get("type") == "immunize_domain" and self.ips_mitigator:
                                     target_domain_imm = action_info["target"]
@@ -2896,7 +2919,7 @@ class EnginePipeline:
                                     # was sitting right there) and a bare confidence number with
                                     # zero explanation of what alert/evidence led here or why the
                                     # FP engine landed on that number. Everything below was already
-                                    # computed by fp_engine.evaluate() a few lines earlier -- see
+                                    # computed by ClAfpeEngine.evaluate() a few lines earlier -- see
                                     # fp_verdict["reasons"]'s own comment ("Exposed as a real key
                                     # here so pipeline.py can show it") -- it just was never read.
                                     identity = f"*{hostname}*"
@@ -2949,7 +2972,7 @@ class EnginePipeline:
                                 # COUNT, so a single ordinary SMB/SSH/RDP connection to one internal
                                 # device satisfied `> 0` identically to a genuine multi-target scan --
                                 # confirmed live: zeek_lateral_moves=1 alone triggered tarpit. Same fix
-                                # as fp_engine.py's Stage-1 Check 2 -- require a genuine distinct-target
+                                # as the CL-AFPE's Stage-1 Check 2 -- require a genuine distinct-target
                                 # count, not just "at least one connection happened."
                                 lateral_targets_count = int(features.get("zeek_lateral_unique_targets", 0) or 0)
                                 lateral_threshold = int(self.config.get("lateral_movement_unique_targets_threshold", 2))
@@ -2958,7 +2981,7 @@ class EnginePipeline:
                                     or features.get("zeek_honeypot_hits", 0) > 0
                                 )
                                 # PHASE 19 FIX: decision["state"] alone can no longer be trusted here --
-                                # it reads HIGH both when decision_engine.py itself found >=2 genuinely
+                                # it reads HIGH both when argus/decision/engine.py itself found >=2 genuinely
                                 # independent corroborating sources, AND when the escalation block above
                                 # promoted a single persisting-but-uncorroborated SUSPICIOUS signal to
                                 # HIGH purely because it kept recurring. Only the former should ever be
@@ -3102,17 +3125,17 @@ class EnginePipeline:
                                 self.reactive_capture.try_dispatch(
                             self.config, self.zeek_fx, trigger_reason="high_severity",
                             state_manager=self.state_manager, evidence_store=self.evidence_store,
-                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, fp_engine=self.fp_engine,
+                            geoip_engine=self.geoip_engine, ti_engine=self.ti_engine, familiarity=self.familiarity,
                         )
 
                             # PHASE 21D3: second feed point for the local confirmed-intel store
-                            # (fp_engine.py's Stage-1 CONFIRMED_THREAT is the first) -- a HIGH/
+                            # (the CL-AFPE's Stage-1 CONFIRMED_THREAT is the first) -- a HIGH/
                             # CRITICAL decision here can come from 2+ independent hypothesis
                             # evidence sources WITHOUT any single Stage-1 hard-stop signal ever
                             # firing (e.g. DGA + reputation combined), so this is genuinely a
                             # second, non-redundant confirmation path, not a duplicate of the one
-                            # inside fp_engine.py. Same not-suppressed gate as the trigger above.
-                            if telegram_worthy and not fp_verdict["suppress"] and self.fp_engine:
+                            # inside the CL-AFPE. Same not-suppressed gate as the trigger above.
+                            if telegram_worthy and not fp_verdict["suppress"]:
                                 # BUGFIX: alert_target_domain, not target_malicious_domain -- see its
                                 # own comment above. Feeding the local confirmed-intel store (which a
                                 # DIFFERENT device's future connection can hard-stop against) the
@@ -3129,7 +3152,7 @@ class EnginePipeline:
                                 # "confirmed malicious" this exact way. Only pass a domain here when it
                                 # was actually overridden by real evidence above, never the raw fallback.
                                 domain_is_evidence_linked = alert_target_domain != target_malicious_domain
-                                self.fp_engine.record_confirmed_threat(
+                                self.cl_afpe.record_confirmed_threat(
                                     dev_id,
                                     etld1(alert_target_domain) if domain_is_evidence_linked else None,
                                     dest_ip, reason="HIGH_CRITICAL_DECISION",
@@ -3228,14 +3251,14 @@ class EnginePipeline:
                                         alert_event_status = "LOGGED_ONLY"
                                     # Bounded semantic search (plan doc's own
                                     # "Semantic search (bounded add-on)" section):
-                                    # embed-ONCE-at-write-time, reusing fp_engine's
+                                    # embed-ONCE-at-write-time, reusing the CL-AFPE's
                                     # already-loaded FastEmbed instance -- never a
                                     # second model copy, never re-embedded at query
                                     # time. None (not yet loaded / embed failed)
                                     # just means this one alert_event isn't
                                     # searchable yet -- everything else is unaffected.
                                     explanation_embedding = (
-                                        self.fp_engine.embed_text(primary_sig) if self.fp_engine else None
+                                        self.cl_afpe.ml_scorer.embed_text(primary_sig) if self.cl_afpe.ml_scorer else None
                                     )
 
                                     # Plain-English narrative (2026-09-22, user request: "rewrite the
@@ -3459,7 +3482,7 @@ class EnginePipeline:
                                     # only for types Argus's map doesn't cover -- a pure display-
                                     # dedup normalization, not a change to which family any
                                     # evidence type counts toward for SCORING purposes (that stays
-                                    # wherever decision_engine.py/hypotheses/engine.py already
+                                    # wherever argus/decision/engine.py/hypotheses/engine.py already
                                     # decide it, untouched here).
                                     grouped_evidence = {}
                                     context_evidence = {}
@@ -3748,7 +3771,7 @@ class EnginePipeline:
                                         # "Lateral Scans" even when zeek_lateral_unique_targets was below the
                                         # SAME threshold (lateral_movement_unique_targets_threshold) that
                                         # gates whether this evidence is even allowed to exist / authorize
-                                        # containment (see fp_engine.py Stage-1 Check 2 and this file's own
+                                        # containment (see the CL-AFPE Stage-1 Check 2 and this file's own
                                         # lateral_threat gate) -- a single SMB/SSH/RDP connection to one
                                         # internal device (e.g. browsing a NAS share) isn't a scan, and
                                         # calling it one here contradicted the decision the system actually
@@ -3971,7 +3994,7 @@ class EnginePipeline:
                         state=state, features=features, risk_score=risk, ml_score=ml_score, ti_risk=ti_risk,
                         ti_match=ti_match, abuse_risk=abuse_risk, vt_risk=vt_risk, is_safe=is_safe,
                         is_poisoned=is_poisoned, current_threshold_limit=threshold_limit, decision=decision,
-                        fp_engine=self.fp_engine, reputation_tier=getattr(rep_vector, "tier", None),
+                        familiarity=self.familiarity, reputation_tier=getattr(rep_vector, "tier", None),
                     )
 
                     for dst_ip, dst_port in self.zeek_fx.pop_new_lateral_events(client_ip):
@@ -4013,19 +4036,14 @@ class EnginePipeline:
             for e_dev_id, e_hostname, e_dev_type in pruned_list:
                 self.metrics_exporter.remove_device_metric_labels(e_dev_id, e_hostname, e_dev_type)
                 if hasattr(self, 'evidence_store'): self.evidence_store.clear_device(e_dev_id)
-                # BUGFIX (device-identity fragmentation audit): device_fp_profiles.json had
-                # NO cleanup on ordinary eviction either -- a pruned device's learned FP
-                # calibration stayed in that file forever with nothing to remove it. Closes
-                # the same gap the merge path's discard_device_profile() closes, here for
-                # the age-out eviction path instead of the retroactive-merge path.
-                if hasattr(self, 'fp_engine') and self.fp_engine: self.fp_engine.discard_device_profile(e_dev_id, reason="prune")
+                # A pruned device's familiarity entries go too (the merge path does the same).
+                self.familiarity.discard_device_profile(e_dev_id, reason="prune")
                 # BUGFIX (2026-09-21, memory-capacity investigation): ml_registry's
                 # per-device model dict had NO cleanup on age-out eviction -- only
                 # merge_into_canonical() ever called discard_device(). A device that
                 # goes stale (7-day idle default) without ever merging kept its
                 # sklearn model resident in RAM, and its .pkl file on disk, forever.
-                # Same gap class as fp_engine's calibration profile above, closed the
-                # same way for the age-out path.
+                # Closed the same way for the age-out path.
                 if self.ml_registry: self.ml_registry.discard_device(e_dev_id, reason="prune")
             self.state_manager.prune_expired_actions(now)  # PHASE 3: drop expired revoke-ledger entries
             # BUGFIX (disk-retention audit): local_intel.py's LocalConfirmedIntel is
@@ -4033,8 +4051,7 @@ class EnginePipeline:
             # prune_expired() -- but nothing ever called it, so state/local_confirmed_intel.json
             # grew forever even though every entry's TTL is enforced only at read time.
             # Hourly cadence matches this same prune block's own cycle.
-            if hasattr(self, 'fp_engine') and self.fp_engine:
-                self.fp_engine.local_intel.prune_expired()
+            self.local_intel.prune_expired()
             # BUGFIX (disk-retention audit): fritz_webhook.log/scheduler.log are raw
             # subprocess stdout redirects (subprocess_launchers.py) held open for the
             # life of those child processes -- no rotation of any kind existed, so
@@ -4088,7 +4105,8 @@ class EnginePipeline:
             LOGGER.debug("Triggering periodic state/model flush to disk.")
             self.state_manager.flush_to_disk()
             if self.ml_registry: self.ml_registry.save_models()
-            if self.fp_engine: self.fp_engine.flush_device_fp_profiles()
+            self.familiarity.flush()
+            self._export_cl_afpe_gauges()
             self._last_flush = now
 
         LOGGER.debug("Pipeline step finished.")
@@ -4099,7 +4117,7 @@ class EnginePipeline:
         self.running = False
         if hasattr(self, "state_manager"): self.state_manager.flush_to_disk()
         if hasattr(self, "ml_registry") and self.ml_registry: self.ml_registry.save_models(wait=True)
-        if getattr(self, "fp_engine", None): self.fp_engine.flush_device_fp_profiles(force=True)
+        if getattr(self, "familiarity", None): self.familiarity.flush(force=True)
         if hasattr(self, "alert_manager"): self.alert_manager.stop()
 
     def _select_target_domain(self, state, ti_engine) -> str:

@@ -7,10 +7,9 @@ and Response (NDR) platform. It initializes all independent background engines
 core processing pipeline.
 
 RECENT ARCHITECTURAL ADDITIONS:
-- ADDED (CL-AFPE): Closed-Loop Autonomous False-Positive Elimination Engine is now
-  auto-instantiated inside EnginePipeline.__init__() and boots its background ML loader
-  threads at pipeline start. No changes required in main.py – the engine is fully
-  self-contained inside src/intelligence/fp_engine.py.
+- CL-AFPE (closed-loop false-positive engine, argus/cl_afpe/) is created inside
+  EnginePipeline.__init__(), which starts its background model loading; readiness
+  below reports the models via pipeline.cl_afpe.ml_scorer.ready().
 - FIXED (WEBHOOK LOG VISIBILITY): Replaced `subprocess.DEVNULL` with a dedicated 
   file stream (`state/fritz_webhook.log`) for the FastAPI Uvicorn subprocess. 
   This ensures access logs (such as `GET /hosts` background pulls) are successfully 
@@ -397,8 +396,9 @@ def main():
         while time.time() - wait_start < 120:
             ti_ready = (ti_engine._stats["last_refresh"] != "never") if getattr(ti_engine, "_stats", None) else True
             fp_ready = True
-            if pipeline and getattr(pipeline, "fp_engine", None):
-                fp_ready = pipeline.fp_engine._lgbm_session is not None and pipeline.fp_engine._embed_model is not None
+            scorer = getattr(getattr(pipeline, "cl_afpe", None), "ml_scorer", None) if pipeline else None
+            if scorer is not None:
+                fp_ready = all(scorer.ready().values())
             
             if ti_ready and fp_ready:
                 break
@@ -448,8 +448,9 @@ def main():
 
             # -- FP Validation Engine: already a real check (are both models actually loaded) --
             fp_status = "⚠️ Partial/Timeout"
-            if pipeline and getattr(pipeline, "fp_engine", None):
-                if pipeline.fp_engine._lgbm_session and pipeline.fp_engine._embed_model:
+            scorer = getattr(getattr(pipeline, "cl_afpe", None), "ml_scorer", None) if pipeline else None
+            if scorer is not None:
+                if all(scorer.ready().values()):
                     fp_status = "✅ Online"
             else:
                 fp_status = "❌ Disabled"

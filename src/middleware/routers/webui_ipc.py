@@ -91,10 +91,9 @@ def ipc_run_script(name: str, apply: bool = False, token: str = Depends(verify_t
 def ipc_purge_device(device_id: str, token: str = Depends(verify_token)):
     """Permanently forgets a device's tracked profile -- the WebUI Maintenance
     page's "Remove Device" action. Removes the StateManager entry plus its
-    matching side-file entries (device_fp_profiles.json / fp_sigma_shifts.json
-    both live inside fp_engine.py's own file, device_labels.json is this
-    process's own concern) so nothing points at a device_id that no longer
-    exists. Irreversible for that device's learned history."""
+    learned false-positive values in the graph (per-device thresholds, sensitivity
+    shift, confirmed-threat counts) and its label, so nothing points at a device_id
+    that no longer exists. Irreversible for that device's learned history."""
     state_path = CONFIG.get("state_path", "state/ids_state.json")
     state_dir = str(Path(state_path).parent)
     sm = StateManager(state_path=state_path)
@@ -106,30 +105,26 @@ def ipc_purge_device(device_id: str, token: str = Depends(verify_token)):
     sm.remove_device(device_id)
     sm.flush_to_disk()
 
-    # fp_engine.py's per-device profile/sigma-shift files -- best-effort cleanup,
-    # never fatal to the purge itself if these files are absent/unreadable.
-    _purge_fp_engine_device_files(state_dir, device_id)
+    # Best-effort: never fatal to the purge itself.
+    _purge_learned_fp_values(state_dir, device_id)
     remove_label(device_id, state_dir)
 
     Path(state_dir).joinpath(".ipc_sync_signal").touch()
     return {"status": "success", "device_id": device_id, "purged": True}
 
 
-def _purge_fp_engine_device_files(state_dir: str, device_id: str) -> None:
-    import json
-    for filename in ("device_fp_profiles.json", "fp_sigma_shifts.json"):
-        path = Path(state_dir) / filename
-        if not path.exists():
-            continue
+def _purge_learned_fp_values(state_dir: str, device_id: str) -> None:
+    from argus.graph.store import GraphStore
+    try:
+        store = GraphStore(str(Path(state_dir) / "v13_graph.db"))
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if device_id in data:
-            del data[device_id]
-            tmp_path = path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp_path.replace(path)
+            if store.get_device_metadata(device_id):
+                store.update_device_metadata(
+                    device_id, {"fp_profile": {}, "sigma_shift": 0.0, "confirmed_threat_counts": {}})
+        finally:
+            store.close()
+    except Exception as exc:
+        LOGGER.warning("Clearing learned false-positive values for %s failed (non-fatal): %s", device_id, exc)
 
 
 @router.post("/api/ipc/restart_pipeline")

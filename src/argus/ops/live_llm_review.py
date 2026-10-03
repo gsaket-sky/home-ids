@@ -119,8 +119,7 @@ LOGGER = logging.getLogger("live_llm_review")
 # no longer consumes the same budget a real 900s-worst-case call does.
 DEFAULT_MAX_QUERIES_PER_RUN = 5
 
-# Matches scripts/ollama_soc.py's own DEFAULT_CACHE_TTL_SECONDS exactly (7 days --
-# "matches this codebase's other weekly cadence, fp_engine's own retrain loop").
+# 7 days: a reviewed verdict is re-asked at most weekly.
 PERSISTENT_CACHE_TTL_SECONDS = 7 * 24 * 3600
 
 # Same character-budget discipline as ollama_soc.py's own _TELEGRAM_MSG_BUDGET
@@ -360,10 +359,8 @@ def _load_persistent_cache(output_path: Path, now: float,
 # shape (character-budgeted detail entries, never truncated mid-sentence -- entries
 # that don't fit fold into a "...and N more" counter instead of a hard [:4000] slice
 # cutting mid-entry, the exact live bug that function's own docstring documents fixing).
-# NOT a line-for-line port: v1's version summarizes AutonomousFPEngine's own
-# immunized/confirmed_threat/withheld/skipped auto-ACTION outcomes, which v13's
-# reviewer doesn't have (it validates a verdict, it doesn't autonomously act on one) --
-# this summarizes what v13's reviewer itself actually found: how many reviews were
+# The reviewer validates a verdict, it does not act on one, so this summarizes what
+# it found: how many reviews were
 # served from the persistent cache vs. a real Ollama call, how many the deterministic
 # validator accepted vs. rejected, and the full detail for every REJECTION specifically
 # (the single most actionable signal in this digest -- the LLM's own verdict disagreed

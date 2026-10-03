@@ -259,7 +259,7 @@ state_f.get_or_create(device_id="orphan_f", client_ip="192.168.77.201", hostname
 state_f.get_or_create(device_id="canonical_f", client_ip="192.168.77.202", hostname="realhost")
 
 returned_orphan_id = live_mgr_f._merge_orphan_if_fragmented(
-    "192.168.77.201", "canonical_f", ml_registry=None, fp_engine=None,
+    "192.168.77.201", "canonical_f", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
 )
 check("F: _merge_orphan_if_fragmented returns the orphan_id that was actually "
@@ -282,7 +282,7 @@ graph_f2 = _fresh_graph_store("f2")
 live_mgr_f2 = LiveIdentityManager(state_f2, {"gateway_ip": GATEWAY_IP}, graph_f2, {})
 state_f2.get_or_create(device_id="only_device_f2", client_ip="192.168.77.203", hostname="unknown")
 result_f2 = live_mgr_f2._merge_orphan_if_fragmented(
-    "192.168.77.203", "only_device_f2", ml_registry=None, fp_engine=None,
+    "192.168.77.203", "only_device_f2", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
 )
 check("F: no merge needed (dev_id already matches the tracked orphan_id) returns "
@@ -297,7 +297,7 @@ live_mgr_f3 = LiveIdentityManager(state_f3, {"gateway_ip": GATEWAY_IP}, None, {}
 state_f3.get_or_create(device_id="orphan_f3", client_ip="192.168.77.204", hostname="unknown")
 state_f3.get_or_create(device_id="canonical_f3", client_ip="192.168.77.205", hostname="realhost")
 result_f3 = live_mgr_f3._merge_orphan_if_fragmented(
-    "192.168.77.204", "canonical_f3", ml_registry=None, fp_engine=None,
+    "192.168.77.204", "canonical_f3", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
 )
 check("F: with graph_store=None, the v1-side merge still fully succeeds (the "
@@ -318,7 +318,7 @@ live_mgr_f4 = LiveIdentityManager(state_f4, {"gateway_ip": GATEWAY_IP}, _Explodi
 state_f4.get_or_create(device_id="orphan_f4", client_ip="192.168.77.206", hostname="unknown")
 state_f4.get_or_create(device_id="canonical_f4", client_ip="192.168.77.207", hostname="realhost")
 result_f4 = live_mgr_f4._merge_orphan_if_fragmented(
-    "192.168.77.206", "canonical_f4", ml_registry=None, fp_engine=None,
+    "192.168.77.206", "canonical_f4", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
 )
 check("F: FAIL-SAFE -- a graph_store.merge_device() failure never raises out to "
@@ -464,7 +464,7 @@ for rotation_ip in IPV6_ROTATIONS:
     # catches up) -- process_zeek_identities() would compute dev_id=canonical_id_i
     # via the MAC-first branch and call this exact method before get_or_create().
     merged_id = live_mgr_i._merge_orphan_if_fragmented(
-        rotation_ip, canonical_id_i, ml_registry=None, fp_engine=None,
+        rotation_ip, canonical_id_i, ml_registry=None, familiarity=None,
         ips_mitigator=None, evidence_store=None, metrics_exporter=None,
     )
     check(f"I: rotation {rotation_ip} -- the orphan created for THIS address is the "

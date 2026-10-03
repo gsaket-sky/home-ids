@@ -41,7 +41,7 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from core.decision_engine import DecisionEngine, DecisionState
+from argus_scenarios import DecisionEngine, DecisionState
 from core.pipeline import classify_payload_size
 from intelligence.hypotheses.evidence import Evidence, EvidenceStore
 from intelligence.reputation.classifier import ReputationClassifier, ReputationVector
@@ -225,7 +225,7 @@ check("a direct UDP/53 connection to a non-Pi-hole, non-public-resolver IP is ta
       f"got {policy_bypass_ev}")
 
 # End-to-end: verify the hypothesis actually picks the right name for each.
-from intelligence.hypotheses.engine import DNSEvasionHypothesis
+from argus_scenarios import DNSEvasionHypothesis
 hyp_f = DNSEvasionHypothesis()
 neutral_rep_f = ReputationVector(domain="", tier=3)
 hyp_f.evaluate(no_dns_ev, neutral_rep_f)
@@ -273,8 +273,9 @@ high_sev_alerts = [{"src_ip": "192.168.1.60", "dest_ip": "203.0.113.99",
                                "category": "A Network Trojan was detected", "severity": 1}}]
 high_sev_ev = suricata_alerts_to_evidence(high_sev_alerts, {"192.168.1.60": "dev_malware"}, time.time())
 decision_malware = de.evaluate(high_sev_ev["dev_malware"], ReputationVector(domain="", tier=3))
-check("a real severity=1 Suricata signature match is a CRITICAL hard-stop end-to-end",
-      decision_malware["state"] == "CRITICAL" and decision_malware["explanation"] == "Confirmed Exploit/Malware Signature (Suricata)",
+check("a lone real severity=1 Suricata signature match is HIGH (uncorroborated) end-to-end, not an automatic block",
+      decision_malware["state"] == "HIGH"
+      and decision_malware["explanation"] == "Confirmed Exploit/Malware Signature (Suricata, Uncorroborated)",
       f"got {decision_malware}")
 
 low_sev_alerts = [{"src_ip": "192.168.1.61", "dest_ip": "203.0.113.98",

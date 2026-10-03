@@ -353,7 +353,7 @@ def get_alerts(
 
 # Lazy-loaded, process-local FastEmbed instance for embedding SEARCH QUERY text in
 # this API process. Deliberately NOT the same in-memory object as the main pipeline
-# process's fp_engine.py instance (they are separate OS processes -- middleware.
+# process's MLScorer (they are separate OS processes -- middleware.
 # main_api:app runs as its own uvicorn subprocess, per soc.service's own unit file)
 # -- this is the smallest honest deviation from "reuse the exact same instance"
 # the plan doc's resource analysis assumed: the underlying ~85MB ONNX model file is
@@ -372,7 +372,7 @@ def _get_query_embed_model():
             if _query_embed_model is None:
                 from fastembed import TextEmbedding
                 from pathlib import Path as _P
-                # Matches fp_engine.py's own _model_dir() derivation EXACTLY
+                # The same model directory the pipeline's MLScorer uses
                 # (config's model_path, defaulting to "models/ids_model.pkl") --
                 # not state_path's own directory, a different one -- so this loads
                 # the SAME already-downloaded cache the main pipeline process

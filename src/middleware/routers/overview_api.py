@@ -58,13 +58,8 @@ router = APIRouter()
 
 # home_ids_alerts_total/fp_evaluations_total/fp_suppressed_total/
 # fp_confirmed_threats_total deliberately NOT scraped from here anymore -- see
-# _alert_stats()'s docstring. Only counters unaffected by the v1/v13 CL-AFPE
-# split are scraped: IPS actions happen downstream of whichever engine chose
-# the verdict, and domains_immunized/sigma_shifts fire from
-# AutonomousFPEngine's mark_false_positive()/_apply_sigma_shift(), which v13's
-# ClAfpeEngine.evaluate() still calls directly (confirmed against
-# v13/cl_afpe/engine.py's own module docstring) even though it bypasses
-# AutonomousFPEngine.evaluate() itself.
+# _alert_stats()'s docstring. Only counters that are not per-verdict are scraped:
+# IPS actions (downstream of the verdict) and corrections (immunizations, sensitivity shifts).
 _SECURITY_COUNTER_NAMES = {
     "home_ids_ips_pihole_blocks_total": "pihole_blocks",
     "home_ids_ips_router_isolations_total": "router_isolations",
@@ -207,33 +202,12 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     alert-volume-by-day trend AND real FP-engine verdict tallies together
     (one read of each line, not two separate scans).
 
-    BUGFIX (found live, 2026-09-14, user report: "1149 alerts today but zero
-    evaluation/suppressed/confirmed-threat counters, and no Telegram alerts"):
-    those counters used to come from Prometheus's home_ids_alerts_total/
-    fp_evaluations_total/fp_suppressed_total/fp_confirmed_threats_total.
-    home_ids_alerts_total is fine on its own, but it was being compared
-    against the OTHER three, which only ever increment inside the LEGACY
-    AutonomousFPEngine.evaluate() (src/intelligence/fp_engine.py) -- and
-    .94's live config has `cl_afpe_engine: v13` set, which routes every real
-    verdict through v13_live_engine.evaluate_cl_afpe_live() ->
-    ClAfpeEngine.evaluate() instead, a completely separate code path with NO
-    Prometheus instrumentation of its own (confirmed: zero Counter/inc() calls
-    anywhere in src/v13/cl_afpe/engine.py). AutonomousFPEngine.evaluate() is
-    only reached as an error-path fallback on that route -- confirmed live: 8
-    real alerts triaged in a 5-minute window, 0 recorded FP evaluations, not
-    because nothing happened but because that counter structurally cannot
-    increment under this deployment's actual configuration.
-
-    The fix isn't new instrumentation -- pipeline.py already writes the REAL
-    verdict (whichever engine produced it, v1 or v13, unconditionally) onto
+    The counts come from the alert records themselves, not Prometheus: pipeline.py writes the
+    false-positive verdict onto
     every alert record as alert_payload["fp_verdict"]["verdict"] before it's
-    appended to alerts.json. Reading that back here is accurate regardless of
-    which engine is active, and as a side effect is NOT reset by a restart
-    the way the Prometheus counters were -- also fixing the separate
-    "still inconsistent" complaint (alerts_triaged, previously Prometheus-
-    since-restart, and the volume trend, always file-based-today, could
-    disagree after any recent deploy restart; both now come from this same
-    scan of the same file, so they can't disagree with each other again)."""
+    appended to alerts.json. Reading that back is not reset by a restart the way
+    Prometheus counters are, and alerts_triaged and the volume trend come from the
+    same scan of the same file, so they always agree."""
     empty = {
         "by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0, "fp_uncertain": 0,
         "fp_evaluations_by_day": {}, "fp_suppressed_by_day": {}, "fp_confirmed_threats_by_day": {}, "fp_uncertain_by_day": {},
@@ -260,7 +234,7 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     fp_confirmed_threats_by_day: Dict[str, int] = {}
     # BUGFIX (2026-09-22, user report: the Overview numbers "should be
     # mathematically logical" for a new user): fp_verdict.verdict has a REAL
-    # third value, "UNCERTAIN" (fp_engine.py writes it at several stages,
+    # third value, "UNCERTAIN" (the CL-AFPE writes it at several stages,
     # confirmed by reading the code, not assumed) -- fp_evaluations only ever
     # counted FALSE_POSITIVE + CONFIRMED_THREAT before this fix, so
     # Suppressed + Confirmed silently fell short of Evaluations by however
@@ -304,7 +278,7 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
                         fp_confirmed_threats_by_day[day] = fp_confirmed_threats_by_day.get(day, 0) + 1
                 else:
                     # Covers "UNCERTAIN" and any other verdict string a future
-                    # fp_engine.py stage might introduce -- counted here rather
+                    # the CL-AFPE stage might introduce -- counted here rather
                     # than silently dropped, so fp_evaluations never again
                     # exceeds fp_suppressed + fp_confirmed_threats + fp_uncertain.
                     fp_uncertain += 1

@@ -3,7 +3,7 @@ Standalone runtime test for the 2026-09-23 disk-capacity/retention audit fixes.
 Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_disk_retention_audit_fixes.py`
 
-No monkeypatching anywhere in this file -- real GraphStore/AutonomousFPEngine
+No monkeypatching anywhere in this file -- real GraphStore/DeviceFamiliarity
 instances, real files on disk, real sqlite3.Connection.set_trace_callback() where a
 count of real writes is needed (same pattern as tests/test_argus_live_engine.py's
 Section L).
@@ -19,8 +19,7 @@ Covers:
   F. core.subprocess_launchers.rotate_subprocess_log_if_oversized() -- copytruncate
      correctness against a REAL os.O_APPEND file descriptor (proves the reasoning
      in that function's own docstring, doesn't just assert it)
-  G. fp_engine.py's discard_device_profile() now also clears
-     confirmed_threat_counts.json (plain + scoped keys) and fp_sigma_shifts.json
+  G. DeviceFamiliarity.discard_device_profile() removes a pruned device and persists it
   H. train_fp_classifier._write_autotune_relay_stats() prunes stale device_ids out
      of autotune_stats.json's devices dict, against a real GraphStore
 """
@@ -45,7 +44,7 @@ def check(name, cond, detail=""):
 from argus.graph.store import GraphStore  # noqa: E402
 from utils import rotate_jsonl_if_oversized, prune_dated_files  # noqa: E402
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized  # noqa: E402
-from intelligence.fp_engine import AutonomousFPEngine  # noqa: E402
+from intelligence.device_familiarity import DeviceFamiliarity  # noqa: E402
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section A: get_active_device_ids()
@@ -238,39 +237,19 @@ check("F7: that write's content is exactly what was written, nothing stale from 
       log_path.read_text(encoding="utf-8") == "c" * 100)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Section G: fp_engine.py discard_device_profile() now clears sibling stores too
+# Section G: a pruned or merged-away device's familiarity record is discarded (and saved)
 # ═══════════════════════════════════════════════════════════════════════════════
 tmpdir_g = tempfile.mkdtemp(prefix="retention_test_g_")
-fp = AutonomousFPEngine(config={}, state_dir=tmpdir_g)
-
-fp.record_confirmed_threat("devG", base_domain="evil.example.com", dest_ip=None,
-                            reason="STAGE_1_HARD_STOP", signature="CONNECTION_ABUSE")
-fp.record_confirmed_threat("devOther", base_domain="other.example.com", dest_ip=None,
-                            reason="STAGE_1_HARD_STOP")
-fp._apply_sigma_shift("devG", "devG-hostname", direction="TUNE_UP", source="autonomous")
-fp._apply_sigma_shift("devOther", "devOther-hostname", direction="TUNE_UP", source="autonomous")
-
-check("G1: confirmed count recorded for devG (plain key)", fp.get_confirmed_count("devG") == 1)
-check("G2: confirmed count recorded for devG (scoped key)",
-      fp.get_confirmed_count("devG", signature="CONNECTION_ABUSE") == 1)
-check("G3: sigma shift recorded for devG", fp.get_sigma_shift("devG") != 0.0)
-
-fp.discard_device_profile("devG", reason="prune")
-
-check("G4: discard_device_profile() clears the plain confirmed-count key",
-      fp.get_confirmed_count("devG") == 0)
-check("G5: discard_device_profile() clears the scoped confirmed-count key",
-      fp.get_confirmed_count("devG", signature="CONNECTION_ABUSE") == 0)
-check("G6: discard_device_profile() clears the sigma shift", fp.get_sigma_shift("devG") == 0.0)
-check("G7: a DIFFERENT device's confirmed count is untouched", fp.get_confirmed_count("devOther") == 1)
-check("G8: a DIFFERENT device's sigma shift is untouched", fp.get_sigma_shift("devOther") != 0.0)
-
-# And it must actually be persisted to disk, not just in-memory.
-on_disk_counts = json.loads((_PathForSysPath(tmpdir_g) / "confirmed_threat_counts.json").read_text(encoding="utf-8"))
-check("G9: confirmed_threat_counts.json on disk no longer has ANY devG-prefixed key",
-      not any(k == "devG" or k.startswith("devG||") for k in on_disk_counts), str(on_disk_counts))
-on_disk_sigma = json.loads((_PathForSysPath(tmpdir_g) / "fp_sigma_shifts.json").read_text(encoding="utf-8"))
-check("G10: fp_sigma_shifts.json on disk no longer has devG", "devG" not in on_disk_sigma, str(on_disk_sigma))
+fam = DeviceFamiliarity(tmpdir_g)
+fam.record_device_baseline_observation("devG", dest_port=443)
+fam.record_device_baseline_observation("devOther", dest_port=443)
+fam.flush(force=True)
+fam.discard_device_profile("devG", reason="prune")
+check("G1: discard_device_profile() removes the device's familiarity", fam.get_baseline_entry_count("devG") == 0)
+check("G2: a DIFFERENT device is untouched", fam.get_baseline_entry_count("devOther") == 1)
+fam.flush(force=True)
+on_disk = json.loads((_PathForSysPath(tmpdir_g) / "device_familiarity.json").read_text(encoding="utf-8"))
+check("G3: the discard is persisted (device_familiarity.json no longer has devG)", "devG" not in on_disk, str(on_disk))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Section H: train_fp_classifier's autotune_stats.json stale-device pruning

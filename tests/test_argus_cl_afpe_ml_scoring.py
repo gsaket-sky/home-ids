@@ -105,7 +105,7 @@ check("lgbm at the neutral sentinel but embed does NOT clear the threshold -> no
       abs(combine_scores(NEUTRAL_LGBM_SCORE, 0.5, embed_similarity_threshold=0.82)
           - (NEUTRAL_LGBM_SCORE * LGBM_WEIGHT + 0.5 * EMBED_WEIGHT)) < 1e-9)
 check("a real lgbm score with a real embed score uses the exact weighted blend "
-      "(0.45/0.55, confirmed via direct read of fp_engine.py)",
+      "(0.45/0.55)",
       abs(combine_scores(0.9, 0.1, embed_similarity_threshold=0.82) - (0.9 * 0.45 + 0.1 * 0.55)) < 1e-9)
 
 
@@ -115,8 +115,8 @@ no_model_dir.mkdir()
 scorer_no_model = MLScorer(str(no_model_dir))
 check("score_stage2 returns None when fp_classifier.onnx doesn't exist yet",
       scorer_no_model.score_stage2({}, "x.com", is_trust_cached=False) is None)
-check("a second call doesn't re-attempt the (already-failed) load -- _lgbm_load_attempted latches",
-      scorer_no_model._lgbm_load_attempted is True and scorer_no_model.score_stage2({}, "x.com", False) is None)
+check("a second call within the recheck interval doesn't re-stat the model dir (at most one check a minute)",
+      scorer_no_model._lgbm_checked_at > 0 and scorer_no_model.score_stage2({}, "x.com", False) is None)
 
 
 # --- MLScorer.score_stage2: REAL onnxruntime inference against a REAL tiny model ---
@@ -166,6 +166,18 @@ check("the trained model actually discriminates: threat-shaped input scores a "
       high_everything_prob is not None and high_everything_prob < low_everything_prob)
 
 
+# --- the nightly retrain replaces the model file: the scorer picks up the new one ---
+import os as _os  # noqa: E402
+first_session = scorer_real._lgbm_session
+_st = _os.stat(onnx_path)
+_os.utime(onnx_path, (_st.st_atime, _st.st_mtime + 10))
+scorer_real._lgbm_checked_at = 0.0          # skip the one-minute recheck wait
+scorer_real.score_stage2({"tranco_rank": 0}, "", is_trust_cached=False)
+check("a replaced model file (new mtime) is reloaded on the next check -- scoring never stays on a stale model",
+      scorer_real._lgbm_session is not None and scorer_real._lgbm_session is not first_session)
+check("ready() reports the classifier as loaded", scorer_real.ready().get("classifier") is True)
+
+
 # --- MLScorer.score_stage3: mocked FastEmbed (real cosine-similarity math, real
 # vendor-pattern reuse, no slow/network-dependent 85MB download) ---
 fake_vendor_embeddings = {
@@ -188,14 +200,20 @@ scorer_embed = MLScorer(str(embed_dir))
 with patch("fastembed.TextEmbedding", _FakeTextEmbedding):
     sim, label = scorer_embed.score_stage3("o1234.ingest.us.sentry.io")
 check("score_stage3 finds a real vendor-pattern match via cosine similarity "
-      "(reusing fp_engine.py's own real _build_safe_vendor_patterns() list, "
-      "confirmed non-empty)", sim is not None and sim > 0.99 and label == "Sentry Ingest US")
+      "(the SAFE_VENDOR_PATTERNS list, confirmed non-empty)", sim is not None and sim > 0.99 and label == "Sentry Ingest US")
 
 scorer_embed_unavailable = MLScorer(str(TMPDIR / "no_fastembed"))
 with patch.dict(sys.modules, {"fastembed": None}):
     sim_none, label_none = scorer_embed_unavailable.score_stage3("x.com")
 check("score_stage3 degrades to (None, None) when fastembed isn't importable, "
       "matching v1's own ImportError-caught behavior", sim_none is None and label_none is None)
+
+
+# --- helpers used outside evaluate(): vendor similarity and text embedding ---
+check("vendor_similarity() never blocks on a model load: no model -> the static rule fallback, a real number",
+      isinstance(scorer_embed_unavailable.vendor_similarity("telemetry.example.com")[0], float))
+check("vendor_similarity() of a placeholder name is 0.0", scorer_embed.vendor_similarity("unknown")[0] == 0.0)
+check("embed_text() returns None while no model is loaded", scorer_embed_unavailable.embed_text("x") is None)
 
 
 print(f"\n{'='*60}")

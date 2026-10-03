@@ -17,9 +17,8 @@ which turned out to have at least one stale tag -- see the module docstring note
 Documentation/CONFIG_API.md):
   - lateral_movement_ports: src/core/pipeline.py's PipelineOrchestrator.__init__ passes
     it once into ZeekFeatureExtractor(...)'s constructor.
-  - local_confirmed_intel_ttl_seconds: src/intelligence/fp_engine.py's
-    AutonomousFPEngine.__init__ passes it once into LocalConfirmedIntel(...)'s
-    constructor.
+  - local_confirmed_intel_ttl_seconds: src/core/pipeline.py's EnginePipeline.__init__
+    passes it once into LocalConfirmedIntel(...)'s constructor.
 reactive_capture_zeek_memory_limit_mb / reactive_capture_suricata_memory_limit_mb were
 also checked against their read site (src/extractors/fritzbox_capture.py:561-562, read
 fresh via config.get() on every capture burst -- genuinely live, correctly NOT in this
@@ -133,7 +132,7 @@ CONFIG_SCHEMA = [
      "desc": "Destination ports treated as lateral-movement-relevant. RESTART REQUIRED: read once at ZeekFeatureExtractor construction (src/core/pipeline.py)."},
 
     {"s": "false_positive_engine", "k": "local_confirmed_intel_ttl_seconds", "t": "number", "def": 2592000.0,
-     "desc": "How long a confirmed-threat IOC stays a hard-stop for other devices touching it (30 days). RESTART REQUIRED: read once at AutonomousFPEngine construction (src/intelligence/fp_engine.py)."},
+     "desc": "How long a confirmed-threat IOC stays a hard-stop for other devices touching it (30 days). RESTART REQUIRED: read once when the engine starts (src/core/pipeline.py)."},
     {"s": "false_positive_engine", "k": "fp_lgbm_threshold", "t": "number", "def": 0.75,
      "desc": "Stage 2: minimum LightGBM P(false positive) to lean toward suppression. Lower = trusts the tabular model more readily."},
     {"s": "false_positive_engine", "k": "fp_embed_similarity_threshold", "t": "number", "def": 0.82,

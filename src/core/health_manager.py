@@ -381,6 +381,7 @@ class HealthManager:
         self._evaluate_probe_component("zeek", self._check_zeek_freshness())
         self._evaluate_probe_component("suricata", self._check_suricata())
         self._evaluate_probe_component("pihole", self._check_pihole())
+        self._evaluate_probe_component("engine_errors", self._check_engine_errors(now))
 
         # BUGFIX (2026-09-16, third-party audit finding P0 -- Pi-hole "isolation
         # storm"): dns_evasion.py's blind-spot audit (fritzbox_capture.py:
@@ -455,6 +456,21 @@ class HealthManager:
             return f" (operator override via console, set by {entry.get('set_by', 'unknown')})"
         except Exception:
             return ""
+
+    def _check_engine_errors(self, now: float) -> Tuple[bool, str]:
+        """Fails while the decision engine or CL-AFPE raised within the last 2 minutes. Each such error means a cycle
+        decided "not evaluated" (no action) or an alert published unsuppressed -- see argus/ops/live_engine.py.
+        Alert-only: no recovery action; three failed probes in a row make it UNHEALTHY and alert."""
+        try:
+            from argus.ops import live_engine
+            status = live_engine.engine_error_status()
+        except Exception as exc:
+            return True, f"engine error status unavailable: {exc}"
+        recent = {k: v for k, v in status.items() if now - float(v.get("last_error_at", 0)) < 120.0}
+        if not recent:
+            total = sum(int(v.get("count", 0)) for v in status.values())
+            return True, f"no recent engine errors ({total} since start)"
+        return False, "; ".join(f"{k}: {v.get('count')} error(s), last: {v.get('last_error', '')}" for k, v in recent.items())
 
     def _check_suricata(self) -> Tuple[bool, str]:
         if not bool(self.config.get("reactive_capture_suricata_enabled", True)):

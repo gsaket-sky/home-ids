@@ -221,8 +221,8 @@ def main():
             graph_store.close()
         return
 
-    # ml_registry/fp_engine are intentionally NOT constructed here -- this is an offline
-    # script with no running pipeline, so there's no live MLRegistry/AutonomousFPEngine
+    # ml_registry/familiarity are intentionally NOT constructed here -- this is an offline
+    # script with no running pipeline, so there's no live MLRegistry/DeviceFamiliarity
     # instance whose in-memory state also needs updating (unlike merge_into_canonical()'s
     # live-traffic caller in identity.py, which always has both). Any orphan .pkl model
     # files under models/ are left in place, reported below for a manual follow-up pass

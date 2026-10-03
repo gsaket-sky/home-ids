@@ -19,9 +19,8 @@ from core import scheduler_metrics  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [SCHEDULER] %(message)s")
 LOGGER = logging.getLogger("scheduler")
 
-# Coordinator job name shared with fp_engine.py's own _weekly_retrain_loop() -- both
-# invoke the literal same script (train_fp_classifier.py) and must mutex against
-# EACH OTHER, not just the 6 jobs below. Keep this string identical on both sides.
+# Coordinator job name for the nightly false-positive retrain (train_fp_classifier.py). The engine picks up the new
+# model on its own (argus/cl_afpe/ml_scoring.py reloads it when the file changes).
 TRAIN_FP_CLASSIFIER_JOB_NAME = "train_fp_classifier"
 
 # state/scheduler.log (embedded mode: this process's stdout, opened O_APPEND by

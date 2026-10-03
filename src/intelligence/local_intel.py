@@ -2,13 +2,13 @@
 local_intel.py - Self-growing local confirmed-threat store.
 
 Once any device on this network is confirmed talking to a malicious destination --
-Stage-1 CONFIRMED_THREAT in fp_engine.py, or the same 2-independent-source HIGH/
+Stage-1 CONFIRMED_THREAT in the CL-AFPE, or the same 2-independent-source HIGH/
 CRITICAL bar the Telegram gate uses (pipeline.py) -- that IOC is recorded here.
 A DIFFERENT device connecting to the SAME IOC later gets an immediate hard-stop
 instead of re-earning 2 independent sources from scratch: the network gets
 collectively harder to compromise via the same infrastructure, the more it confirms.
 
-Scope note: kinds are "ip" and "domain" only, not "ja3"/"ja4" -- fp_engine.py's
+Scope note: kinds are "ip" and "domain" only, not "ja3"/"ja4" -- the CL-AFPE's
 evaluate() only ever receives aggregated malicious-hit COUNTS
 (zeek_ja3_malicious/zeek_ja4_malicious), not the actual hash strings, so there is
 nothing reliable to record/check a specific fingerprint against at this layer without
@@ -17,7 +17,7 @@ adding kinds that would silently never populate.
 
 TTL-bounded (default 30 days) -- confirmed-malicious infrastructure from months ago may
 be repurposed or abandoned, so this is explicitly not permanent, same reasoning as
-fp_engine.py's own domain trust cache.
+the CL-AFPE's own domain trust cache.
 
 One file, several processes: the engine (live checks and records), the scheduler's retro-hunt
 and the maintenance tools all use state/local_confirmed_intel.json. Every operation therefore
@@ -50,7 +50,7 @@ class LocalConfirmedIntel:
 
     def _entry_ttl(self, entry: dict) -> float:
         """PHASE 67 (HEE_ROADMAP.md item 6, malicious-track calibration wiring):
-        per-entry TTL override, same shape-agnostic pattern as fp_engine.py's own
+        per-entry TTL override, same shape-agnostic pattern as the CL-AFPE's own
         `_trust_entry_ttl()` (Phase 52) -- an entry without a stored `ttl_seconds`
         (every entry written before this phase) falls back to the instance-wide
         `self._ttl`, so a live upgrade never breaks reading pre-existing entries."""
@@ -61,9 +61,9 @@ class LocalConfirmedIntel:
                ttl_seconds: Optional[float] = None) -> bool:
         """Records a confirmed IOC. Returns True if this is a NEW entry, False if it
         was a refresh of an already-known one -- same is_new convention as
-        fp_engine.py's _immunize_domain(). `ttl_seconds` (PHASE 67, optional) overrides
+        the CL-AFPE's _immunize_domain(). `ttl_seconds` (PHASE 67, optional) overrides
         the instance-wide default for THIS entry only -- same per-entry-override shape
-        as fp_engine.py's trust cache (Phase 52); None (every caller before this phase)
+        as the CL-AFPE's trust cache (Phase 52); None (every caller before this phase)
         means "use the instance default", not "no TTL"."""
         if kind not in _KINDS or not value or str(value).lower() in ("unknown", "null", "none", ""):
             return False

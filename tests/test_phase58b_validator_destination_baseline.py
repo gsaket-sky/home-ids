@@ -30,11 +30,9 @@ Not part of the pytest suite -- run directly:
 `.venv/Scripts/python.exe tests/test_phase58b_validator_destination_baseline.py`
 
 Sections:
-  A. FAMILIARITY_TRUST_BAR -- single source of truth, same value in both
-     hypotheses/engine.py and fp_engine.py
-  C. Source-level wiring -- pipeline.py persists hee_rep_tier from the same
-     rep_vector decision_engine.evaluate() used; hypotheses/engine.py imports the
-     shared FAMILIARITY_TRUST_BAR constant rather than a separately-defined literal
+  A. FAMILIARITY_TRUST_BAR -- one value (hypothesis default = autotuner default), and the familiarity scale
+     (intelligence/device_familiarity.py) reaches it at 3 of 5 observations
+  C. Source-level wiring -- pipeline.py persists hee_rep_tier; the validator reads the hypothesis's bar
 """
 import sys
 from pathlib import Path as _PathForSysPath
@@ -56,38 +54,38 @@ def check(name, cond, detail=""):
         FAILURES.append(name)
 
 
-from intelligence.fp_engine import FAMILIARITY_TRUST_BAR
-from intelligence.hypotheses.engine import DeviceProfileBenignHypothesis
-
+from argus.hypotheses.engine import DeviceProfileBenignHypothesis
+from argus.ops.backtest_job import _FAMILIARITY_TRUST_BAR_DEFAULT
+from intelligence.device_familiarity import OBSERVATIONS_FOR_FULL_FAMILIARITY, DeviceFamiliarity
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# Section A: single source of truth
+# Section A: one familiarity bar, one familiarity scale
 # ═══════════════════════════════════════════════════════════════════════════════════
 print("--- Section A: FAMILIARITY_TRUST_BAR single source of truth ---")
-
-check("DeviceProfileBenignHypothesis's class attribute equals the shared "
-      "module-level constant from fp_engine.py",
-      DeviceProfileBenignHypothesis._FAMILIARITY_TRUST_BAR == FAMILIARITY_TRUST_BAR)
-
-check("value is the documented 0.6 (3 of 5 observations)",
-      FAMILIARITY_TRUST_BAR == 0.6)
-
+check("the benign device-profile hypothesis's default bar is the documented 0.6 (3 of 5 observations)",
+      DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR == 0.6)
+check("the autotuner's shipped default for familiarity_trust_bar is the same value",
+      _FAMILIARITY_TRUST_BAR_DEFAULT == DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR)
+check("full familiarity is reached at 5 observations, so 3 observations reach the 0.6 bar exactly",
+      OBSERVATIONS_FOR_FULL_FAMILIARITY == 5)
+_fam = DeviceFamiliarity()
+for _ in range(3):
+    _fam.record_device_baseline_observation("d1", asn_owner="Example Owner")
+check("3 observations -> familiarity 0.6", abs(_fam.get_baseline_familiarity("d1", asn_owner="Example Owner") - 0.6) < 1e-9)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section C: source-level wiring
 # ═══════════════════════════════════════════════════════════════════════════════════
-print("\n--- Section C: source-level wiring ---")
-
-_pipeline_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "pipeline.py").read_text(encoding="utf-8")
+print()
+print("--- Section C: source-level wiring ---")
+_src = _PathForSysPath(__file__).resolve().parent.parent / "src"
+_pipeline_src = (_src / "core" / "pipeline.py").read_text(encoding="utf-8")
 check("pipeline.py persists hee_rep_tier from rep_vector.tier (the same reputation "
-      "vector already computed for decision_engine.evaluate() this cycle)",
+      "vector the decision engine evaluated this cycle)",
       '"hee_rep_tier": rep_vector.tier' in _pipeline_src)
-
-_engine_src = (_PathForSysPath(__file__).resolve().parent.parent / "src" / "intelligence" / "hypotheses" / "engine.py").read_text(encoding="utf-8")
-check("hypotheses/engine.py also imports the shared constant rather than keeping its "
-      "own separately-defined 0.6 literal",
-      "from intelligence.fp_engine import FAMILIARITY_TRUST_BAR" in _engine_src
-      and "_FAMILIARITY_TRUST_BAR = FAMILIARITY_TRUST_BAR" in _engine_src)
+_validator_src = (_src / "argus" / "llm_review" / "validator.py").read_text(encoding="utf-8")
+check("the AI advisor's validator reads the hypothesis's (autotuned) bar, not its own literal",
+      "DeviceProfileBenignHypothesis.FAMILIARITY_TRUST_BAR" in _validator_src)
 
 print()
 if FAILURES:

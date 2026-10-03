@@ -50,8 +50,6 @@ from metrics import (
     autotune_device_threshold_effective, autotune_calibration_total, autotune_evidence_count,
     autotune_arp_sweep_threshold_effective, autotune_arp_sweep_calibration_total,
     autotune_arp_sweep_evidence_count,
-    autotune_conn_abuse_threshold_effective, autotune_long_conn_threshold_effective,
-    autotune_device_profile_correction_total,
     ollama_last_run_timestamp, ollama_calls_last_run, ollama_cache_hits_last_run,
     ollama_deferred_last_run, ollama_validated_total,
     job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
@@ -306,7 +304,7 @@ class MetricsExporter:
         is_poisoned: bool,
         current_threshold_limit: float,
         decision: Dict[str, Any] = None,
-        fp_engine: Any = None,
+        familiarity: Any = None,
         reputation_tier: Any = None,
     ) -> None:
         try:
@@ -357,9 +355,9 @@ class MetricsExporter:
             self._track_transition(self._last_probation, str_dev_id, str_host, in_probation,
                                     "entered", "graduated", probation_transitions_total)
 
-            if fp_engine is not None:
+            if familiarity is not None:
                 baseline_familiarity_entries_total.labels(str_dev_id, str_host).set(
-                    fp_engine.get_baseline_entry_count(str_dev_id)
+                    familiarity.get_baseline_entry_count(str_dev_id)
                 )
 
             if decision:
@@ -628,34 +626,6 @@ class MetricsExporter:
                     ollama_validated_total.labels(verdict=verdict).set(count)
             except Exception as exc:
                 LOGGER.debug("Failed to sync Ollama relay metrics: %s", exc)
-
-        # PHASE 30: device_fp_profiles.json is fp_engine.py's own write-through file for
-        # EVERY per-device learned threshold (written from whichever process calls
-        # apply_device_fp_profile() -- the FastAPI webhook subprocess for reactive
-        # corrections, or the train_fp_classifier.py/ollama_soc.py cron processes) --
-        # only the two newest keys (conn_abuse/long_conn) are synced here since every
-        # other key already has its own dedicated, correctly-relayed metric elsewhere
-        # (fp_combined_suppress_threshold via autotune_stats.json's "effective" field,
-        # arp_sweep_unique_targets_threshold via its "arp_sweep_effective" field above).
-        profiles = self._read_relay_file(base / "device_fp_profiles.json")
-        if profiles:
-            try:
-                _profile_key_gauges = {
-                    "conn_abuse_unique_ip_threshold": autotune_conn_abuse_threshold_effective,
-                    "long_conn_duration_threshold": autotune_long_conn_threshold_effective,
-                }
-                for dev_id, profile in profiles.items():
-                    for key, gauge in _profile_key_gauges.items():
-                        entry = profile.get(key)
-                        if not entry or "value" not in entry:
-                            continue
-                        hostname = entry.get("hostname") or "unknown"
-                        gauge.labels(device=dev_id, hostname=hostname).set(entry["value"])
-                        autotune_device_profile_correction_total.labels(
-                            device=dev_id, hostname=hostname, key=key, set_by=entry.get("set_by", "unknown")
-                        ).set(entry.get("correction_count", 0))
-            except Exception as exc:
-                LOGGER.debug("Failed to sync device-FP-profile relay metrics: %s", exc)
 
         jobs = self._read_relay_file(base / "job_health.json")
         if jobs:

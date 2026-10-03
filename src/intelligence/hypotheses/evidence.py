@@ -26,12 +26,12 @@ class Evidence:
 # VERSION 10 (evidence families): canonical registry of every `independence_group`
 # value actually used anywhere in the codebase. Before this existed, independence_group
 # was just an ad-hoc string literal scattered across each detector file with no central
-# list -- decision_engine.py's "how many independent evidence sources" count read a
+# list -- argus/decision/engine.py's "how many independent evidence sources" count read a
 # hand-maintained hybrid type-prefix-or-group-membership filter that had silently never
 # been updated when threat_signals.py added "lan_recon" (arp_sweep) evidence, so a real
 # ARP-sweep + corroborating signal never counted toward the 2-independent-sources bar a
 # HIGH-severity verdict requires. This registry is the single source of truth
-# decision_engine.py's filter now reads from, so a new detector inventing a fragmenting
+# argus/decision/engine.py's filter now reads from, so a new detector inventing a fragmenting
 # or colliding group name is at least visible in one place instead of silently
 # fragmenting corroboration counting further.
 #
@@ -42,7 +42,7 @@ class Evidence:
 # deliberately, so ONE hypothesis (DNSTunnelingV2Hypothesis) can still tell two
 # different tunneling signal *categories* apart for its own internal "2+ corroborating
 # categories" bonus. independence_group answers "how many independent evidence FAMILIES
-# does this device have, across every hypothesis" (decision_engine.py's cross-hypothesis
+# does this device have, across every hypothesis" (argus/decision/engine.py's cross-hypothesis
 # question); subtag answers "how many distinct signal categories does THIS ONE
 # hypothesis have" (a single Hypothesis subclass's own, finer-grained question). These
 # are intentionally separate mechanisms at different granularities -- merging them would
@@ -65,19 +65,19 @@ EVIDENCE_FAMILIES = frozenset({
                          # flow/behavioral analysis.
 })
 
-# Families whose evidence can corroborate an ATTACK hypothesis toward decision_engine.py's
+# Families whose evidence can corroborate an ATTACK hypothesis toward argus/decision/engine.py's
 # "N independent evidence sources" count. Deliberately excludes "local_context" -- that
 # family is benign-context-only (e.g. UPnP/SSDP local device discovery) and must never
 # count toward independent sources for an attack verdict, the same way it's already
 # excluded from pipeline.py's attack-side noisy_types dampening.
 ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 
-# PHASE 58 (hoisted from hypotheses/engine.py's DeviceProfileBenignHypothesis, which
+# PHASE 58 (hoisted from argus/hypotheses/engine.py's DeviceProfileBenignHypothesis, which
 # originally defined this as a private class attribute): Evidence `type` values that are
 # NEVER ambiguous/routine-telemetry-explainable -- a device-type label (Gap 6, Documentation/
 # DECISION_LOGIC_DEPENDENCY_MAP.md) can never rescue a "benign" verdict when any of these
 # are present, regardless of which HYPOTHESIS actually fired. Single source of truth,
-# imported both by DeviceProfileBenignHypothesis (`hypotheses/engine.py`, competing
+# imported both by DeviceProfileBenignHypothesis (`argus/hypotheses/engine.py`, competing
 # against an attack hypothesis at alert-creation time) and by ai_soc.py's
 # DeterministicValidator (checking an LLM's free-text re-review of an already-published
 # alert, hours later, in a different process) -- previously only the FIRST of those two
@@ -86,7 +86,7 @@ ATTACK_EVIDENCE_FAMILIES = EVIDENCE_FAMILIES - {"local_context"}
 # all (confirmed live: both example_smarttv_fritz_box immunizations in the 2026-09-03 SOC
 # report justified suppressing NETWORK_INTRUSION using DNS-hygiene language -- query rate,
 # unique domains, entropy -- none of which NetworkIntrusionHypothesis.evaluate() actually
-# reads; see hypotheses/engine.py:104-120). Deliberately excludes dns_rate/dns_entropy/
+# reads; see argus/hypotheses/engine.py:104-120). Deliberately excludes dns_rate/dns_entropy/
 # dns_unique_ratio (and by extension the "dns_behavior" independence_group as a whole) --
 # those genuinely are ambiguous signals a device-profile hypothesis is allowed to explain
 # as routine telemetry, not attack-specific on their own -- see

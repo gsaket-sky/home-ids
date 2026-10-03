@@ -395,7 +395,7 @@ def ingest_zeek_logs(log_dir: Path, zeek_fx, collect_sources: set = None) -> Dic
 # --- Orchestration -------------------------------------------------------------------
 
 def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_ips: set,
-                           capture_ts: float, geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, int]:
+                           capture_ts: float, geoip_engine=None, ti_engine=None, familiarity=None) -> Dict[str, int]:
     """Runs dns_evasion.py's blind-spot audit for every tracked device whose client_ip
     was actually seen in this burst -- the piece Phase C2 built and tested but never
     actually wired into a live capture flow (found while scoping the LightGBM feature
@@ -441,7 +441,7 @@ def run_dns_evasion_audit(zeek_fx, state_manager, evidence_store, burst_source_i
     if not devices:
         return {}
 
-    results = audit_burst(devices, capture_ts, geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
+    results = audit_burst(devices, capture_ts, geoip_engine=geoip_engine, ti_engine=ti_engine, familiarity=familiarity)
     counts: Dict[str, int] = {}
     for dev_id, audit in devices.items():
         evidence_list = results.get(dev_id, [])
@@ -546,7 +546,7 @@ def cleanup_stale_scratch_files(out_dir: Path, max_age_seconds: float = 3600.0) 
 
 def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/opt/zeek/bin/zeek",
                         trigger_reason: str = "unspecified", state_manager=None, evidence_store=None,
-                        geoip_engine=None, ti_engine=None, fp_engine=None) -> Dict[str, object]:
+                        geoip_engine=None, ti_engine=None, familiarity=None) -> Dict[str, object]:
     """Top-level entry point for a single reactive-capture burst: authenticate, capture
     all configured radios, convert each from AVM's modified pcap format to standard
     pcap, reprocess through real Zeek, and ingest the resulting logs into the SAME
@@ -746,7 +746,7 @@ def capture_and_ingest(config: dict, zeek_fx, out_dir: Path, zeek_bin: str = "/o
         try:
             summary["dns_evasion_findings"] = run_dns_evasion_audit(
                 zeek_fx, state_manager, evidence_store, burst_source_ips, capture_ts,
-                geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine,
+                geoip_engine=geoip_engine, ti_engine=ti_engine, familiarity=familiarity,
             )
             reactive_capture_dns_evasion_findings_total.inc(sum(summary["dns_evasion_findings"].values()))
         except Exception as exc:
@@ -1003,7 +1003,7 @@ class ReactiveCaptureDispatcher:
             self._deferral_log[kind] = (last, repeats + 1)
 
     def try_dispatch(self, config: dict, zeek_fx, trigger_reason: str, state_manager=None,
-                      evidence_store=None, geoip_engine=None, ti_engine=None, fp_engine=None) -> bool:
+                      evidence_store=None, geoip_engine=None, ti_engine=None, familiarity=None) -> bool:
         """Attempts to fire one capture burst asynchronously. Returns True if
         dispatched (the actual capture runs in a daemon thread and this call never
         blocks), False if reactive_capture_enabled is false or the shared hourly
@@ -1078,7 +1078,7 @@ class ReactiveCaptureDispatcher:
             try:
                 result = capture_fn(config, zeek_fx, out_dir, zeek_bin=zeek_bin, trigger_reason=trigger_reason,
                                      state_manager=state_manager, evidence_store=evidence_store,
-                                     geoip_engine=geoip_engine, ti_engine=ti_engine, fp_engine=fp_engine)
+                                     geoip_engine=geoip_engine, ti_engine=ti_engine, familiarity=familiarity)
                 # Feed the bytes budget from what was ACTUALLY captured (real numbers,
                 # not an estimate) -- test stubs return None, which is fine, they just
                 # don't move the bytes counter. See _check_and_consume_budget()'s docstring.

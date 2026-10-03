@@ -29,7 +29,7 @@ def _is_rfc1918_private(addr) -> bool:
     return any(addr in net for net in _RFC1918_NETWORKS)
 
 
-# P1 FIX (third-party review, 2026-09-28): matches fp_engine.py's own
+# P1 FIX (third-party review, 2026-09-28): matches the CL-AFPE's own
 # _DEFAULT_EMBED_SIMILARITY_THRESHOLD -- see classify()'s own comment on the
 # is_cloud_cdn_provider_org() gate below for why this specific value is reused
 # here rather than inventing a second, disagreeing bar for the same underlying
@@ -40,7 +40,7 @@ _CLOUD_CDN_AFPE_TRUST_THRESHOLD = 0.82
 class ReputationVector:
     """`tier` is a reputation/context classification — "how much prior trust or suspicion
     attaches to this destination" — not a threat score or a verdict. It does NOT mean
-    "tier 4 is 4x more dangerous than tier 1". decision_engine.py treats tier 5 as
+    "tier 4 is 4x more dangerous than tier 1". argus/decision/engine.py treats tier 5 as
     corroborated-enough to justify auto-block; every lower tier only ever contributes
     context toward hypothesis evaluation, never a verdict on its own.
 
@@ -62,7 +62,7 @@ class ReputationVector:
     source_confidence: str = "medium"
     # SHADOW-MODE GAP 1 (Documentation/DECISION_LOGIC_DEPENDENCY_MAP.md): True only when
     # tier 5 was reached via ti_score (a genuine curated-feed IOC match -- Feodo/ThreatFox/
-    # OTX), never via vt_score/abuse_score alone. Currently READ ONLY by decision_engine.py's
+    # OTX), never via vt_score/abuse_score alone. Currently READ ONLY by argus/decision/engine.py's
     # shadow computation (does not change the live tier==5 branch's behavior yet) -- see
     # that file's own comment for why. Verified via a live backtest
     # (scripts/shadow_backtest.py against state/alerts.json): of 80 historical
@@ -213,7 +213,7 @@ class ReputationClassifier:
         # unchanged. When a real domain string IS available, this now also
         # requires the CL-AFPE Stage 3 FastEmbed text-similarity score (afpe_score
         # -- see pipeline.py's classify() call site for how this is now actually
-        # wired from fp_engine.py's own loaded embedding model, instead of the
+        # wired from the CL-AFPE's own loaded embedding model, instead of the
         # hardcoded 0.0 it used to always pass) to independently say this
         # domain's own text resembles a real vendor pattern, before granting the
         # protective tier-2 floor. A domain that merely resolves into a cloud ASN
@@ -222,7 +222,7 @@ class ReputationClassifier:
         # exactly the C2-hosted-on-legitimate-cloud-infra case this heuristic used
         # to blanket-suppress regardless of evidence. "unknown"/"" get the same
         # no-real-domain-text treatment as a bare IP -- this codebase's own
-        # standing sentinel for "no resolved hostname" (fp_engine.py/dns_evasion.py
+        # standing sentinel for "no resolved hostname" (the CL-AFPE/dns_evasion.py
         # etc. all treat it identically), matching the exact live incidents this
         # whole is_cloud_cdn_provider_org() floor was built for (149.154.166.110/
         # 35.186.224.24 were both resolved via `reputation_target` == "unknown").
@@ -238,7 +238,7 @@ class ReputationClassifier:
         # is_cloud_cdn_provider_org() already maintains a broader, deliberately
         # conservative "universally-recognized cloud/CDN infrastructure" list (Google
         # LLC, AWS, Apple, Facebook/Meta, IBM Cloud, Vultr, Leaseweb, Scaleway, Contabo --
-        # the SAME list fp_engine.py's confirmed-intel write guard already trusts), and
+        # the SAME list the CL-AFPE's confirmed-intel write guard already trusts), and
         # this function never consulted it. Confirmed live: a device's alerts to
         # updates.bravesoftware.com / two Spotify hosts / Datadog's log intake all
         # resolved to 35.186.224.0/24 (Google LLC, AS396982) -- a shared GCP customer
@@ -268,12 +268,12 @@ class ReputationClassifier:
         # from an AbuseIPDB score of 3.78 (~63% abuseConfidenceScore) — with VirusTotal and
         # ThreatIntel both at 0.0. AbuseIPDB is a crowd-sourced abuse-report aggregate, not
         # IOC confirmation, and it's routinely non-zero for widely-shared infrastructure.
-        # fp_engine.py's own Stage 1 hard-stop already treats this exact metric
+        # the CL-AFPE's own Stage 1 hard-stop already treats this exact metric
         # conservatively (only "cannot be a FP" at abuse>=4.0) — this threshold used to be
         # a lower, disagreeing bar (>2.0) for the identical number. VT (multi-vendor
         # detection) and TI (curated malware-blacklist feeds: Feodo/ThreatFox/OTX) are both
         # more authoritative single-source signals and keep their original >2.0 bar;
-        # AbuseIPDB alone now has to clear the same 4.0 bar fp_engine already trusted it at.
+        # AbuseIPDB alone now has to clear the same 4.0 bar the CL-AFPE already trusted it at.
         confirmed_ioc = vt_score > confirmed_vt_ti_floor or ti_score > confirmed_vt_ti_floor or abuse_score >= confirmed_abuse_floor
         weak_signal = vt_score > 0.0 or ti_score > 0.0 or abuse_score > 0.0
         # BUGFIX: this used to run unconditionally, so ANY explicit tier assigned above
@@ -291,7 +291,7 @@ class ReputationClassifier:
                 verified_ioc = ti_score > confirmed_vt_ti_floor
             elif weak_signal:
                 tier = 4 # Weak/unconfirmed detection — surfaced as SUSPICIOUS/monitor by
-                         # decision_engine.py, never auto-blocked on this alone (see PHASE 8 there).
+                         # argus/decision/engine.py, never auto-blocked on this alone (see PHASE 8 there).
 
         return ReputationVector(
             domain=domain,

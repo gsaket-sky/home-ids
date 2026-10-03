@@ -1,7 +1,7 @@
 """
 v13 HypothesisEngine (Phase 1/3 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 
-Faithful port of intelligence/hypotheses/engine.py (786 lines, read in full this
+Faithful port of argus/hypotheses/engine.py (786 lines, read in full this
 session before writing a single line here -- not reconstructed from memory or
 research notes, per this project's own "verify, don't assume" standard for
 security-critical scoring logic). Every hypothesis's required/strong/contradicting
@@ -129,7 +129,7 @@ class Hypothesis:
         of bug is structurally possible for every other tier-gated hypothesis
         below, just not yet caught live for each one individually).
 
-        Same domain-linkage discipline as decision_engine.py's own Gap-64 fix
+        Same domain-linkage discipline as argus/decision/engine.py's own Gap-64 fix
         (only strip/ignore when BOTH sides carry destination info and they
         PROVABLY differ; never touch the ambiguous case where either side lacks
         it) -- rep_vector.domain is the ONE destination it was actually computed
@@ -739,10 +739,7 @@ class DeviceProfileBenignHypothesis(Hypothesis):
         "arp_spoof_pending",
     }) | ZEEK_NOTICE_ATTACK_SHAPED_EVIDENCE_TYPES
 
-    # Matches fp_engine.py's FAMILIARITY_TRUST_BAR -- v13's CL-AFPE port (Phase 4)
-    # doesn't exist yet, so this is a literal copy of the current live value (0.6,
-    # confirmed via the v-current source comment referencing "3 of 5 observations"),
-    # not an import (no v13 fp_engine module to import from yet).
+    # Familiarity at or above this counts as "this device normally talks here" (3 of 5 observations).
     FAMILIARITY_TRUST_BAR = 0.6
 
     # BUGFIX (live audit, 2026-09-09): see AdvertisingBurstHypothesis's own comment --

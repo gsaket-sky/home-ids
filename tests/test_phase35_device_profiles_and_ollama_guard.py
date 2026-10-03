@@ -55,7 +55,7 @@ def check(name, cond, detail=""):
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section A: hypotheses/engine.py
 # ═══════════════════════════════════════════════════════════════════════════════════
-from intelligence.hypotheses.engine import (
+from argus_scenarios import (
     HypothesisEngine, DeviceProfileBenignHypothesis, DNSTunnelingHypothesis,
     AdvertisingBurstHypothesis,
 )
@@ -145,7 +145,7 @@ check("THE MITIGATION (end-to-end): a weak-but-real DGA signal on a trusted-tier
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section B: decision_engine.py -- device_type threaded end-to-end
 # ═══════════════════════════════════════════════════════════════════════════════════
-from core.decision_engine import DecisionEngine, DecisionState
+from argus_scenarios import DecisionEngine, DecisionState
 
 de = DecisionEngine()
 d_result = de.evaluate([_dns_rate_ev(30)], ReputationVector(domain="apple.com", tier=1), "smart_tv")

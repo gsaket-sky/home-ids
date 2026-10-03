@@ -16,7 +16,7 @@ with Phases 4/5's own honest cuts, not accidents:
    not a redesign.
 
 2. A FINDING BECOMES A NEW GRAPH EVIDENCE ITEM, not a side-channel
-   fp_engine.record_confirmed_threat()+_apply_sigma_shift() call (v13's CL-AFPE
+   CL-AFPE record_confirmed_threat()+_apply_sigma_shift() call (the CL-AFPE
    deliberately doesn't have either -- Phase 4's own scope cut). A retroactively-
    confirmed malicious destination is written back as a real `reputation`
    Evidence item for the device that touched it, timestamped now with

@@ -749,7 +749,7 @@ class IPSMitigator:
         # CL-AFPE failing to suppress it. Pi-hole blocking now requires the decision engine's
         # own corroborated verdict (HIGH/CRITICAL — reached only via a hard-stop, a confirmed
         # reputation tier, or >=2 independent evidence sources scoring >=3.0; see
-        # decision_engine.py) before it will act at all. A SUSPICIOUS/monitor verdict — a
+        # argus/decision/engine.py) before it will act at all. A SUSPICIOUS/monitor verdict — a
         # single uncorroborated signal — is alerted on but never blocks: it stays under
         # observation until either it escalates on its own evidence or CL-AFPE/Ollama clears it.
         if pihole_enabled and target_domain and target_domain not in ("unknown", "-"):

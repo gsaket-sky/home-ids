@@ -1,113 +1,37 @@
 """
-v13 CL-AFPE (Phase 4 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
+CL-AFPE: the closed-loop false-positive engine. For every alert that reaches it, evaluate() returns one verdict --
+FALSE_POSITIVE (suppressed), UNCERTAIN (published, softer) or CONFIRMED_THREAT -- and every correction or
+confirmation feeds back into what it decides next time.
 
-HONEST SCOPE NOTE (read this before assuming parity with v-current):
-intelligence/fp_engine.py is 2,847 lines covering many concerns beyond trust-cache
-scoping -- local confirmed-intel poisoning protection, per-device threshold
-profiles (CONNECTION_ABUSE arp-sweep/long-conn/rejected-connection threshold
-bumping), sigma-shift EWMA widening, ML model (LightGBM/FastEmbed) management, and
-training-data write-back (the graph's fp_suppression_log, 2026-09-21 -- formerly
-autonomous_muted.jsonl) for train_fp_classifier.py. The
-plan scopes v13's CL-AFPE specifically to "trust/immunization scoping as native
-graph edges" -- THIS FILE PORTS THAT AND ONLY THAT, PLUS THE TWO REFUSAL GUARDS AND
-BASELINE FAMILIARITY. Deliberately NOT ported here (tracked as separate, real,
-not-yet-scoped future work in the dependency map, not silently dropped):
-  - Per-device threshold bumping (mark_false_positive()'s CONNECTION_ABUSE branch)
-  - Local confirmed-intel poisoning protection (local_intel.py integration)
-  - Sigma-shift EWMA widening (_apply_sigma_shift)
-  - ML model training/inference, muted-log training-data write-back
+evaluate(), in order:
+  1. Trust-cache fast path: a destination already corrected as safe (a graph 'trusts' edge, device-scoped for the
+     DEVICE_SCOPED_TRUST_HYPOTHESES) is suppressed straight away -- once composite trust (composite_trust.py, two
+     independent evidence families) clears its bar.
+  2. Stage 1 hard stops, never suppressible: the decision engine's own CRITICAL verdict (check 0); a threat-intel
+     IOC, lateral movement, a corroborated malicious JA3/JA4, the decoy host, AbuseIPDB, an exfiltration burst
+     (checks 1-6, re-derived from `features`, because only some of them are hard stops in the decision engine);
+     and the local confirmed-intel store (check 7: once any device was confirmed touching a domain/IP, every
+     other device touching it is stopped too).
+  3. Stages 2/3: the LightGBM false-positive classifier and FastEmbed vendor similarity (ml_scoring.py), combined
+     and compared with the device's suppress / uncertain thresholds (config, then the device's profile, then a
+     promoted autotuner value).
 
-WHAT'S PORTED, faithfully, from fp_engine.py (read directly, not guessed):
-  - _immunize_domain()/revoke_immunization()/_is_trust_cached()/get_dynamic_trust_cache()
-    (lines 871-891, 1504-1624, 2418-2453) -- redesigned as graph 'trusts' edges
-    (device --trusts--> destination, metadata carries source/hypothesis/ttl_seconds)
-    instead of a dict-shape-agnostic _trust_cache, per the plan's own stated design.
-  - DEVICE_SCOPED_TRUST_HYPOTHESES (lines 139-156) -- copied exactly.
-  - mark_false_positive()'s two refusal guards (Phase 64c device-identity check,
-    lines 1698-1723; hard-stop-signature refusal, lines 1739-1761) and the DEFAULT
-    domain/IP immunization routing (lines 1869-1908).
-  - get_baseline_familiarity() (lines 2225-2246) -- ported using this module's own
-    lightweight per-device observation counters, mirroring v1's
-    _device_fp_profiles[device_id]['_baseline'] structure conceptually (v13 doesn't
-    yet have a v13-native per-device-profile store beyond this).
+Learning (the write paths):
+  - mark_false_positive() -- an operator, LLM-validated or autonomous correction: refuses hard-stop and
+    unknown-device alerts; for connection-abuse signatures raises the device's own detection thresholds, otherwise
+    immunizes the base domain (or the destination IP); always widens the device's sensitivity shift; records
+    composite-trust corroboration; writes a training record for the nightly retrain.
+  - record_confirmed_threat() -- records the destination in the shared local confirmed-intel store (never a public
+    resolver, a safe IP, cloud/CDN infrastructure or a private/reserved address -- each guard exists because such
+    an entry once poisoned the store), counts the confirmation per device/signature and tightens sensitivity.
 
-v13 full-architecture plan, Phase 6a/6c (added after this module's initial Phase 4
-build, once it was confirmed dormant -- nothing called ClAfpeEngine outside its own
-tests): per-device threshold bumping and sigma-shift widening, read directly from
-fp_engine.py's real mark_false_positive() (lines 1626-1914) and _apply_sigma_shift()
-rather than guessed from this module's own earlier scope note above. Confirmed via
-that read: the CONNECTION_ABUSE/PORT_SCAN/INTERNAL_RECONNAISSANCE branch is a
-genuine `elif`, mutually exclusive with the default domain/IP immunization branch
-below it (a real bugfix in v1's own history: immunizing an "unknown" domain for a
-signature type with no meaningful domain used to keep re-suppressing the same FP
-forever) -- and _apply_sigma_shift() fires unconditionally AFTER whichever branch
-ran, not tied to either one specifically. Per-device threshold values and the
-cumulative sigma shift are both stored via GraphStore.update_device_metadata()/
-get_device_metadata() (Phase 3) -- a per-device JSON blob under 'fp_profile'/
-'sigma_shift' keys, the graph-native equivalent of v1's own flat
-device_fp_profiles.json/fp_sigma_shifts.json files.
+STATE: trust edges and per-device values (fp_profile, sigma_shift, confirmed_threat_counts) live in the graph;
+confirmed intel in state/local_confirmed_intel.json and device familiarity in state/device_familiarity.json (both
+injected by pipeline.py, see live_engine.py's CL-AFPE wiring). Models are read-only here: the nightly
+train_fp_classifier.py writes them and MLScorer reloads them when the files change.
 
-v13 full-architecture plan, Phase 6b: local-intel poisoning protection, ported from
-fp_engine.py's real _is_ip_protected_from_confirmed_intel() (lines 909-965),
-record_confirmed_threat() (967-1037), and Stage-1 Check 7's read-side logic
-(1203-1240) -- read directly, not guessed. REUSES intelligence/local_intel.py's
-real LocalConfirmedIntel class via constructor injection (same "inject the real
-dependency" pattern RetroHunter already uses for threat_intel_lookup) rather than
-reimplementing it -- `local_intel`/`safe_ips` are both optional (None/empty
-default), matching this module's own existing graceful-degradation pattern for
-`resolve_canonical_device_id`/`has_device`: a caller that hasn't wired a
-LocalConfirmedIntel instance yet gets a safe no-op (record does nothing, the
-hard-stop check never fires) rather than a hard requirement. Every guard found in
-the real file is ported, since each one is a documented live-incident fix: known
-public DNS resolvers, `safe_ips`, cloud/CDN-owned ASNs, private/multicast/loopback/
-reserved IPs (write-side, in record_confirmed_threat), and telemetry-domain/IP-
-protection re-checked on the READ side too (check_local_intel_hard_stop) so an
-already-poisoned entry stops being honored immediately rather than waiting for its
-TTL to lapse -- v1's own real bugfix history (8.8.8.8, this network's own IDS box,
-mDNS multicast addresses, and 357 cloud/CDN IPs were all found poisoned in
-production before these guards existed).
-
-v13 full-architecture plan, Phase 6e: the composed `evaluate()` below wires
-everything above (6a-6d) into ONE end-to-end verdict, mirroring fp_engine.py's real
-`evaluate()` (line 397) faithfully -- trust-cache fast path (460-539), Stage 1
-hard-stop (541-588, `_stage1_hard_stop` at 1088), Stage 2/3 ML scoring (590-682,
-`ml_scoring.py`), and the final suppress/uncertain/confirmed-threat branch
-(690-870) including `get_device_suppress_threshold()` (2043-2056, now ported as a
-thin wrapper over the same `_get_device_profile_value()` Phase 6a already built).
-
-TWO DELIBERATE, DOCUMENTED SCOPE DECISIONS for Stage 1, found necessary once the
-real `_stage1_hard_stop()` (1088-1241) was read in full for this phase (not
-assumed from this module's own earlier docstring paragraphs above):
-  - Check 0 (decision_engine.py's own hard-stop verdict) reuses v13's OWN
-    already-computed `decision["state"] == "CRITICAL"`, exactly like v1's Check 0
-    reuses v-current's decision_engine.py -- the two engines are the SAME kind of
-    dependency here, not a shortcut.
-  - Checks 1-6 (ThreatIntel IOC, lateral movement, malicious JA3/JA4 TLS, honeypot,
-    AbuseIPDB, exfiltration burst) are each RE-PORTED here reading `features`
-    directly, NOT approximated via v13's own decision state. Confirmed via a direct
-    read of decision/engine.py's DEFAULT_HARD_STOP_REGISTRY that this is necessary,
-    not optional: v13's own hard-stop registry only covers honeypot/arp_spoof/
-    geofence/confirmed_exploit -- ThreatIntel IOC score, lateral-movement target
-    count, JA3/JA4 fingerprints, AbuseIPDB risk, and the exfiltration-burst z-score
-    all feed v13's ATTACK HYPOTHESIS SCORE instead (a probabilistic accumulation,
-    not a guaranteed hard stop), so treating v13's decision state alone as a proxy
-    for these six checks would silently under-detect relative to v1's real
-    Stage 1 on exactly the alerts a genuine shadow comparison most needs to catch.
-    Check 7 (local confirmed-intel) is NOT re-ported a second time here -- it
-    reuses `check_local_intel_hard_stop()` (Phase 6b) directly, since that method
-    already IS this check, faithfully.
-
-STATE: `evaluate()` calls the real `mark_false_positive()`/`_apply_sigma_shift()`/
-`record_confirmed_threat()` write paths on a suppress/confirmed-threat verdict. They write
-the graph (trust 'trusts' edges, the device's `fp_profile`/`sigma_shift` metadata) and the
-shared local confirmed-intel store (state/local_confirmed_intel.json, injected by
-pipeline.py -- see live_engine.py's CL-AFPE wiring section). This engine's verdict is the
-one pipeline.py acts on.
-
-Calibration (`_apply_calibration()`, fp_engine.py ~2490) is NOT ported: v1's own
-docstring already describes it as "purely additive to the audit trail... never
-used for branching" -- `calibrated_confidence` is always `None` in the dict this returns, same shape
-v1 itself uses when no reliable calibration is loaded.
+If evaluate() raises, live_engine.evaluate_cl_afpe_live() returns UNCERTAIN (never suppressed) and reports the error
+to the health manager. `calibrated_confidence` is always None (no calibration layer is applied).
 """
 import logging
 import time
@@ -121,12 +45,17 @@ from argus.cl_afpe.ml_scoring import MLScorer, NEUTRAL_LGBM_SCORE, combine_score
 from argus.cl_afpe import composite_trust as ct
 from argus.baseline.engine import derive_activity_state
 from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.device_familiarity import DeviceFamiliarity
 from utils import (
     KNOWN_PUBLIC_DNS_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain,
-    _is_cdn_or_cloud_domain, etld1,
+    _is_cdn_or_cloud_domain, etld1_strict as etld1,  # trust decisions fail closed (see utils.etld1_strict)
 )
 
 LOGGER = logging.getLogger("home_ids.cl_afpe")
+
+# A correction may be reviewed long after the alert: the decision row is matched by device + the alert's own
+# timestamp within this window.
+_TRAINING_RECORD_MATCH_SECONDS = 120.0
 
 # Release 15 Sheet 03b: regime_id is part of composite_trust's key, but no live
 # per-alert regime value exists on this host today -- BOCPD/regime tracking
@@ -136,18 +65,17 @@ LOGGER = logging.getLogger("home_ids.cl_afpe")
 # into the live decision path -- see ARGUS_DECISIONS.md.
 _DEFAULT_REGIME_ID = 0
 
-# Matches fp_engine.py's constants exactly.
 TRUST_CACHE_TTL_SECONDS = 14 * 24 * 3600
 MIN_TRUST_ENTRY_TTL_SECONDS = 3600
 MAX_TRUST_ENTRY_TTL_SECONDS = TRUST_CACHE_TTL_SECONDS
 
-# Matches fp_engine.py:154-156 exactly -- hypotheses whose benign correction is a
+# Hypotheses whose benign correction is a
 # claim about THIS DEVICE's own behavior, not the destination's general safety.
 DEVICE_SCOPED_TRUST_HYPOTHESES = frozenset({
     "DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS",
 })
 
-# Matches fp_engine.py's _HARD_STOP_SIGNATURES exactly (line 1739-1745).
+# Alerts a correction can never mark safe (verifiable facts, not judgements).
 _HARD_STOP_SIGNATURES = frozenset({
     "Internal Honeypot Accessed",
     "Layer-2 ARP Spoofing Detected",
@@ -156,15 +84,13 @@ _HARD_STOP_SIGNATURES = frozenset({
     "Confirmed Malicious IOC",
 })
 
-# Matches fp_engine.py's own signature set for the per-device-threshold branch
-# exactly (line 1790) -- PORT_SCAN/INTERNAL_RECONNAISSANCE are
-# ConnectionAbuseHypothesis's own dynamic names (hypotheses/engine.py) for a
+# Signatures whose correction raises the device's own thresholds -- PORT_SCAN/INTERNAL_RECONNAISSANCE are
+# ConnectionAbuseHypothesis's own dynamic names (argus/hypotheses/engine.py) for a
 # single-category finding; the branches below inspect raw feature values
 # directly, never the signature string itself, so all three route identically.
 _CONNECTION_ABUSE_SIGNATURES = frozenset({"CONNECTION_ABUSE", "PORT_SCAN", "INTERNAL_RECONNAISSANCE"})
 
-# Matches fp_engine.py's sigma-shift constants exactly (module-level in that file).
-# Asymmetric by design, confirmed via direct read, not assumed symmetric: widening
+# Sensitivity (sigma) shift steps. Asymmetric by design: widening
 # (TUNE_DOWN, a correction) is a small step with a wide cap; tightening (TUNE_UP, a
 # confirmed threat) is a bigger flat step with a narrower floor -- a real threat
 # should sharpen sensitivity faster than a single correction should relax it.
@@ -173,27 +99,15 @@ MAX_SIGMA_SHIFT = 2.0
 _SIGMA_TIGHTEN_STEP = 0.50
 _MIN_SIGMA_SHIFT = -1.5
 
-# Matches fp_engine.py's own default (referenced by get_baseline_familiarity's
-# docstring; the exact constant _BASELINE_FAMILIARITY_OBSERVATIONS wasn't in the
-# section read this session -- 5 is the value cited by hypotheses/engine.py's own
-# FAMILIARITY_TRUST_BAR=0.6 comment, "3 of 5 observations", so 5 is confirmed via
-# that cross-reference, not guessed independently).
-BASELINE_FAMILIARITY_OBSERVATIONS = 5
-
-# Matches fp_engine.py's own Stage-2/3/combined threshold FALLBACK defaults exactly
-# (_DEFAULT_LGBM_FP_THRESHOLD / _DEFAULT_EMBED_SIMILARITY_THRESHOLD /
-# _DEFAULT_COMBINED_SUPPRESS_THRESHOLD / _DEFAULT_COMBINED_UNCERTAIN_THRESHOLD,
-# fp_engine.py:116-125). v1 itself reads these live from config.json when present;
-# v13 doesn't yet have that config-override wiring for CL-AFPE specifically (a real,
-# tracked gap, not a silent one -- see Phase 6e's own docstring paragraph above), so
-# these fallback numbers are used unconditionally for now.
+# Stage-2/3/combined thresholds when no config is injected. Live, they come from config (fp_lgbm_threshold,
+# fp_embed_similarity_threshold, fp_combined_suppress_threshold, fp_combined_uncertain_threshold), read on every
+# alert; the suppress and uncertain thresholds then layer the device's own profile and the autotuner on top.
 DEFAULT_LGBM_FP_THRESHOLD = 0.75
 DEFAULT_EMBED_SIMILARITY_THRESHOLD = 0.82
 DEFAULT_COMBINED_SUPPRESS_THRESHOLD = 0.80
 DEFAULT_COMBINED_UNCERTAIN_THRESHOLD = 0.55
 
-# Matches fp_engine.py's real Stage-1 numeric thresholds exactly (Checks 1/2/5/6,
-# _stage1_hard_stop() lines 1120-1201).
+# Stage-1 numeric thresholds (checks 1/2/5/6).
 _TI_RISK_HARD_STOP = 2.0
 _ABUSEIPDB_HARD_STOP = 4.0
 _EXFIL_OUTBOUND_Z_HARD_STOP = 5.0
@@ -202,9 +116,7 @@ _DEFAULT_LATERAL_MOVEMENT_UNIQUE_TARGETS_THRESHOLD = 2
 
 
 def _strip_persistence_suffix(signature: Optional[str]) -> Optional[str]:
-    """Matches fp_engine.py's _trust_entry_hypothesis_base()/mark_false_positive()'s
-    own signature_base stripping exactly (e.g. 'DNS_EVASION (persisted 603s)' ->
-    'DNS_EVASION')."""
+    """The signature without its persistence suffix ('DNS_EVASION (persisted 603s)' -> 'DNS_EVASION')."""
     if not signature:
         return None
     return signature.split(" (persisted ", 1)[0] or None
@@ -222,24 +134,27 @@ class MarkFalsePositiveResult:
 class ClAfpeEngine:
     def __init__(self, store: GraphStore, resolve_canonical_device_id=None, has_device=None,
                   local_intel: Optional[LocalConfirmedIntel] = None, safe_ips: Optional[Any] = None,
-                  ml_scorer: Optional[MLScorer] = None):
+                  ml_scorer: Optional[MLScorer] = None, familiarity: Optional[DeviceFamiliarity] = None,
+                  lateral_targets_threshold=None, config_get=None):
         self.store = store
-        # Both optional/defaulted, same pattern fp_engine.py's own state_manager
-        # dependency uses -- a no-op device-identity check when not supplied.
+        # (key, default) -> value; live_engine passes CONFIG.get so console edits apply on the next alert.
+        self._config_get = config_get
+        # Distinct internal targets needed for the lateral-movement hard stop; a callable is read on every alert so a
+        # config change applies live (live_engine passes config's lateral_movement_unique_targets_threshold).
+        self._lateral_targets_threshold = lateral_targets_threshold
+        # Both optional: default to the graph's own identity lookups.
         self._resolve_canonical_device_id = resolve_canonical_device_id or store.resolve_canonical_device_id
         self._has_device = has_device or (lambda device_id: self.store._conn.execute(
             "SELECT 1 FROM devices WHERE device_id = ?", (device_id,)).fetchone() is not None)
-        self._baseline_observations: Dict[str, Dict[str, Dict[str, int]]] = {}
-        # Phase 6b: injected, real LocalConfirmedIntel -- optional (None = poisoning
-        # protection is a safe no-op: record_confirmed_threat() does nothing,
-        # check_local_intel_hard_stop() never fires), matching this constructor's
-        # own existing graceful-degradation pattern for the two params above.
+        # Which destinations each device normally uses (intelligence/device_familiarity.py). The pipeline injects its
+        # persisted instance, which it also records into; without one this is an in-memory store.
+        self.familiarity = familiarity or DeviceFamiliarity()
+        # The shared confirmed-intel store. Optional: without one, record_confirmed_threat() records nothing and
+        # check_local_intel_hard_stop() never fires.
         self.local_intel = local_intel
         self._safe_ips = safe_ips or set()
-        # Phase 6d: injected, real MLScorer -- optional (None = Stage 2 always
-        # falls back to the neutral 0.50 score and Stage 3 always uses the static
-        # rule fallback, exactly matching v1's own "model not loaded yet" behavior,
-        # never an error).
+        # Optional: without it (or before its models load) Stage 2 gives the neutral 0.50 score and Stage 3 uses
+        # the static vendor rules -- never an error.
         self.ml_scorer = ml_scorer
         # 2026-09-27 (Phase 4 of the autonomy-completion effort): lazy, same
         # construct-once-reuse pattern live_engine.py's own _get_autotune_engine()
@@ -259,9 +174,8 @@ class ClAfpeEngine:
     def immunize(self, destination_id: str, device_id: Optional[str] = None,
                   hypothesis: Optional[str] = None, source: str = "autonomous",
                   ttl_seconds: Optional[float] = None, now: Optional[float] = None) -> bool:
-        """Matches _immunize_domain()'s validation/TTL-clamping/refresh semantics
-        exactly. Returns True for a genuinely new immunization, False for a refresh
-        of an already-immunized destination (matching v1's own return contract)."""
+        """Marks a destination safe (a 'trusts' edge; TTL clamped to 1 h .. 14 days). Returns True for a new
+        immunization, False for a refresh of an existing one or an unusable destination."""
         if not destination_id or str(destination_id).lower() in ("unknown", "null", "none", NO_DESTINATION):
             return False
         now = now if now is not None else time.time()
@@ -315,9 +229,8 @@ class ClAfpeEngine:
         return active
 
     def get_dynamic_trust_cache(self, now: Optional[float] = None) -> set:
-        """Matches get_dynamic_trust_cache() exactly: every currently-active
-        immunized destination, globally unscoped -- deliberately not filtered by
-        device/hypothesis, same as v1's own documented choice for this consumer."""
+        """Every currently-active immunized destination, not filtered by device or hypothesis (threat intel uses it
+        to skip lookups for destinations already corrected as safe)."""
         return {e["dst_id"] for e in self._active_trust_edges(now=now)}
 
     def is_trust_cached(self, destination_id: str, device_id: Optional[str] = None,
@@ -344,13 +257,12 @@ class ClAfpeEngine:
 
     def _apply_sigma_shift(self, device_id: str, direction: str = "TUNE_DOWN",
                              source: str = "autonomous", now: Optional[float] = None) -> None:
-        """Matches fp_engine.py's _apply_sigma_shift() exactly: TUNE_DOWN (a
+        """TUNE_DOWN (a
         correction -- widen sensitivity) steps by +SIGMA_WIDENING_STEP capped at
         MAX_SIGMA_SHIFT; TUNE_UP (a confirmed threat -- tighten sensitivity) steps
         by a flat -0.50 floored at -1.5 (deliberately NOT SIGMA_WIDENING_STEP-based
-        -- confirmed via direct read this asymmetry is real, not an oversight).
-        Best-effort: a device_id of "unknown"/empty is a no-op, matching v1's own
-        guard against widening a shift nothing is tracked under."""
+        -- the asymmetry is deliberate).
+        A device_id of "unknown"/empty is a no-op."""
         if not device_id or device_id == "unknown":
             return
         now = now if now is not None else time.time()
@@ -375,7 +287,7 @@ class ClAfpeEngine:
     def apply_device_fp_profile(self, device_id: str, key: str, value: float, baseline: float,
                                   set_by: str, reason: str, sample_count: int = 0,
                                   hostname: str = "", now: Optional[float] = None) -> None:
-        """Matches apply_device_fp_profile() exactly: merges ONE key into the
+        """Merges ONE key into the
         device's profile (preserves all other keys/devices -- reads the full
         existing 'fp_profile' dict first since update_device_metadata()'s merge is
         shallow at the top level only), increments (not overwrites)
@@ -409,16 +321,39 @@ class ClAfpeEngine:
     def get_device_long_conn_duration_threshold(self, device_id: str, default: float = 14400.0) -> float:
         return self._get_device_profile_value(device_id, "long_conn_duration_threshold", default)
 
-    def get_device_suppress_threshold(self, device_id: Optional[str],
-                                        default: float = DEFAULT_COMBINED_SUPPRESS_THRESHOLD) -> float:
-        """Matches get_device_suppress_threshold() exactly (fp_engine.py:2043-2056):
-        this device's own calibrated combined-suppress threshold if
-        apply_device_fp_profile() has ever written one under the
-        'fp_combined_suppress_threshold' key, else the global default. v1's global
-        default itself layers over config.json; v13 doesn't have that override
-        wiring yet (see this module's own DEFAULT_COMBINED_SUPPRESS_THRESHOLD
-        comment), so `default` is the effective global value for now."""
-        return self._get_device_profile_value(device_id, "fp_combined_suppress_threshold", default)
+    def _configured(self, key: str, default: float) -> float:
+        if self._config_get is None:
+            return default
+        try:
+            return float(self._config_get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    def _autotuned(self, parameter: str, device_id: Optional[str], default: float) -> float:
+        """A promoted autotuner value (device, then category, then global) wins over `default`. Never blocks a verdict:
+        on any failure `default` is used."""
+        try:
+            value = self._get_autotune_engine().get_active_value(parameter, device_id=device_id, default=default)
+            return float(value) if value is not None else default
+        except Exception as e:
+            LOGGER.warning("Autotuned %s lookup failed for %r, using %s: %s", parameter, device_id, default, e)
+            return default
+
+    def get_device_suppress_threshold(self, device_id: Optional[str], default: Optional[float] = None) -> float:
+        """The combined score at or above which an alert is suppressed, for ONE device: a promoted autotuner value
+        (nightly calibration) if there is one, else this device's own profile value (raised by corrections), else the
+        configured global value."""
+        if default is None:
+            default = self._configured("fp_combined_suppress_threshold", DEFAULT_COMBINED_SUPPRESS_THRESHOLD)
+        profile_value = self._get_device_profile_value(device_id, "fp_combined_suppress_threshold", default) \
+            if device_id else default
+        return self._autotuned("fp_combined_suppress_threshold", device_id, profile_value)
+
+    def get_device_uncertain_threshold(self, device_id: Optional[str]) -> float:
+        """The combined score at or above which a non-suppressed alert is UNCERTAIN rather than kept as a threat: the
+        autotuner's value if promoted, else the configured one."""
+        return self._autotuned("combined_uncertain_threshold", device_id,
+                               self._configured("fp_combined_uncertain_threshold", DEFAULT_COMBINED_UNCERTAIN_THRESHOLD))
 
     # --- mark_false_positive(): refusal guards + threshold-bump + default routing
 
@@ -465,15 +400,13 @@ class ClAfpeEngine:
         threshold_bumped = False
 
         if signature_base in _CONNECTION_ABUSE_SIGNATURES:
-            # Ported exactly from fp_engine.py:1790-1868 -- a genuine `elif`, NOT a
-            # fall-through to the default domain-immunization branch below (a real
-            # v1 bugfix: immunizing an "unknown" domain for a signature type with
+            # Exclusive with the domain-immunization branch below (immunizing an "unknown" domain for a signature type with
             # no meaningful domain used to keep re-suppressing the same FP
             # forever). Inspects the SAME features this alert's own evidence was
             # computed from and bumps every threshold whose condition is still
             # true for THIS alert -- never just one blind guess. Bumping an
             # unrelated threshold that wasn't the cause is harmless; missing the
-            # real cause is what kept the v1 bug alive.
+            # real cause is what kept the false positive coming back.
             feats = alert_payload.get("features", {}) or {}
             s0_rej = float(feats.get("zeek_s0_rej_count", 0.0) or 0.0)
             s0_rej_unique = float(feats.get("zeek_s0_rej_unique_ips", 0.0) or 0.0)
@@ -517,7 +450,7 @@ class ClAfpeEngine:
             if not bumped_any:
                 # None of the three conditions still hold against this alert's own
                 # feature snapshot -- fall back to the old blanket behavior rather
-                # than silently doing nothing, matching v1 exactly.
+                # than silently doing nothing.
                 current_arp = self.get_device_arp_sweep_threshold(device_id)
                 self.apply_device_fp_profile(
                     device_id, "arp_sweep_unique_targets_threshold", current_arp + 4.0,
@@ -529,38 +462,23 @@ class ClAfpeEngine:
                 )
             threshold_bumped = True
         else:
-            # Default domain/IP immunization routing (fp_engine.py:1869-1908).
-            # BUGFIX (found writing Phase 6e's own tests, fixed here since it's the
-            # SAME code this phase's shadow evaluate() now depends on for a correct
-            # trust-cache round-trip): the immunized target must be the eTLD+1 BASE
-            # domain, matching what evaluate()'s own trust-cache check looks up
-            # (base_domain, see this class's own evaluate() method below) -- v1
-            # itself immunizes base_domain, never the raw queried_domain (a raw
-            # subdomain would only ever re-match itself, never a sibling subdomain
-            # of the same vendor, defeating the entire point of "immunizing
-            # sentry.io suppresses xyz.ingest.us.sentry.io too"). This version had
-            # been immunizing the raw domain instead since Phase 6a first wrote
-            # this branch -- never actually exercised end-to-end until Phase 6e's
-            # composed evaluate() tests caught the mismatch.
-            # `domain`/`base_domain` now computed once at the top of this method
-            # (see 2026-09-15 gap-1 comment there) -- no longer recomputed here.
+            # Default routing: immunize the eTLD+1 BASE domain -- what evaluate()'s trust-cache check looks up, so
+            # immunizing sentry.io also covers xyz.ingest.us.sentry.io (a raw subdomain would only re-match itself).
             if base_domain:
                 target = base_domain
                 is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
                                          source=source, ttl_seconds=ttl_seconds, now=now)
             else:
                 # No extractable base domain (no domain at all, or etld1() couldn't
-                # parse it) -- fall back to the raw destination IP, matching v1
-                # exactly (the live-audit bugfix that closed the "raw-IP alert
-                # falls through to a total no-op" gap).
+                # parse it) -- immunize the raw destination IP instead, so a raw-IP
+                # alert's correction is not a no-op.
                 if dest_ip and dest_ip != "unknown":
                     target = dest_ip
                     is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
                                              source=source, ttl_seconds=ttl_seconds, now=now)
 
         # Runs regardless of which branch above fired -- a general behavioral
-        # dampener, not specific to domain-based corrections (matches v1's own
-        # placement exactly, fp_engine.py:1914).
+        # dampener, not specific to domain-based corrections.
         self._apply_sigma_shift(device_id, source=source, now=now)
 
         # GAP 1 FIX (2026-09-15, "3 automated-learning gaps" audit): this used to
@@ -596,6 +514,14 @@ class ClAfpeEngine:
         except Exception:
             LOGGER.exception("[COMPOSITE_TRUST] record_corroborating_signal failed, non-fatal")
 
+        event_type = {"llm_validated": "LLM_VALIDATED_FALSE_POSITIVE",
+                      "autonomous_stage23": "AUTONOMOUS_FP_SUPPRESSED",
+                      "autonomous_local_origin": "AUTONOMOUS_FP_SUPPRESSED"}.get(source, "OPERATOR_MARKED_FALSE_POSITIVE")
+        self._write_training_record(
+            alert_payload, event_type,
+            [f"Marked as false positive ({source}) for '{target or domain or dest_ip or 'unknown'}'."],
+            1.0, decision=decision)
+
         return MarkFalsePositiveResult(refused=False, is_new_immunization=is_new,
                                          immunized_destination=target, threshold_bumped=threshold_bumped)
 
@@ -604,47 +530,27 @@ class ClAfpeEngine:
     def record_baseline_observation(self, device_id: str, *, dest_port=None,
                                        asn_owner: Optional[str] = None,
                                        domain_base: Optional[str] = None) -> None:
-        """Matches fp_engine.py's own safety invariant: callers must only record
-        from cycles already classified BENIGN/ANOMALOUS -- this module doesn't
-        enforce that itself (no decision context available here), same as v1's
-        get_baseline_familiarity() docstring describing it as the CALLER's
-        responsibility (pipeline.py in v-current)."""
-        if not device_id or device_id == "unknown":
-            return
-        bucket = self._baseline_observations.setdefault(device_id, {"ports": {}, "asn_owners": {}, "domain_bases": {}})
-        for kind, key in (("ports", dest_port), ("asn_owners", asn_owner), ("domain_bases", domain_base)):
-            if key is None or key == "" or key == "unknown" or key == 0:
-                continue
-            bucket[kind][str(key)] = bucket[kind].get(str(key), 0) + 1
+        """Callers must only record from cycles already classified BENIGN/ANOMALOUS."""
+        self.familiarity.record_device_baseline_observation(
+            device_id, dest_port=dest_port, asn_owner=asn_owner, domain_base=domain_base)
 
     def get_baseline_familiarity(self, device_id: str, *, dest_port=None,
                                     asn_owner: Optional[str] = None,
                                     domain_base: Optional[str] = None) -> float:
-        """Matches get_baseline_familiarity() exactly: highest familiarity across
-        whichever identity dimensions are supplied, 0.0-1.0."""
-        if not device_id or device_id == "unknown":
-            return 0.0
-        bucket = self._baseline_observations.get(device_id, {})
-        best = 0.0
-        for kind, key in (("ports", dest_port), ("asn_owners", asn_owner), ("domain_bases", domain_base)):
-            if key is None or key == "" or key == "unknown" or key == 0:
-                continue
-            count = bucket.get(kind, {}).get(str(key), 0)
-            best = max(best, min(1.0, count / float(BASELINE_FAMILIARITY_OBSERVATIONS)))
-        return best
+        """Highest familiarity across whichever identity dimensions are supplied, 0.0-1.0."""
+        return self.familiarity.get_baseline_familiarity(
+            device_id, dest_port=dest_port, asn_owner=asn_owner, domain_base=domain_base)
 
     # --- local-intel poisoning protection (Phase 6b) -----------------------------
 
     def _is_ip_protected_from_confirmed_intel(self, ip: str, asn_owner: str = "") -> bool:
-        """Matches fp_engine.py's _is_ip_protected_from_confirmed_intel() exactly
-        (lines 909-965): True if `ip` should NEVER be recordable/matchable via the
+        """True if `ip` should NEVER be recordable/matchable via the
         local confirmed-intel store -- a known public DNS resolver, explicitly
         listed in `safe_ips`, a cloud/CDN-owned ASN, or private/multicast/loopback/
         link-local/reserved/unspecified (stdlib ipaddress -- these structurally
         cannot be "malicious external infrastructure," the entire premise of this
-        store). Every branch here is a documented live-incident fix in v1, not a
-        speculative safeguard -- see this module's own top-of-file docstring for
-        the real numbers found poisoned in production before each one existed."""
+        store). Each branch exists because such an entry once poisoned the store in production
+        (public resolvers, this network's own IDS host, mDNS multicast, hundreds of cloud/CDN IPs)."""
         if not ip or ip == "unknown":
             return False
         if ip in KNOWN_PUBLIC_DNS_RESOLVERS:
@@ -663,7 +569,7 @@ class ClAfpeEngine:
 
     def record_confirmed_threat(self, device_id: str, base_domain: Optional[str], dest_ip: Optional[str],
                                   reason: str, asn_owner: str = "",
-                                  ttl_seconds: Optional[float] = None) -> None:
+                                  ttl_seconds: Optional[float] = None, signature: str = "") -> None:
         """Matches record_confirmed_threat() exactly (lines 967-1037): the write
         path into the shared LocalConfirmedIntel store, so a DIFFERENT device
         touching the same IOC later gets an immediate hard-stop via
@@ -674,8 +580,7 @@ class ClAfpeEngine:
         protected IP (see _is_ip_protected_from_confirmed_intel above) -- both real,
         live-incident-driven guards, not speculative. A no-op, not an error, when
         no LocalConfirmedIntel was ever injected (self.local_intel is None) --
-        never raises, matching v1's own 'a bookkeeping failure must not take down
-        the confirmed-threat verdict itself' discipline."""
+        never raises: a bookkeeping failure must not take down the confirmed-threat verdict."""
         if self.local_intel is None:
             return
         try:
@@ -688,14 +593,74 @@ class ClAfpeEngine:
             if dest_ip and dest_ip != "unknown":
                 self.local_intel.record("ip", dest_ip, device_id, reason=reason, ttl_seconds=ttl_seconds)
         except Exception:
-            # Matches v1: a bookkeeping failure here must never take down the
-            # confirmed-threat verdict that triggered this call.
-            pass
+            # A bookkeeping failure here must never take down the confirmed-threat verdict.
+            LOGGER.exception("Failed to record confirmed intel (non-fatal)")
+        self._increment_confirmed_count(device_id, signature)
+
+    def _increment_confirmed_count(self, device_id: str, signature: str = "") -> None:
+        """How often this device was confirmed malicious, overall and per signature (graph metadata
+        `confirmed_threat_counts`) -- the nightly calibration weighs corrections against it."""
+        if not device_id or device_id == "unknown":
+            return
+        try:
+            counts = dict(self.store.get_device_metadata(device_id).get("confirmed_threat_counts") or {})
+            counts["_total"] = int(counts.get("_total", 0)) + 1
+            if signature:
+                counts[signature] = int(counts.get(signature, 0)) + 1
+            self.store.update_device_metadata(device_id, {"confirmed_threat_counts": counts})
+        except Exception:
+            LOGGER.exception("Failed to increment the confirmed-threat count (non-fatal)")
+
+    def get_confirmed_count(self, device_id: str, signature: str = "") -> int:
+        try:
+            counts = self.store.get_device_metadata(device_id).get("confirmed_threat_counts") or {}
+            return int(counts.get(signature or "_total", 0))
+        except Exception:
+            return 0
+
+    # --- training records (decisions.raw_payload_json.fp_suppression_log) ----------------------------------------
+
+    def _write_training_record(self, alert_payload: dict, event_type: str, reasons: List[str],
+                               confidence: float, decision: Optional[dict] = None) -> None:
+        """Records a suppressed or corrected alert on its own decision row as `fp_suppression_log`. The nightly
+        retrain (scripts/train_fp_classifier.py) learns false-positive samples from these, and the calibration
+        counts the correction types. Resolves the decision by `decision["_graph_decision_id"]` when given, else by
+        device + the alert's own timestamp. Never raises."""
+        try:
+            graph_decision_id = decision.get("_graph_decision_id") if decision else None
+            if graph_decision_id is None:
+                device_id = alert_payload.get("device", {}).get("id")
+                ts = alert_payload.get("timestamp")
+                if device_id and device_id != "unknown" and ts is not None:
+                    row = self.store._conn.execute(
+                        "SELECT decision_id FROM decisions WHERE device_id=? AND timestamp BETWEEN ? AND ? "
+                        "ORDER BY ABS(timestamp - ?) LIMIT 1",
+                        (device_id, ts - _TRAINING_RECORD_MATCH_SECONDS, ts + _TRAINING_RECORD_MATCH_SECONDS, ts),
+                    ).fetchone()
+                    if row is not None:
+                        graph_decision_id = row["decision_id"]
+            if graph_decision_id is None:
+                LOGGER.warning("No graph decision row for this %s alert (device=%r) -- no training record written.",
+                               event_type, alert_payload.get("device", {}).get("id"))
+                return
+            entry = {
+                "ts_human": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+                "ts_unix": time.time(),
+                "type": event_type,
+                "confidence": round(float(confidence), 4),
+                "reasons": reasons,
+                "device": alert_payload.get("device", {}),
+                "domain": alert_payload.get("network_context", {}).get("queried_domain", ""),
+                "risk_score": alert_payload.get("risk", 0.0),
+                "original_alert": alert_payload,
+            }
+            self.store.update_decision_payload(graph_decision_id, {"fp_suppression_log": entry})
+        except Exception:
+            LOGGER.exception("Failed to write the training record (non-fatal)")
 
     def check_local_intel_hard_stop(self, base_domain: Optional[str], dest_ip: Optional[str],
                                        asn_owner: str = "") -> Optional[Dict[str, Any]]:
-        """Matches Stage-1 Check 7's real read-side logic exactly (fp_engine.py
-        lines 1203-1240): once ANY device on this network was confirmed touching
+        """Stage-1 check 7: once ANY device on this network was confirmed touching
         this domain/IP, a DIFFERENT device touching the SAME IOC doesn't have to
         re-earn independent corroboration from scratch. Re-checks the SAME
         telemetry/protection guards on the READ side as record_confirmed_threat()
@@ -723,8 +688,7 @@ class ClAfpeEngine:
 
     @staticmethod
     def _is_domain_causal_hard_stop(triggers: Optional[List[str]]) -> bool:
-        """Matches _is_domain_causal_hard_stop() exactly (fp_engine.py:1243-1273):
-        only Check 1 (ThreatIntel IOC) has a plausible causal link to `domain` --
+        """Only check 1 (ThreatIntel IOC) has a plausible causal link to `domain` --
         every other check is behavioral or IP-based and records dest_ip only."""
         if not triggers:
             return False
@@ -733,15 +697,13 @@ class ClAfpeEngine:
     def _stage1_hard_stop(self, features: dict, hostname: str, domain: str, dest_ip: str,
                             base_domain: str, decision: Optional[dict] = None,
                             asn_owner: str = "") -> Optional[List[str]]:
-        """Matches _stage1_hard_stop() exactly (fp_engine.py:1088-1241) -- see this
-        module's own top-of-file Phase 6e docstring paragraph for why Checks 0-6 are
-        each re-derived here (not approximated from v13's own decision state) while
-        Check 7 reuses check_local_intel_hard_stop() (Phase 6b) directly."""
+        """Stage-1 hard stops (see the module docstring). Checks 1-6 are re-derived from `features` because the
+        decision engine treats most of them as weighted evidence, not hard stops; check 7 is
+        check_local_intel_hard_stop()."""
         triggers: List[str] = []
         features = features or {}
 
-        # Check 0: v13's own already-computed decision verdict, the same
-        # cross-engine-recognition role v1's Check 0 plays for decision_engine.py.
+        # Check 0: the decision engine's own verdict for this cycle.
         if decision is not None and decision.get("state") == "CRITICAL":
             triggers.append(f"HEE hard-stop verdict: {decision.get('explanation', 'unknown')}")
 
@@ -753,7 +715,9 @@ class ClAfpeEngine:
         # Check 2: lateral movement / internal port scanning (distinct-target gated).
         lateral = int(features.get("zeek_lateral_moves", 0) or 0)
         lateral_targets = int(features.get("zeek_lateral_unique_targets", 0) or 0)
-        if lateral > 0 and lateral_targets >= _DEFAULT_LATERAL_MOVEMENT_UNIQUE_TARGETS_THRESHOLD:
+        threshold = self._lateral_targets_threshold
+        threshold = threshold() if callable(threshold) else (threshold or _DEFAULT_LATERAL_MOVEMENT_UNIQUE_TARGETS_THRESHOLD)
+        if lateral > 0 and lateral_targets >= int(threshold):
             triggers.append(
                 f"Internal lateral movement / port scan ({lateral} connection(s) across "
                 f"{lateral_targets} distinct target(s))"
@@ -805,12 +769,8 @@ class ClAfpeEngine:
 
     def evaluate(self, alert_payload: dict, features: dict, decision: Optional[dict] = None,
                   asn_owner: str = "", now: Optional[float] = None) -> Dict[str, Any]:
-        """Matches fp_engine.py's real evaluate() control flow exactly (line 397) --
-        trust-cache fast path, Stage 1 hard-stop, Stage 2/3 ML scoring, final
-        suppress/uncertain/confirmed-threat branch. See this module's own
-        top-of-file Phase 6e docstring paragraphs for the three deliberate scope
-        decisions (Check-0 reuse, Checks-1-6 re-ported not approximated, and
-        shadow-mode state mutation) before changing this method."""
+        """One verdict for one alert: trust-cache fast path, Stage 1 hard stops, Stage 2/3 ML scoring, then
+        suppress / uncertain / confirmed threat. See the module docstring."""
         now = now if now is not None else time.time()
         device_id = alert_payload.get("device", {}).get("id", "unknown")
         hostname = alert_payload.get("device", {}).get("hostname", "") or ""
@@ -870,6 +830,7 @@ class ClAfpeEngine:
                     device_id,
                     base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                     dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
+                    signature=alert_hypothesis,
                 )
                 return {
                     "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
@@ -877,11 +838,13 @@ class ClAfpeEngine:
                     "stage": "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
                     "reasons": stage1_triggers, "suppress": False,
                 }
+            reasons = [f"'{cached_target}' previously verified safe – dynamic trust cache hit"]
+            self._write_training_record(alert_payload, "TRUST_CACHE_HIT", reasons, 1.0, decision=decision)
             return {
                 "verdict": "FALSE_POSITIVE", "confidence": 1.0,
                 "calibrated_confidence": None,
                 "stage": "TRUST_CACHE",
-                "reasons": [f"'{cached_target}' previously verified safe – dynamic trust cache hit"],
+                "reasons": reasons,
                 "suppress": True,
             }
 
@@ -893,7 +856,7 @@ class ClAfpeEngine:
             self.record_confirmed_threat(
                 device_id,
                 base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
-                dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner,
+                dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
             )
             return {
                 "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
@@ -986,8 +949,16 @@ class ClAfpeEngine:
         embed_sim_str = f"{embed_sim:.3f}" if embed_sim is not None else "N/A"
 
         # --- Final verdict ---
-        combined = combine_scores(lgbm_prob, embed_sim, DEFAULT_EMBED_SIMILARITY_THRESHOLD)
+        embed_threshold = self._configured("fp_embed_similarity_threshold", DEFAULT_EMBED_SIMILARITY_THRESHOLD)
+        combined = combine_scores(lgbm_prob, embed_sim, embed_threshold)
         effective_suppress_threshold = self.get_device_suppress_threshold(device_id)
+        # Which stage carried a suppression (for the stage-hit metrics): the embedding match, else the classifier.
+        if embed_sim is not None and embed_sim >= embed_threshold:
+            stage_hit = "embed"
+        elif lgbm_prob is not None and lgbm_prob >= self._configured("fp_lgbm_threshold", DEFAULT_LGBM_FP_THRESHOLD):
+            stage_hit = "lgbm"
+        else:
+            stage_hit = None
 
         if combined >= effective_suppress_threshold:
             # GAP 1 FIX (2026-09-15): decision/asn_owner now threaded through so
@@ -1020,10 +991,11 @@ class ClAfpeEngine:
                     f"Combined confidence={combined:.3f} >= {effective_suppress_threshold} (suppress threshold)",
                 ],
                 "suppress": True,
+                "stage_hit": stage_hit,
                 "action": {"type": "immunize_domain", "target": base_domain, "is_new": mark_result.is_new_immunization}
                           if base_domain and mark_result.is_new_immunization else None,
             }
-        elif combined >= DEFAULT_COMBINED_UNCERTAIN_THRESHOLD:
+        elif combined >= self.get_device_uncertain_threshold(device_id):
             return {
                 "verdict": "UNCERTAIN", "confidence": combined,
                 "calibrated_confidence": None,
