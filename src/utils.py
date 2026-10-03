@@ -19,6 +19,7 @@ RECENT FIXES:
 - FIXED: Added explicit bypasses for .local and .lan domains to prevent mDNS hashes from triggering DGA/DNS penalties.
 """
 import math
+import os
 import ipaddress
 import logging
 import json
@@ -342,7 +343,9 @@ def write_job_health(state_dir, job_name: str, duration_seconds: float, extra: d
         entry.update(extra)
     existing[job_name] = entry
     try:
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")   # atomic: a crash mid-write never truncates the file
+        tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        tmp.replace(path)
     except Exception as exc:
         LOGGER.debug("Failed to write job_health.json for %s: %s", job_name, exc)
 

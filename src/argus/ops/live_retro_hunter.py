@@ -55,7 +55,6 @@ from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
 from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
 from argus.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
 from argus.ops.telegram import send_telegram  # noqa: E402
-from argus.ops.live_engine import _CL_AFPE_LOCAL_INTEL_DIR  # noqa: E402
 
 LOGGER = logging.getLogger("live_retro_hunter")
 
@@ -240,11 +239,9 @@ def main() -> None:
         )
         _notify_external_ti_findings(findings, days_back)
 
-        # Phase 7: cross-device local-intel correlation, against the SAME v13-only
-        # LocalConfirmedIntel store CL-AFPE's own shadow mode writes into (Phase 6e)
-        # -- see retro_hunter.py's own module docstring item #4 for why this is
-        # deliberately never v1's real local_confirmed_intel.json.
-        local_intel = LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
+        # Cross-device local-intel correlation against the shared confirmed-intel store
+        # (state/local_confirmed_intel.json) -- the same one the engine's CL-AFPE checks and records into.
+        local_intel = LocalConfirmedIntel(str(state_dir))
         local_matches = hunter.check_local_intel_history(local_intel, days_back=days_back)
         LOGGER.info(
             "Local-intel cross-reference complete: %d match(es) against the last %d days.",

@@ -51,11 +51,11 @@ tmp3 = tempfile.mkdtemp()
 cfg3 = _Cfg({"onboarding_mode_days": 0})
 stale_ts = time.time() - 100 * 3600  # 100h ago, well past every job's expected cadence
 (_PathForSysPath(tmp3) / "job_health.json").write_text(json.dumps({
-    "retro_hunter": {"last_success": stale_ts, "duration_seconds": 1.0},
+    "live_retro_hunter": {"last_success": stale_ts, "duration_seconds": 1.0},
 }))
 cards3 = build_recommendations(cfg3, tmp3)
 check("a stale scheduled job produces a warning card",
-      any(c["severity"] == "warning" and "retro_hunter" in c["text"] for c in cards3),
+      any(c["severity"] == "warning" and "live_retro_hunter" in c["text"] for c in cards3),
       f"got {[c['text'] for c in cards3]}")
 
 # ── Onboarding active produces an actionable card ────────────────────────────

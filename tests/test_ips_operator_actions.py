@@ -26,7 +26,10 @@ from mitigation.ips import IPSMitigator  # noqa: E402
 @pytest.fixture
 def mitigator(tmp_path):
     sm = StateManager(state_path=str(tmp_path / "ids_state.json"))
-    config = {"ips_router_enabled": True, "ips_tarpit_enabled": True}
+    # Own state dir and no learning period: otherwise onboarding (alert-only for the first 14 days, tracked in
+    # <state>/onboarding.json) withholds containment and the result depends on the machine running the test.
+    config = {"ips_router_enabled": True, "ips_tarpit_enabled": True, "onboarding_mode_days": 0,
+              "state_path": str(tmp_path / "ids_state.json")}
     m = IPSMitigator(config=config, state_manager=sm)
     return m
 

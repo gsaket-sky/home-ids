@@ -159,7 +159,58 @@ with open(_PathForSysPath(__file__).resolve().parent.parent / "src" / "core" / "
 
 check("pipeline.py's arp_sweep_threshold computation consults the per-device FP profile "
       "before falling back to the global config default",
-      "self.fp_engine.get_device_arp_sweep_threshold(dev_id, default=global_arp_sweep_threshold)" in pipeline_src)
+      '"arp_sweep_unique_targets_threshold", global_arp_sweep_threshold, autotuned=True)' in pipeline_src)
+
+# Behaviour of EnginePipeline._device_threshold(): the live CL-AFPE's own profile (graph) first, then the older
+# AutonomousFPEngine profile, then the default; for an autotuned key a promoted autotuner value wins over all three.
+import tempfile as _tf  # noqa: E402
+import argus.ops.live_engine as _live  # noqa: E402
+from core.pipeline import EnginePipeline  # noqa: E402
+
+_tmp = _PathForSysPath(_tf.mkdtemp(prefix="phase26_threshold_"))
+_live.configure(str(_tmp / "graph.db"))
+_live.configure_cl_afpe(model_dir=str(_tmp / "models"), local_intel_dir=str(_tmp / "state"))
+
+
+class _FakeAutotune:
+    def __init__(self, value=None):
+        self.value = value
+
+    def get_active_value(self, key, device_id=None, default=None):
+        return self.value if self.value is not None else default
+
+
+class _FakeFP:
+    def __init__(self, profile, autotune):
+        self.profile, self.autotune = profile, autotune
+
+    def _get_device_profile_value(self, dev, key, default):
+        return self.profile.get((dev, key), default)
+
+    def _get_autotune_engine(self):
+        return self.autotune
+
+
+class _P:
+    pass
+
+
+_p = _P()
+_p.fp_engine = _FakeFP({("devA", "conn_abuse_unique_ip_threshold"): 7.0}, _FakeAutotune())
+_thr = EnginePipeline._device_threshold
+check("_device_threshold: falls back to the older profile when the live CL-AFPE has none",
+      _thr(_p, "devA", "conn_abuse_unique_ip_threshold", 5.0) == 7.0)
+check("_device_threshold: falls back to the default when neither profile has a value",
+      _thr(_p, "devB", "conn_abuse_unique_ip_threshold", 5.0) == 5.0)
+_live.get_graph_store().upsert_device("devA", timestamp=1.0)
+_live._get_cl_afpe_engine().apply_device_fp_profile("devA", "conn_abuse_unique_ip_threshold", 11.0, 5.0, "t", "r", now=2.0)
+check("_device_threshold: the live CL-AFPE's own profile value wins over the older store",
+      _thr(_p, "devA", "conn_abuse_unique_ip_threshold", 5.0) == 11.0)
+_p.fp_engine.autotune = _FakeAutotune(20.0)
+check("_device_threshold: a promoted autotuner value wins for an autotuned key",
+      _thr(_p, "devA", "arp_sweep_unique_targets_threshold", 8.0, autotuned=True) == 20.0)
+check("_device_threshold: the autotuner is not consulted for a key that is not autotuned",
+      _thr(_p, "devA", "conn_abuse_unique_ip_threshold", 5.0) == 11.0)
 
 
 if FAILURES:

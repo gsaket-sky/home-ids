@@ -434,11 +434,9 @@ device_identity:
 # network / hardware_profile — v13 full-architecture plan, Phase 2
 # NOT YET LIVE (nothing reads this on `.94` yet; Phase 3 is what actually
 # switches identity resolution over to it). Top-level keys, NOT nested under
-# device_identity -- src/v13/config/trust_anchors.py's load_trust_anchors_from_config()
+# device_identity -- src/argus/config/trust_anchors.py's load_trust_anchors_from_config()
 # / load_hardware_profile() both read config.get("network")/config.get("hardware_profile")
-# directly off the flat top-level config dict (confirmed against
-# src/v13/config_v13.example.yaml's own schema, which also puts network: at
-# top level). Nesting these under device_identity: is a real bug that was
+# directly off the flat top-level config dict. Nesting these under device_identity: is a real bug that was
 # caught and fixed here -- it doesn't crash (the loader fails safe to zero
 # anchors when the key is absent), so it would have silently loaded no trust
 # anchors at all rather than erroring.
@@ -557,10 +555,15 @@ threat_intel_and_ai:
   # How often (seconds) the threat-intel feeds refresh. Default 3600
   # = hourly. [LIVE]
   ti_refresh_interval: 3600
-  # ADVANCED (leave off on a shipped unit): enables the personal-use keyed feeds -- OTX, AbuseIPDB,
-  # URLhaus, ThreatFox -- using the keys from .env. Their free tiers forbid commercial use.
-  # Restart required. Not shown in the WebUI on purpose.
+  # The ONE feature that ships off, because of the feeds' licences, not for technical reasons: the keyed feeds --
+  # OTX, AbuseIPDB, URLhaus, ThreatFox -- whose free tiers forbid commercial use. If you hold a licence that
+  # covers your use, run `docker/scripts/enable-licensed-feeds.sh` (it asks, then switches this on and checks
+  # the keys). Restart required. Not shown in the WebUI on purpose.
   advanced_keyed_feeds: false
+  # The two per-lookup reputation services, same licence situation (free tiers: personal, non-commercial use).
+  # Off by default; scripts/enable-licensed-feeds.sh switches them on together with the feeds above. [LIVE]
+  abuseipdb_enabled: false
+  virustotal_enabled: false
 
   # Base URL of your local Ollama server, used by scripts/ollama_soc.py (batch triage,
   # every 4h) and intelligence/ai_soc.py's DeterministicValidator for LLM-based alert
@@ -698,7 +701,9 @@ reactive_capture:
   # deployment to actually fire capture bursts (Phase D's triggers below are wired and
   # live-verified as of this session, see zeek_scripts/local-arp-log.zeek's deployment
   # notes and this phase's commit message). [LIVE]
-  reactive_capture_enabled: false  # PRODUCT DEFAULT: off until enabled by the setup wizard (PRODUCTIZATION_ROADMAP.md Phase 5)
+  # Docker: also add `reactive-capture` (and `suricata` for signature scans) to COMPOSE_PROFILES in
+  # docker/.env -- the burst scans run in the capture-worker container.
+  reactive_capture_enabled: true  # PRODUCT DEFAULT: on. It stays inert until a supported router is configured (router_type) and the `reactive-capture` compose profile runs
 
   # The ONE shared aggressiveness knob (Phase D design): every trigger below draws
   # from this single hourly budget instead of a per-trigger-type cooldown, since a
@@ -815,7 +820,7 @@ reactive_capture:
   # a real binary and a ruleset you manage yourself (e.g. `suricata-update --etopen`
   # with a trimmed "security"/"balanced" policy, not the full noisy feed), and
   # (3) set this to true. [LIVE]
-  reactive_capture_suricata_enabled: false  # PRODUCT DEFAULT: off until enabled by the setup wizard (PRODUCTIZATION_ROADMAP.md Phase 5)
+  reactive_capture_suricata_enabled: true  # PRODUCT DEFAULT: on (needs the `suricata` compose profile for rules and scanning)
 
   # Max seconds to let one batch scan run before giving up on it (non-fatal --
   # the burst's Zeek/DNS-evasion findings are unaffected either way). A burst pcap
@@ -918,17 +923,16 @@ telegram:
 # -----------------------------------------------------------------------------
 job_admission_max_pressure_tier: resource_pressure  # normal/resource_pressure/conservation/critical -- a NEW job may start at or below this tier
 job_max_defer_minutes: 60  # a job denied the slot for longer than this force-runs anyway (starvation backstop)
-# embedded = main.py starts scheduler.py as its child (old behavior; every job then runs
-# inside the engine's own cgroup/container memory limit). external = scheduler.py runs as
-# its own service with its own limit (systemd/soc-scheduler.service, or the compose
-# `scheduler` service) -- recommended: a heavy job can then never throttle the engine.
-# [RESTART]
-scheduler_mode: embedded
+# external = scheduler.py runs as its own compose service (`scheduler`) with its own memory
+# limit, so a heavy job can never throttle the engine container. embedded = main.py
+# starts it as a child inside the pipeline container (old behavior). [RESTART]
+scheduler_mode: external
 scheduled_jobs:
-  # Daily retrain of the false-positive classifier (scripts/train_fp_classifier.py) — this
-  # one is NOT in the `scheduler` dict below, it has its own dedicated enable/cron pair.
-  # Fires at 3am. When enabled, the scheduler owns training; fp_engine.py's in-engine
-  # weekly loop then only hot-reloads the new model. [LIVE]
+  # Weekly/nightly retrain of the false-positive LightGBM classifier
+  # (scripts/train_fp_classifier.py) — this one is NOT in the `scheduler`
+  # dict below, it has its own dedicated enable/cron pair. Fires at 3am.
+  # When enabled, the scheduler owns training; fp_engine.py's in-engine weekly loop then
+  # only hot-reloads the new model. [LIVE]
   autotune_enabled: true
   autotune_schedule_cron: "0 3 * * *"
   autotune_priority: 2
@@ -1126,32 +1130,6 @@ scheduled_jobs:
       priority: 3
       pausable: true  # explicit per-item _maybe_commit(), confirmed no wrapping transaction()
       max_runtime_minutes: 30
-
-
-# =============================================================================
-# engine — v13 fast-cutover rollback switch (Documentation/
-# V13_ARCHITECTURE_DEPENDENCY_MAP.md, the entry recording this cutover)
-# =============================================================================
-# "argus" (default) = pipeline.py's live decision path is argus's EvidenceGraph-based
-# HypothesisEngine/DecisionEngine (src/argus/ops/live_engine.py), the whole engine, not a
-# per-mechanism shadow flag -- this superseded the earlier A10 per-mechanism
-# shadow-flip approach (independence_family shadow computation, gap_monitor.py,
-# v13_independence_eligible_count.json) once the risk tolerance for this box changed
-# from "critical home security" to "IDS_PRODUCT real-traffic testbed."
-# "v_current" = instant rollback to core/decision_engine.py's original engine, a config
-# edit + restart, no redeploy, if anything about argus's live behavior looks wrong.
-engine: argus
-
-# =============================================================================
-# cl_afpe_engine — CL-AFPE (autonomous false-positive suppression) engine switch
-# =============================================================================
-# "argus" (default since 2026-10-02) = the real suppression decision comes from
-# argus's own ClAfpeEngine (src/argus/cl_afpe/engine.py), with intelligence/
-# fp_engine.py's AutonomousFPEngine only as its internal fallback.
-# "v_current" = instant rollback to AutonomousFPEngine as the real decision (ClAfpeEngine
-# then runs in shadow, logging to state/cl_afpe_divergence_v13.jsonl) -- a config edit
-# + restart, no redeploy. Switching back to "argus" is the same manual edit.
-cl_afpe_engine: argus
 
 
 # =============================================================================

@@ -26,7 +26,6 @@ from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domai
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
-from core.identity import DeviceIdentityManager
 from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
@@ -837,29 +836,16 @@ class EnginePipeline:
         if state_manager is None:
             self.state_manager.load_from_disk(alpha=float(self.config.get("baseline_alpha", 0.05)))
 
-        # v13 full-architecture plan, Phase 3: config.get("engine", "argus") == "argus"
-        # (the default) swaps in LiveIdentityManager -- a real DeviceIdentityManager
-        # SUBCLASS (Fritz!Box polling, process_dns_identities/process_zeek_identities,
-        # apply_device_type, orphan-merge cleanup all inherited UNCHANGED; only
-        # resolve_device_id() itself is overridden) generalizing the single hardcoded
-        # gateway_ip to config.yaml's network.trust_anchors (Phase 2's loader) plus
-        # real MAC-randomization detection. Same rollback flag as the decision engine
-        # (A13) -- "v_current" uses the real, unmodified DeviceIdentityManager exactly
-        # as before Phase 3 existed.
-        if self.config.get("engine", "argus") == "argus":
-            # Phase 13 (zero-site bootstrap E, autonomy-completion effort): trust_anchors
-            # is now auto-discovered/authoritative rather than hand-configured-only --
-            # see bootstrap_trust_anchors()'s own docstring for the gateway-continuity
-            # safety guard (refuses to auto-adopt a discovered gateway that doesn't match
-            # the last-known-good one). Runs ONCE here at construction time, same as the
-            # hand-configured load it replaces -- a one-time ARP round-trip at boot, not
-            # a per-cycle cost.
-            trust_anchors = bootstrap_trust_anchors(self.config)
-            self.identity_manager = LiveIdentityManager(
-                self.state_manager, self.config, argus_live_engine.get_graph_store(), trust_anchors,
-            )
-        else:
-            self.identity_manager = DeviceIdentityManager(self.state_manager, self.config)
+        # Identity: LiveIdentityManager, a DeviceIdentityManager subclass (Fritz!Box polling,
+        # process_dns_identities/process_zeek_identities, apply_device_type and orphan-merge
+        # cleanup are inherited) that resolves against config.yaml's network.trust_anchors and
+        # handles MAC randomisation. trust_anchors are auto-discovered once at construction --
+        # see bootstrap_trust_anchors() for the gateway-continuity guard (a discovered gateway
+        # that doesn't match the last known good one is not adopted automatically).
+        trust_anchors = bootstrap_trust_anchors(self.config)
+        self.identity_manager = LiveIdentityManager(
+            self.state_manager, self.config, argus_live_engine.get_graph_store(), trust_anchors,
+        )
 
         self.ti_engine = ti_engine
         self.ml_registry = ml_registry
@@ -1000,6 +986,15 @@ class EnginePipeline:
         )
         if self.ti_engine:
             self.ti_engine.fp_engine = self.fp_engine
+        # One shared local confirmed-intel store (state/local_confirmed_intel.json): the argus
+        # CL-AFPE's Stage-1 check, this pipeline's HIGH/CRITICAL feed (fp_engine.record_confirmed_threat)
+        # and the expiry prune all use this same instance. The store the argus engine kept while it
+        # ran in shadow is merged in once.
+        argus_live_engine.configure_cl_afpe(local_intel=self.fp_engine.local_intel)
+        try:
+            argus_live_engine.merge_retired_local_intel(self.fp_engine.local_intel, state_dir)
+        except Exception as e:
+            LOGGER.warning("Merging the retired confirmed-intel store failed (non-fatal): %s", e)
 
         self._last_flush = time.time()
         self._last_prune = time.time()
@@ -1054,6 +1049,19 @@ class EnginePipeline:
         # its own lock, so there is no split-brain window at all.
         LOGGER.info("Starting Device-Identity Reconciliation Worker Thread...")
         threading.Thread(target=self._identity_reconcile_worker, daemon=True, name="identity_reconcile_worker").start()
+
+    def _device_threshold(self, dev_id: str, key: str, default: float, autotuned: bool = False) -> float:
+        """A per-device detection threshold: the value the live CL-AFPE (argus) raised after corrections, else the
+        older AutonomousFPEngine profile, else `default`; for autotuned keys, a promoted autotuner value wins."""
+        value = argus_live_engine.get_device_profile_threshold(dev_id, key, default)
+        if value is None:
+            value = self.fp_engine._get_device_profile_value(dev_id, key, default) if self.fp_engine else default
+        if autotuned and self.fp_engine:
+            try:
+                value = self.fp_engine._get_autotune_engine().get_active_value(key, device_id=dev_id, default=value)
+            except Exception as e:
+                LOGGER.warning("autotuned %s lookup failed for %s, using %s: %s", key, dev_id, value, e)
+        return value
 
     def _identity_reconcile_worker(self) -> None:
         """Periodically finds and merges device-identity fragmentation (the same
@@ -1473,7 +1481,7 @@ class EnginePipeline:
                 mitigation_pending = None
                 with self.state_manager.lock_device(dev_id) as state:
                     features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
-                    features["sigma_shift"] = self.fp_engine.get_sigma_shift(dev_id)
+                    features["sigma_shift"] = argus_live_engine.get_device_sigma_shift(dev_id)
                     features["current_hour"] = current_hour
                     features["current_minute"] = current_minute
                     # AUDIT FIX #15: Inject honeypot IPs from config so scoring engine doesn't hardcode them
@@ -1722,22 +1730,16 @@ class EnginePipeline:
                     # uses that instead of the global default -- self-healing takes effect
                     # immediately, not just as a contribution to next week's retrain.
                     global_arp_sweep_threshold = float(self.config.get("arp_sweep_unique_targets_threshold", 8))
-                    arp_sweep_threshold = int(
-                        self.fp_engine.get_device_arp_sweep_threshold(dev_id, default=global_arp_sweep_threshold)
-                        if self.fp_engine else global_arp_sweep_threshold
-                    )
+                    arp_sweep_threshold = int(self._device_threshold(
+                        dev_id, "arp_sweep_unique_targets_threshold", global_arp_sweep_threshold, autotuned=True))
                     # BUGFIX (live audit): same self-healing shape as arp_sweep_threshold just
                     # above, now also covering zeek_conn_abuse's unique-IP requirement and
                     # zeek_long_conn's duration requirement -- previously hardcoded, so a
                     # correction to either had nowhere to actually take effect.
                     conn_abuse_unique_ip_threshold = int(
-                        self.fp_engine.get_device_conn_abuse_unique_ip_threshold(dev_id, default=5.0)
-                        if self.fp_engine else 5.0
-                    )
+                        self._device_threshold(dev_id, "conn_abuse_unique_ip_threshold", 5.0))
                     long_conn_duration_threshold = float(
-                        self.fp_engine.get_device_long_conn_duration_threshold(dev_id, default=14400.0)
-                        if self.fp_engine else 14400.0
-                    )
+                        self._device_threshold(dev_id, "long_conn_duration_threshold", 14400.0))
                     threat_signal_ev = self.threat_signal_detector.detect(
                         dev_id, features, top_domain=top_domain, arp_sweep_threshold=arp_sweep_threshold,
                         conn_abuse_unique_ip_threshold=conn_abuse_unique_ip_threshold,
@@ -2026,40 +2028,14 @@ class EnginePipeline:
                     # 1033) -- without it, a safe_ips device (the router) touching the
                     # honeypot for a benign reason diverged CRITICAL in shadow on every
                     # single cycle it happened, live BENIGN, with nothing wrong.
-                    # V13 FAST CUTOVER (Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md, the
-                    # entry recording this cutover): v13's EvidenceGraph-based
-                    # hypothesis/decision engine is now the LIVE decision path, not a shadow
-                    # comparison -- superseding A10's earlier per-mechanism shadow-flip
-                    # machinery (that whole apparatus checked ONE mechanism at a time before
-                    # flipping; this replaces the entire engine at once, per an explicit,
-                    # deliberate risk-tolerance change: this box is being used as a real-
-                    # traffic testbed for IDS_PRODUCT, not run as a critical home-security
-                    # system right now). `engine: "v_current"` in config.yaml is the instant
-                    # rollback switch (config edit + restart, no redeploy) if anything looks
-                    # wrong -- kept from the superseded plan since it costs nothing.
-                    #
-                    # Cleanup (2026-09-07, Workstream 1 of ARGUS_AUTONOMY_DEPENDENCY_MAP.md):
-                    # Gap 1/2/3's OWN shadow experiment (shadow_changed/_log_shadow_divergence,
-                    # DECISION_LOGIC_DEPENDENCY_MAP.md) used to be computed INSIDE
-                    # core/decision_engine.py's evaluate() and logged here on divergence -- since
-                    # v-current stopped being the primary engine it had already stopped producing
-                    # new state/shadow_decisions.jsonl entries under the live default, so both the
-                    # computation and this call site were removed outright rather than kept as
-                    # permanently-dead code with no live path left to ever flip into (see the
-                    # dependency map's A13 entry for the full cutover record; git history has the
-                    # removed code if it's ever needed for reference).
-                    if self.config.get("engine", "argus") == "argus":
-                        decision = argus_live_engine.evaluate(
-                            active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                            features=features, is_safe=is_safe,
-                            fallback_evaluate=self.decision_engine.evaluate,
-                            device_id=dev_id, now=now, geoip_engine=self.geoip_engine,
-                        )
-                    else:
-                        decision = self.decision_engine.evaluate(
-                            active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
-                            features=features, is_safe=is_safe,
-                        )
+                    # The argus engine (argus/ops/live_engine.py: evidence graph, hypotheses, decision) makes
+                    # the decision. core/decision_engine.py is only its in-process fallback if it raises.
+                    decision = argus_live_engine.evaluate(
+                        active_evidence, rep_vector, getattr(state, "device_type", ""), baseline_familiarity,
+                        features=features, is_safe=is_safe,
+                        fallback_evaluate=self.decision_engine.evaluate,
+                        device_id=dev_id, now=now, geoip_engine=self.geoip_engine,
+                    )
 
                     # PHASE 7 (16-parameter autonomy plan, Documentation/
                     # ARGUS_AUTONOMY_DEPENDENCY_MAP.md): shadow-test at most one
@@ -2173,13 +2149,10 @@ class EnginePipeline:
                                             # would re-insert every one of those items again as genuine
                                             # duplicate graph rows. This second, rare re-evaluation path
                                             # stays graph-uninvolved until that's worth solving properly.
-                                            if self.config.get("engine", "argus") == "argus":
-                                                decision = argus_live_engine.evaluate(
-                                                    active_evidence, rep_vector, getattr(state, "device_type", ""),
-                                                    fallback_evaluate=self.decision_engine.evaluate,
-                                                )
-                                            else:
-                                                decision = self.decision_engine.evaluate(active_evidence, rep_vector, getattr(state, "device_type", ""))
+                                            decision = argus_live_engine.evaluate(
+                                                active_evidence, rep_vector, getattr(state, "device_type", ""),
+                                                fallback_evaluate=self.decision_engine.evaluate,
+                                            )
                                             risk = decision["threat_confidence"] * 10.0
                                             factors = [{"name": decision["explanation"], "score": risk}]
                                 
@@ -2799,61 +2772,26 @@ class EnginePipeline:
                             # IOC) directly instead of independently re-deriving the same
                             # signal from raw features with its own, separately-drifting
                             # thresholds -- see fp_engine.evaluate()'s docstring.
-                            # V13 FULL-ARCHITECTURE PLAN, WORKSTREAM 2: cl_afpe_engine mirrors
-                            # the top-level `engine:` switch's exact shape -- default
-                            # "argus" (since 2026-10-02) makes ClAfpeEngine's verdict the real
-                            # one; "v_current" is the rollback: AutonomousFPEngine decides and
-                            # ClAfpeEngine is shadow-computed alongside for comparison (below)
-                            # -- a whole-engine swap, not a per-mechanism flag, matching this
-                            # project's own precedent for the main decision engine (A13).
-                            if self.config.get("cl_afpe_engine", "argus") == "argus":
-                                legacy_fallback_used = []
+                            # The argus CL-AFPE (argus/cl_afpe/engine.py) decides; AutonomousFPEngine is only
+                            # its in-process fallback if it raises.
+                            legacy_fallback_used = []
 
-                                def _legacy_fallback(**kwargs):
-                                    legacy_fallback_used.append(True)
-                                    return self.fp_engine.evaluate(**kwargs)
+                            def _legacy_fallback(**kwargs):
+                                legacy_fallback_used.append(True)
+                                return self.fp_engine.evaluate(**kwargs)
 
-                                fp_verdict = argus_live_engine.evaluate_cl_afpe_live(
-                                    alert_payload=alert_payload,
-                                    features=features,
-                                    risk_score=risk,
-                                    ti_engine=self.ti_engine,
-                                    decision=decision,
-                                    asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                    fallback_evaluate=_legacy_fallback,
-                                    now=now,
-                                )
-                                if not legacy_fallback_used:
-                                    record_cl_afpe_verdict(fp_verdict, alert_payload)
-                            else:
-                                fp_verdict = self.fp_engine.evaluate(
-                                    alert_payload=alert_payload,
-                                    features=features,
-                                    risk_score=risk,
-                                    ti_engine=self.ti_engine,
-                                    decision=decision,
-                                    asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                )
-
-                                # V13 FULL-ARCHITECTURE PLAN, PHASE 6E: CL-AFPE shadow-mode
-                                # comparison, compute-only -- never affects fp_verdict above
-                                # or anything derived from it. Only runs while v1 is still
-                                # the real decision-maker -- once cl_afpe_engine="argus" above,
-                                # there's no more real v1 verdict left to diff against (same
-                                # reasoning that froze decision_engine.py's own shadow
-                                # experiment once the main engine flipped, A13), and calling
-                                # fp_engine.evaluate() here anyway would keep writing to its
-                                # now-unread flat files for no purpose. Best-effort: never
-                                # raises (caught internally), so a shadow failure can never
-                                # affect the real alert this cycle publishes.
-                                argus_live_engine.evaluate_cl_afpe_shadow(
-                                    alert_payload=alert_payload,
-                                    features=features,
-                                    decision=decision,
-                                    asn_owner=asn_owner if asn_owner != "Unknown" else "",
-                                    fp_verdict_v1=fp_verdict,
-                                    now=now,
-                                )
+                            fp_verdict = argus_live_engine.evaluate_cl_afpe_live(
+                                alert_payload=alert_payload,
+                                features=features,
+                                risk_score=risk,
+                                ti_engine=self.ti_engine,
+                                decision=decision,
+                                asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                                fallback_evaluate=_legacy_fallback,
+                                now=now,
+                            )
+                            if not legacy_fallback_used:
+                                record_cl_afpe_verdict(fp_verdict, alert_payload)
 
                             # PHASE 12: persist CL-AFPE's own combined confidence into the alert
                             # record. Previously this number existed only in memory for the

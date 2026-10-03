@@ -18,9 +18,15 @@ adding kinds that would silently never populate.
 TTL-bounded (default 30 days) -- confirmed-malicious infrastructure from months ago may
 be repurposed or abandoned, so this is explicitly not permanent, same reasoning as
 fp_engine.py's own domain trust cache.
+
+One file, several processes: the engine (live checks and records), the scheduler's retro-hunt
+and the maintenance tools all use state/local_confirmed_intel.json. Every operation therefore
+re-reads the file when another process changed it, and saves atomically (temp file + rename),
+so a power cut never leaves a half-written store and one writer does not silently undo another.
 """
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -39,6 +45,7 @@ class LocalConfirmedIntel:
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
         self._store: Dict[str, Dict[str, dict]] = {k: {} for k in _KINDS}
+        self._mtime_ns = None   # file mtime at our last load/save; a different value = another process wrote it
         self._load()
 
     def _entry_ttl(self, entry: dict) -> float:
@@ -61,6 +68,7 @@ class LocalConfirmedIntel:
         if kind not in _KINDS or not value or str(value).lower() in ("unknown", "null", "none", ""):
             return False
         now = time.time()
+        self._refresh_if_changed()
         with self._lock:
             bucket = self._store[kind]
             existing = bucket.get(value)
@@ -91,6 +99,7 @@ class LocalConfirmedIntel:
         if kind not in _KINDS or not value:
             return None
         now = time.time()
+        self._refresh_if_changed()
         with self._lock:
             entry = self._store[kind].get(value)
         if entry and (now - entry["last_confirmed"]) < self._entry_ttl(entry):
@@ -103,6 +112,7 @@ class LocalConfirmedIntel:
         if kind not in _KINDS:
             return set()
         now = time.time()
+        self._refresh_if_changed()
         with self._lock:
             return {v for v, e in self._store[kind].items() if (now - e["last_confirmed"]) < self._entry_ttl(e)}
 
@@ -112,6 +122,7 @@ class LocalConfirmedIntel:
         run) rather than on every access."""
         now = time.time()
         pruned = 0
+        self._refresh_if_changed()
         with self._lock:
             for kind in _KINDS:
                 bucket = self._store[kind]
@@ -123,11 +134,53 @@ class LocalConfirmedIntel:
             self._save()
         return pruned
 
+    def merge_from(self, other_path) -> int:
+        """Folds the entries of another store file into this one (union per indicator: newest
+        last_confirmed wins, sources combined). Returns how many indicators were added or updated."""
+        try:
+            raw = json.loads(Path(other_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return 0
+        changed = 0
+        self._refresh_if_changed()
+        with self._lock:
+            for k in _KINDS:
+                for value, entry in (raw.get(k) or {}).items():
+                    if not isinstance(entry, dict) or "last_confirmed" not in entry:
+                        continue
+                    mine = self._store[k].get(value)
+                    if mine is None:
+                        self._store[k][value] = dict(entry)
+                        changed += 1
+                    elif entry["last_confirmed"] > mine.get("last_confirmed", 0):
+                        sources = list(dict.fromkeys((mine.get("sources") or []) + (entry.get("sources") or [])))
+                        mine.update(entry)
+                        mine["sources"] = sources
+                        changed += 1
+        if changed:
+            self._save()
+        return changed
+
+    def _file_mtime(self):
+        try:
+            return self._path.stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _refresh_if_changed(self) -> None:
+        """Re-reads the file when another process wrote it since our last load/save."""
+        mtime = self._file_mtime()
+        if mtime is not None and mtime != self._mtime_ns:
+            self._load()
+
     def _save(self) -> None:
         try:
             with self._lock:
                 snapshot = {k: dict(v) for k, v in self._store.items()}
-            self._path.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            os.replace(tmp, self._path)
+            self._mtime_ns = self._file_mtime()
         except Exception as exc:
             LOGGER.error("Failed to save local_confirmed_intel.json: %s", exc)
 
@@ -135,12 +188,12 @@ class LocalConfirmedIntel:
         if not self._path.exists():
             return
         try:
+            mtime = self._file_mtime()
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             with self._lock:
                 for k in _KINDS:
-                    if isinstance(raw.get(k), dict):
-                        self._store[k] = raw[k]
-            LOGGER.info("✅ Local confirmed-intel store loaded: %s",
-                        {k: len(v) for k, v in self._store.items()})
+                    self._store[k] = raw[k] if isinstance(raw.get(k), dict) else {}
+                self._mtime_ns = mtime
+            LOGGER.debug("Local confirmed-intel store loaded: %s", {k: len(v) for k, v in self._store.items()})
         except Exception as exc:
             LOGGER.error("Failed to load local_confirmed_intel.json: %s", exc)

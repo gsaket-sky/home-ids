@@ -1209,8 +1209,8 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
         return decision
     except Exception as e:
         LOGGER.error(
-            "v13 live engine raised %s -- falling back to v-current's decision engine "
-            "for this cycle. This should never happen in normal operation; investigate.",
+            "Argus decision engine raised %s -- falling back to core/decision_engine.py for this cycle. "
+            "This should never happen in normal operation; investigate.",
             e, exc_info=True,
         )
         if fallback_evaluate is not None:
@@ -1222,145 +1222,112 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
 
 
 # ==============================================================================
-# CL-AFPE shadow-mode wiring (v13 full-architecture plan, Phase 6e)
+# CL-AFPE (the false-positive engine) wiring
 #
-# This module is "the actual swap-in adapter pipeline.py calls" for the DECISION
-# path (see the module docstring above) -- but v-current's real CL-AFPE verdict
-# (self.fp_engine.evaluate(), intelligence/fp_engine.py) is computed at a LATER,
-# separate point in pipeline.py's own per-cycle flow (~line 1812, well after the
-# `decision` this module's own evaluate() returns at ~line 1298). A genuine
-# shadow comparison therefore needs its OWN call site in pipeline.py, immediately
-# alongside that real fp_engine.evaluate() call -- not a repurposing of this
-# module's own decision-path evaluate() above. This mirrors the SAME "one new
-# call site, mirroring an existing precedent" shape the original v13 decision
-# cutover itself used (this module's own docstring calls that "a one-line
-# change") -- the new pipeline.py line calls evaluate_cl_afpe_shadow() below,
-# which does 100% of the real work here, in live_engine.py, matching the plan's
-# own wording as closely as is architecturally honest.
+# The engine's verdict is computed at a later point in pipeline.py's per-cycle flow than the decision above, so it
+# has its own entry point here, evaluate_cl_afpe_live(), with the same fail-safe fallback shape as evaluate().
 #
-# "Compute-only, never suppresses" (the plan's own verification section) means:
-# this function's return value is never used by pipeline.py to change what
-# actually gets suppressed/contained -- it's fire-and-forget, logging a
-# divergence record for later comparison. It does NOT mean CL-AFPE's own writes
-# (trust edges, per-device fp_profile/sigma_shift, its own local-intel store) are
-# skipped -- see cl_afpe/engine.py's own Phase 6e docstring paragraph for why
-# accumulating that experience for real is the point of running this in shadow
-# at all. What IS carefully kept separate: local-intel poisoning-protection state
-# writes into a v13-ONLY LocalConfirmedIntel store (_CL_AFPE_LOCAL_INTEL_DIR,
-# never intelligence/local_intel.py's real state/local_confirmed_intel.json) --
-# sharing that file would let a shadow-only ML verdict actually hard-stop v1's
-# own real Stage-1 Check 7 on a later alert, a real live-behavior side effect
-# through a shared file, which is exactly what "never suppresses" rules out.
+# Shared threat memory: the local confirmed-intel store (intelligence/local_intel.py) is ONE store,
+# state/local_confirmed_intel.json, used by this engine's Stage-1 check, by pipeline.py's HIGH/CRITICAL feed, by the
+# retro-hunt and by the maintenance tools. pipeline.py injects its instance through configure_cl_afpe(local_intel=),
+# so a destination confirmed for one device is checked for every other device. A store left over from the period
+# when this engine ran in shadow (state/v13_cl_afpe/) is merged into it once, then renamed.
 #
-# ML models are the one deliberate EXCEPTION to that separation: MLScorer reads
-# v-current's REAL, already-trained fp_classifier.onnx/fastembed_cache under
-# _CL_AFPE_MODEL_DIR read-only (see cl_afpe/ml_scoring.py's own module docstring
-# for the reuse-not-retrain design) -- reading them changes nothing about how
-# train_fp_classifier.py's weekly retrain produces or consumes those same files.
+# ML models: MLScorer reads the trained fp_classifier.onnx / fastembed_cache under the model dir read-only;
+# train_fp_classifier.py remains their only producer.
 # ==============================================================================
 
-LOGGER_CL_AFPE = logging.getLogger("home_ids.v13_cl_afpe_shadow")
+LOGGER_CL_AFPE = logging.getLogger("home_ids.cl_afpe")
 
-# Matches config.yaml's real `model_path: models/ids_model.pkl` -> parent dir
-# `models/`, where fp_classifier.onnx and fastembed_cache/ actually live (see
-# fp_engine.py:2532/2671's own Path(...).parent resolution). Relative to the
-# process's CWD, matching every other v13 ops file's own state_dir convention.
+# Matches config.yaml's `model_path: models/ids_model.pkl` -> parent dir `models/`, where fp_classifier.onnx and
+# fastembed_cache/ live. Relative to the process's CWD, like every other ops file's state dir.
 _CL_AFPE_MODEL_DIR = "models"
 
-# Deliberately v13-only -- never intelligence/local_intel.py's real
-# state/local_confirmed_intel.json. See this section's own docstring above.
-_CL_AFPE_LOCAL_INTEL_DIR = "state/v13_cl_afpe"
-
-_CL_AFPE_DIVERGENCE_LOG_PATH = "state/cl_afpe_divergence_v13.jsonl"
+# Directory of the shared state/local_confirmed_intel.json (used when no instance is injected, e.g. in tests).
+_CL_AFPE_LOCAL_INTEL_DIR = "state"
+_RETIRED_LOCAL_INTEL_SUBDIR = "v13_cl_afpe"
 
 _cl_afpe_engine: Optional[ClAfpeEngine] = None
+_shared_local_intel: Optional[LocalConfirmedIntel] = None
 
 
-def configure_cl_afpe(model_dir: Optional[str] = None, local_intel_dir: Optional[str] = None) -> None:
-    """Optional: call once at startup to point CL-AFPE's shadow engine somewhere
-    other than the defaults above -- same override shape as this module's own
-    configure() for the graph db path. Safe to call before any real
-    evaluate_cl_afpe_shadow() call; forces re-init of the lazy singleton."""
-    global _CL_AFPE_MODEL_DIR, _CL_AFPE_LOCAL_INTEL_DIR, _cl_afpe_engine
+def configure_cl_afpe(model_dir: Optional[str] = None, local_intel_dir: Optional[str] = None,
+                      local_intel: Optional[LocalConfirmedIntel] = None) -> None:
+    """Call once at startup. `local_intel` shares the caller's LocalConfirmedIntel instance (one store, one
+    in-memory copy per process); `local_intel_dir` points a fresh one at another directory. Forces re-init of the
+    lazy singleton."""
+    global _CL_AFPE_MODEL_DIR, _CL_AFPE_LOCAL_INTEL_DIR, _cl_afpe_engine, _shared_local_intel
     if model_dir is not None:
         _CL_AFPE_MODEL_DIR = model_dir
     if local_intel_dir is not None:
         _CL_AFPE_LOCAL_INTEL_DIR = local_intel_dir
+    if local_intel is not None:
+        _shared_local_intel = local_intel
     _cl_afpe_engine = None
+
+
+def merge_retired_local_intel(local_intel: LocalConfirmedIntel, state_dir) -> int:
+    """Folds the store this engine kept while it ran in shadow (state/v13_cl_afpe/local_confirmed_intel.json)
+    into the shared one, once, then renames the old file so it is not merged again."""
+    old = Path(state_dir) / _RETIRED_LOCAL_INTEL_SUBDIR / "local_confirmed_intel.json"
+    if not old.exists():
+        return 0
+    merged = local_intel.merge_from(old)
+    try:
+        old.rename(old.with_name(old.name + ".merged"))
+    except OSError as e:
+        LOGGER_CL_AFPE.warning("Could not rename merged confirmed-intel store %s: %s", old, e)
+    LOGGER_CL_AFPE.info("Merged %d confirmed indicator(s) from %s into the shared store", merged, old)
+    return merged
 
 
 def _get_cl_afpe_engine() -> ClAfpeEngine:
     global _cl_afpe_engine
     if _cl_afpe_engine is None:
         store = _get_graph_store()
-        local_intel = LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
+        local_intel = _shared_local_intel or LocalConfirmedIntel(_CL_AFPE_LOCAL_INTEL_DIR)
         ml_scorer = MLScorer(_CL_AFPE_MODEL_DIR)
         _cl_afpe_engine = ClAfpeEngine(store, local_intel=local_intel, ml_scorer=ml_scorer)
     return _cl_afpe_engine
 
 
-def _log_cl_afpe_divergence(alert_payload: dict, v13_verdict: dict,
-                              fp_verdict_v1: Optional[dict], now: float) -> None:
-    """Best-effort append-only log, matching Phase 5's own separate-file
-    convention (state/cl_afpe_divergence_v13.jsonl, mirroring
-    ollama_analysis_v13.jsonl's own shape) -- never raises out to the caller.
-    Logs EVERY comparison, not just divergences, so the log also carries a true
-    agreement rate rather than only ever showing disagreements."""
+def get_device_sigma_shift(device_id: str) -> float:
+    """The device's cumulative sensitivity shift, as the false-positive engine maintains it (graph metadata)."""
     try:
-        v1_verdict = (fp_verdict_v1 or {}).get("verdict")
-        v13_verdict_str = v13_verdict.get("verdict")
-        record = {
-            "timestamp": now,
-            "device_id": alert_payload.get("device", {}).get("id", "unknown"),
-            "hostname": alert_payload.get("device", {}).get("hostname", ""),
-            "signature": alert_payload.get("signature", ""),
-            "v1_verdict": v1_verdict,
-            "v1_confidence": (fp_verdict_v1 or {}).get("confidence"),
-            "v1_stage": (fp_verdict_v1 or {}).get("stage"),
-            "v13_verdict": v13_verdict_str,
-            "v13_confidence": v13_verdict.get("confidence"),
-            "v13_stage": v13_verdict.get("stage"),
-            "agree": (v1_verdict == v13_verdict_str) if (v1_verdict and v13_verdict_str) else None,
-        }
-        path = Path(_CL_AFPE_DIVERGENCE_LOG_PATH)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+        return _get_cl_afpe_engine().get_sigma_shift(device_id)
     except Exception as e:
-        LOGGER_CL_AFPE.error("Failed to write CL-AFPE divergence log entry: %s", e, exc_info=True)
+        LOGGER_CL_AFPE.warning("sigma shift lookup failed for %s: %s", device_id, e)
+        return 0.0
+
+
+def get_device_profile_threshold(device_id: str, key: str, default: float) -> Optional[float]:
+    """A per-device threshold the false-positive engine raised after corrections (graph metadata `fp_profile`), or
+    None when it has none for this device -- the caller then falls back to older stores / its own default."""
+    try:
+        engine = _get_cl_afpe_engine()
+        sentinel = object()
+        value = engine._get_device_profile_value(device_id, key, sentinel)
+        return None if value is sentinel else float(value)
+    except Exception as e:
+        LOGGER_CL_AFPE.warning("profile threshold lookup failed for %s/%s: %s", device_id, key, e)
+        return None
 
 
 def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float = 0.0,
                             ti_engine=None, decision: Optional[dict] = None, asn_owner: str = "",
                             fallback_evaluate=None, now: Optional[float] = None) -> Dict[str, Any]:
-    """v13 full-architecture plan, Workstream 2 -- the pipeline.py call site once
-    config.yaml's `cl_afpe_engine` is flipped from "v_current" to "argus" (see
-    config.yaml.example's cl_afpe_engine block; argus is the default since 2026-10-02). Unlike
-    evaluate_cl_afpe_shadow() above, this function's RETURN VALUE is what pipeline.py
-    actually acts on -- suppress/publish, ML-registry learn/reject, alerts.json's
-    fp_verdict field -- exactly the same "one new call site, fail-safe fallback" shape
-    A13's own decision-path evaluate() above already established for the main engine
-    cutover. `risk_score`/`ti_engine` are accepted ONLY to pass through to
-    fallback_evaluate on failure (ClAfpeEngine.evaluate() itself needs neither) --
-    kept as real parameters rather than **kwargs so a caller passing the wrong shape
-    fails loudly at the call site, not inside the except block.
-
-    Once flipped, v-current's own fp_engine.evaluate() is no longer called at all for
-    this cycle -- its flat-file state (device_fp_profiles.json/fp_sigma_shifts.json/
-    fp_trust_cache.json/local_confirmed_intel.json) stops being updated, matching
-    exactly how the main engine cutover (A13) made decision_engine.py's own shadow
-    experiment permanently frozen. This is the intended, one-way consequence of a
-    whole-engine swap (the granularity explicitly chosen over a per-mechanism flip),
-    not a bug."""
+    """The false-positive engine's verdict for one alert -- the value pipeline.py acts on (suppress/publish,
+    ML-registry learn/reject, alerts.json's fp_verdict). `risk_score`/`ti_engine` are only passed through to
+    `fallback_evaluate` (the earlier AutonomousFPEngine) if this engine raises, so a failure degrades to the older
+    verdict for that cycle instead of dropping the alert."""
     ts = now if now is not None else time.time()
     try:
         engine = _get_cl_afpe_engine()
         return engine.evaluate(alert_payload, features, decision=decision, asn_owner=asn_owner, now=ts)
     except Exception as e:
         LOGGER_CL_AFPE.error(
-            "CL-AFPE LIVE evaluation raised %s -- falling back to v-current's real "
-            "AutonomousFPEngine for this cycle. This should never happen in normal "
-            "operation; investigate.", e, exc_info=True,
+            "CL-AFPE evaluation raised %s -- falling back to AutonomousFPEngine for this cycle. "
+            "This should never happen in normal operation; investigate.", e, exc_info=True,
         )
         if fallback_evaluate is not None:
             return fallback_evaluate(
@@ -1368,28 +1335,6 @@ def evaluate_cl_afpe_live(alert_payload: dict, features: dict, risk_score: float
                 ti_engine=ti_engine, decision=decision, asn_owner=asn_owner,
             )
         raise
-
-
-def evaluate_cl_afpe_shadow(alert_payload: dict, features: dict, decision: Optional[dict] = None,
-                              asn_owner: str = "", fp_verdict_v1: Optional[dict] = None,
-                              now: Optional[float] = None) -> None:
-    """The pipeline.py call site for Phase 6e -- called immediately alongside the
-    real self.fp_engine.evaluate() (fp_verdict_v1 is that call's own return
-    value, passed straight through for the divergence comparison). Returns
-    nothing: this is fire-and-forget, compute-only shadow evaluation. Never
-    raises -- a CL-AFPE shadow failure must never affect the real alert this
-    cycle is publishing, matching every other best-effort graph operation in
-    this module."""
-    ts = now if now is not None else time.time()
-    try:
-        engine = _get_cl_afpe_engine()
-        v13_verdict = engine.evaluate(alert_payload, features, decision=decision, asn_owner=asn_owner, now=ts)
-        _log_cl_afpe_divergence(alert_payload, v13_verdict, fp_verdict_v1, ts)
-    except Exception as e:
-        LOGGER_CL_AFPE.error(
-            "CL-AFPE shadow evaluation failed (compute-only -- the real fp_verdict this "
-            "cycle is already decided and unaffected by this): %s", e, exc_info=True,
-        )
 
 
 _shadow_evaluator = None
@@ -1415,8 +1360,7 @@ def maybe_shadow_evaluate(active_evidence, rep_vector, device_type: str, baselin
     passing the SAME inputs plus that call's own decision["state"] as
     real_state for the agreement comparison. Fire-and-forget, compute-only:
     returns nothing, never raises -- a shadow-eval failure must never affect
-    the real decision this cycle already made, matching evaluate_cl_afpe_shadow()
-    immediately above. Picks at most one active canary per cycle (see
+    the real decision this cycle already made. Picks at most one active canary per cycle (see
     ShadowEvaluator.maybe_shadow_evaluate's own docstring for the scope
     preference order); a no-op whenever no canary is active or resource
     pressure is high, at negligible cost either way."""

@@ -23,11 +23,17 @@ from core.onboarding import get_onboarding_status
 # Expected cadence per scheduled job, in hours -- used only to flag a job that
 # looks overdue, not to enforce/replace the real schedule in config.yaml's
 # `scheduler` block (which is the actual source of truth for when a job runs).
+# Names are the ones the jobs write to state/job_health.json (utils.write_job_health()).
 _EXPECTED_CADENCE_HOURS = {
-    "ollama_soc": 8.0,        # config.yaml default: every 4h -- 2x margin before flagging
-    "retro_hunter": 48.0,     # default: nightly -- 2x margin
+    "live_llm_review": 8.0,          # every 4h -- 2x margin before flagging (a skip without Ollama counts as a run)
+    "live_prune_weak_notices": 8.0,  # every 4h
+    "live_retro_hunter": 48.0,       # nightly -- 2x margin
+    "live_prune": 48.0,
+    "disk_budget_governor": 48.0,
+    "zeek_log_prune": 48.0,
     "top_domains_report": 48.0,
-    "train_fp_classifier": 240.0,  # weekly retrain -- 10-day margin
+    "train_fp_classifier": 48.0,     # nightly retrain + calibration (autotune_schedule_cron)
+    "live_decision_archive": 62 * 24.0,  # monthly
 }
 
 

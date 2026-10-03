@@ -43,6 +43,8 @@ RETIRED_KEYS = {
     "health_manager_swap_pressure_pct": "2026-09-30: never read by health_manager.py",
     "health_manager_swap_critical_pct": "2026-09-30: never read by health_manager.py",
     "health_manager_recovery_confirm_seconds": "2026-09-30: never read by health_manager.py",
+    "engine": "2026-10-03: the argus decision engine is the only engine (the old one is its in-process fallback)",
+    "cl_afpe_engine": "2026-10-03: the argus CL-AFPE is the only engine (the old one is its in-process fallback)",
 }
 
 _KEY_RE = re.compile(r"^(?P<indent> *)(?P<key>[A-Za-z0-9_.\-]+|\"[^\"]+\"|'[^']+')\s*:(?P<rest>\s.*|)$")
@@ -325,7 +327,8 @@ def main(argv=None) -> int:
     root = Path(__file__).resolve().parent.parent.parent
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=str(root / "config.yaml"))
-    ap.add_argument("--example", default=str(root / "config.yaml.example"))
+    example = root / "docker" / "config" / "ids" / "config.yaml.example"   # the product template; home_ids keeps it at the root
+    ap.add_argument("--example", default=str(example if example.exists() else root / "config.yaml.example"))
     ap.add_argument("--overrides", help="YAML file of flat key: scalar value pinned for this host")
     ap.add_argument("--apply", action="store_true", help="write the result (default: dry run)")
     a = ap.parse_args(argv)

@@ -140,7 +140,9 @@ check("REGRESSION GUARD: verify_token() still rejects a remote request outright 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # Section F: config.yaml.example documents the new key
 # ═══════════════════════════════════════════════════════════════════════════════════
-_example_src = (ROOT / "config.yaml.example").read_text(encoding="utf-8")
+# The product keeps one template (under its packaging config dir); the public repo publishes it at the root.
+_example = ROOT / "docker" / "config" / "ids" / "config.yaml.example"
+_example_src = (_example if _example.exists() else ROOT / "config.yaml.example").read_text(encoding="utf-8")
 check('config.yaml.example documents fastapi_bind_host with the safe "127.0.0.1" default',
       'fastapi_bind_host: "127.0.0.1"' in _example_src)
 

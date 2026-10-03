@@ -2,7 +2,7 @@
 v13 identity resolver (Phase 1 -- Documentation/ARGUS_AUTONOMY_DEPENDENCY_MAP.md).
 Generalizes v-current's resolve_device_id() (core/identity.py) from one hardcoded
 gateway_ip/gateway_mac special case to an arbitrary list of `trust_anchors`
-(v13/config_v13.example.yaml's `network.trust_anchors`) -- an IDS product needs to
+(config.yaml.example's `network.trust_anchors`) -- an IDS product needs to
 recognize "this is a well-known infrastructure device" for however many such
 devices a given deployment has (gateway, NAS, a second AP, ...), not just one.
 

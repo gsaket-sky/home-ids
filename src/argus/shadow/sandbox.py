@@ -184,8 +184,7 @@ class ShadowEvaluator:
                                  active_evidence_v1: List, rep_vector, features: Optional[dict],
                                  is_safe: bool, baseline_familiarity: float, real_state: str,
                                  now: Optional[float] = None) -> None:
-        """Best-effort, called once per real decision cycle (mirroring
-        evaluate_cl_afpe_shadow()'s own call shape in core/pipeline.py) -- shadow-
+        """Best-effort, called once per real decision cycle from core/pipeline.py -- shadow-
         tests AT MOST ONE currently-active canary per call (the first one whose
         scope matches this device/category, or a global one), keeping per-cycle
         cost bounded regardless of how many parameters are simultaneously in

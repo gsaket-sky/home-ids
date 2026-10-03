@@ -29,12 +29,8 @@ from intelligence.local_intel import LocalConfirmedIntel  # noqa: E402
 
 TMPDIR = _PathForSysPath(tempfile.mkdtemp(prefix="live_retro_hunter_test_"))
 
-# Phase 7: redirect CL-AFPE's own v13-only local-intel store to an isolated temp
-# dir for every test in this file -- the real default (v13/ops/live_engine.py's
-# _CL_AFPE_LOCAL_INTEL_DIR, "state/v13_cl_afpe") is a relative path that would
-# otherwise create real files under this repo's own working directory during a
-# test run.
-live_retro_hunter._CL_AFPE_LOCAL_INTEL_DIR = str(TMPDIR / "cl_afpe_local_intel_shared")
+# The retro-hunt reads the shared confirmed-intel store in the state dir (CONFIG's state_path parent), which every
+# section below points at its own temp dir.
 
 
 # --- no db yet: a clean no-op, not an error (matches live_prune.py's own convention) ---
@@ -156,20 +152,19 @@ li_store.insert_evidence(Evidence(
 ))
 li_store.close()
 
-_li_intel_dir = TMPDIR / "cl_afpe_local_intel_phase7"
+_li_intel_dir = _li_dir   # the shared store lives in the state dir
 LocalConfirmedIntel(str(_li_intel_dir)).record(
     "domain", "already-bad.example.com", "li_confirmer", reason="STAGE_1_HARD_STOP")
 
 live_retro_hunter.CONFIG = {"state_path": str(_li_dir / "ids_state.json"),
                               "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
-with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(_li_intel_dir)), \
-     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram:
     live_retro_hunter.main()
 
 check("main() finds the cross-device local-intel match (li_victim touched a domain "
-      "already confirmed by li_confirmer) via the SAME v13-only LocalConfirmedIntel "
-      "store CL-AFPE's own shadow mode writes into",
+      "already confirmed by li_confirmer) via the shared LocalConfirmedIntel "
+      "store the live CL-AFPE records into",
       json.loads((_li_dir / "job_health.json").read_text())["live_retro_hunter"]["local_intel_matches_count"] == 1)
 check("main() sends exactly one Telegram notification for the local-intel match "
       "(no external-TI matches this run -- fake_lookup_factory only recognizes "
@@ -202,8 +197,7 @@ li_store_check.close()
 # confirmed SOURCE for this IOC too, so a second run finds ZERO new matches for it
 # -- without this, the identical match would re-fire and re-notify every single day.
 _reset_telegram_mock = None
-with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(_li_intel_dir)), \
-     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_rerun:
     live_retro_hunter.main()
 check("W5: a SECOND run finds ZERO new local-intel matches for li_victim -- closing "
@@ -228,8 +222,7 @@ quiet_store.close()
 
 live_retro_hunter.CONFIG = {"state_path": str(_quiet_dir / "ids_state.json"),
                               "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
-with patch.object(live_retro_hunter, "_CL_AFPE_LOCAL_INTEL_DIR", str(TMPDIR / "cl_afpe_local_intel_empty")), \
-     patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_quiet:
     live_retro_hunter.main()
 

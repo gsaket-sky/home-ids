@@ -2,9 +2,9 @@
 v13 config loader: network.trust_anchors -> Dict[str, TrustAnchor], plus
 hardware_profile validation (v13 full-architecture plan, Phase 2).
 
-Bridges the YAML list shape `src/v13/config_v13.example.yaml` documents
+Bridges the YAML list shape config.yaml.example's `network:` block documents
 (`network.trust_anchors: [{role, ip, mac}, ...]`) into the `Dict[str, TrustAnchor]`
-keyed-by-role shape `src/v13/identity/resolver.py`'s `resolve_device_id()` already
+keyed-by-role shape `src/argus/identity/resolver.py`'s `resolve_device_id()` already
 expects. Confirmed 100% unbuilt before this file: nothing anywhere read
 `trust_anchors`/`hardware_profile` from a real config into that shape.
 
@@ -64,7 +64,7 @@ def load_trust_anchors(raw_entries: Optional[List[Dict[str, Any]]]) -> Dict[str,
 
 def load_trust_anchors_from_config(config: Dict[str, Any]) -> Dict[str, TrustAnchor]:
     """Convenience wrapper reading directly off a flat config dict's 'network' key
-    (matching config_v13.example.yaml's nesting). Returns an empty dict, not an
+    (matching config.yaml.example's top-level `network:` block). Returns an empty dict, not an
     error, when the key is absent entirely -- a deployment that hasn't opted into
     this yet behaves identically to one with zero configured anchors."""
     network_cfg = config.get("network") or {}

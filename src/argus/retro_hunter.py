@@ -55,17 +55,10 @@ See that ops module for Phase 7's Telegram/GeoIP wiring.
    GraphStore's own insert_evidence() already uses (v13 Evidence has one
    destination_id field, not v1's separate queried_domain/destination_ip pair).
 
-   DELIBERATELY checked against the SAME v13-only LocalConfirmedIntel instance
-   CL-AFPE's own shadow mode writes into (v13/ops/live_engine.py's
-   _CL_AFPE_LOCAL_INTEL_DIR, Phase 6e), never v1's real
-   state/local_confirmed_intel.json -- a self-contained v13 feature: as CL-AFPE's
-   shadow Stage 1 hard-stop confirms a threat via one device (Phase 6b/6e's
-   record_confirmed_threat()), this finds every OTHER device that touched the
-   SAME IOC earlier, the actual "device B also touched this before it was
-   confirmed by device A" point of the mechanism -- entirely inside v13's own
-   state, matching this whole session's "v13 never writes into v1's real
-   confirmed-intel store" principle (see live_engine.py's own Phase 6e docstring
-   for why that separation matters).
+   Checked against the shared confirmed-intel store (state/local_confirmed_intel.json),
+   the one the live CL-AFPE records into when its Stage-1 hard stop confirms a threat for
+   one device: this finds every OTHER device that touched the SAME IOC earlier -- the
+   "device B also touched this before it was confirmed by device A" point of the mechanism.
 """
 import time
 from dataclasses import dataclass, field

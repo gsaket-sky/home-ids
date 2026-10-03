@@ -97,25 +97,16 @@ assumed from this module's own earlier docstring paragraphs above):
     reuses `check_local_intel_hard_stop()` (Phase 6b) directly, since that method
     already IS this check, faithfully.
 
-A THIRD deliberate decision, about STATE MUTATION during shadow evaluation: this
-`evaluate()` DOES call the real `mark_false_positive()`/`_apply_sigma_shift()`/
-`record_confirmed_threat()` write paths on a suppress/confirmed-threat verdict --
-it does not silently no-op them. This only ever mutates v13's OWN graph state
-(trust 'trusts' edges, a device's own `fp_profile`/`sigma_shift` metadata, and a
-v13-only LocalConfirmedIntel store -- see live_engine.py's own
-`evaluate_cl_afpe_shadow()` docstring for why that store is deliberately NOT the
-same file v1's real fp_engine reads from). None of this ever reaches v1's live
-state or v1's real suppress/containment decision -- "compute-only, never
-suppresses" (this plan's own verification section) means CL-AFPE's OWN verdict
-never drives pipeline.py's actual routing, not that shadow mode must be a frozen
-no-op. Shadow mode needs to accumulate real per-device trust/threshold/sigma
-experience -- exactly what Phase 6f's eventual live-flip decision would need
-evidence of -- not start from zero the day it's finally flipped live.
+STATE: `evaluate()` calls the real `mark_false_positive()`/`_apply_sigma_shift()`/
+`record_confirmed_threat()` write paths on a suppress/confirmed-threat verdict. They write
+the graph (trust 'trusts' edges, the device's `fp_profile`/`sigma_shift` metadata) and the
+shared local confirmed-intel store (state/local_confirmed_intel.json, injected by
+pipeline.py -- see live_engine.py's CL-AFPE wiring section). This engine's verdict is the
+one pipeline.py acts on.
 
 Calibration (`_apply_calibration()`, fp_engine.py ~2490) is NOT ported: v1's own
 docstring already describes it as "purely additive to the audit trail... never
-used for branching," and this shadow verdict has no audit-trail UI to feed it into
--- `calibrated_confidence` is always `None` in the dict this returns, same shape
+used for branching" -- `calibrated_confidence` is always `None` in the dict this returns, same shape
 v1 itself uses when no reliable calibration is loaded.
 """
 import logging
