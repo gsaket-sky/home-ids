@@ -25,6 +25,25 @@ pytest.importorskip("skl2onnx")
 from scripts import train_fp_classifier  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _realistic_dataset(monkeypatch):
+    """Enough overlapping, noisy rows for the quality gate to verify a model (an empty state dir only has the 16
+    synthetic rows, which the gate rightly refuses to install). These tests are about WHERE files land."""
+    import random
+    rng = random.Random(3)
+    X, y = [], []
+    for _ in range(400):
+        label = rng.randint(0, 1)
+        base = 0.35 if label == 0 else 0.65
+        row = [min(1.0, max(0.0, rng.gauss(base, 0.22))) for _ in range(train_fp_classifier.FP_FEATURE_DIM)]
+        row[5] = 0.0
+        X.append(row)
+        y.append(label)
+    stats = {k: 0 for k in ("threat_accepted", "threat_rejected", "fp_accepted", "fp_rejected",
+                            "threat_skipped_corrected", "threat_skipped_non_alert", "skipped_corrupted_attribution")}
+    monkeypatch.setattr(train_fp_classifier, "load_dataset", lambda state_dir: (list(X), list(y), dict(stats)))
+
+
 def test_train_and_export_onnx_writes_to_explicit_model_dir(tmp_path):
     """A model_dir explicitly passed in must be exactly where the files land --
     not state_dir/"models", regardless of what state_dir is."""

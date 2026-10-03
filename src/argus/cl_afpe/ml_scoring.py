@@ -9,8 +9,13 @@ The models are trained by src/scripts/train_fp_classifier.py (nightly) into the 
     or download inside the detection loop;
   - the ONNX model is reloaded when the nightly retrain replaces the file (checked at most every
     _MODEL_RECHECK_SECONDS), so scoring always uses the latest model;
-  - a model that is not available yet degrades to None (Stage 2) or the static rule fallback (Stage 3).
+  - a model that is not available yet degrades to None (Stage 2) or the static rule fallback (Stage 3);
+  - the classifier is used only when fp_classifier_quality.json (written by the trainer after its quality gate)
+    vouches for exactly that file (sha256) and the current feature version. A model without it -- e.g. one trained
+    before the gate existed -- is not used.
 """
+import hashlib
+import json
 import logging
 import threading
 import time
@@ -20,6 +25,19 @@ from typing import Any, Dict, List, Optional, Tuple
 LOGGER = logging.getLogger("home_ids.cl_afpe.ml")
 
 _MODEL_RECHECK_SECONDS = 60.0
+
+# Bumped when the meaning of the feature vector changes; a model trained for another version is not loaded.
+# 2 = feature 5 (historical_fp_flag) neutralised in training (2026-10-03).
+FP_FEATURE_VERSION = 2
+QUALITY_FILE_NAME = "fp_classifier_quality.json"
+
+
+def file_sha256(path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 EMBED_MODEL_NAME = "BAAI/bge-small-en-v1.5"
 
 # Reference set for Stage 3: known-legitimate vendor telemetry names. A queried destination whose name embeds close to
@@ -225,11 +243,18 @@ class MLScorer:
             return
         self._lgbm_checked_at = now
         onnx_path = self.model_dir / "fp_classifier.onnx"
+        quality_path = self.model_dir / QUALITY_FILE_NAME
         try:
-            mtime = onnx_path.stat().st_mtime
+            mtime = (onnx_path.stat().st_mtime, quality_path.stat().st_mtime if quality_path.exists() else None)
         except OSError:
             return  # not trained yet: Stage 2 unavailable
-        if mtime == self._lgbm_mtime and self._lgbm_session is not None:
+        if mtime == self._lgbm_mtime:
+            return
+        refusal = self._quality_refusal(onnx_path, quality_path)
+        if refusal:
+            with self._lock:
+                self._lgbm_session, self._lgbm_mtime = None, mtime
+            LOGGER.warning("Not using the false-positive classifier in %s: %s", self.model_dir, refusal)
             return
         try:
             import onnxruntime as ort
@@ -247,6 +272,26 @@ class MLScorer:
         except Exception as e:
             LOGGER.error("Failed to load %s: %s", onnx_path, e, exc_info=True)
             self._lgbm_mtime = mtime   # don't retry a broken file every cycle; a new file has a new mtime
+
+    @staticmethod
+    def _quality_refusal(onnx_path: Path, quality_path: Path) -> str:
+        """Why the classifier must not be used, or "" when its quality file vouches for it."""
+        try:
+            quality = json.loads(quality_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return f"no {QUALITY_FILE_NAME} (trained before the quality gate, or the gate rejected every retrain)"
+        except (OSError, ValueError) as e:
+            return f"unreadable {QUALITY_FILE_NAME}: {e}"
+        if not quality.get("passed"):
+            return "its quality gate did not pass"
+        if quality.get("feature_version") != FP_FEATURE_VERSION:
+            return f"trained for feature version {quality.get('feature_version')}, engine uses {FP_FEATURE_VERSION}"
+        try:
+            if quality.get("model_sha256") != file_sha256(onnx_path):
+                return "the model file does not match the one its quality gate checked"
+        except OSError as e:
+            return f"cannot read the model file: {e}"
+        return ""
 
     def _ensure_embed_loaded(self) -> None:
         with self._lock:

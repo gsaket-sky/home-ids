@@ -1,3 +1,4 @@
+import json
 import threading
 from typing import Dict, Any, Optional
 from pydantic import BaseModel, Field
@@ -15,40 +16,36 @@ router = APIRouter()
 class IPCTargetRequest(BaseModel):
     target: str = Field(..., description="Target domain or IP")
 
-# The CL-AFPE engine behind the three operator actions below (mark safe, revoke, approve tune-down): one instance
-# per API process, on the same graph db the engine uses. Each action is also written as a training record.
-_argus_cl_afpe_singleton: Optional[ClAfpeEngine] = None
-_argus_cl_afpe_lock = threading.Lock()
+# The CL-AFPE engine behind the operator actions below (mark safe / not a threat, revoke, approve tune-down) and the
+# graph store for the operator_actions audit rows, on the same graph db the engine uses. One of each PER THREAD: the
+# endpoints are plain `def`s that FastAPI runs on its worker-thread pool, and a sqlite3 connection may only be used by
+# the thread that opened it -- a single shared instance failed every request that landed on another thread (found
+# 2026-10-03). Tests may set `_test_cl_afpe` / `_test_operator_store` to pin instances.
+_thread_local = threading.local()
+_test_cl_afpe: Optional[ClAfpeEngine] = None
+_test_operator_store: Optional[GraphStore] = None
+
+
+def _graph_db_path() -> str:
+    return str(Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "v13_graph.db")
+
 
 def _get_argus_cl_afpe_engine() -> ClAfpeEngine:
-    global _argus_cl_afpe_singleton
-    if _argus_cl_afpe_singleton is None:
-        with _argus_cl_afpe_lock:
-            if _argus_cl_afpe_singleton is None:
-                # The graph db next to ids_state.json, the same file the engine uses.
-                state_path = CONFIG.get("state_path", "state/ids_state.json")
-                db_path = str(Path(state_path).parent / "v13_graph.db")
-                store = GraphStore(db_path)
-                _argus_cl_afpe_singleton = ClAfpeEngine(store)
-    return _argus_cl_afpe_singleton
+    if _test_cl_afpe is not None:
+        return _test_cl_afpe
+    engine = getattr(_thread_local, "cl_afpe", None)
+    if engine is None or engine.store.db_path != _graph_db_path():
+        engine = _thread_local.cl_afpe = ClAfpeEngine(GraphStore(_graph_db_path()))
+    return engine
 
-# Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): same
-# lazy-singleton pattern as _get_argus_cl_afpe_engine() above, its own connection
-# rather than reaching into ClAfpeEngine's internals -- SQLite WAL mode is built
-# for exactly this (multiple readers/writers against the same file), so a second
-# lightweight connection here costs nothing meaningful.
-_operator_action_store_singleton: Optional[GraphStore] = None
-_operator_action_store_lock = threading.Lock()
 
 def _get_graph_store_for_operator_actions() -> GraphStore:
-    global _operator_action_store_singleton
-    if _operator_action_store_singleton is None:
-        with _operator_action_store_lock:
-            if _operator_action_store_singleton is None:
-                state_path = CONFIG.get("state_path", "state/ids_state.json")
-                db_path = str(Path(state_path).parent / "v13_graph.db")
-                _operator_action_store_singleton = GraphStore(db_path)
-    return _operator_action_store_singleton
+    if _test_operator_store is not None:
+        return _test_operator_store
+    store = getattr(_thread_local, "operator_store", None)
+    if store is None or store.db_path != _graph_db_path():
+        store = _thread_local.operator_store = GraphStore(_graph_db_path())
+    return store
 
 def _record_operator_action(entry: Optional[Dict[str, Any]], action: str, result: Dict[str, Any]) -> None:
     """Best-effort write of one operator_actions row, IF the ledger entry this
@@ -118,67 +115,102 @@ def _ipc_immunize_logic(action_id: str):
 
         target = entry.get("target", "unknown")
         device_id = entry.get("device_id", "unknown")
-        hostname = entry.get("hostname", "unknown")
         alert_payload = entry.get("extra", {}).get("alert_payload", {}) or {}
 
-        # CL-AFPE records the correction (trust edge, per-device threshold, sensitivity shift, training record).
-        # It refuses hard-stop/verifiable-fact alerts (decoy, ARP spoofing, geofencing, confirmed exploit, tier-5
-        # IOC) -- those must not fall through to the fp_count reset / Pi-hole unblock below.
-        result = _get_argus_cl_afpe_engine().mark_false_positive(alert_payload, source="operator")
-        if result.refused:
-            return {
-                "status": "refused",
-                "action_id": action_id,
-                "reason": result.refused_reason or "Cannot mark this alert as a false positive.",
-                "device_id": device_id,
-            }
-        immunized = result.immunized_destination or ""
-        base_domain = "" if _looks_like_ip(immunized) else immunized
-
-        # FIX #1 (blast radius): only the device this specific alert was about, not every
-        # tracked device on the network.
-        if device_id and device_id != "unknown" and sm.has_device(device_id):
-            with sm.lock_device(device_id) as state:
-                state.fp_count = getattr(state, "fp_count", 0) + 1
-                state.has_validated_threat = False
-        else:
-            LOGGER.warning(
-                "IPC immunize: device_id '%s' from action '%s' no longer tracked — "
-                "skipping per-device fp_count/has_validated_threat update (domain "
-                "immunization + training correction still applied).", device_id, action_id
-            )
-
-        # FIX #3 (unblock): undo any active Pi-hole block on the immunized domain.
-        # PHASE 16 FIX: was a single unblock_domain(base_domain) call -- but Pi-hole
-        # blocks are keyed by the specific queried FQDN, which is almost always a
-        # subdomain of base_domain, not base_domain literally (e.g. immunizing
-        # 'samsungapps.com' never touched an actual block on 'vas.samsungapps.com').
-        # unblock_by_base_domain() sweeps every blocked entry under this base domain.
-        unblocked_domains = []
-        if base_domain:
-            try:
-                ips = IPSMitigator(config=CONFIG, state_manager=sm)
-                unblocked_domains = ips.unblock_by_base_domain(base_domain)
-            except Exception as exc:
-                LOGGER.warning("Failed to unblock domain(s) under '%s' after FP mark: %s", base_domain, exc)
-        unblocked = bool(unblocked_domains)
-
-        sm.flush_to_disk()
-        Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
-        _record_operator_action(entry, "immunize", {
-            "immunized": immunized or target, "unblocked": unblocked,
-        })
-        return {
-            "status": "success",
-            "action_id": action_id,
-            "immunized": immunized or target,
-            "device_id": device_id,
-            "unblocked": unblocked,
-        }
+        return _apply_operator_correction(alert_payload, device_id, target, entry, {"action_id": action_id})
     except HTTPException:
         raise
     except Exception as e:
         LOGGER.error("IPC immunize failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+def _apply_operator_correction(alert_payload: dict, device_id: str, target: str,
+                               record_entry: Optional[Dict[str, Any]], ref: Dict[str, Any]) -> Dict[str, Any]:
+    """An operator's "this is not a threat" for one alert, from Telegram or the web UI: the CL-AFPE correction, the
+    device's fp_count, any Pi-hole block under the corrected domain, and the operator_actions audit row."""
+    state_path = CONFIG.get("state_path", "state/ids_state.json")
+    sm = StateManager(state_path=state_path)
+    sm.load_from_disk()
+    # CL-AFPE records the correction (trust edge, per-device threshold, sensitivity shift, training record).
+    # It refuses hard-stop/verifiable-fact alerts (decoy, ARP spoofing, geofencing, confirmed exploit, tier-5
+    # IOC) -- those must not fall through to the fp_count reset / Pi-hole unblock below.
+    result = _get_argus_cl_afpe_engine().mark_false_positive(alert_payload, source="operator")
+    if result.refused:
+        return {
+            "status": "refused",
+            **ref,
+            "reason": result.refused_reason or "Cannot mark this alert as a false positive.",
+            "device_id": device_id,
+        }
+    immunized = result.immunized_destination or ""
+    base_domain = "" if _looks_like_ip(immunized) else immunized
+
+    # FIX #1 (blast radius): only the device this specific alert was about, not every
+    # tracked device on the network.
+    if device_id and device_id != "unknown" and sm.has_device(device_id):
+        with sm.lock_device(device_id) as state:
+            state.fp_count = getattr(state, "fp_count", 0) + 1
+            state.has_validated_threat = False
+    else:
+        LOGGER.warning(
+            "Operator correction: device_id '%s' (%s) no longer tracked — "
+            "skipping per-device fp_count/has_validated_threat update (domain "
+            "immunization + training correction still applied).", device_id, ref
+        )
+
+    # FIX #3 (unblock): undo any active Pi-hole block on the immunized domain.
+    # PHASE 16 FIX: was a single unblock_domain(base_domain) call -- but Pi-hole
+    # blocks are keyed by the specific queried FQDN, which is almost always a
+    # subdomain of base_domain, not base_domain literally (e.g. immunizing
+    # 'samsungapps.com' never touched an actual block on 'vas.samsungapps.com').
+    # unblock_by_base_domain() sweeps every blocked entry under this base domain.
+    unblocked_domains = []
+    if base_domain:
+        try:
+            ips = IPSMitigator(config=CONFIG, state_manager=sm)
+            unblocked_domains = ips.unblock_by_base_domain(base_domain)
+        except Exception as exc:
+            LOGGER.warning("Failed to unblock domain(s) under '%s' after FP mark: %s", base_domain, exc)
+    unblocked = bool(unblocked_domains)
+
+    sm.flush_to_disk()
+    Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
+    _record_operator_action(record_entry, "immunize", {
+        "immunized": immunized or target, "unblocked": unblocked,
+    })
+    return {
+        "status": "success",
+        **ref,
+        "immunized": immunized or target,
+        "device_id": device_id,
+        "unblocked": unblocked,
+    }
+
+
+@router.post("/api/ipc/incident/{incident_id}/not_a_threat")
+def ipc_incident_not_a_threat(incident_id: str, token: str = Depends(verify_token)):
+    """The web UI's "Not a threat" on an incident: the same correction as the Telegram button, applied to the
+    incident's newest alert (graph alert_events), so it works for alerts that never went to Telegram."""
+    LOGGER.info("Received IPC not-a-threat request for incident: %s", incident_id)
+    try:
+        row = _get_graph_store_for_operator_actions()._conn.execute(
+            "SELECT alert_event_id, device_id, alert_payload_json FROM alert_events WHERE incident_id = ? "
+            "ORDER BY timestamp DESC LIMIT 1", (incident_id,)).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Incident '{incident_id}' not found.")
+        try:
+            alert_payload = json.loads(row["alert_payload_json"] or "{}")
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="The incident's alert record is unreadable.")
+        ctx = alert_payload.get("network_context", {}) or {}
+        target = ctx.get("queried_domain") or ctx.get("destination_ip") or "unknown"
+        return _apply_operator_correction(alert_payload, row["device_id"] or "unknown", target,
+                                          {"extra": {"alert_event_id": row["alert_event_id"]}},
+                                          {"incident_id": incident_id})
+    except HTTPException:
+        raise
+    except Exception as e:
+        LOGGER.error("IPC not-a-threat failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/ipc/revoke")
@@ -275,9 +307,6 @@ def _ipc_approve_tune_down_logic(device_id: str):
 
         if not sm.has_device(device_id):
             return {"status": "not_found", "device_id": device_id}
-
-        with sm.lock_device(device_id) as state:
-            hostname = getattr(state, "hostname", "unknown") or "unknown"
 
         _get_argus_cl_afpe_engine()._apply_sigma_shift(device_id, direction="TUNE_DOWN", source="llm_pending_approval")
 

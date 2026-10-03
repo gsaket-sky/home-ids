@@ -70,6 +70,7 @@ if str(SRC_DIR) not in sys.path:
 from utils import entropy as compute_entropy, write_job_health, is_resource_pressure_active
 from config import CONFIG
 from argus.cl_afpe.engine import ClAfpeEngine
+from argus.cl_afpe.ml_scoring import FP_FEATURE_VERSION, QUALITY_FILE_NAME, file_sha256
 from argus.graph.store import GraphStore
 from argus.autotune.engine import AutotuneEngine
 
@@ -101,6 +102,23 @@ FP_FEATURE_NAMES = (
 )
 
 MAX_REAL_SAMPLES_PER_CLASS = 5000
+
+# Feature 5 (historical_fp_flag: "the destination is in the trust cache") is always 0.0 in training rows. Every
+# trust-cache hit is itself a label-1 row, so the flag reproduced the label exactly (2026-10-03, .94: 1.0 in all
+# 5,000 false-positive rows, 0.0 in all 857 threat rows) and the model learned nothing else: it scored every live
+# alert 0.005. A trust-cached alert is resolved by the trust-cache fast path before Stage 2 runs, so the live value
+# is 0 anyway. The column stays so the model's input shape is unchanged.
+LEAKED_FEATURE_INDEXES = (5,)
+
+# Trust-cache hits repeat the same destination for the same device thousands of times (4,834 of 5,000 rows on .94).
+# One row per (device, destination, alert type) is kept, so they cannot drown the real corrections.
+TRUST_CACHE_HIT_EVENT = "TRUST_CACHE_HIT"
+MAX_FP_DOCS_SCANNED = 100_000
+
+# Quality gate before a new model is installed (held-out split, never used for training):
+MIN_HELD_OUT_BALANCED_ACCURACY = 0.65   # clearly better than chance on both classes
+MAX_SINGLE_FEATURE_SEPARATION = 0.98    # one feature alone separating the classes this well = a leaked label
+MIN_HELD_OUT_SAMPLES = 40
 
 # Synthetic baseline samples used to seed training if historical dataset is small
 # (11 features -- PHASE 21-LGBM-EXTEND added arp_sweep_norm/dns_evasion_ratio; existing
@@ -283,6 +301,8 @@ def extract_features_from_alert(doc: dict) -> list:
 def _append_sample(X: list, y: list, doc: dict, label: int, stats: dict, source: str) -> None:
     try:
         row = extract_features_from_alert(doc)
+        for i in LEAKED_FEATURE_INDEXES:
+            row[i] = 0.0
         X.append(row)
         y.append(label)
         stats[f"{source}_accepted"] += 1
@@ -347,7 +367,7 @@ _CALIBRATION_EVIDENCE_LOOKBACK_SECONDS = 90 * 86400.0
 
 
 def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int = None,
-                                 strict: bool = False) -> list:
+                                 strict: bool = False, collapse_trust_cache_hits: bool = False) -> list:
     """Graph-backed replacement for reading every line of the old
     state/autonomous_muted.jsonl -- queries `decisions` for rows carrying a
     raw_payload_json.fp_suppression_log (written live by the CL-AFPE's
@@ -366,7 +386,7 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
     pre-existing MAX_REAL_SAMPLES_PER_CLASS cap on the old file's tail."""
     if not strict:
         try:
-            return _read_muted_docs_once(state_dir, since, limit)
+            return _read_muted_docs_once(state_dir, since, limit, collapse_trust_cache_hits)
         except Exception as exc:
             LOGGER.warning(f"[AUTOTUNE] Could not read fp_suppression_log entries from the graph: {exc}")
             return []
@@ -378,7 +398,7 @@ def _read_muted_docs_from_graph(state_dir: Path, since: float = None, limit: int
     last: Exception = None
     for attempt in range(1, GRAPH_READ_ATTEMPTS + 1):
         try:
-            return _read_muted_docs_once(state_dir, since, limit)
+            return _read_muted_docs_once(state_dir, since, limit, collapse_trust_cache_hits)
         except Exception as exc:
             last = exc
             busy = "locked" in str(exc).lower() or "busy" in str(exc).lower()
@@ -399,8 +419,22 @@ class GraphReadError(Exception):
     """The graph could not be read (as opposed to being read and containing nothing)."""
 
 
-def _read_muted_docs_once(state_dir: Path, since: float = None, limit: int = None) -> list:
+def _trust_cache_hit_key(entry: dict) -> tuple:
+    payload = _extract_payload(entry)
+    ctx = payload.get("network_context", {}) or {}
+    target = ctx.get("queried_domain") or ctx.get("destination_ip") or entry.get("domain") or ""
+    device = (payload.get("device") or entry.get("device") or {})
+    device_id = device.get("id", "") if isinstance(device, dict) else str(device)
+    signature = str(payload.get("signature") or "").split(" (persisted ", 1)[0]
+    return device_id, target, signature
+
+
+def _read_muted_docs_once(state_dir: Path, since: float = None, limit: int = None,
+                          collapse_trust_cache_hits: bool = False) -> list:
+    """Newest first. With collapse_trust_cache_hits, only the newest TRUST_CACHE_HIT per (device, destination, alert
+    type) is kept and `limit` counts kept entries (up to MAX_FP_DOCS_SCANNED rows are scanned)."""
     docs = []
+    seen_hits = set()
     store = _get_graph_store(state_dir)
     try:
         query = "SELECT raw_payload_json FROM decisions WHERE raw_payload_json LIKE '%fp_suppression_log%'"
@@ -409,17 +443,26 @@ def _read_muted_docs_once(state_dir: Path, since: float = None, limit: int = Non
             query += " AND timestamp >= ?"
             params.append(since)
         query += " ORDER BY timestamp DESC"
-        if limit is not None:
+        sql_limit = MAX_FP_DOCS_SCANNED if collapse_trust_cache_hits else limit
+        if sql_limit is not None:
             query += " LIMIT ?"
-            params.append(limit)
+            params.append(sql_limit)
         for row in store._conn.execute(query, params):  # iterate, don't fetchall(): bounded memory
             try:
                 payload = json.loads(row["raw_payload_json"] or "{}")
             except (TypeError, ValueError):
                 continue
             entry = payload.get("fp_suppression_log")
-            if isinstance(entry, dict):
-                docs.append(entry)
+            if not isinstance(entry, dict):
+                continue
+            if collapse_trust_cache_hits and entry.get("type") == TRUST_CACHE_HIT_EVENT:
+                key = _trust_cache_hit_key(entry)
+                if key in seen_hits:
+                    continue
+                seen_hits.add(key)
+            docs.append(entry)
+            if collapse_trust_cache_hits and limit is not None and len(docs) >= limit:
+                break
     finally:
         store.close()
     return docs
@@ -1434,7 +1477,8 @@ def load_dataset(state_dir: Path) -> tuple:
 
     # Read the graph's fp_suppression_log entries FIRST so their dedup keys are
     # available while filtering the alerts.json threat stream below.
-    muted_docs = _read_muted_docs_from_graph(state_dir, limit=MAX_REAL_SAMPLES_PER_CLASS, strict=True)
+    muted_docs = _read_muted_docs_from_graph(state_dir, limit=MAX_REAL_SAMPLES_PER_CLASS, strict=True,
+                                             collapse_trust_cache_hits=True)
 
     corrected_keys = {_alert_dedup_key(_extract_payload(d)) for d in muted_docs}
 
@@ -1501,6 +1545,57 @@ def load_dataset(state_dir: Path) -> tuple:
     return X, y, stats
 
 
+def _balanced_accuracy(y_true: list, y_pred: list) -> float:
+    rates = []
+    for cls in (0, 1):
+        idx = [i for i, v in enumerate(y_true) if v == cls]
+        if idx:
+            rates.append(sum(1 for i in idx if y_pred[i] == cls) / len(idx))
+    return sum(rates) / len(rates) if rates else 0.0
+
+
+def _best_single_feature_separation(X: list, y: list) -> tuple:
+    """(feature index, balanced accuracy) of the best one-feature threshold rule on (X, y)."""
+    best = (None, 0.0)
+    for j in range(len(X[0]) if X else 0):
+        values = sorted({row[j] for row in X})
+        cuts = [(values[k] + values[k + 1]) / 2.0 for k in range(len(values) - 1)] or values
+        for cut in cuts[:: max(1, len(cuts) // 200)]:     # at most ~200 cut points per feature
+            pred = [1 if row[j] > cut else 0 for row in X]
+            acc = _balanced_accuracy(y, pred)
+            acc = max(acc, 1.0 - acc)                     # either direction
+            if acc > best[1]:
+                best = (j, acc)
+    return best
+
+
+def model_quality_gate(pipeline, X_held: list, y_held: list) -> tuple:
+    """(passed, metrics, reasons). A model is installed only when it is clearly better than chance on BOTH classes of
+    held-out data, and no single feature separates the classes almost perfectly (a leaked label)."""
+    metrics = {"held_out_samples": len(X_held), "held_out_class_counts": {str(c): y_held.count(c) for c in (0, 1)}}
+    reasons = []
+    if len(X_held) < MIN_HELD_OUT_SAMPLES or len(set(y_held)) < 2:
+        reasons.append(f"only {len(X_held)} held-out sample(s) with classes {sorted(set(y_held))} "
+                       f"(need >= {MIN_HELD_OUT_SAMPLES} with both classes)")
+        return False, metrics, reasons
+    pred = [int(p) for p in pipeline.predict(X_held)]
+    bal = _balanced_accuracy(y_held, pred)
+    probs = [float(p) for p in pipeline.predict_proba(X_held)[:, 1]]
+    feat, sep = _best_single_feature_separation(X_held, y_held)
+    metrics.update({
+        "held_out_balanced_accuracy": round(bal, 4),
+        "held_out_score_min": round(min(probs), 4), "held_out_score_max": round(max(probs), 4),
+        "best_single_feature": FP_FEATURE_NAMES[feat] if feat is not None else None,
+        "best_single_feature_balanced_accuracy": round(sep, 4),
+    })
+    if bal < MIN_HELD_OUT_BALANCED_ACCURACY:
+        reasons.append(f"held-out balanced accuracy {bal:.3f} < {MIN_HELD_OUT_BALANCED_ACCURACY}")
+    if sep >= MAX_SINGLE_FEATURE_SEPARATION:
+        reasons.append(f"feature '{metrics['best_single_feature']}' alone separates the classes "
+                       f"(balanced accuracy {sep:.3f}) -- a leaked label, not a pattern")
+    return not reasons, metrics, reasons
+
+
 def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
     """Trains GradientBoostingClassifier on 11 features and exports fp_classifier.onnx +
     fp_calibration.json to model_dir (default: derived from config.yaml's model_path,
@@ -1559,9 +1654,25 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
             StandardScaler(),
             GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
         )
-        pipeline.fit(X_train, y_train)
+        # Balanced class weights: the two classes come from different sources and differ widely in size.
+        n0, n1 = y_train.count(0), y_train.count(1)
+        weights = [len(y_train) / (2.0 * (n1 if label == 1 else n0)) for label in y_train] if n0 and n1 else None
+        pipeline.fit(X_train, y_train, gradientboostingclassifier__sample_weight=weights)
         acc = pipeline.score(X_train, y_train)
-        LOGGER.info("✅ GBDT Model trained successfully. Training Accuracy: %.2f%%", acc * 100.0)
+        LOGGER.info("GBDT model trained. Training accuracy: %.2f%% (not a quality measure; see the gate below)",
+                    acc * 100.0)
+
+        passed, gate_metrics, gate_reasons = model_quality_gate(pipeline, list(X_calib), list(y_calib))
+        gate_metrics.update({"training_class_counts": {"0": n0, "1": n1}, "dataset_stats": stats})
+        if not passed:
+            model_dir.mkdir(parents=True, exist_ok=True)
+            _atomic_write_text(model_dir / "fp_classifier_rejected.json", json.dumps({
+                "rejected_at": time.time(), "reasons": gate_reasons, "metrics": gate_metrics,
+            }, indent=2))
+            LOGGER.error("❌ New false-positive model REJECTED by the quality gate, existing model kept: %s",
+                         "; ".join(gate_reasons))
+            return False
+        LOGGER.info("Quality gate passed: %s", gate_metrics)
 
         # VERSION 11 (P2): isotonic calibration -- maps the raw classifier score to
         # an actually-calibrated probability, fit against the HELD-OUT split above
@@ -1611,7 +1722,17 @@ def train_and_export_onnx(state_dir: Path, model_dir: Path = None) -> bool:
         )
 
         onnx_path = model_dir / "fp_classifier.onnx"
-        _atomic_write_bytes(onnx_path, onnx_model.SerializeToString())
+        model_bytes = onnx_model.SerializeToString()
+        _atomic_write_bytes(onnx_path, model_bytes)
+        # The engine loads the classifier only when this file vouches for exactly these bytes (ml_scoring.py).
+        _atomic_write_text(model_dir / QUALITY_FILE_NAME, json.dumps({
+            "passed": True, "feature_version": FP_FEATURE_VERSION, "model_sha256": file_sha256(onnx_path),
+            "trained_at": time.time(), "metrics": gate_metrics,
+        }, indent=2))
+        try:
+            (model_dir / "fp_classifier_rejected.json").unlink()
+        except FileNotFoundError:
+            pass
 
         LOGGER.info("🎉 Retrained LightGBM/ONNX model exported to: %s (%.1f KB)", onnx_path, onnx_path.stat().st_size / 1024.0)
         return True

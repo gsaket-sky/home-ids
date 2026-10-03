@@ -148,6 +148,27 @@ onnx_model = convert_sklearn(
 with open(onnx_path, "wb") as f:
     f.write(onnx_model.SerializeToString())
 
+# --- the classifier is used only when its quality file vouches for exactly this file ---
+import json as _json  # noqa: E402
+from argus.cl_afpe.ml_scoring import FP_FEATURE_VERSION, QUALITY_FILE_NAME, file_sha256  # noqa: E402
+quality_path = real_model_dir / QUALITY_FILE_NAME
+gate_scorer = MLScorer(str(real_model_dir))
+check("a model without a quality file (trained before the gate) is NOT used",
+      gate_scorer.score_stage2({"tranco_rank": 0}, "", is_trust_cached=False) is None
+      and gate_scorer.ready().get("classifier") is False)
+for bad, why in (({"passed": False, "feature_version": FP_FEATURE_VERSION, "model_sha256": file_sha256(onnx_path)},
+                  "a failed gate"),
+                 ({"passed": True, "feature_version": FP_FEATURE_VERSION - 1, "model_sha256": file_sha256(onnx_path)},
+                  "an older feature version"),
+                 ({"passed": True, "feature_version": FP_FEATURE_VERSION, "model_sha256": "0" * 64},
+                  "a different model file")):
+    quality_path.write_text(_json.dumps(bad), encoding="utf-8")
+    s = MLScorer(str(real_model_dir))
+    check(f"a quality file for {why} keeps the classifier unused",
+          s.score_stage2({"tranco_rank": 0}, "", is_trust_cached=False) is None)
+quality_path.write_text(_json.dumps({"passed": True, "feature_version": FP_FEATURE_VERSION,
+                                     "model_sha256": file_sha256(onnx_path)}), encoding="utf-8")
+
 scorer_real = MLScorer(str(real_model_dir))
 low_everything_prob = scorer_real.score_stage2(
     {"tranco_rank": 0, "max_label_length": 0, "outbound_bytes_z": 0.0}, "", is_trust_cached=False,
