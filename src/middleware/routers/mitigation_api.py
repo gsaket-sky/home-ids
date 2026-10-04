@@ -110,7 +110,7 @@ def get_mitigation_state(token: str = Depends(verify_token)):
 def isolate_device_router(device_id: str, payload: ReasonPayload, token: str = Depends(verify_token)):
     sm = _load_state_manager()
     identity = _resolve_identity(sm, device_id)
-    ips = IPSMitigator(config=CONFIG, state_manager=sm)
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_isolate_router(
         dev_id=device_id, ip=identity["ip"], mac=identity["mac"], hostname=identity["hostname"],
         reason=payload.reason or "Operator-requested Fritz!Box isolation (console)",
@@ -126,7 +126,7 @@ def isolate_device_router(device_id: str, payload: ReasonPayload, token: str = D
 def tarpit_device(device_id: str, payload: ReasonPayload, token: str = Depends(verify_token)):
     sm = _load_state_manager()
     identity = _resolve_identity(sm, device_id)
-    ips = IPSMitigator(config=CONFIG, state_manager=sm)
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_tarpit(
         dev_id=device_id, ip=identity["ip"], mac=identity["mac"], hostname=identity["hostname"],
         reason=payload.reason or "Operator-requested Layer-2 tarpit (console)",
@@ -143,7 +143,7 @@ def release_device_console(device_id: str, token: str = Depends(verify_token)):
     sm = _load_state_manager()
     if not sm.has_device(device_id):
         raise HTTPException(status_code=404, detail=f"No such device '{device_id}'.")
-    ips = IPSMitigator(config=CONFIG, state_manager=sm)
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     released = ips.release_device(device_id)
     sm.flush_to_disk()
     _touch_sync_signal()
@@ -158,7 +158,7 @@ def block_domain_console(payload: DomainBlockPayload, token: str = Depends(verif
         identity = _resolve_identity(sm, payload.device_id)
         hostname, device_ip, dev_id = identity["hostname"], identity["ip"], payload.device_id
 
-    ips = IPSMitigator(config=CONFIG, state_manager=sm)
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success = ips._block_domain(
         domain=payload.domain, hostname=hostname, device_ip=device_ip, dev_id=dev_id,
         reason=payload.reason or "Operator explicitly blocked via console",
@@ -173,7 +173,7 @@ def block_domain_console(payload: DomainBlockPayload, token: str = Depends(verif
 @router.post("/api/domains/unblock")
 def unblock_domain_console(payload: DomainUnblockPayload, token: str = Depends(verify_token)):
     sm = _load_state_manager()
-    ips = IPSMitigator(config=CONFIG, state_manager=sm)
+    ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success = ips.unblock_domain(payload.domain, reason="manual (console)")
     sm.flush_to_disk()
     _touch_sync_signal()

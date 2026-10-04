@@ -212,6 +212,14 @@ DEFAULT_CONFIG = {
         "live_retro_hunter": {"enabled": True, "cron": "45 2 * * *", "script": "../argus/ops/live_retro_hunter.py"},
         "top_domains_report": {"enabled": True, "cron": "0 6 * * *"},
     },
+    # Weekly FP-classifier retrain. Defined here (W-06) so the scheduler, the health manager and the WebUI
+    # all read the same default when a config file omits the key, instead of each using its own inline fallback.
+    "autotune_enabled": True,
+    "autotune_schedule_cron": "0 3 * * *",
+    "autotune_max_runtime_minutes": 40,
+    # Documented default (config_schema.py): Suricata batch scan of bursts is opt-in. fritzbox_capture.py already
+    # used False; main.py / health_manager.py / recommendations.py used True inline (W-06).
+    "reactive_capture_suricata_enabled": False,
     "decay_factor": 0.995,
     "device_type_overrides": {},
     "ips_enabled": True,           # Master switch for IPS

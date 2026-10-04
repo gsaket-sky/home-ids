@@ -245,9 +245,13 @@ class GraphStore:
         self.db_path = db_path
         self._hardware_profile = hardware_profile
         is_new = not Path(db_path).exists()
-        self._conn = sqlite3.connect(db_path)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
+        # E16/I9 (2026-10-04): a sqlite3 connection is bound to the thread that opened it, but this store is
+        # shared by the main loop, the reactive-capture dispatcher and the threadpool. Each thread therefore
+        # gets its own connection (see the _conn property) and its own transaction flag. SQLite's file locking
+        # orders the writes between them, exactly as it already did between separate processes.
+        self._tls = threading.local()
+        self._all_conns: list = []
+        self._all_conns_lock = threading.Lock()
         # BUGFIX (2026-09-20, SSD/SD-card wear audit): synchronous is a PER-CONNECTION
         # setting, unlike journal_mode (which persists in the db file itself once set) --
         # it does NOT survive into schema.sql's _apply_schema(), which only ever runs
@@ -260,7 +264,7 @@ class GraphStore:
         # the only risk is losing the most-recent commit(s) if power is lost before the
         # next checkpoint -- an acceptable tradeoff for this data, and a direct fix for
         # the fsync-per-commit write-amplification/wear pattern found live on .94.
-        self._conn.execute("PRAGMA synchronous = NORMAL")
+        # (synchronous, busy_timeout and cache_size are applied per connection in _open_connection())
         # BUGFIX (2026-09-20, identity-merge handover -- "bonus finding"): Python's
         # sqlite3 module defaults connect()'s busy_timeout to 5000ms. Found live this
         # same session: a one-time maintenance script (this project's own cleanup
@@ -277,13 +281,9 @@ class GraphStore:
         # heartbeat deadline even in a genuinely stuck-writer worst case. Per-
         # connection, same as synchronous/cache_size above -- must be set here, not
         # schema.sql, for the identical reason (doesn't persist in the db file itself).
-        self._conn.execute("PRAGMA busy_timeout = 10000")
         # Phase 10b: optional -- omitting hardware_profile (every pre-existing
         # caller, including every test) leaves SQLite's own default cache_size
         # untouched, identical to this class's behavior before this param existed.
-        cache_kb = _HARDWARE_PROFILE_CACHE_SIZE_KB.get(hardware_profile or "")
-        if cache_kb is not None:
-            self._conn.execute(f"PRAGMA cache_size = -{cache_kb}")
         self._in_transaction = False
         # Merge-chain lookups (resolve_canonical_device_id / _all_ids_resolving_to) ran several queries EACH,
         # thousands of times per detection cycle (profiled 2026-09-30: ~20 % of the engine's main loop).
@@ -327,6 +327,38 @@ class GraphStore:
                 if db_path not in GraphStore._migrated_db_paths:
                     self._migrate_existing_db()
                     GraphStore._migrated_db_paths.add(db_path)
+
+    def _open_connection(self) -> sqlite3.Connection:
+        # check_same_thread=False only so close() can reach every thread's connection; each one is still
+        # used by the single thread that opened it.
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA busy_timeout = 10000")
+        cache_kb = _HARDWARE_PROFILE_CACHE_SIZE_KB.get(self._hardware_profile or "")
+        if cache_kb is not None:
+            conn.execute(f"PRAGMA cache_size = -{cache_kb}")
+        with self._all_conns_lock:
+            self._all_conns.append(conn)
+        return conn
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        """This thread's connection, opened on first use (E16/I9: never share one across threads)."""
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            conn = self._open_connection()
+            self._tls.conn = conn
+        return conn
+
+    @property
+    def _in_transaction(self) -> bool:
+        return getattr(self._tls, "in_transaction", False)
+
+    @_in_transaction.setter
+    def _in_transaction(self, value: bool) -> None:
+        self._tls.in_transaction = value
 
     def _apply_schema(self) -> None:
         with open(_SCHEMA_PATH, "r", encoding="utf-8") as f:
@@ -595,7 +627,14 @@ class GraphStore:
         self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        # Closes every thread's connection, not just the caller's.
+        with self._all_conns_lock:
+            conns, self._all_conns = self._all_conns, []
+        for conn in conns:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
 
     def checkpoint_wal(self) -> None:
         """BUGFIX (2026-09-16, third-party audit finding P0 -- unbounded WAL

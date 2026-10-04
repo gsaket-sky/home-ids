@@ -156,12 +156,13 @@ class ThreatSignalDetector:
             add("dns_dga_burst", sd, 0.6, "dns_behavior",
                 f"elevated {int(sd)} domains entropy={entropy_avg:.2f}{dga_examples_note}", domain=dga_evidence_domain)
         elif not is_telemetry and dga_score > 0.40:
-            # Pure classifier-score branch, not the per-domain loop above -- no
-            # specific domain to attach here, unlike the two branches above it, and no
-            # per-domain source protection either -- keep the device-wide gate for
-            # this one branch only.
+            # 1-hour, novelty-gated NXDOMAIN score (dns_features._dga_score, W-04): the per-domain source protection
+            # now lives in the producer, which also names the domains behind the score.
+            dga_score_examples = features.get("dga_score_examples", []) or []
             add("dns_dga_burst", dga_score, min(1.0, dga_score), "dns_behavior",
-                f"classifier score {dga_score:.2f}")
+                f"classifier score {dga_score:.2f}"
+                + (f" e.g.={','.join(dga_score_examples)}" if dga_score_examples else ""),
+                domain=dga_score_examples[0] if dga_score_examples else None)
 
         # ── Real DNS tunneling signals (distinct from the existing rate/entropy-based
         #    "DNS_TUNNELING" hypothesis, which is really a burst detector) ────────────
@@ -349,9 +350,10 @@ class ThreatSignalDetector:
         elif beacon_tdr > 0.75 and beacon_total >= 15:
             conf = min(1.0, beacon_tdr) * (0.1 if is_telemetry else 1.0)
             if conf > 0:
+                # W-04: the producer (zeek_features._beacon_features) names the destination it measured.
                 add("zeek_beaconing", beacon_tdr, conf, "zeek_network",
                     f"persistent single-target beaconing tdr={beacon_tdr:.2f} total={int(beacon_total)}",
-                    subtag="persistent_single_target", domain=None)
+                    subtag="persistent_single_target", domain=features.get("beacon_domain") or None)
         elif c2_jitter > 0 and not is_telemetry and not _is_local_name(jitter_beacon_domain):
             conf = 0.3 if outbound_bytes == 0 else 0.55
             add("zeek_beaconing", c2_jitter, conf, "zeek_network",

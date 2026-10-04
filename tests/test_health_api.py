@@ -56,6 +56,17 @@ def test_reads_component_heartbeat_job_and_feed_files(state_dir):
     assert result["feed_health"]["otx"]["consecutive_failures"] == 0
 
 
+def test_heartbeat_read_from_runtime_dir_in_docker_layout(state_dir):
+    # Docker: state/run is the RAM volume where core/heartbeat.py writes (W-05). A stale copy left at the
+    # state root must be ignored once the run dir exists.
+    run = state_dir / "run"
+    run.mkdir()
+    (run / "component_heartbeat.json").write_text(json.dumps({"scheduler_subprocess": {"pid": 7}}), encoding="utf-8")
+    (state_dir / "component_heartbeat.json").write_text(json.dumps({"stale": {"pid": 0}}), encoding="utf-8")
+    result = health_api.get_health_status(token="test")
+    assert result["component_heartbeats"] == {"scheduler_subprocess": {"pid": 7}}
+
+
 def test_corrupt_json_file_degrades_to_empty_not_a_500(state_dir):
     (state_dir / "health_manager_snapshot.json").write_text("{not valid json", encoding="utf-8")
     result = health_api.get_health_status(token="test")  # must not raise

@@ -225,6 +225,7 @@ ACTIONS: Dict[str, Callable[["HealthManager", str], Tuple[bool, str]]] = {
     "pipeline_main_loop": restart_own_process,
     "identity_reconcile_worker": restart_own_process,
     "ti_refresh": restart_own_process,
+    "ips_retry_worker": restart_own_process,
     "resource_pressure": restart_own_process,
     "api_subprocess": restart_fastapi_subprocess,
     "scheduler_subprocess": restart_scheduler_subprocess,

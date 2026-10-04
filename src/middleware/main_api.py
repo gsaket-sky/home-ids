@@ -11,6 +11,7 @@ from middleware.auth import CONFIG
 from core.heartbeat import write_component_heartbeat
 
 app = FastAPI(title="Fritz!Box Mitigation API", version="1.0.6")
+_heartbeat_task = None  # strong ref to the startup heartbeat loop (see _start_heartbeat_task)
 
 # Mount Routers
 app.include_router(fritzbox_api.router)
@@ -45,7 +46,9 @@ async def _start_heartbeat_task():
                 pass
             await asyncio.sleep(10)
 
-    asyncio.create_task(_beat_loop())
+    # Keep a strong reference: the loop only weakly references tasks with no other referrer.
+    global _heartbeat_task
+    _heartbeat_task = asyncio.create_task(_beat_loop())
     try:   # 2026-10-02: the console's Overview should be instant from the first visit
         overview_api.warm_cache()
     except Exception:

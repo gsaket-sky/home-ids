@@ -11,7 +11,9 @@ class DNSBehaviorDetector:
         now = time.time()
         
         # Rate evidence
-        rate = features.get("dns_rate_last_60s", features.get("query_rate", 0))
+        # W-04: read "dns_rate_last_60s" first, which nothing ever produced. Deliberately not produced: this fixed
+        # 100/min bar applied to a raw 60-s count would fire on ordinary page loads. The 5-min average is the signal.
+        rate = features.get("query_rate", 0)
         if rate > 100:
             ev_list.append(Evidence(
                 type="dns_rate",
@@ -65,7 +67,9 @@ class DNSBehaviorDetector:
                 value=unique_ratio,
                 confidence=unique_ratio,
                 independence_group="dns_behavior",
-                provenance="detector:dns_behavior:unique_ratio"
+                provenance="detector:dns_behavior:unique_ratio",
+                # W-04: the parent domain the ratio was measured under (dns_features._unique_subdomain_ratio).
+                domain=features.get("unique_subdomain_ratio_domain") or None,
             ))
             
         return ev_list

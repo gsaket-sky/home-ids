@@ -255,7 +255,87 @@ class PiHoleCollector:
         return results
 
 
+# W-04 producers (unique_subdomain_ratio, dga_score). Both are novelty-gated: a value is produced only for names that
+# are new on this network (intelligence/local_popularity.is_preexisting() is False). With no popularity source, or
+# history younger than its warm-up, they produce nothing -- thin data never becomes evidence. No subnet, hostname or
+# vendor of any one network is involved; every gate is measured from this network's own traffic.
+UNIQUE_RATIO_MIN_CHILDREN = 20        # distinct subdomains under one parent, in the 5-min window
+UNIQUE_RATIO_MIN_LABEL_ENTROPY = 3.5  # mean first-label entropy: encoded chunks, not customer1/customer2 names
+DGA_MIN_NX_CANDIDATES = 10            # distinct NXDOMAIN names in the last hour before a score is computed
+DGA_MIN_NOVEL_ALGORITHMIC = 8         # of which at least this many look algorithmic AND are new here
+_NXDOMAIN_REPLY = 2                   # FTL reply_type for NXDOMAIN (the status column cannot tell it apart)
+
+# A device's own learning period: everything it does is "new on this network" (a camera added today polling its
+# vendor cloud), so novelty says nothing about it yet. Measured as activity actually observed
+# (DeviceFamiliarity.learned_activity), never calendar time: a device that was on for an hour a week ago is still at
+# the start of its learning period. Both bars must hold -- three short sessions on three days are not enough either.
+# The pipeline applies this gate to every novelty-gated feature, from both extractors.
+NOVELTY_MIN_ACTIVE_DAYS = 3
+NOVELTY_MIN_ACTIVE_HOURS = 24
+_NOVELTY_GATED_DEFAULTS = {"unique_subdomain_ratio": 0.0, "unique_subdomain_ratio_domain": "",
+                           "dga_score": 0.0, "dga_score_examples": []}
+_NOVELTY_GATED_OPTIONAL = ("beacon_tdr", "beacon_total", "beacon_domain", "beacon_dest_ip")
+
+
+def apply_device_age_gate(features: dict, active_days: int, active_hours: int) -> bool:
+    """Clears the novelty-gated W-04 features until the device has NOVELTY_MIN_ACTIVE_DAYS active days AND
+    NOVELTY_MIN_ACTIVE_HOURS active hours of learned behaviour. Returns True when it cleared them."""
+    if active_days >= NOVELTY_MIN_ACTIVE_DAYS and active_hours >= NOVELTY_MIN_ACTIVE_HOURS:
+        return False
+    features.update({k: (list(v) if isinstance(v, list) else v) for k, v in _NOVELTY_GATED_DEFAULTS.items()})
+    for key in _NOVELTY_GATED_OPTIONAL:
+        features.pop(key, None)
+    return True
+
+
 class FeatureExtractor:
+    # intelligence.local_popularity.LocalPopularity, set by the pipeline. None (tests, tools): the novelty-gated
+    # producers stay silent.
+    popularity = None
+
+    def _novel(self, domain: str) -> bool:
+        """True only when the popularity source positively says `domain` is new on this network."""
+        pop = self.popularity
+        if pop is None or not domain:
+            return False
+        try:
+            return pop.is_preexisting(domain) is False
+        except Exception:
+            return False
+
+    def _unique_subdomain_ratio(self, rw, fanout_by_base, parent: str, label_entropy: float):
+        """Share of queries under the busiest non-CDN parent that went to a never-repeated subdomain. ~1.0 is the
+        tunneling shape (every encoded chunk asked once). Produced only for a large, high-entropy fanout under a
+        parent that is new on this network; otherwise (0.0, "")."""
+        if not parent or label_entropy < UNIQUE_RATIO_MIN_LABEL_ENTROPY:
+            return 0.0, ""
+        children = fanout_by_base.get(parent) or ()
+        if len(children) < UNIQUE_RATIO_MIN_CHILDREN or not self._novel(parent):
+            return 0.0, ""
+        total = sum(rw.domains.get(c, 0) for c in children)
+        if total <= 0:
+            return 0.0, ""
+        return min(1.0, len(children) / total), parent
+
+    def _dga_score(self, nx_names):
+        """Share of the last hour's NXDOMAIN names that look algorithmic and are new on this network. Real DGA malware
+        mostly hits unregistered names, hence NXDOMAIN. Single-label names (browser intranet probes), local and
+        CDN/telemetry names, and anything already used here (a local search suffix, a typo of a known site) are left
+        out before counting. Produced only with enough distinct names behind it; otherwise (0.0, [])."""
+        if self.popularity is None:
+            return 0.0, []
+        candidates = [n for n in nx_names
+                      if "." in n and etld1(n) and not is_telemetry_domain(n) and not _is_cdn_or_cloud_domain(n)]
+        if len(candidates) < DGA_MIN_NX_CANDIDATES:
+            return 0.0, []
+        algorithmic = [n for n in candidates if suspicious_dga(n)]
+        if len(algorithmic) < DGA_MIN_NOVEL_ALGORITHMIC:
+            return 0.0, []
+        # Novelty last and bounded: it is the only gate that reads the database.
+        novel = [n for n in sorted(algorithmic)[:64] if self._novel(n)]
+        if len(novel) < DGA_MIN_NOVEL_ALGORITHMIC:
+            return 0.0, []
+        return min(1.0, len(novel) / len(candidates)), novel[:3]
     
     def _determine_killchain_phase(self, state, features: dict) -> str:
         """Determines the current active kill-chain phase based on aggregated features."""
@@ -462,9 +542,12 @@ class FeatureExtractor:
 
         # 1-Hour Long-Term Periodicity Evaluation (Catches low-and-slow 5-30 min C2 beacons)
         long_domain_timestamps = defaultdict(list)
+        nx_names_1h = set()
         for ev in rw.long_events:
             if len(ev) >= 4 and ev[3] in _TXT_NULL_QTYPES:
                 txt_null_count += 1
+            if len(ev) >= 4 and ev[3] == _NXDOMAIN_REPLY:
+                nx_names_1h.add(ev[1])
             long_domain_timestamps[ev[1]].append(ev[0])
         # A2 (2026-10-01): the TLD check used to split every event of the last hour, per device, per cycle (the
         # single hottest line in the engine's profile on .94). Same count, one rpartition per UNIQUE domain:
@@ -531,6 +614,12 @@ class FeatureExtractor:
             fanout_children = fanout_by_base[subdomain_fanout_domain]
             fanout_label_entropy = sum(entropy(c.split(".")[0]) for c in fanout_children) / max(len(fanout_children), 1)
 
+        # W-04: read by detectors/dns_behavior.py (dns_unique_ratio) and threat_signals.py (dns_dga_burst classifier
+        # branch) but never produced before. Novelty-gated, see the producer docstrings.
+        unique_subdomain_ratio, unique_subdomain_ratio_domain = self._unique_subdomain_ratio(
+            rw, fanout_by_base, subdomain_fanout_domain, fanout_label_entropy)
+        dga_score, dga_score_examples = self._dga_score(nx_names_1h)
+
         nxdomain_tld_conc = 0.0
         nx_events = [ev[1] for ev in rw.events if ev[2] in NXDOMAIN]
         if len(nx_events) >= 5:
@@ -573,6 +662,10 @@ class FeatureExtractor:
             "subdomain_fanout_count": subdomain_fanout_count,
             "subdomain_fanout_domain": subdomain_fanout_domain,
             "fanout_label_entropy": fanout_label_entropy,
+            "unique_subdomain_ratio": unique_subdomain_ratio,
+            "unique_subdomain_ratio_domain": unique_subdomain_ratio_domain,
+            "dga_score": dga_score,
+            "dga_score_examples": dga_score_examples,
         }
         
         current_phase = self._determine_killchain_phase(state, extracted_features)
@@ -606,5 +699,7 @@ class FeatureExtractor:
             "beaconing_c2_count": 0, "beaconing_c2_1h": 0, "min_jitter_cv": 0.0,
             "beaconing_c2_domains": [], "beaconing_c2_1h_domains": [],
             "subdomain_fanout_count": 0, "subdomain_fanout_domain": "", "fanout_label_entropy": 0.0,
+            "unique_subdomain_ratio": 0.0, "unique_subdomain_ratio_domain": "",
+            "dga_score": 0.0, "dga_score_examples": [],
             "killchain_phase": "NORMAL", "markov_anomaly": 0.0
         }

@@ -292,12 +292,12 @@ def main():
             for name, cfg in (config.get("scheduler", {}) or {}).items()
             if isinstance(cfg, dict) and cfg.get("enabled", False)
         }
-        if config.get("autotune_enabled", False):
+        if config.get("autotune_enabled", True):
             enabled_tasks[TRAIN_FP_CLASSIFIER_JOB_NAME] = float(config.get("autotune_max_runtime_minutes", 40))
         scheduler_metrics.sync_enabled_tasks(enabled_tasks)
 
         # 1. Check legacy autotune
-        if config.get("autotune_enabled", False):
+        if config.get("autotune_enabled", True):
             cron = config.get("autotune_schedule_cron", "0 3 * * *")
             due = check_cron(cron, now) or job_coordinator.is_deferred(state_dir, TRAIN_FP_CLASSIFIER_JOB_NAME)
             if due and last_run.get("autotune") != now_str:

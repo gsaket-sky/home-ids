@@ -167,7 +167,7 @@ def _apply_operator_correction(alert_payload: dict, device_id: str, target: str,
     unblocked_domains = []
     if base_domain:
         try:
-            ips = IPSMitigator(config=CONFIG, state_manager=sm)
+            ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
             unblocked_domains = ips.unblock_by_base_domain(base_domain)
         except Exception as exc:
             LOGGER.warning("Failed to unblock domain(s) under '%s' after FP mark: %s", base_domain, exc)
@@ -268,7 +268,7 @@ def ipc_block_domain_get(target: str, token: str = Depends(verify_token)):
         sm = StateManager(state_path=state_path)
         sm.load_from_disk()
         
-        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         # Block the domain specifically for pi-hole
         success = ips._block_domain(domain=target, hostname="grafana_manual", device_ip="unknown", dev_id="manual", reason="Operator explicitly blocked via Grafana")
         
@@ -310,7 +310,7 @@ def _ipc_approve_tune_down_logic(device_id: str):
 
         _get_argus_cl_afpe_engine()._apply_sigma_shift(device_id, direction="TUNE_DOWN", source="llm_pending_approval")
 
-        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         released = ips.release_device(device_id)
 
         sm.flush_to_disk()
@@ -328,7 +328,7 @@ def ipc_release_domain_get(target: str, token: str = Depends(verify_token)):
         sm = StateManager(state_path=state_path)
         sm.load_from_disk()
         
-        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         success = ips.unblock_domain(domain=target)
         
         if success:

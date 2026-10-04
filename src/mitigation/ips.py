@@ -117,7 +117,11 @@ def check_pihole_health(config: Dict[str, Any], timeout: float = 3.0,
 
 class IPSMitigator:
     def __init__(self, config: Dict[str, Any], state_manager: Optional[Any] = None, stream_writer: Optional[Any] = None,
-                  graph_store: Optional[Any] = None):
+                  graph_store: Optional[Any] = None, start_workers: bool = True):
+        """start_workers=False builds a state-only instance: no retry/reconcile threads, no tarpit threads, no
+        boot reconcile. Request handlers (W-01) construct one per call to apply an operator action to the shared
+        state, and must never leave background threads or raw sockets behind. The engine's own instance keeps the
+        default."""
         self.config = config
         self.stream_writer = stream_writer
         # IPS containment unification: OPTIONAL
@@ -153,6 +157,13 @@ class IPSMitigator:
         self._router_isolated_devices = ips_state.get("router_isolated_devices", {})
         self._operator_released_devices = ips_state.get("operator_released_devices", {})
         
+        if not start_workers:
+            # State-only instance (W-01): no tarpit threads, no sockets, no background workers.
+            self.tarpit_armed = False
+            self._tarpit_thread = None
+            self._ndp_tarpit_thread = None
+            return
+
         self._init_arp_tarpit()
         self._sync_metrics_from_state()
 
@@ -1067,9 +1078,10 @@ class IPSMitigator:
                 resp = self.session.get(v5_url, timeout=timeout_seconds)
                 LOGGER.info("Pi-hole v5 fallback response: %s %s", resp.status_code, resp.text)
                 if "Not authorized" in resp.text:
-                    LOGGER.warning("Pi-hole v5 requires SHA256 hashed password, but raw password was used. Mocking success for tests.")
-                    self._finalize_block(domain, hostname, device_ip, dev_id, comment=comment)
-                    return True
+                    # Pi-hole rejected auth on every rung and nothing was blocked. Report failure
+                    # so the alert and self-heal state match reality (W-02). Never record success here.
+                    LOGGER.warning("Pi-hole block of %s failed: all auth paths rejected (v5 needs a SHA256-hashed password).", domain)
+                    return False
 
             if resp.status_code in (200, 201, 204):
                 if "Not authorized" in resp.text:
@@ -1187,25 +1199,39 @@ class IPSMitigator:
         return True
 
     def _retry_worker(self):
-        """H4 FIX: Background retry worker with exponential backoff per-domain attempt count."""
+        """H4 FIX: Background retry worker with exponential backoff per-domain attempt count.
+
+        W-23: an exception used to end this thread for good, silently (no liveness check watched it). Each pass now
+        beats the health heartbeat and is guarded, so a bad entry is logged and the worker keeps running."""
+        from core.heartbeat import HEARTBEATS
         while True:
             time.sleep(30)
-            if not self.config.get("ips_pihole_enabled", True):
+            HEARTBEATS.beat("ips_retry_worker", health_state="healthy")
+            try:
+                self._retry_pass()
+            except Exception:
+                LOGGER.exception("IPS retry pass failed; retrying on the next cycle")
+
+    def _retry_pass(self) -> None:
+        if not self.config.get("ips_pihole_enabled", True):
+            return
+        with self._lock:
+            items_to_retry = list(self._retry_queue.items())
+            self._prune_dead_letter_entries(now=time.time())
+        for domain, meta in items_to_retry:
+            # Exponential backoff: wait 30s × 2^attempts before each retry
+            # attempt 1 → 60s, attempt 2 → 120s, attempt 3 → 240s, attempt 4 → 480s
+            min_wait = 30 * (2 ** meta.get("attempts", 1))
+            last_attempt = meta.get("last_attempt_ts", 0.0)
+            if time.time() - last_attempt < min_wait:
                 continue
             with self._lock:
-                items_to_retry = list(self._retry_queue.items())
-                self._prune_dead_letter_entries(now=time.time())
-            for domain, meta in items_to_retry:
-                # Exponential backoff: wait 30s × 2^attempts before each retry
-                # attempt 1 → 60s, attempt 2 → 120s, attempt 3 → 240s, attempt 4 → 480s
-                min_wait = 30 * (2 ** meta.get("attempts", 1))
-                last_attempt = meta.get("last_attempt_ts", 0.0)
-                if time.time() - last_attempt < min_wait:
-                    continue
-                with self._lock:
-                    if domain in self._retry_queue:
-                        self._retry_queue[domain]["last_attempt_ts"] = time.time()
+                if domain in self._retry_queue:
+                    self._retry_queue[domain]["last_attempt_ts"] = time.time()
+            try:
                 self._block_domain(domain, meta["hostname"], meta.get("device_ip", ""), meta["device_id"], meta["reason"])
+            except Exception:
+                LOGGER.exception("IPS retry of %s failed; left in the retry queue", domain)
 
     def unblock_domain(self, domain: str, reason: str = "manual") -> bool:
         if not domain: return False

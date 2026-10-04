@@ -266,7 +266,7 @@ def test_actions_catalog_has_no_entry_for_externally_managed_components():
 
 def test_actions_catalog_covers_every_real_recovery_lever():
     expected = {
-        "pipeline_main_loop", "identity_reconcile_worker", "ti_refresh",
+        "pipeline_main_loop", "identity_reconcile_worker", "ti_refresh", "ips_retry_worker",
         "resource_pressure", "api_subprocess", "scheduler_subprocess",
     }
     assert set(healing_actions.ACTIONS.keys()) == expected

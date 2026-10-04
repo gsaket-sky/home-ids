@@ -23,7 +23,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 LOGGER = logging.getLogger("home_ids.device_familiarity")
 
@@ -32,6 +32,11 @@ MAX_ENTRIES_PER_KIND = 200
 FLUSH_INTERVAL_SECONDS = 600.0
 _KINDS = ("ports", "asn_owners", "domain_bases")
 FILE_NAME = "device_familiarity.json"
+# Activity actually observed, not calendar time: {"<utc day number>": {"count", "first_seen", "last_seen", "hours"}},
+# "hours" a 24-bit mask of the hours of that day with at least one learned (benign/anomalous) cycle. A device that was
+# on for one hour a week ago has 1 active day and 1 active hour, however long ago that was. Same entry shape and
+# eviction as the other kinds, so at most MAX_ENTRIES_PER_KIND days are kept.
+ACTIVE_DAYS_KIND = "active_days"
 
 
 def _usable(key) -> bool:
@@ -50,12 +55,25 @@ class DeviceFamiliarity:
 
     # --- writes ------------------------------------------------------------------------------------------------
     def record_device_baseline_observation(self, device_id: str, *, dest_port=None, asn_owner: Optional[str] = None,
-                                           domain_base: Optional[str] = None) -> None:
+                                           domain_base: Optional[str] = None, now: Optional[float] = None) -> None:
         if not device_id or device_id == "unknown":
             return
-        now = time.time()
+        now = time.time() if now is None else float(now)
         with self._lock:
             device = self._data.setdefault(device_id, {})
+            days = device.setdefault(ACTIVE_DAYS_KIND, {})
+            day = str(int(now // 86400))
+            hour_bit = 1 << int((now % 86400) // 3600)
+            entry = days.get(day)
+            if entry is None:
+                if len(days) >= MAX_ENTRIES_PER_KIND:
+                    days.pop(min(days, key=lambda k: days[k].get("last_seen", 0)), None)
+                days[day] = {"count": 1, "first_seen": now, "last_seen": now, "hours": hour_bit}
+            else:
+                entry["count"] = int(entry.get("count", 0)) + 1
+                entry["last_seen"] = now
+                entry["hours"] = int(entry.get("hours", 0)) | hour_bit
+            self._dirty = True
             for kind, key in (("ports", dest_port), ("asn_owners", asn_owner), ("domain_bases", domain_base)):
                 if not _usable(key):
                     continue
@@ -85,6 +103,17 @@ class DeviceFamiliarity:
                     if mine is None or int(entry.get("count", 0)) > int(mine.get("count", 0)):
                         device[kind][key] = dict(entry)
                         changed += 1
+            # Activity of a merged identity is the union of both: same days, hours OR-ed together.
+            for day, entry in ((baseline or {}).get(ACTIVE_DAYS_KIND) or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+                mine = device.setdefault(ACTIVE_DAYS_KIND, {}).get(day)
+                if mine is None:
+                    device[ACTIVE_DAYS_KIND][day] = dict(entry)
+                else:
+                    mine["hours"] = int(mine.get("hours", 0)) | int(entry.get("hours", 0))
+                    mine["count"] = max(int(mine.get("count", 0)), int(entry.get("count", 0)))
+                changed += 1
             if changed:
                 self._dirty = True
         return changed
@@ -112,10 +141,23 @@ class DeviceFamiliarity:
                     best = max(best, min(1.0, int(entry.get("count", 0)) / float(OBSERVATIONS_FOR_FULL_FAMILIARITY)))
         return best
 
+    def learned_activity(self, device_id: str) -> Tuple[int, int]:
+        """(active days, active hours) of learned behaviour for this device: distinct days, and distinct (day, hour)
+        slots, with at least one benign/anomalous cycle. Calendar time does not count -- a device on for an hour a
+        week ago is (1, 1). (0, 0) for an unknown device, and for every device whose history predates this
+        bookkeeping, so gates built on it start quiet and open only on activity actually observed."""
+        if not device_id or device_id == "unknown":
+            return 0, 0
+        with self._lock:
+            days = self._data.get(device_id, {}).get(ACTIVE_DAYS_KIND, {})
+            hours = sum(bin(int(e.get("hours", 0))).count("1") for e in days.values() if isinstance(e, dict))
+            return len(days), hours
+
     def get_baseline_entry_count(self, device_id: str) -> int:
         """Distinct ports/owners/domains tracked for this device -- a size/maturity signal for the dashboards."""
         with self._lock:
-            return sum(len(bucket) for bucket in self._data.get(device_id, {}).values())
+            return sum(len(bucket) for kind, bucket in self._data.get(device_id, {}).items()
+                       if kind != ACTIVE_DAYS_KIND)
 
     # --- persistence -------------------------------------------------------------------------------------------
     def flush(self, force: bool = False) -> None:

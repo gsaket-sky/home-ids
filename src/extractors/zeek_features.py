@@ -17,6 +17,7 @@ RECENT FIXES:
 import ipaddress
 import json
 import logging
+import math
 import threading
 import time
 import concurrent.futures
@@ -36,6 +37,24 @@ _LOG_FILES = {
 DOH_IPS = {"1.1.1.1", "1.0.0.1", "8.8.8.8", "8.8.4.4", "9.9.9.9", "149.112.112.112"}
 DOH_SNIS = {"cloudflare-dns.com", "dns.google", "dns.quad9.net"}
 LATERAL_PORTS = frozenset([22, 445, 3389, 5900, 23])
+
+# W-04 beacon tracker. Protocol-level periodic services that are periodic by design on every network: DNS/DoT,
+# NTP, mDNS/LLMNR/NetBIOS, SSDP, DHCP, STUN (WebRTC/VoIP keepalives). Never beacon candidates.
+_BEACON_EXCLUDED_PORTS = frozenset({53, 67, 68, 123, 137, 138, 853, 1900, 3478, 5353, 5355, 19302})
+# Connections that never carried an exchange (no handshake / rejected) are retries to a dead endpoint, not check-ins.
+_BEACON_EXCLUDED_STATES = frozenset({"S0", "REJ", "RSTOS0", "RSTRH", "SH", "SHR"})
+_BEACON_MAX_PAIRS_PER_DEVICE = 64
+_BEACON_SAME_CHECKIN_SECONDS = 2.0   # connections this close together are one check-in, not two intervals
+_BEACON_MIN_MEAN_INTERVAL = 10.0     # faster periodicity is keepalive/streaming/polling-loop territory
+_BEACON_MAX_GAP = 1800.0             # a longer silence ends the series; a new one starts from scratch
+_BEACON_MISSED_FACTOR = 1.8          # an interval this many times the mean is a skipped check-in, not jitter
+_BEACON_MAX_MISSED_SHARE = 0.2
+_BEACON_MIN_OBSERVATIONS = 15        # same bar as the detector's beacon_total >= 15
+# tdr = min(interval regularity, size regularity). tdr > 0.75 (the detector's bar) <=> interval CV < 0.15 AND
+# payload-size CV < 0.30: check-ins within +-15 % of the period, each carrying a similar payload.
+_BEACON_INTERVAL_CV_SCALE = 0.6
+_BEACON_SIZE_CV_SCALE = 1.2
+_BEACON_REPORT_TDR = 0.75
 
 
 # Substring markers of a DNS line sent to the mDNS multicast groups (matches flat and nested Zeek JSON).
@@ -354,6 +373,16 @@ class ZeekFeatureExtractor:
         # P0 (architecture review 2026-10-02): (ts, dst_ip, bytes) so exfiltration evidence can name the
         # destination that actually received the bytes, not the device's most recent connection.
         self._outbound_by_dst = defaultdict(lambda: deque(maxlen=5000))
+        # W-04: per-minute outbound byte totals, [minute, bytes], kept one hour (the history above is pruned to the
+        # 5-min detection window, so it cannot answer "last hour"). 61 buckets per device at most.
+        self._outbound_minutes = defaultdict(lambda: deque(maxlen=61))
+        # W-04: per (device ip -> destination ip) connection-periodicity stats for beacon_tdr/beacon_total -- O(1)
+        # memory per pair (running mean/variance, Welford), at most _BEACON_MAX_PAIRS_PER_DEVICE pairs per device,
+        # stalest evicted. Lives across the 5-min window on purpose: a 1-minute beacon needs 15 minutes to show.
+        self._beacon_pairs: Dict[str, Dict[str, list]] = defaultdict(dict)
+        self._beacon_pruned_at = 0.0
+        # intelligence.local_popularity.LocalPopularity, set by the pipeline; None keeps beacon features silent.
+        self.popularity = None
         self._doh_bypass_uids = defaultdict(dict)
         # SNI-verified DoH hits only (real DOH_SNIS hostname match, e.g. "dns.google"),
         # separate from _doh_bypass_uids above which also counts the port+IP heuristic
@@ -607,6 +636,24 @@ class ZeekFeatureExtractor:
         prune_ts_dict(self._http_uas)
         prune_ts_dict(self._http_reqs)
 
+        # W-04 state lives longer than `window`; trim it on its own clock, once a minute.
+        if now_ts - self._beacon_pruned_at >= 60.0:
+            self._beacon_pruned_at = now_ts
+            beacon_cutoff = now_ts - _BEACON_MAX_GAP
+            for src in list(self._beacon_pairs.keys()):
+                pairs = self._beacon_pairs.get(src)
+                if pairs is None:
+                    continue
+                for dst in [d for d, st in list(pairs.items()) if st[1] < beacon_cutoff]:
+                    pairs.pop(dst, None)
+                if not pairs:
+                    self._beacon_pairs.pop(src, None)
+            minute_cutoff = int((now_ts - 3600.0) // 60)
+            for src in list(self._outbound_minutes.keys()):
+                buckets = self._outbound_minutes.get(src)
+                if not buckets or buckets[-1][0] <= minute_cutoff:
+                    self._outbound_minutes.pop(src, None)
+
         for src in list(self._new_lateral_events.keys()):
             if not self._lateral_moves.get(src):
                 del self._new_lateral_events[src]
@@ -856,6 +903,89 @@ class ZeekFeatureExtractor:
             self._outbound_bytes[src].append((ts, orig_bytes))
             if orig_bytes and dst_ip:
                 self._outbound_by_dst[src].append((ts, dst_ip, orig_bytes))
+            try:
+                minute = int(float(ts) // 60)
+            except (TypeError, ValueError):
+                minute = None
+            if minute is not None:
+                buckets = self._outbound_minutes[src]
+                if buckets and minute <= buckets[-1][0]:
+                    buckets[-1][1] += orig_bytes      # same (or an out-of-order earlier) minute
+                else:
+                    buckets.append([minute, orig_bytes])
+            if (dst_ip and orig_bytes > 0 and dst_port not in _BEACON_EXCLUDED_PORTS
+                    and conn_state not in _BEACON_EXCLUDED_STATES and self._is_home_ip(src)):
+                try:
+                    self._observe_beacon(src, dst_ip, float(ts), orig_bytes)
+                except (TypeError, ValueError):
+                    pass
+
+    def _observe_beacon(self, src: str, dst_ip: str, ts: float, orig_bytes: int) -> None:
+        """One connection into the (src -> dst_ip) periodicity series. Pair layout:
+        [first_ts, last_checkin_ts, n_intervals, mean_interval, m2_interval, n_sizes, mean_size, m2_size, missed]."""
+        pairs = self._beacon_pairs[src]
+        st = pairs.get(dst_ip)
+        if st is None or ts - st[1] > _BEACON_MAX_GAP:
+            if st is None and len(pairs) >= _BEACON_MAX_PAIRS_PER_DEVICE:
+                pairs.pop(min(pairs, key=lambda k: pairs[k][1]), None)
+            pairs[dst_ip] = [ts, ts, 0, 0.0, 0.0, 1, float(orig_bytes), 0.0, 0]
+            return
+        gap = ts - st[1]
+        if gap < 0:
+            return  # out-of-order line (conn.log is written when a connection closes, ts is when it opened)
+        st[5] += 1
+        delta = orig_bytes - st[6]
+        st[6] += delta / st[5]
+        st[7] += delta * (orig_bytes - st[6])
+        if gap < _BEACON_SAME_CHECKIN_SECONDS:
+            return  # another connection of the same check-in
+        if st[2] >= 5 and gap > _BEACON_MISSED_FACTOR * st[3]:
+            st[8] += 1  # a skipped check-in; counted, kept out of the interval statistics
+            st[1] = ts
+            return
+        st[2] += 1
+        delta = gap - st[3]
+        st[3] += delta / st[2]
+        st[4] += delta * (gap - st[3])
+        st[1] = ts
+
+    def _beacon_features(self, ips) -> dict:
+        """beacon_tdr / beacon_total for the most regular destination of this device that is NEW on this network.
+
+        Regularity alone is not enough -- vendor-cloud polling from IoT devices is perfectly regular by design. A series
+        is reported only when its destination resolves (as seen on the wire) to names that are all new on this network
+        (intelligence/local_popularity.is_preexisting() is False) and none of them is CDN/telemetry infrastructure.
+        A destination with no observed name (direct-IP) is not reported: novelty cannot be measured for it. Without a
+        popularity source, or before its history warm-up, nothing is reported."""
+        if self.popularity is None:
+            return {}
+        candidates = []
+        for ip in ips:
+            for dst, st in list(self._beacon_pairs.get(ip, {}).items()):
+                n_int, mean_i, mean_b = st[2], st[3], st[6]
+                if n_int + 1 < _BEACON_MIN_OBSERVATIONS or mean_i < _BEACON_MIN_MEAN_INTERVAL or mean_b <= 0:
+                    continue
+                if st[8] > _BEACON_MAX_MISSED_SHARE * n_int:
+                    continue
+                cv_i = math.sqrt(st[4] / n_int) / mean_i
+                cv_b = math.sqrt(st[7] / st[5]) / mean_b if st[5] > 1 else 0.0
+                tdr = max(0.0, min(1.0 - cv_i / _BEACON_INTERVAL_CV_SCALE, 1.0 - cv_b / _BEACON_SIZE_CV_SCALE))
+                if tdr > _BEACON_REPORT_TDR:
+                    candidates.append((tdr, n_int + 1, dst))
+        if not candidates:
+            return {}
+        from utils import is_telemetry_domain, _is_cdn_or_cloud_domain
+        for tdr, total, dst in sorted(candidates, reverse=True)[:3]:
+            names = sorted({q for q, a in list(self._wire_dns_resolutions.items()) if a == dst})[:8]
+            if not names or any(is_telemetry_domain(n) or _is_cdn_or_cloud_domain(n) for n in names):
+                continue
+            try:
+                if all(self.popularity.is_preexisting(n) is False for n in names):
+                    return {"beacon_tdr": tdr, "beacon_total": float(total),
+                            "beacon_domain": names[0], "beacon_dest_ip": dst}
+            except Exception:
+                continue
+        return {}
 
     def _process_dns(self, ev: dict) -> None:
         query, answers = ev.get("query"), ev.get("answers", [])
@@ -1118,6 +1248,7 @@ class ZeekFeatureExtractor:
         for ip in ips:
             lateral_targets.update(dst_ip for _, dst_ip, _ in self._lateral_moves.get(ip, []))
 
+        outbound_1h_cutoff_minute = int((time.time() - 3600.0) // 60)
         return {
             "zeek_conn_count": sum(len(self._conn_ts.get(ip, [])) for ip in ips),
             "zeek_new_ips": sum(len(self._new_ips.get(ip, {})) for ip in ips),
@@ -1127,6 +1258,14 @@ class ZeekFeatureExtractor:
             "zeek_susp_ports": sum(len(self._susp_ports.get(ip, [])) for ip in ips),
             "zeek_http_ua_count": sum(len(self._http_uas.get(ip, {})) for ip in ips),
             "zeek_outbound_bytes": sum(b for ip in ips for t, b in self._outbound_bytes.get(ip, [])),
+            # W-04: read by metrics_sync (home_ids_outbound_bytes_1h), but never produced, so the gauge was a constant 0.
+            # From the per-minute buckets: the per-connection history is pruned to the 5-min window.
+            "zeek_outbound_bytes_1h": sum(
+                b for ip in ips for m, b in list(self._outbound_minutes.get(ip, ())) if m > outbound_1h_cutoff_minute
+            ),
+            # W-04: beacon_tdr / beacon_total / beacon_domain, only for a regular series to a destination new on
+            # this network (see _beacon_features). Absent otherwise, so the detector's branch stays quiet.
+            **self._beacon_features(ips),
             **self._outbound_top_destination(ips),
             "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
             "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),
@@ -1179,7 +1318,7 @@ class ZeekFeatureExtractor:
         return alerts
 
     def reset_all(self) -> None:
-        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta): d.clear()
+        for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._beacon_pairs, self._outbound_minutes): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
     def reset_client(self, client_ip) -> None:
@@ -1189,6 +1328,6 @@ class ZeekFeatureExtractor:
         alert time would keep its stale pre-alert counters and could immediately
         re-trigger the same alert next cycle purely from leftover, already-alerted-on data."""
         for ip in self._as_ip_list(client_ip):
-            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio):
+            for d in (self._conn_ts, self._new_ips, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._dhcp_fingerprints, self._ja4_seen, self._arp_targets, self._dns_evasion_ratio, self._beacon_pairs):
                 if ip in d:
                     del d[ip]

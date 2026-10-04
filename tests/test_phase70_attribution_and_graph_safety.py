@@ -121,7 +121,7 @@ def worker():
 t = threading.Thread(target=worker)
 t.start()
 t.join()
-check("the old cross-thread call fails (why the worker's merges never happened)", err[:1] == ["ProgrammingError"], str(err))
+check("the singleton's cross-thread call works (E16/I9: each thread gets its own connection)", not err[:1], str(err))
 check("the worker's own-connection merge succeeds", not [x for x in err if x.startswith("new:")], str(err))
 check("and the main loop's singleton sees it",
       live_engine._graph_store.resolve_canonical_device_id("c") == "d")

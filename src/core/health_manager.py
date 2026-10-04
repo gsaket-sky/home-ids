@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from core.backoff import RecoveryBackoff
+from core.file_lock import exclusive_file_lock
 from core.heartbeat import HEARTBEATS, read_component_heartbeats
 from core.healing_actions import ACTIONS
 from metrics import health_component_state, health_recovery_attempts, health_pressure_level
@@ -332,6 +333,10 @@ class HealthManager:
         self._evaluate_heartbeat_component(
             "ti_refresh", HEARTBEATS.get("ti_refresh"), now,
             expected_interval=float(self.config.get("ti_refresh_interval", 3600.0)),
+        )
+        # W-23: the IPS retry worker beats every 30 s (mitigation/ips.py _retry_worker).
+        self._evaluate_heartbeat_component(
+            "ips_retry_worker", HEARTBEATS.get("ips_retry_worker"), now, expected_interval=30.0,
         )
 
         # cross-process heartbeat components (self-reported via file)
@@ -1035,16 +1040,18 @@ class HealthManager:
         effect without the HTTP layer around it."""
         try:
             overrides_path = self.config._overrides_path
-            data = {}
-            if overrides_path.exists():
-                data = json.loads(overrides_path.read_text(encoding="utf-8"))
-            existing = data.get(key)
-            baseline = existing["baseline"] if isinstance(existing, dict) and "baseline" in existing else self.config.get(key)
-            data[key] = {"value": value, "baseline": baseline, "set_at": time.time(), "set_by": "health_manager", "reason": reason}
-            overrides_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = overrides_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp.replace(overrides_path)
+            # Cross-process lock: the API and WebUI processes write this file too (C: lost update).
+            with exclusive_file_lock(overrides_path):
+                data = {}
+                if overrides_path.exists():
+                    data = json.loads(overrides_path.read_text(encoding="utf-8"))
+                existing = data.get(key)
+                baseline = existing["baseline"] if isinstance(existing, dict) and "baseline" in existing else self.config.get(key)
+                data[key] = {"value": value, "baseline": baseline, "set_at": time.time(), "set_by": "health_manager", "reason": reason}
+                overrides_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = overrides_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                tmp.replace(overrides_path)
             self.config._load_overrides()
         except Exception as exc:
             LOGGER.warning("Health manager failed to set config override %s=%s: %s", key, value, exc)
@@ -1054,15 +1061,16 @@ class HealthManager:
             overrides_path = self.config._overrides_path
             if not overrides_path.exists():
                 return
-            data = json.loads(overrides_path.read_text(encoding="utf-8"))
-            entry = data.get(key)
-            # Only undo what this manager set: an operator's own override (console) is theirs to change.
-            if not (isinstance(entry, dict) and entry.get("set_by") == "health_manager"):
-                return
-            data.pop(key)
-            tmp = overrides_path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            tmp.replace(overrides_path)
+            with exclusive_file_lock(overrides_path):
+                data = json.loads(overrides_path.read_text(encoding="utf-8"))
+                entry = data.get(key)
+                # Only undo what this manager set: an operator's own override (console) is theirs to change.
+                if not (isinstance(entry, dict) and entry.get("set_by") == "health_manager"):
+                    return
+                data.pop(key)
+                tmp = overrides_path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+                tmp.replace(overrides_path)
             baseline = entry.get("baseline") if isinstance(entry, dict) else None
             self.config.revert_override(key, baseline)
         except Exception as exc:

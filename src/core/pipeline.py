@@ -29,7 +29,7 @@ from core.state_guard import StateManager
 from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
-from extractors.dns_features import FeatureExtractor, PiHoleCollector
+from extractors.dns_features import FeatureExtractor, PiHoleCollector, apply_device_age_gate
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
@@ -923,6 +923,10 @@ class EnginePipeline:
             wired_probe_warmup_seconds=float(self.config.get("reactive_capture_wired_probe_warmup_seconds", 600.0)),
             lateral_ports=set(self.config.get("lateral_movement_ports", [22, 445, 3389, 5900, 23])),
         )
+        # W-04: the novelty-gated producers (dns_features: unique_subdomain_ratio, dga_score; zeek_features:
+        # beacon_tdr/beacon_total) need "is this name new on this network". None (popularity disabled) keeps them silent.
+        self.dns_extractor.popularity = self.local_popularity
+        self.zeek_fx.popularity = self.local_popularity
 
         self.zeek_collector = ZeekCollector(log_dir=self.config.get("zeek_log_dir", "/opt/zeek/logs/current"), poll_interval=float(self.config.get("poll_interval", 2.0)), state_dir=state_dir)
         self.pihole_collector = pihole_collector or PiHoleCollector(db_path=self.config.get("pihole_db", "/etc/pihole/pihole-FTL.db"), lookback_seconds=int(self.config.get("startup_lookback_seconds", 300)), excluded_ips=safe_ips, excluded_patterns=safe_patterns)
@@ -1539,6 +1543,10 @@ class EnginePipeline:
                 mitigation_pending = None
                 with self.state_manager.lock_device(dev_id) as state:
                     features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
+                    # W-04: novelty-gated features say nothing about a device still in its own learning period
+                    # (measured in active days and hours, not calendar time).
+                    _familiarity = getattr(self, "familiarity", None)
+                    apply_device_age_gate(features, *(_familiarity.learned_activity(dev_id) if _familiarity else (0, 0)))
                     features["sigma_shift"] = argus_live_engine.get_device_sigma_shift(dev_id)
                     features["current_hour"] = current_hour
                     features["current_minute"] = current_minute
@@ -1585,9 +1593,16 @@ class EnginePipeline:
                                     from concurrent.futures import ThreadPoolExecutor, TimeoutError
                                     # Use a temporary thread to enforce a 0.5s timeout on gethostbyname
                                     # without breaking global socket timeouts for other threads.
-                                    with ThreadPoolExecutor(max_workers=1) as executor:
+                                    # W-24: the `with` form joins the worker on exit, so the 0.5 s
+                                    # bound never held (a 3 s resolver stalled the loop for 3 s).
+                                    # shutdown(wait=False) returns at the timeout; the lookup finishes
+                                    # (or dies) on its own thread.
+                                    executor = ThreadPoolExecutor(max_workers=1)
+                                    try:
                                         future = executor.submit(socket.gethostbyname, top_domain)
                                         dest_ip = future.result(timeout=0.5)
+                                    finally:
+                                        executor.shutdown(wait=False)
                                 except Exception:
                                     dest_ip = "unknown"
                         else:

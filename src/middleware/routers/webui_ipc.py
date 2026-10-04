@@ -77,7 +77,14 @@ def ipc_run_script(name: str, apply: bool = False, token: str = Depends(verify_t
             timeout=_RUN_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired:
+        # A timed-out script may already have written state; signal the engine the same way below.
+        Path(CONFIG.get("state_path", "state/ids_state.json")).parent.joinpath(".ipc_sync_signal").touch()
         raise HTTPException(status_code=504, detail=f"'{name}' did not finish within {_RUN_TIMEOUT_SECONDS:.0f}s")
+
+    # W-03: scripts write state through their own StateManager. Without this sentinel the engine keeps its
+    # in-memory copy and overwrites the change on its next flush. Touch it after every run, including failed
+    # ones, since a script can write partway before it fails.
+    Path(CONFIG.get("state_path", "state/ids_state.json")).parent.joinpath(".ipc_sync_signal").touch()
 
     return {
         "name": name,

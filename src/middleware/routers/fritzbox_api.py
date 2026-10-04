@@ -189,7 +189,7 @@ def _ipc_release_logic(target: str):
         state_path = CONFIG.get("state_path", "state/ids_state.json")
         sm = StateManager(state_path=state_path)
         sm.load_from_disk()
-        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         
         if target.lower() in ("all", "--all"):
             count = ips.release_all_devices()
@@ -223,7 +223,7 @@ def _ipc_block_logic(target: str):
         sm = StateManager(state_path=state_path)
         sm.load_from_disk()
         
-        ips = IPSMitigator(config=CONFIG, state_manager=sm)
+        ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         
         dev_id = target
         for id_str in sm.get_all_device_ids():

@@ -36,6 +36,7 @@ from middleware.config_schema import CONFIG_SCHEMA, is_restart_required
 from argus.config.trust_anchors import load_trust_anchors
 
 from config import CONFIG_FILE
+from core.file_lock import exclusive_file_lock
 from utils import rotate_jsonl_if_oversized
 
 router = APIRouter()
@@ -112,7 +113,7 @@ def _set_override(key: str, value: Any, set_by: str, reason: Optional[str]) -> d
     already present -- this file may hold entries from train_fp_classifier.py's own
     autotune pass too), apply it live immediately, and audit-log it. Returns the entry
     written."""
-    with _OVERRIDES_LOCK:
+    with _OVERRIDES_LOCK, exclusive_file_lock(_OVERRIDES_PATH):
         data = _read_overrides()
         existing = data.get(key)
         baseline = existing["baseline"] if isinstance(existing, dict) and "baseline" in existing else CONFIG.get(key)
@@ -128,7 +129,7 @@ def _delete_override(key: str, set_by: str) -> bool:
     """Removes key's override entry (if any) and pushes CONFIG back to its config.yaml
     baseline immediately via the new LiveConfig.revert_override(). Returns whether an
     override actually existed to remove."""
-    with _OVERRIDES_LOCK:
+    with _OVERRIDES_LOCK, exclusive_file_lock(_OVERRIDES_PATH):
         data = _read_overrides()
         entry = data.pop(key, None)
         if entry is not None:

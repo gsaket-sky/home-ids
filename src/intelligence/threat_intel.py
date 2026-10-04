@@ -163,6 +163,7 @@ class ThreatIntel:
         self.abusech_auth_key = (abusech_auth_key or "").strip()
         self.local_popularity = None
         self.trust_cache_provider = None  # the CL-AFPE engine, bound by the pipeline at boot (get_dynamic_trust_cache())
+        self._trust_cache_error_logged_at = 0.0  # rate-limits the is_allowlisted() cache-read error log
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
         self._load_cache()
@@ -222,8 +223,12 @@ class ThreatIntel:
                         LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", base_dom)
                         return True
                 except Exception as e:
-                    LOGGER.error("Error reading dynamic trust cache for %s: %s", domain, e)
-                    return False
+                    # Every static check above has already run and not matched, so this read failing cannot
+                    # turn a static-list domain into a non-match. Log once a minute, not once per domain.
+                    now = time.monotonic()
+                    if now - self._trust_cache_error_logged_at >= 60.0:
+                        self._trust_cache_error_logged_at = now
+                        LOGGER.error("Error reading dynamic trust cache (last domain %s): %s", domain, e)
                     
             return False
         except Exception as exc:

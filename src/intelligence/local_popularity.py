@@ -22,6 +22,7 @@ Storage: SQLite (owner requirement: no JSON state files), capped at MAX_ROWS nam
 (observe) only touches an in-memory dict; a flush every FLUSH_SECONDS merges into the database and rebuilds the
 lookup snapshot (rank dict + established set) that readers use without locking the database.
 """
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -37,6 +38,16 @@ MAX_DEVICES_TRACKED = 16       # per name; beyond this the exact count no longer
 DAY_WINDOW = 60                # only days within this window count
 MAX_ROWS = 200_000
 FLUSH_SECONDS = 300.0
+
+# Novelty (is_preexisting): a name counts as already in use on this network once it was asked for on at least
+# NOVELTY_MIN_DAYS distinct days. Until the network itself has HISTORY_WARMUP_ACTIVE_DAYS distinct days of observed
+# queries, nothing can be called new (a fresh install, or a unit that ran one afternoon a month ago, has no "before"),
+# so novelty-gated detectors stay silent instead of treating every name as new. Both are counts of days with activity,
+# never calendar spans.
+NOVELTY_MIN_DAYS = 3
+HISTORY_WARMUP_ACTIVE_DAYS = 3
+_HISTORY_CACHE_TTL = 300.0
+_HISTORY_CACHE_MAX = 5000
 
 
 def _day(ts: float) -> int:
@@ -54,6 +65,8 @@ class LocalPopularity:
         self._established: Set[str] = set()
         self._last_flush = self._now()
         self._etld_memo: Dict[str, str] = {}
+        self._history_cache: Dict[str, tuple] = {}   # name -> (first_seen or None, n_days, cached_at)
+        self._active_days = 0                         # distinct days with any observed query, from the snapshot
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, devices TEXT NOT NULL, "
@@ -133,6 +146,69 @@ class LocalPopularity:
     def established_count(self) -> int:
         return len(self._established)
 
+    # --- novelty (W-04 producers) -----------------------------------------------------------------------------------
+
+    def _base_of(self, name: str) -> str:
+        base = self._etld_memo.get(name)
+        if base is None:
+            try:
+                base = self._etld1(name) or name
+            except Exception:
+                base = name
+        return base
+
+    @property
+    def active_days(self) -> int:
+        """Distinct days (within DAY_WINDOW) on which this network had any learned query. Rebuilt with the snapshot."""
+        return self._active_days
+
+    def _name_history(self, name: str) -> tuple:
+        """(first_seen or None, distinct days) from the database, cached. A name only in the unflushed buffer (first
+        seen within the last flush interval) reads as unknown, i.e. new -- which is what it is."""
+        now = self._now()
+        with self._lock:
+            hit = self._history_cache.get(name)
+        if hit is not None and now - hit[2] < _HISTORY_CACHE_TTL:
+            return hit[0], hit[1]
+        first_seen, n_days = None, 0
+        try:
+            with contextlib.closing(sqlite3.connect(str(self.db_path), timeout=5)) as db:
+                row = db.execute("SELECT first_seen, days FROM names WHERE name=?", (name,)).fetchone()
+            if row:
+                first_seen = float(row[0])
+                n_days = len([d for d in (row[1] or "").split(",") if d])
+        except sqlite3.Error as exc:
+            LOGGER.debug("local popularity: history of %s unavailable: %s", name, exc)
+            raise
+        with self._lock:
+            if len(self._history_cache) >= _HISTORY_CACHE_MAX:
+                self._history_cache.clear()
+            self._history_cache[name] = (first_seen, n_days, now)
+        return first_seen, n_days
+
+    def is_preexisting(self, domain: str) -> Optional[bool]:
+        """Whether `domain` -- the exact name or its registrable domain -- was already in use on this network: an
+        established name, or one asked for on >= NOVELTY_MIN_DAYS distinct days.
+
+        True: in use here before, so a novelty-gated detector must not act on it. False: new on this network.
+        None: cannot tell (fewer than HISTORY_WARMUP_ACTIVE_DAYS days of observed history, or the database is
+        unreadable). Callers treat None exactly like True, so missing or thin history never produces evidence."""
+        if not domain:
+            return None
+        if self._active_days < HISTORY_WARMUP_ACTIVE_DAYS:
+            return None
+        name = domain.lower().strip(".")
+        try:
+            for n in dict.fromkeys((name, self._base_of(name))):
+                if n in self._established:
+                    return True
+                _first_seen, n_days = self._name_history(n)
+                if n_days >= NOVELTY_MIN_DAYS:
+                    return True
+        except sqlite3.Error:
+            return None
+        return False
+
     # --- persistence ------------------------------------------------------------------------------------------------
 
     def flush(self) -> None:
@@ -181,11 +257,14 @@ class LocalPopularity:
         oldest_day = _day(self._now()) - DAY_WINDOW
         scored = []
         established = set()
+        all_days = set()
         try:
             with self._connect() as db:
                 for name, devs, days in db.execute("SELECT name, devices, days FROM names"):
                     n_dev = len([d for d in devs.split(",") if d])
-                    n_days = len([d for d in days.split(",") if d and int(d) >= oldest_day])
+                    name_days = {int(d) for d in days.split(",") if d and int(d) >= oldest_day}
+                    n_days = len(name_days)
+                    all_days |= name_days
                     if n_dev >= MIN_DEVICES and n_days >= MIN_DAYS:
                         established.add(name)
                     scored.append((n_dev, n_days, name))
@@ -195,3 +274,4 @@ class LocalPopularity:
         scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
         self._rank = {name: i + 1 for i, (_, _, name) in enumerate(scored)}
         self._established = established
+        self._active_days = len(all_days)

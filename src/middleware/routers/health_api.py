@@ -51,7 +51,9 @@ def get_health_status(token: str = Depends(verify_token)) -> dict:
     state_dir = _state_dir()
     from core.runtime_paths import runtime_dir
     snapshot = _read_json(runtime_dir(state_dir) / "health_manager_snapshot.json")
-    component_heartbeats = _read_json(state_dir / "component_heartbeat.json")
+    # Heartbeats live in the RAM runtime dir (core/heartbeat.py writes there); reading state_dir
+    # directly always came back empty in Docker (W-05).
+    component_heartbeats = _read_json(runtime_dir(state_dir) / "component_heartbeat.json")
     job_health = _read_json(state_dir / "job_health.json")
     feed_health = _read_json(state_dir / "feed_health.json")
     return {

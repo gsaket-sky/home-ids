@@ -771,19 +771,19 @@ store.upsert_device("pb_canonical", timestamp=9_500_000.0)
 store.upsert_device("pb_unmerged_dev", timestamp=9_500_000.0)
 store._conn.execute(
     "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
-    "VALUES ('pb_orphan1', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+    "VALUES ('pb_orphan1', 'query_rate', 10, 'gaussian', 9500000.0)"
 )
 store._conn.execute(
     "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
-    "VALUES ('pb_orphan2', 'query_rate', 11, 'gaussian', 9_500_000.0)"
+    "VALUES ('pb_orphan2', 'query_rate', 11, 'gaussian', 9500000.0)"
 )
 store._conn.execute(
     "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
-    "VALUES ('pb_canonical', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+    "VALUES ('pb_canonical', 'query_rate', 10, 'gaussian', 9500000.0)"
 )
 store._conn.execute(
     "INSERT INTO device_baselines (device_id, metric, hour, model_kind, updated_at) "
-    "VALUES ('pb_unmerged_dev', 'query_rate', 10, 'gaussian', 9_500_000.0)"
+    "VALUES ('pb_unmerged_dev', 'query_rate', 10, 'gaussian', 9500000.0)"
 )
 store._maybe_commit()
 store.merge_device("pb_orphan1", "pb_canonical", timestamp=9_500_100.0)
