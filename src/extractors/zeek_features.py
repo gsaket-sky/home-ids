@@ -949,7 +949,7 @@ class ZeekFeatureExtractor:
         st[4] += delta * (gap - st[3])
         st[1] = ts
 
-    def _beacon_features(self, ips) -> dict:
+    def _beacon_features(self, ips, device_id=None) -> dict:
         """beacon_tdr / beacon_total for the most regular destination of this device that is NEW on this network.
 
         Regularity alone is not enough -- vendor-cloud polling from IoT devices is perfectly regular by design. A series
@@ -980,7 +980,7 @@ class ZeekFeatureExtractor:
             if not names or any(is_telemetry_domain(n) or _is_cdn_or_cloud_domain(n) for n in names):
                 continue
             try:
-                if all(self.popularity.is_preexisting(n) is False for n in names):
+                if all(self.popularity.is_preexisting(n, device_id=device_id) is False for n in names):
                     return {"beacon_tdr": tdr, "beacon_total": float(total),
                             "beacon_domain": names[0], "beacon_dest_ip": dst}
             except Exception:
@@ -1212,7 +1212,7 @@ class ZeekFeatureExtractor:
         except TypeError:
             return [device_ip] if device_ip else []
 
-    def get_features(self, device_ip) -> dict:
+    def get_features(self, device_ip, device_id=None) -> dict:
         ips = self._as_ip_list(device_ip)
         states, durations, rejected_ips = [], [], set()
         for ip in ips:
@@ -1265,7 +1265,7 @@ class ZeekFeatureExtractor:
             ),
             # W-04: beacon_tdr / beacon_total / beacon_domain, only for a regular series to a destination new on
             # this network (see _beacon_features). Absent otherwise, so the detector's branch stays quiet.
-            **self._beacon_features(ips),
+            **self._beacon_features(ips, device_id),
             **self._outbound_top_destination(ips),
             "zeek_doh_bypass": sum(len(self._doh_bypass_uids.get(ip, {})) for ip in ips),
             "zeek_lateral_moves": sum(len(self._lateral_moves.get(ip, [])) for ip in ips),

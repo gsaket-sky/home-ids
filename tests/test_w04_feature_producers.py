@@ -42,7 +42,7 @@ class _Pop:
     def __init__(self, known=(), unknown=()):
         self.known, self.unknown = set(known), set(unknown)
 
-    def is_preexisting(self, domain):
+    def is_preexisting(self, domain, device_id=None):
         if domain in self.unknown:
             return None
         return domain in self.known or any(domain.endswith("." + k) for k in self.known)
@@ -67,7 +67,8 @@ def _popularity(tmp_path, now, rows):
         for name, first_seen, days in rows:
             offsets = range(days) if isinstance(days, int) else days
             day_list = ",".join(str(int((now // DAY) - d)) for d in offsets)
-            db.execute("INSERT INTO names VALUES (?,?,?,?,?)", (name, "dev1", day_list, first_seen, now))
+            db.execute("INSERT INTO names (name, devices, days, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                       (name, "dev1", day_list, first_seen, now))
     pop._rebuild_snapshot()   # what the periodic flush does
     return pop
 
@@ -297,9 +298,9 @@ def test_young_device_gets_no_novelty_features():
 
 
 @pytest.mark.parametrize("days,hours,cleared", [
-    (3, 24, False),    # enough of both
-    (10, 12, True),    # many short sessions: not enough observed hours
-    (2, 48, True),     # two long days: not enough distinct days
+    (7, 24, False),    # enough of both
+    (14, 12, True),    # many short sessions: not enough observed hours
+    (6, 144, True),    # six long days: not a full week of distinct days
 ])
 def test_device_gate_needs_active_days_and_hours(days, hours, cleared):
     feats = {"dga_score": 0.9, "beacon_tdr": 0.9}
@@ -324,11 +325,11 @@ def test_activity_is_observed_time_not_calendar_time():
 
 def test_activity_of_an_always_on_device_opens_the_gate():
     fam = DeviceFamiliarity()
-    start = 1_800_000_000.0 - 3 * DAY
-    for h in range(3 * 24):
+    start = 1_800_000_000.0 - 7 * DAY
+    for h in range(7 * 24):
         _observe(fam, "nas", start + h * 3600)
     days, hours = fam.learned_activity("nas")
-    assert days >= 3 and hours >= 24
+    assert days >= 7 and hours >= 24
     assert apply_device_age_gate({"beacon_tdr": 0.9}, days, hours) is False
 
 

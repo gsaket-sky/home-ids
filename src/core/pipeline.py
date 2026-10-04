@@ -29,7 +29,7 @@ from core.state_guard import StateManager
 from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
-from extractors.dns_features import FeatureExtractor, PiHoleCollector, apply_device_age_gate
+from extractors.dns_features import FeatureExtractor, PiHoleCollector, apply_device_age_gate, in_learning_period
 from extractors.zeek_features import ZeekCollector, ZeekFeatureExtractor
 from extractors.fritzbox_capture import ReactiveCaptureDispatcher, cleanup_stale_scratch_files  # PHASE 21D
 from intelligence.hypotheses.evidence import EvidenceStore, Evidence
@@ -992,6 +992,11 @@ class EnginePipeline:
         self.local_intel = LocalConfirmedIntel(
             str(state_dir), ttl_seconds=float(self.config.get("local_confirmed_intel_ttl_seconds", 30 * 86400.0)))
         self.familiarity = DeviceFamiliarity(state_dir)
+        # Learning-adoption ledger: popularity records which devices first used a name during their own learning
+        # period, so a name only such devices ever used is not "normal" for a baselined device picking it up.
+        if self.local_popularity is not None:
+            self.local_popularity.learning_fn = \
+                lambda device_id: in_learning_period(*self.familiarity.learned_activity(device_id))
         argus_live_engine.configure_cl_afpe(
             model_dir=str(Path(self.config.get("model_path", "models/ids_model.pkl")).parent),
             local_intel=self.local_intel, familiarity=self.familiarity)
@@ -1537,7 +1542,7 @@ class EnginePipeline:
                 # since it needs live state (rolling window, EWMA baselines).
                 # PHASE 6: aggregate across every known address of this device, not just the
                 # single currently-active client_ip — see known_ips_snapshot comment above.
-                _zeek_features = {**self.zeek_fx.get_features(known_ips_snapshot), **self.zeek_fx.get_last_connection_meta(client_ip)}
+                _zeek_features = {**self.zeek_fx.get_features(known_ips_snapshot, device_id=dev_id), **self.zeek_fx.get_last_connection_meta(client_ip)}
 
                 # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
                 mitigation_pending = None

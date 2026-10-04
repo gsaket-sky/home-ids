@@ -268,19 +268,26 @@ _NXDOMAIN_REPLY = 2                   # FTL reply_type for NXDOMAIN (the status 
 # A device's own learning period: everything it does is "new on this network" (a camera added today polling its
 # vendor cloud), so novelty says nothing about it yet. Measured as activity actually observed
 # (DeviceFamiliarity.learned_activity), never calendar time: a device that was on for an hour a week ago is still at
-# the start of its learning period. Both bars must hold -- three short sessions on three days are not enough either.
+# the start of its learning period. Both bars must hold -- short sessions on many days are not enough either.
+# Seven active days so a weekly rhythm (weekend-only use) is part of what was learned, not "new" next weekend.
 # The pipeline applies this gate to every novelty-gated feature, from both extractors.
-NOVELTY_MIN_ACTIVE_DAYS = 3
+NOVELTY_MIN_ACTIVE_DAYS = 7
 NOVELTY_MIN_ACTIVE_HOURS = 24
 _NOVELTY_GATED_DEFAULTS = {"unique_subdomain_ratio": 0.0, "unique_subdomain_ratio_domain": "",
                            "dga_score": 0.0, "dga_score_examples": []}
 _NOVELTY_GATED_OPTIONAL = ("beacon_tdr", "beacon_total", "beacon_domain", "beacon_dest_ip")
 
 
+def in_learning_period(active_days: int, active_hours: int) -> bool:
+    """True until a device has NOVELTY_MIN_ACTIVE_DAYS active days AND NOVELTY_MIN_ACTIVE_HOURS active hours of
+    learned behaviour (DeviceFamiliarity.learned_activity). One definition for every consumer."""
+    return not (active_days >= NOVELTY_MIN_ACTIVE_DAYS and active_hours >= NOVELTY_MIN_ACTIVE_HOURS)
+
+
 def apply_device_age_gate(features: dict, active_days: int, active_hours: int) -> bool:
-    """Clears the novelty-gated W-04 features until the device has NOVELTY_MIN_ACTIVE_DAYS active days AND
-    NOVELTY_MIN_ACTIVE_HOURS active hours of learned behaviour. Returns True when it cleared them."""
-    if active_days >= NOVELTY_MIN_ACTIVE_DAYS and active_hours >= NOVELTY_MIN_ACTIVE_HOURS:
+    """Clears the novelty-gated W-04 features while the device is in its learning period (in_learning_period).
+    Returns True when it cleared them."""
+    if not in_learning_period(active_days, active_hours):
         return False
     features.update({k: (list(v) if isinstance(v, list) else v) for k, v in _NOVELTY_GATED_DEFAULTS.items()})
     for key in _NOVELTY_GATED_OPTIONAL:
@@ -293,31 +300,32 @@ class FeatureExtractor:
     # producers stay silent.
     popularity = None
 
-    def _novel(self, domain: str) -> bool:
-        """True only when the popularity source positively says `domain` is new on this network."""
+    def _novel(self, domain: str, device_id=None) -> bool:
+        """True only when the popularity source positively says `domain` is new on this network (or, for an
+        out-of-learning `device_id`, a name only learning-period devices had used -- see is_preexisting())."""
         pop = self.popularity
         if pop is None or not domain:
             return False
         try:
-            return pop.is_preexisting(domain) is False
+            return pop.is_preexisting(domain, device_id=device_id) is False
         except Exception:
             return False
 
-    def _unique_subdomain_ratio(self, rw, fanout_by_base, parent: str, label_entropy: float):
+    def _unique_subdomain_ratio(self, rw, fanout_by_base, parent: str, label_entropy: float, device_id=None):
         """Share of queries under the busiest non-CDN parent that went to a never-repeated subdomain. ~1.0 is the
         tunneling shape (every encoded chunk asked once). Produced only for a large, high-entropy fanout under a
         parent that is new on this network; otherwise (0.0, "")."""
         if not parent or label_entropy < UNIQUE_RATIO_MIN_LABEL_ENTROPY:
             return 0.0, ""
         children = fanout_by_base.get(parent) or ()
-        if len(children) < UNIQUE_RATIO_MIN_CHILDREN or not self._novel(parent):
+        if len(children) < UNIQUE_RATIO_MIN_CHILDREN or not self._novel(parent, device_id):
             return 0.0, ""
         total = sum(rw.domains.get(c, 0) for c in children)
         if total <= 0:
             return 0.0, ""
         return min(1.0, len(children) / total), parent
 
-    def _dga_score(self, nx_names):
+    def _dga_score(self, nx_names, device_id=None):
         """Share of the last hour's NXDOMAIN names that look algorithmic and are new on this network. Real DGA malware
         mostly hits unregistered names, hence NXDOMAIN. Single-label names (browser intranet probes), local and
         CDN/telemetry names, and anything already used here (a local search suffix, a typo of a known site) are left
@@ -332,7 +340,7 @@ class FeatureExtractor:
         if len(algorithmic) < DGA_MIN_NOVEL_ALGORITHMIC:
             return 0.0, []
         # Novelty last and bounded: it is the only gate that reads the database.
-        novel = [n for n in sorted(algorithmic)[:64] if self._novel(n)]
+        novel = [n for n in sorted(algorithmic)[:64] if self._novel(n, device_id)]
         if len(novel) < DGA_MIN_NOVEL_ALGORITHMIC:
             return 0.0, []
         return min(1.0, len(novel) / len(candidates)), novel[:3]
@@ -617,8 +625,8 @@ class FeatureExtractor:
         # W-04: read by detectors/dns_behavior.py (dns_unique_ratio) and threat_signals.py (dns_dga_burst classifier
         # branch) but never produced before. Novelty-gated, see the producer docstrings.
         unique_subdomain_ratio, unique_subdomain_ratio_domain = self._unique_subdomain_ratio(
-            rw, fanout_by_base, subdomain_fanout_domain, fanout_label_entropy)
-        dga_score, dga_score_examples = self._dga_score(nx_names_1h)
+            rw, fanout_by_base, subdomain_fanout_domain, fanout_label_entropy, getattr(state, "device_id", None))
+        dga_score, dga_score_examples = self._dga_score(nx_names_1h, getattr(state, "device_id", None))
 
         nxdomain_tld_conc = 0.0
         nx_events = [ev[1] for ev in rw.events if ev[2] in NXDOMAIN]

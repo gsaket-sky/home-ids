@@ -28,7 +28,7 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Callable, Dict, Optional, Set
 
 LOGGER = logging.getLogger("home_ids.local_popularity")
 
@@ -45,9 +45,10 @@ FLUSH_SECONDS = 300.0
 # so novelty-gated detectors stay silent instead of treating every name as new. Both are counts of days with activity,
 # never calendar spans.
 NOVELTY_MIN_DAYS = 3
-HISTORY_WARMUP_ACTIVE_DAYS = 3
+HISTORY_WARMUP_ACTIVE_DAYS = 7    # a full weekly rhythm of network history before anything can be called new
 _HISTORY_CACHE_TTL = 300.0
 _HISTORY_CACHE_MAX = 5000
+_LEARNING_MEMO_TTL = 60.0     # observe() is per query; a device's learning status is re-read at most once a minute
 
 
 def _day(ts: float) -> int:
@@ -55,24 +56,52 @@ def _day(ts: float) -> int:
 
 
 class LocalPopularity:
-    def __init__(self, db_path, etld1_fn=None, now_fn=time.time):
+    def __init__(self, db_path, etld1_fn=None, now_fn=time.time, learning_fn: Optional[Callable[[str], bool]] = None):
+        """`learning_fn(device_id)` -> True while that device is still in its own learning period (set by the
+        pipeline from DeviceFamiliarity). None: every device counts as out of learning, the behaviour before the
+        learning-adoption ledger existed."""
         self.db_path = Path(db_path)
         self._etld1 = etld1_fn or (lambda d: d)
         self._now = now_fn
+        self.learning_fn = learning_fn
         self._lock = threading.Lock()
-        self._pending: Dict[str, list] = {}        # name -> [set(device), set(day), last_seen]
+        # name -> [set(device), set(day), last_seen, set(device first seen using it during its learning period)]
+        self._pending: Dict[str, list] = {}
         self._rank: Dict[str, int] = {}
         self._established: Set[str] = set()
         self._last_flush = self._now()
         self._etld_memo: Dict[str, str] = {}
-        self._history_cache: Dict[str, tuple] = {}   # name -> (first_seen or None, n_days, cached_at)
+        self._history_cache: Dict[str, tuple] = {}   # name -> (first_seen, n_days, devices, learning, cached_at)
+        self._learning_memo: Dict[str, tuple] = {}   # device -> (in learning period, checked_at)
         self._active_days = 0                         # distinct days with any observed query, from the snapshot
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS names (name TEXT PRIMARY KEY, devices TEXT NOT NULL, "
-                       "days TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL)")
+                       "days TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL, "
+                       "learning TEXT NOT NULL DEFAULT '')")
             db.execute("CREATE INDEX IF NOT EXISTS names_last_seen ON names(last_seen)")
+            # Databases from before the learning-adoption ledger: add the column. Their existing devices read as
+            # adopted outside a learning period (unknowable after the fact), i.e. exactly the old behaviour.
+            if "learning" not in {r[1] for r in db.execute("PRAGMA table_info(names)")}:
+                db.execute("ALTER TABLE names ADD COLUMN learning TEXT NOT NULL DEFAULT ''")
         self._rebuild_snapshot()
+
+    def _device_in_learning(self, device_id: str) -> bool:
+        fn = self.learning_fn
+        if fn is None or not device_id:
+            return False
+        now = self._now()
+        hit = self._learning_memo.get(device_id)
+        if hit is not None and now - hit[1] < _LEARNING_MEMO_TTL:
+            return hit[0]
+        try:
+            learning = bool(fn(device_id))
+        except Exception:
+            learning = False
+        if len(self._learning_memo) > 10_000:
+            self._learning_memo.clear()
+        self._learning_memo[device_id] = (learning, now)
+        return learning
 
     def _connect(self):
         db = sqlite3.connect(str(self.db_path), timeout=10)
@@ -99,13 +128,16 @@ class LocalPopularity:
                 self._etld_memo.clear()
             self._etld_memo[name] = base
         day = _day(ts)
+        learning = self._device_in_learning(device_id)
         with self._lock:
             for n in ((name,) if base == name else (name, base)):
                 e = self._pending.get(n)
                 if e is None:
-                    e = self._pending[n] = [set(), set(), ts]
+                    e = self._pending[n] = [set(), set(), ts, set()]
                 if len(e[0]) < MAX_DEVICES_TRACKED:
                     e[0].add(device_id)
+                    if learning:
+                        e[3].add(device_id)
                 e[1].add(day)
                 if ts > e[2]:
                     e[2] = ts
@@ -163,36 +195,59 @@ class LocalPopularity:
         return self._active_days
 
     def _name_history(self, name: str) -> tuple:
-        """(first_seen or None, distinct days) from the database, cached. A name only in the unflushed buffer (first
-        seen within the last flush interval) reads as unknown, i.e. new -- which is what it is."""
+        """(first_seen or None, distinct days, devices, devices that adopted it during their learning period) from
+        the database, cached. A name only in the unflushed buffer (first seen within the last flush interval) reads
+        as unknown, i.e. new -- which is what it is."""
         now = self._now()
         with self._lock:
             hit = self._history_cache.get(name)
-        if hit is not None and now - hit[2] < _HISTORY_CACHE_TTL:
-            return hit[0], hit[1]
-        first_seen, n_days = None, 0
+        if hit is not None and now - hit[4] < _HISTORY_CACHE_TTL:
+            return hit[:4]
+        first_seen, n_days, devices, learning = None, 0, frozenset(), frozenset()
         try:
             with contextlib.closing(sqlite3.connect(str(self.db_path), timeout=5)) as db:
-                row = db.execute("SELECT first_seen, days FROM names WHERE name=?", (name,)).fetchone()
+                row = db.execute("SELECT first_seen, days, devices, learning FROM names WHERE name=?",
+                                 (name,)).fetchone()
             if row:
                 first_seen = float(row[0])
                 n_days = len([d for d in (row[1] or "").split(",") if d])
+                devices = frozenset(filter(None, (row[2] or "").split(",")))
+                learning = frozenset(filter(None, (row[3] or "").split(",")))
         except sqlite3.Error as exc:
             LOGGER.debug("local popularity: history of %s unavailable: %s", name, exc)
             raise
         with self._lock:
             if len(self._history_cache) >= _HISTORY_CACHE_MAX:
                 self._history_cache.clear()
-            self._history_cache[name] = (first_seen, n_days, now)
-        return first_seen, n_days
+            self._history_cache[name] = (first_seen, n_days, devices, learning, now)
+        return first_seen, n_days, devices, learning
 
-    def is_preexisting(self, domain: str) -> Optional[bool]:
+    def _unproven_for(self, device_id: Optional[str], devices: frozenset, learning: frozenset) -> bool:
+        """True when `device_id`, out of its own learning period, is picking up a name that only devices still in
+        their learning period had used (so nobody's baselined behaviour ever vouched for it). Spread from an
+        already-infected device -- or from the devices present when the system was first switched on -- to a device
+        whose normal behaviour is known. A device's own learning-period names stay its own: from local history
+        alone, a camera infected since day one cannot be told from a clean camera polling its vendor since day one,
+        so those never count against the device that brought them."""
+        if not device_id:
+            return False
+        others = devices - {device_id}
+        if not others or not others <= learning:
+            return False          # only this device's own history, or an independent baselined device vouches
+        if device_id in learning or self._device_in_learning(device_id):
+            return False          # this device's own learning period
+        return True
+
+    def is_preexisting(self, domain: str, device_id: Optional[str] = None) -> Optional[bool]:
         """Whether `domain` -- the exact name or its registrable domain -- was already in use on this network: an
-        established name, or one asked for on >= NOVELTY_MIN_DAYS distinct days.
+        established name, or one asked for on >= NOVELTY_MIN_DAYS distinct days. With `device_id`, a name that only
+        learning-period devices ever used does not count as in use for an out-of-learning device picking it up
+        (see _unproven_for) -- until it becomes established.
 
-        True: in use here before, so a novelty-gated detector must not act on it. False: new on this network.
-        None: cannot tell (fewer than HISTORY_WARMUP_ACTIVE_DAYS days of observed history, or the database is
-        unreadable). Callers treat None exactly like True, so missing or thin history never produces evidence."""
+        True: in use here before, so a novelty-gated detector must not act on it. False: new on this network (or,
+        for `device_id`, unproven). None: cannot tell (fewer than HISTORY_WARMUP_ACTIVE_DAYS days of observed
+        history, or the database is unreadable). Callers treat None exactly like True, so missing or thin history
+        never produces evidence."""
         if not domain:
             return None
         if self._active_days < HISTORY_WARMUP_ACTIVE_DAYS:
@@ -202,8 +257,8 @@ class LocalPopularity:
             for n in dict.fromkeys((name, self._base_of(name))):
                 if n in self._established:
                     return True
-                _first_seen, n_days = self._name_history(n)
-                if n_days >= NOVELTY_MIN_DAYS:
+                _first_seen, n_days, devices, learning = self._name_history(n)
+                if n_days >= NOVELTY_MIN_DAYS and not self._unproven_for(device_id, devices, learning):
                     return True
         except sqlite3.Error:
             return None
@@ -222,10 +277,11 @@ class LocalPopularity:
                 LOGGER.warning("local popularity: flush failed (%s); %d names kept for the next try", exc, len(pending))
                 with self._lock:
                     for n, e in pending.items():
-                        cur = self._pending.setdefault(n, [set(), set(), e[2]])
+                        cur = self._pending.setdefault(n, [set(), set(), e[2], set()])
                         cur[0] |= e[0]
                         cur[1] |= e[1]
                         cur[2] = max(cur[2], e[2])
+                        cur[3] |= e[3]
                 return
         self._rebuild_snapshot()
 
@@ -233,20 +289,27 @@ class LocalPopularity:
         now = self._now()
         oldest_day = _day(now) - DAY_WINDOW
         with self._connect() as db:
-            for name, (devices, days, last_seen) in pending.items():
-                row = db.execute("SELECT devices, days, first_seen, last_seen FROM names WHERE name=?", (name,)).fetchone()
+            for name, (devices, days, last_seen, learning_new) in pending.items():
+                row = db.execute("SELECT devices, days, first_seen, last_seen, learning FROM names WHERE name=?",
+                                 (name,)).fetchone()
                 if row:
                     devs = set(filter(None, row[0].split(",")))
                     ds = {int(x) for x in row[1].split(",") if x}
                     first, last = row[2], max(row[3], last_seen)
+                    learn = set(filter(None, (row[4] or "").split(",")))
                 else:
-                    devs, ds, first, last = set(), set(), last_seen, last_seen
+                    devs, ds, first, last, learn = set(), set(), last_seen, last_seen, set()
+                # A device's adoption status is fixed at its FIRST use: only devices new to this name can be added.
+                learn |= learning_new - devs
                 devs |= devices
                 if len(devs) > MAX_DEVICES_TRACKED:
                     devs = set(sorted(devs)[:MAX_DEVICES_TRACKED])
+                learn &= devs
                 ds = {d for d in (ds | days) if d >= oldest_day}
-                db.execute("INSERT OR REPLACE INTO names VALUES (?,?,?,?,?)",
-                           (name, ",".join(sorted(devs)), ",".join(str(d) for d in sorted(ds)), first, last))
+                db.execute("INSERT OR REPLACE INTO names (name, devices, days, first_seen, last_seen, learning) "
+                           "VALUES (?,?,?,?,?,?)",
+                           (name, ",".join(sorted(devs)), ",".join(str(d) for d in sorted(ds)), first, last,
+                            ",".join(sorted(learn))))
             n = db.execute("SELECT COUNT(*) FROM names").fetchone()[0]
             if n > MAX_ROWS:
                 db.execute("DELETE FROM names WHERE name IN (SELECT name FROM names ORDER BY last_seen ASC LIMIT ?)",
