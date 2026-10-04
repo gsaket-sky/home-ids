@@ -21,8 +21,8 @@ from typing import Optional, List, Dict, Set, Any, Tuple
 
 from utils import sanitize_hostname, infer_device_type, get_mac_vendor
 
-# Pi-hole query statuses that mean "blocked" (same set as extractors/dns_features.py's BLOCKED).
-_PIHOLE_BLOCKED_STATUSES = frozenset({1, 4, 5, 6, 7, 8, 10})
+# Pi-hole query statuses that mean "blocked" (the one shared definition).
+from extractors.pihole_codes import BLOCKED_STATUSES as _PIHOLE_BLOCKED_STATUSES
 from core.state_guard import StateManager
 from core.device_matching import AUTO_MERGE_CONFIDENCE
 from core.device_labels import get_label as get_confirmed_device_label

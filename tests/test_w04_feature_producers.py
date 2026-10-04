@@ -159,11 +159,13 @@ def test_unique_ratio_silent_for_readable_subdomains():
 
 # --------------------------------------------------------------------------- dga_score
 
-def _nx_state(names, reply_type=2):
+def _nx_state(names, reply_type=2, ftl_status=2):
+    # Events carry the status PiHoleCollector classified (extractors/pihole_codes.classify_status), as in the pipeline.
+    from extractors.pihole_codes import classify_status
     state = DeviceState(device_id="d1", client_ip="192.168.1.50", hostname="h")
     now = time.time()
     for n in names:
-        state.rolling.long_events.append((now - 60, n, 3, reply_type))
+        state.rolling.long_events.append((now - 60, n, classify_status(ftl_status, reply_type), reply_type))
     return state, now
 
 
@@ -190,6 +192,10 @@ def test_dga_score_silent_when_names_already_used_here():
 def test_dga_score_ignores_answered_queries_and_single_labels():
     answered, _ = _nx_state([_algorithmic(i) for i in range(12)], reply_type=4)     # answered, not NXDOMAIN
     assert _extractor(_Pop()).compute(answered, time.time(), 300)["dga_score"] == 0.0
+    cached, _ = _nx_state([_algorithmic(i) for i in range(12)], reply_type=4, ftl_status=3)  # cache hits (FTL 3)
+    assert _extractor(_Pop()).compute(cached, time.time(), 300)["dga_score"] == 0.0
+    blocked, _ = _nx_state([_algorithmic(i) for i in range(12)], ftl_status=1)  # blocked, block replied NXDOMAIN
+    assert _extractor(_Pop()).compute(blocked, time.time(), 300)["dga_score"] == 0.0
     probes, now = _nx_state([_CONSONANTS[i:] + _CONSONANTS[:i] for i in range(12)])  # intranet probes, no dot
     assert _extractor(_Pop()).compute(probes, now, 300)["dga_score"] == 0.0
 

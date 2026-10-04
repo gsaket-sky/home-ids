@@ -151,9 +151,8 @@ _INFRA_NOISY_TYPES = {"dns_dga_burst", "dns_tunnel_v2", "zeek_beaconing", "zeek_
 
 LOGGER = logging.getLogger("home_ids.pipeline")
 
-# Real DNS status classifications aligned with dns_features.py
-BLOCKED_STATUSES = {1, 4, 5, 6, 7, 8, 10}
-NXDOMAIN_STATUSES = {3, 12, 13}
+# DNS status classification: the one shared definition (rows arrive already classified by PiHoleCollector).
+from extractors.pihole_codes import BLOCKED_STATUSES, NXDOMAIN_STATUSES  # noqa: E402
 
 
 # Reviewer suggestion, implemented: URI substrings characteristic of local media/UPnP

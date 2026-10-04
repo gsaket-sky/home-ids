@@ -24,6 +24,7 @@ from typing import Optional, Any
 import time
 from config import CONFIG
 from intelligence.iforest_fast import compile_model
+from extractors.pihole_codes import DNS_RATIO_SCHEME
 from metrics import (
     ml_warmup_completions_total,
     ml_retrain_events_total,
@@ -56,6 +57,20 @@ _RETRAIN_N = 500       # retrain every 500 new samples (~17 min) for faster adap
 
 
 REJECT_THREAT_WINDOW_SECONDS = 120.0  # ~1 pipeline cycle worth of "don't learn from this" guard
+
+# Every fitted model records how nxdomain_ratio/blocked_ratio were measured when it learned them; load_models()
+# drops a model learned under another scheme (extractors/pihole_codes.DNS_RATIO_SCHEME). Models saved before the stamp
+# existed count as scheme 1.
+_SCHEME_ATTR = "ids_dns_ratio_scheme"
+
+
+def _stamp(model):
+    setattr(model, _SCHEME_ATTR, DNS_RATIO_SCHEME)
+    return model
+
+
+def _model_scheme(model) -> int:
+    return getattr(model, _SCHEME_ATTR, 1)
 
 
 class _FastScorer:
@@ -188,7 +203,7 @@ class DeviceMLEngine:
                 return
             start_t = time.time()
             X_raw = np.array(snapshot, dtype=np.float32)
-            new_model = IsolationForest(contamination=0.01, random_state=42)
+            new_model = _stamp(IsolationForest(contamination=0.01, random_state=42))
             new_model.fit(X_raw)
             elapsed = time.time() - start_t
             # Atomic model swap
@@ -318,7 +333,7 @@ class GlobalMLEngine:
         try:
             start_t = time.time()
             X_raw = np.array(snapshot, dtype=np.float32)
-            new_model = IsolationForest(contamination=0.01, random_state=42)
+            new_model = _stamp(IsolationForest(contamination=0.01, random_state=42))
             new_model.fit(X_raw)
             elapsed = time.time() - start_t
             with self._fit_lock:
@@ -616,7 +631,12 @@ class MultiDeviceMLEngine:
             try:
                 loaded = joblib.load(self.global_model_path)
                 target_model = loaded[0] if isinstance(loaded, tuple) else loaded
-                if self._verify_model_shape(target_model, expected_features=11):
+                if _model_scheme(target_model) != DNS_RATIO_SCHEME:
+                    LOGGER.warning("Global ML model learned under DNS ratio scheme %s, now %s: discarding; it re-learns "
+                                   "(scores 0 until warm).", _model_scheme(target_model), DNS_RATIO_SCHEME)
+                    ml_model_invalidations_total.labels(device="global").inc()
+                    self.global_model_path.unlink()
+                elif self._verify_model_shape(target_model, expected_features=11):
                     self.global_engine.model = target_model
                     self.global_engine.warmed_up = True
                     self._persisted[self.global_model_path] = target_model
@@ -640,6 +660,14 @@ class MultiDeviceMLEngine:
                 discarded += 1
                 continue
             target_model = loaded[0] if isinstance(loaded, tuple) else loaded
+            if _model_scheme(target_model) != DNS_RATIO_SCHEME:
+                LOGGER.warning("Device ML model for %s learned under DNS ratio scheme %s, now %s: discarding; the "
+                               "device re-learns (global model meanwhile).", dev_id, _model_scheme(target_model),
+                               DNS_RATIO_SCHEME)
+                ml_model_invalidations_total.labels(device=dev_id).inc()
+                dev_path.unlink()
+                discarded += 1
+                continue
             engine = self._get_or_create_device(dev_id)
             if self._verify_model_shape(target_model, expected_features=11):
                 engine.model = target_model
@@ -650,7 +678,7 @@ class MultiDeviceMLEngine:
                 LOGGER.warning("Legacy device ML model for %s found with incompatible feature shape. Discarding.", dev_id)
                 dev_path.unlink()
 
-        LOGGER.info("Loaded %d compatible 11-feature Device ML models from disk (%d unreadable file(s) removed).",
+        LOGGER.info("Loaded %d compatible 11-feature Device ML models from disk (%d unreadable or outdated file(s) removed).",
                     loaded_devs, discarded)
 
 

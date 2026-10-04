@@ -12,8 +12,9 @@ RECENT FIXES:
 - FIXED (EXCEPTION TRAP): Replaced the `reply_type` try/except block with a `PRAGMA table_info` schema 
   validation during `_connect()`. Prevents the 2-second polling loop from continuously triggering and 
   swallowing `sqlite3.OperationalError` exceptions on older FTL databases.
-- FIXED (UNBOUND NXDOMAIN BLINDSPOT): Intelligently overrides `status=2` to `3` (NXDOMAIN) if an 
-  external recursive resolver returned an NXDOMAIN (`reply_type=2`).
+- FIXED (2026-10-05, NXDOMAIN CLASSIFICATION): a row is NXDOMAIN when its `reply_type` is 2, never by status --
+  FTL status 3 is "answered from cache" and 12/13 are retries, which used to count as NXDOMAIN. Blocked statuses
+  follow Pi-hole's documented set. One classification for every consumer: extractors/pihole_codes.py.
 """
 import logging
 import sqlite3
@@ -25,11 +26,12 @@ from pathlib import Path
 from utils import entropy, suspicious_dga, is_telemetry_domain, _is_cdn_or_cloud_domain, etld1
 from config import CONFIG
 from core.heartbeat import write_component_heartbeat
+from extractors.pihole_codes import BLOCKED_STATUSES, NXDOMAIN_STATUSES, classify_status
 
 LOGGER = logging.getLogger("home_ids.dns_features")
 
-BLOCKED  = frozenset({1, 4, 5, 6, 7, 8, 10})
-NXDOMAIN = frozenset({3, 12, 13})
+BLOCKED  = BLOCKED_STATUSES
+NXDOMAIN = NXDOMAIN_STATUSES
 
 _DEFAULT_DECAY_FACTOR = 0.995
 
@@ -236,18 +238,15 @@ class PiHoleCollector:
             if any(pat in hostname.lower() for pat in excl_pats):
                 continue
                 
-            status = r[4]
             reply_type = r[5] if self._has_reply_type else 0
-            
-            if reply_type == 2:
-                status = 3
-                
+
             results.append({
                 "timestamp": r[1],
                 "domain": r[2],
                 "client_ip": client_ip,
                 "hostname": hostname,
-                "status": status,
+                "status": classify_status(r[4], reply_type),
+                "ftl_status": r[4],
                 "reply_type": reply_type
             })
             
@@ -263,7 +262,6 @@ UNIQUE_RATIO_MIN_CHILDREN = 20        # distinct subdomains under one parent, in
 UNIQUE_RATIO_MIN_LABEL_ENTROPY = 3.5  # mean first-label entropy: encoded chunks, not customer1/customer2 names
 DGA_MIN_NX_CANDIDATES = 10            # distinct NXDOMAIN names in the last hour before a score is computed
 DGA_MIN_NOVEL_ALGORITHMIC = 8         # of which at least this many look algorithmic AND are new here
-_NXDOMAIN_REPLY = 2                   # FTL reply_type for NXDOMAIN (the status column cannot tell it apart)
 
 # A device's own learning period: everything it does is "new on this network" (a camera added today polling its
 # vendor cloud), so novelty says nothing about it yet. Measured as activity actually observed
@@ -554,7 +552,7 @@ class FeatureExtractor:
         for ev in rw.long_events:
             if len(ev) >= 4 and ev[3] in _TXT_NULL_QTYPES:
                 txt_null_count += 1
-            if len(ev) >= 4 and ev[3] == _NXDOMAIN_REPLY:
+            if ev[2] in NXDOMAIN:   # blocked queries are never NXDOMAIN, even when the block replied NXDOMAIN
                 nx_names_1h.add(ev[1])
             long_domain_timestamps[ev[1]].append(ev[0])
         # A2 (2026-10-01): the TLD check used to split every event of the last hour, per device, per cycle (the

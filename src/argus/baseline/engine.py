@@ -27,11 +27,13 @@ from argus.baseline.bayesian import (
 from argus.evidence.model import Evidence, NO_DESTINATION
 from argus.graph.store import GraphStore
 from argus.hypotheses.independence import family_for
+from extractors.pihole_codes import ratio_metric_key
 
 # --- metric registry ---------------------------------------------------------
 
 GAUSSIAN_METRICS = ("query_rate", "entropy", "unique_domains", "outbound_bytes", "risk")
-BETA_METRICS = ("nxdomain_ratio", "blocked_ratio")
+# Versioned storage keys: a change in how the ratios are measured starts fresh trackers (see live_engine.py).
+BETA_METRICS = (ratio_metric_key("nxdomain_ratio"), ratio_metric_key("blocked_ratio"))
 POISSON_METRICS = ("dga_hits", "honeypot_touches")
 
 _INCIDENT_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})

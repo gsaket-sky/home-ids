@@ -16,6 +16,8 @@ import time
 from collections import deque, Counter, defaultdict, OrderedDict
 from typing import Optional, Dict, Any
 
+from extractors.pihole_codes import DNS_RATIO_SCHEME
+
 LOGGER = logging.getLogger("home_ids.state")
 
 class BoundedSet:
@@ -238,6 +240,7 @@ class DeviceState:
             "unique_baseline": self.unique_baseline.to_dict(),
             "nxdomain_baseline": self.nxdomain_baseline.to_dict(),
             "blocked_baseline": self.blocked_baseline.to_dict(),
+            "dns_ratio_scheme": DNS_RATIO_SCHEME,
             "dga_baseline": self.dga_baseline.to_dict(),
             "outbound_bytes_baseline": self.outbound_bytes_baseline.to_dict(),
             "risk_baseline": self.risk_baseline.to_dict()
@@ -305,8 +308,14 @@ class DeviceState:
         if "rate_baseline" in data: obj.rate_baseline = EWMABaseline.from_dict(data["rate_baseline"], alpha)
         if "entropy_baseline" in data: obj.entropy_baseline = EWMABaseline.from_dict(data["entropy_baseline"], alpha)
         if "unique_baseline" in data: obj.unique_baseline = EWMABaseline.from_dict(data["unique_baseline"], alpha)
-        if "nxdomain_baseline" in data: obj.nxdomain_baseline = EWMABaseline.from_dict(data["nxdomain_baseline"], alpha)
-        if "blocked_baseline" in data: obj.blocked_baseline = EWMABaseline.from_dict(data["blocked_baseline"], alpha)
+        # Learned under another measurement of the two ratios (extractors/pihole_codes.DNS_RATIO_SCHEME): start them
+        # over. A fresh baseline gives z = 0 until it has re-learned, so the change is quiet, never an alert.
+        if data.get("dns_ratio_scheme", 1) == DNS_RATIO_SCHEME:
+            if "nxdomain_baseline" in data: obj.nxdomain_baseline = EWMABaseline.from_dict(data["nxdomain_baseline"], alpha)
+            if "blocked_baseline" in data: obj.blocked_baseline = EWMABaseline.from_dict(data["blocked_baseline"], alpha)
+        elif "nxdomain_baseline" in data or "blocked_baseline" in data:
+            LOGGER.info("Device %s: NXDOMAIN/blocked baselines learned under DNS ratio scheme %s, re-learning under %s.",
+                        obj.device_id, data.get("dns_ratio_scheme", 1), DNS_RATIO_SCHEME)
         if "dga_baseline" in data: obj.dga_baseline = EWMABaseline.from_dict(data["dga_baseline"], alpha)
         if "outbound_bytes_baseline" in data: obj.outbound_bytes_baseline = EWMABaseline.from_dict(data["outbound_bytes_baseline"], alpha)
         if "risk_baseline" in data: obj.risk_baseline = EWMABaseline.from_dict(data["risk_baseline"], alpha)

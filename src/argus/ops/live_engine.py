@@ -63,6 +63,7 @@ from argus.graph.window import RollingWindowView
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import MLScorer
 from config import CONFIG
+from extractors.pihole_codes import ratio_metric_key
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.device_familiarity import DeviceFamiliarity
 from intelligence.reputation.classifier import ReputationClassifier
@@ -945,7 +946,10 @@ _GAUSSIAN_INPUT_KEYS = {
     "query_rate": "query_rate", "entropy_avg": "entropy_avg", "unique_domains": "unique_domains",
     "outbound_bytes": "zeek_outbound_bytes",
 }
-_BETA_INPUT_KEYS = {"nxdomain_ratio": "nxdomain_ratio", "blocked_ratio": "blocked_ratio"}
+# Stored under versioned keys (extractors/pihole_codes.ratio_metric_key): a change in how the two ratios are measured
+# starts fresh trackers instead of the old ones reading it as a changepoint.
+_BETA_INPUT_KEYS = {ratio_metric_key("nxdomain_ratio"): "nxdomain_ratio",
+                    ratio_metric_key("blocked_ratio"): "blocked_ratio"}
 
 # device_id -> the attack hypothesis score `_v13_engine.evaluate()` computed on the
 # device's PREVIOUS cycle -- daemon.py's own documented trade-off, ported unchanged:
