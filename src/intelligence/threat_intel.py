@@ -214,13 +214,16 @@ class ThreatIntel:
                     LOGGER.debug("Allowlist match (Parent): %s", parent)
                     return True
                     
-            # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains)
+            # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains). Like 1b, a correction can be wrong
+            # (an autonomous one, or a person's) and may only shield a name from suffix matches and weak indicators:
+            # an activated feed's strong hit on the name, or on any name up to the trusted entry, takes priority.
             if self.trust_cache_provider:
                 try:
                     trust_cache = self.trust_cache_provider.get_dynamic_trust_cache()
                     base_dom = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-                    if base_dom in trust_cache or domain in trust_cache:
-                        LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", base_dom)
+                    trusted = domain if domain in trust_cache else (base_dom if base_dom in trust_cache else "")
+                    if trusted and not self._strong_ioc_up_to(domain, trusted):
+                        LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", trusted)
                         return True
                 except Exception as e:
                     # Every static check above has already run and not matched, so this read failing cannot
@@ -322,6 +325,15 @@ class ThreatIntel:
             return False
         hit = self._decayed(meta)
         return bool(hit) and float(hit.get("confidence", 0.0) or 0.0) >= 0.5
+
+    def _strong_ioc_up_to(self, domain: str, trusted: str) -> bool:
+        """_strong_direct_ioc() for `domain` and every parent name of it down to `trusted` (the trust-cache entry
+        that matched, `domain` itself or its base domain). With no domain feed activated this is always False."""
+        parts = domain.split(".")
+        for i in range(0, max(1, len(parts) - len(trusted.split(".")) + 1)):
+            if self._strong_direct_ioc(".".join(parts[i:])):
+                return True
+        return False
 
     def lookup_domain(self, domain: str) -> Optional[dict]:
         if not domain: 

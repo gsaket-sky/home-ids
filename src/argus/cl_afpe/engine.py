@@ -19,7 +19,8 @@ evaluate(), in order:
 Learning (the write paths):
   - mark_false_positive() -- an operator, LLM-validated or autonomous correction: refuses hard-stop and
     unknown-device alerts; for connection-abuse signatures raises the device's own detection thresholds, otherwise
-    immunizes the base domain (or the destination IP); always widens the device's sensitivity shift; records
+    immunizes the base domain (or the destination IP) -- for that device only when the correction is automatic and
+    the device is in its learning period; always widens the device's sensitivity shift; records
     composite-trust corroboration; writes a training record for the nightly retrain.
   - record_confirmed_threat() -- records the destination in the shared local confirmed-intel store (never a public
     resolver, a safe IP, cloud/CDN infrastructure or a private/reserved address -- each guard exists because such
@@ -74,6 +75,13 @@ MAX_TRUST_ENTRY_TTL_SECONDS = TRUST_CACHE_TTL_SECONDS
 DEVICE_SCOPED_TRUST_HYPOTHESES = frozenset({
     "DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS",
 })
+
+# Correction sources that are a person's decision. Every other source (the engine's own Stage 1b/2/3, the AI advisor)
+# is automatic: made for a device still in its learning period it is a claim about that device only (an edge with
+# scope "device"), never network-wide trust -- whatever that device did since it appeared was learned as normal,
+# including traffic to a C2 it brought with it or had at first install. Needs no threat-intel feed.
+HUMAN_CORRECTION_SOURCES = frozenset({"operator"})
+TRUST_SCOPE_DEVICE = "device"
 
 # Alerts a correction can never mark safe (verifiable facts, not judgements).
 _HARD_STOP_SIGNATURES = frozenset({
@@ -184,9 +192,12 @@ class ClAfpeEngine:
 
     def immunize(self, destination_id: str, device_id: Optional[str] = None,
                   hypothesis: Optional[str] = None, source: str = "autonomous",
-                  ttl_seconds: Optional[float] = None, now: Optional[float] = None) -> bool:
+                  ttl_seconds: Optional[float] = None, now: Optional[float] = None,
+                  device_scoped: bool = False) -> bool:
         """Marks a destination safe (a 'trusts' edge; TTL clamped to 1 h .. 14 days). Returns True for a new
-        immunization, False for a refresh of an existing one or an unusable destination."""
+        immunization, False for a refresh of an existing one or an unusable destination. `device_scoped`: trusted for
+        `device_id` only -- not in get_dynamic_trust_cache(), and it replaces only that device's own scoped edge, never
+        another device's or a network-wide one."""
         if not destination_id or str(destination_id).lower() in ("unknown", "null", "none", NO_DESTINATION):
             return False
         now = now if now is not None else time.time()
@@ -203,11 +214,16 @@ class ClAfpeEngine:
 
         existing = self.store.get_edges(relation="trusts", dst_id=destination_id)
         is_new = len(existing) == 0
+        src_id = device_id if (device_id and device_id != "unknown") else "unattributed"
         # A refresh replaces the existing edge rather than accumulating duplicates.
         for e in existing:
+            if device_scoped and not (e["metadata"].get("scope") == TRUST_SCOPE_DEVICE and e["src_id"] == src_id):
+                continue
             self.store.delete_edge(e["edge_id"])
 
         metadata: Dict[str, Any] = {"source": source}
+        if device_scoped:
+            metadata["scope"] = TRUST_SCOPE_DEVICE
         if device_id and device_id != "unknown":
             metadata["device_id"] = device_id
         if hypothesis_base:
@@ -216,7 +232,6 @@ class ClAfpeEngine:
             metadata["ttl_seconds"] = entry_ttl
 
         self.store.upsert_destination(destination_id, "domain", timestamp=now)
-        src_id = device_id if (device_id and device_id != "unknown") else "unattributed"
         self.store.upsert_device(src_id, timestamp=now)
         self.store.add_edge("device", src_id, "destination", destination_id, "trusts", timestamp=now, metadata=metadata)
         return is_new
@@ -240,9 +255,19 @@ class ClAfpeEngine:
         return active
 
     def get_dynamic_trust_cache(self, now: Optional[float] = None) -> set:
-        """Every currently-active immunized destination, not filtered by device or hypothesis (threat intel uses it
-        to skip lookups for destinations already corrected as safe)."""
-        return {e["dst_id"] for e in self._active_trust_edges(now=now)}
+        """Every currently-active network-wide immunized destination, not filtered by device or hypothesis (threat
+        intel uses it to skip lookups for destinations already corrected as safe). Device-scoped edges are left out:
+        they trust a destination for one device, not for the network."""
+        return {e["dst_id"] for e in self._active_trust_edges(now=now)
+                if e["metadata"].get("scope") != TRUST_SCOPE_DEVICE}
+
+    def device_in_learning_period(self, device_id: Optional[str]) -> bool:
+        """True while `device_id` is in its learning period (extractors.dns_features.in_learning_period on its learned
+        activity), and for an unknown/unattributed device, whose learning state cannot be known."""
+        if not device_id or device_id == "unknown":
+            return True
+        from extractors.dns_features import in_learning_period  # lazy: dns_features pulls in config
+        return in_learning_period(*self.familiarity.learned_activity(device_id))
 
     def is_trust_cached(self, destination_id: str, device_id: Optional[str] = None,
                           hypothesis: Optional[str] = None, now: Optional[float] = None) -> bool:
@@ -258,7 +283,10 @@ class ClAfpeEngine:
             recorded_hypothesis = e["metadata"].get("hypothesis")
             if recorded_hypothesis and recorded_hypothesis != hypothesis_base:
                 continue
-            if recorded_hypothesis in DEVICE_SCOPED_TRUST_HYPOTHESES:
+            if e["metadata"].get("scope") == TRUST_SCOPE_DEVICE:
+                if e["src_id"] != (device_id if (device_id and device_id != "unknown") else "unattributed"):
+                    continue
+            elif recorded_hypothesis in DEVICE_SCOPED_TRUST_HYPOTHESES:
                 if e["metadata"].get("device_id") != device_id:
                     continue
             return True
@@ -475,10 +503,13 @@ class ClAfpeEngine:
         else:
             # Default routing: immunize the eTLD+1 BASE domain -- what evaluate()'s trust-cache check looks up, so
             # immunizing sentry.io also covers xyz.ingest.us.sentry.io (a raw subdomain would only re-match itself).
+            # An automatic correction for a device in its learning period trusts it for that device only.
+            device_scoped = source not in HUMAN_CORRECTION_SOURCES and self.device_in_learning_period(device_id)
             if base_domain:
                 target = base_domain
                 is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
-                                         source=source, ttl_seconds=ttl_seconds, now=now)
+                                         source=source, ttl_seconds=ttl_seconds, now=now,
+                                         device_scoped=device_scoped)
             else:
                 # No extractable base domain (no domain at all, or etld1() couldn't
                 # parse it) -- immunize the raw destination IP instead, so a raw-IP
@@ -486,7 +517,8 @@ class ClAfpeEngine:
                 if dest_ip and dest_ip != "unknown":
                     target = dest_ip
                     is_new = self.immunize(target, device_id=device_id, hypothesis=signature,
-                                             source=source, ttl_seconds=ttl_seconds, now=now)
+                                             source=source, ttl_seconds=ttl_seconds, now=now,
+                                             device_scoped=device_scoped)
 
         # Runs regardless of which branch above fired -- a general behavioral
         # dampener, not specific to domain-based corrections.

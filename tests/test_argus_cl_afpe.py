@@ -496,7 +496,12 @@ v = _evaluate(cl_afpe, _alert(domain="sentry.io"))
 check("evaluate() suppresses via Stage 2/3 when Stage 3's rule fallback alone clears "
       "the embed-similarity threshold for a known telemetry vendor domain",
       v["verdict"] == "FALSE_POSITIVE" and v["stage"] == "STAGE_3_COMBINED"
-      and cl_afpe.is_trust_cached("sentry.io", hypothesis="NETWORK_INTRUSION", now=NOW))
+      and cl_afpe.is_trust_cached("sentry.io", device_id="shadow_dev", hypothesis="NETWORK_INTRUSION", now=NOW))
+# shadow_dev has no learned activity (in its learning period), so the automatic correction trusts sentry.io for it
+# only (tests/test_argus_trust_cache_learning_scope.py covers the scoping itself).
+check("...for that device only: an automatic correction during the learning period is not network-wide trust",
+      not cl_afpe.is_trust_cached("sentry.io", device_id="other_dev", hypothesis="NETWORK_INTRUSION", now=NOW)
+      and "sentry.io" not in cl_afpe.get_dynamic_trust_cache(now=NOW))
 
 v = _evaluate(cl_afpe, _alert(domain="totally-unrecognized-xyz123.example"))
 check("evaluate() reaches CONFIRMED_THREAT via Stage 2/3 when neither stage finds "
