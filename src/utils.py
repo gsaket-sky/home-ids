@@ -451,7 +451,10 @@ def is_local_name(domain: str) -> bool:
     """True for a name under a suffix that cannot be a public host: the built-in set plus this network's configured
     `local_domain_suffixes`."""
     norm = str(domain or "").lower().strip(".")
-    return bool(norm) and norm.endswith(_local_suffixes())
+    if not norm:
+        return False
+    suffixes = _local_suffixes()
+    return norm.endswith(suffixes) or ("." in norm and ("." + norm) in suffixes)   # a multi-label suffix's own apex (e.g. "fritz.box") counts; a bare TLD does not
 
 
 def is_telemetry_domain(domain: str) -> bool:
@@ -461,7 +464,7 @@ def is_telemetry_domain(domain: str) -> bool:
     norm = str(domain).lower().strip(".")
     
     # Fast path: Reverse DNS and local network lookups are inherently safe telemetry
-    if norm.endswith(_local_suffixes()):
+    if is_local_name(norm):
         return True
         
     base_dom = etld1(norm)

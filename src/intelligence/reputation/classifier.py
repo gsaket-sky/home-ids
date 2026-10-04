@@ -2,7 +2,7 @@ import ipaddress
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
-from utils import is_cloud_cdn_provider_org
+from utils import is_cloud_cdn_provider_org, is_local_name
 
 # BUGFIX (found chasing test_phase36_review_regression.py's tier-4/5 golden case):
 # classify()'s own tier-0 check below uses is_link_local/is_loopback (both precise)
@@ -85,7 +85,7 @@ def _suffix_or_domain_match(domain: str, pattern: str) -> bool:
 
 class ReputationClassifier:
     def __init__(self):
-        self._TIER_0 = {".box", ".local", "fritz.box"}
+        self._TIER_0 = set()   # local names: utils.is_local_name() (built-in suffixes + configured local_domain_suffixes)
         self._TIER_1 = {"apple.com", "microsoft.com", "google.com", "icloud.com", "windowsupdate.com"}
         self._TIER_2 = {"doubleclick.net", "cloudflare.com", "amazonaws.com", "azure.com", "akamaiedge.net", "googlesyndication.com"}
         # BUGFIX: found via a production alerts.json audit spanning 5+ days -- the SAME
@@ -186,10 +186,8 @@ class ReputationClassifier:
 
         # Check explicit tiers (boundary-safe matching — see _suffix_or_domain_match)
         if tier == 3:
-            for t0 in self._TIER_0:
-                if _suffix_or_domain_match(domain, t0):
-                    tier = 0
-                    break
+            if is_local_name(domain) or any(_suffix_or_domain_match(domain, t0) for t0 in self._TIER_0):
+                tier = 0
         if tier == 3:
             for t1 in self._TIER_1:
                 if _suffix_or_domain_match(domain, t1):

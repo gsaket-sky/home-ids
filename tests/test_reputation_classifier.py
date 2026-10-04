@@ -56,7 +56,10 @@ check("a known infrastructure domain (cloudflare.com) still reaches tier 2, unaf
 check("the pre-existing domain-suffix tier-0 patterns (.local) still work exactly as "
       "before -- the new IP-range check is additive, not a replacement",
       c.classify("some-device.local").tier == 0)
-check("fritz.box (the pre-existing exact-match tier-0 pattern) still works",
+from config import CONFIG  # noqa: E402
+with CONFIG._lock:
+    CONFIG._config["local_domain_suffixes"] = ["fritz.box"]   # the network's own local domain is configuration
+check("fritz.box is tier 0 once configured as this network's local domain",
       c.classify("fritz.box").tier == 0)
 check("an ordinary unclassified domain still reaches tier 3", c.classify("random-xyz-example.net").tier == 3)
 

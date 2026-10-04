@@ -30,6 +30,8 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set
 
+from utils import is_local_name
+
 LOGGER = logging.getLogger("home_ids.local_popularity")
 
 MIN_DEVICES = 3
@@ -115,7 +117,7 @@ class LocalPopularity:
         if not device_id or not domain:
             return
         name = domain.lower().strip(".")
-        if not name or "." not in name or name.endswith((".arpa", ".local", ".lan", ".home", ".fritz.box")):
+        if not name or "." not in name or is_local_name(name):
             return
         ts = float(ts) if ts else self._now()
         base = self._etld_memo.get(name)

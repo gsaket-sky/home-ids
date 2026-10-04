@@ -23,7 +23,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from intelligence.hypotheses.evidence import Evidence
-from utils import is_telemetry_domain, _is_cdn_or_cloud_domain
+from utils import is_telemetry_domain, is_local_name, _is_cdn_or_cloud_domain
 
 # Same small curated list scoring.py used for "this outbound burst is probably a
 # legitimate cloud-vendor sync, not exfiltration" — kept narrow and explicit rather than
@@ -31,7 +31,7 @@ from utils import is_telemetry_domain, _is_cdn_or_cloud_domain
 # exfiltration signal and a broad match here would create a real blind spot.
 _VENDOR_CLOUD_API_DOMAINS = (
     "coinbase.com", "microsoft.com", "apple.com", "amazonaws.com", "google.com",
-    "azure.com", "cloudflare.com", "fritz.box", "github.com", "sentry.io",
+    "azure.com", "cloudflare.com", "github.com", "sentry.io",
 )
 
 
@@ -49,7 +49,8 @@ def _is_local_dest(ip: str) -> bool:
         return False
 
 
-_LOCAL_NAME_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal", ".fritz.box", ".localdomain")
+# Only ".localdomain" is added here; the rest (incl. this network's own `local_domain_suffixes`) come from is_local_name().
+_LOCAL_NAME_SUFFIXES = (".localdomain",)
 
 
 def _is_local_name(name) -> bool:
@@ -58,7 +59,7 @@ def _is_local_name(name) -> bool:
     if not name:
         return False
     n = str(name).lower().rstrip(".")
-    return _is_local_dest(n) or n.endswith(_LOCAL_NAME_SUFFIXES) or "." not in n
+    return _is_local_dest(n) or n.endswith(_LOCAL_NAME_SUFFIXES) or is_local_name(n) or "." not in n
 
 
 class ThreatSignalDetector:
@@ -80,7 +81,7 @@ class ThreatSignalDetector:
         is_telemetry = bool(top_domain) and (
             is_telemetry_domain(top_domain) or bool(ti_engine and ti_engine.is_pihole_gravity_domain(top_domain))
         )
-        is_vendor_cloud_api = bool(top_domain) and any(top_domain.endswith(d) for d in _VENDOR_CLOUD_API_DOMAINS)
+        is_vendor_cloud_api = bool(top_domain) and (is_local_name(top_domain) or any(top_domain.endswith(d) for d in _VENDOR_CLOUD_API_DOMAINS))
 
         # BUGFIX (live audit): _is_cdn_or_cloud_domain() alone is a fully hardcoded,
         # disconnected check -- kept needing one-off patches every time a legitimate
