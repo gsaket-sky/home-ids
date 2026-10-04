@@ -1403,7 +1403,7 @@ class EnginePipeline:
 
             with self.state_manager.lock_device(dev_id) as state:
                 status_code = int(row.get("status", 0))
-                qtype = row.get("reply_type", 0)
+                qtype = row.get("qtype", 0)   # FTL query type (extractors/pihole_codes), not the reply type
                 state.rolling.events.append((ts, domain, status_code))
                 state.rolling.long_events.append((ts, domain, status_code, qtype))
                 state.rolling.dns_qtypes[qtype] += 1

@@ -14,6 +14,14 @@ Everything learned from nxdomain_ratio / blocked_ratio under that scheme is re-l
 DNS_RATIO_SCHEME.
 """
 
+# FTL's own query-type numbering (the `queries.type` column), NOT DNS wire numbers: 1 A, 2 AAAA, 3 ANY, 4 SRV, 5 SOA,
+# 6 PTR, 7 TXT, 8 NAPTR, 9 MX, 10 DS, 11 RRSIG, 12 DNSKEY, 13 NS, 14 OTHER, 15 SVCB, 16 HTTPS; any other type is stored
+# as 100 + its wire number (NULL, wire 10, is 110; CNAME, wire 5, is 105).
+QTYPE_ANY, QTYPE_TXT, QTYPE_MX = 3, 7, 9
+QTYPE_OTHER_OFFSET = 100
+# Query types DNS tunnels favour (large free-form answers): TXT, NULL, ANY, MX, CNAME.
+TXT_NULL_QTYPES = frozenset({QTYPE_TXT, QTYPE_OTHER_OFFSET + 10, QTYPE_ANY, QTYPE_MX, QTYPE_OTHER_OFFSET + 5})
+
 BLOCKED_STATUSES = frozenset({1, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 18})
 REPLY_NXDOMAIN = 2
 

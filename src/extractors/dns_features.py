@@ -26,7 +26,7 @@ from pathlib import Path
 from utils import entropy, suspicious_dga, is_telemetry_domain, _is_cdn_or_cloud_domain, etld1
 from config import CONFIG
 from core.heartbeat import write_component_heartbeat
-from extractors.pihole_codes import BLOCKED_STATUSES, NXDOMAIN_STATUSES, classify_status
+from extractors.pihole_codes import BLOCKED_STATUSES, NXDOMAIN_STATUSES, TXT_NULL_QTYPES, classify_status
 
 LOGGER = logging.getLogger("home_ids.dns_features")
 
@@ -81,6 +81,7 @@ class PiHoleCollector:
         self.last_id = 0
         self._hostnames = {}
         self._has_reply_type = False
+        self._has_type = False
         
         self._last_hostname_refresh = 0.0
         self._hostname_refresh_interval = 60.0
@@ -150,6 +151,7 @@ class PiHoleCollector:
             # Check schema dynamically to avoid OperationalError exceptions during the poll loop
             cols = [info[1] for info in self._conn.execute("PRAGMA table_info(queries)").fetchall()]
             self._has_reply_type = "reply_type" in cols
+            self._has_type = "type" in cols
             
             self._refresh_hostnames()
                 
@@ -186,10 +188,11 @@ class PiHoleCollector:
         
         try:
             # High-performance strict Primary Key seek. Query planner caches this efficiently.
-            if self._has_reply_type:
-                query = "SELECT id, timestamp, domain, client, status, reply_type FROM queries WHERE id > ? ORDER BY id ASC LIMIT ?"
-            else:
-                query = "SELECT id, timestamp, domain, client, status FROM queries WHERE id > ? ORDER BY id ASC LIMIT ?"
+            # Optional columns always occupy fixed slots (5 = reply_type, 6 = type), NULL when the schema lacks them.
+            query = ("SELECT id, timestamp, domain, client, status, "
+                     f"{'reply_type' if self._has_reply_type else 'NULL'}, "
+                     f"{'type' if self._has_type else 'NULL'} "
+                     "FROM queries WHERE id > ? ORDER BY id ASC LIMIT ?")
                 
             rows = self._conn.execute(query, (self.last_id, limit)).fetchall()
         except sqlite3.OperationalError:
@@ -239,6 +242,7 @@ class PiHoleCollector:
                 continue
                 
             reply_type = r[5] if self._has_reply_type else 0
+            qtype = r[6] if self._has_type else 0
 
             results.append({
                 "timestamp": r[1],
@@ -247,7 +251,8 @@ class PiHoleCollector:
                 "hostname": hostname,
                 "status": classify_status(r[4], reply_type),
                 "ftl_status": r[4],
-                "reply_type": reply_type
+                "reply_type": reply_type,
+                "qtype": qtype,
             })
             
         self.last_id = rows[-1][0]
@@ -462,7 +467,6 @@ class FeatureExtractor:
         fanout_by_base = defaultdict(set)
 
         _SUSPICIOUS_TLDS = frozenset({"top", "xyz", "biz", "cc", "cfd", "buzz", "gq", "tk", "work", "rest", "country", "stream", "icu", "click", "live"})
-        _TXT_NULL_QTYPES = frozenset({"TXT", "NULL", "ANY", "MX", "CNAME", 16, 10, 255, 15, 5})
 
         decay_rate = _decay_rate_per_second()
         decayed_weights = {}
@@ -550,7 +554,7 @@ class FeatureExtractor:
         long_domain_timestamps = defaultdict(list)
         nx_names_1h = set()
         for ev in rw.long_events:
-            if len(ev) >= 4 and ev[3] in _TXT_NULL_QTYPES:
+            if len(ev) >= 4 and ev[3] in TXT_NULL_QTYPES:   # ev[3] is the FTL query type (pihole_codes), not reply_type
                 txt_null_count += 1
             if ev[2] in NXDOMAIN:   # blocked queries are never NXDOMAIN, even when the block replied NXDOMAIN
                 nx_names_1h.add(ev[1])

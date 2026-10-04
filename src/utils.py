@@ -417,6 +417,43 @@ def prune_dated_files(directory, pattern: str, max_age_days: float) -> int:
     return deleted
 
 
+# Suffixes that can never name a public host, whatever the network: .arpa (reverse DNS, incl. home.arpa, RFC 8375),
+# .local (mDNS, RFC 6762), .internal (reserved for private use by ICANN, 2024) and .lan/.home (never delegated; the
+# common private-network defaults). A network's own local domain (its router's or Pi-hole's, a delegated TLD such as
+# ".sky" included) is configuration, not code: the `local_domain_suffixes` setting.
+_BUILTIN_LOCAL_SUFFIXES = (".arpa", ".local", ".internal", ".lan", ".home")
+_local_suffix_cache = (None, _BUILTIN_LOCAL_SUFFIXES)   # (the configured list it was built from, the suffix tuple)
+
+
+def _local_suffixes() -> tuple:
+    """The built-in local suffixes plus the configured `local_domain_suffixes`, each as ".suffix". Rebuilt only when
+    the configured list changes, so a live config edit applies on the next call at no per-call cost."""
+    global _local_suffix_cache
+    try:
+        from config import CONFIG   # lazy: config does not import utils, but keep this module importable on its own
+        configured = CONFIG.get("local_domain_suffixes", None)
+    except Exception:
+        configured = None
+    if configured is _local_suffix_cache[0] or (not configured and _local_suffix_cache[0] is None):
+        return _local_suffix_cache[1]
+    extra = []
+    for s in (configured if isinstance(configured, (list, tuple)) else []):
+        if not isinstance(s, str):
+            continue
+        s = s.strip().lower().strip(".")
+        if s and "." + s not in _BUILTIN_LOCAL_SUFFIXES:
+            extra.append("." + s)
+    _local_suffix_cache = (configured, _BUILTIN_LOCAL_SUFFIXES + tuple(extra))
+    return _local_suffix_cache[1]
+
+
+def is_local_name(domain: str) -> bool:
+    """True for a name under a suffix that cannot be a public host: the built-in set plus this network's configured
+    `local_domain_suffixes`."""
+    norm = str(domain or "").lower().strip(".")
+    return bool(norm) and norm.endswith(_local_suffixes())
+
+
 def is_telemetry_domain(domain: str) -> bool:
     """True if domain matches known high-volume telemetry SDKs, reverse DNS (.arpa), local network boundaries, cloud telemetry infrastructure, or CL-AFPE dynamic trust cache."""
     if not domain:
@@ -424,7 +461,7 @@ def is_telemetry_domain(domain: str) -> bool:
     norm = str(domain).lower().strip(".")
     
     # Fast path: Reverse DNS and local network lookups are inherently safe telemetry
-    if norm.endswith(".arpa") or norm.endswith(".local") or norm.endswith(".lan") or norm.endswith(".sky") or norm.endswith(".home") or norm.endswith(".fritz.box") or norm.endswith(".internal") or norm.endswith(".home.arpa"):
+    if norm.endswith(_local_suffixes()):
         return True
         
     base_dom = etld1(norm)

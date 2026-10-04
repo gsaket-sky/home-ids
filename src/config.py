@@ -187,6 +187,11 @@ DEFAULT_CONFIG = {
     "safe_ips": ["127.0.0.1", "192.168.1.1", "192.0.0.2"],
     "honeypot_ips": [],
     "safe_domains": [],       
+    # This network's own local DNS suffixes (its router's / Pi-hole's local domain), e.g. ["sky", "fritz.box"]: names
+    # under them are treated as local telemetry, never as external hosts. Standards-defined and never-delegated suffixes
+    # (.arpa, .local, .internal, .lan, .home) are built in; list here only what is specific to your network. A delegated
+    # public TLD that your router also uses locally (like ".sky") must be listed by you -- it is never assumed.
+    "local_domain_suffixes": [],
     # Deployment-agnostic infrastructure-hostname keywords only -- add your own deployment's
     # self-hosted app hostnames via config.yaml rather than baking one household's apps in.
     "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "fritz", "repeater"],

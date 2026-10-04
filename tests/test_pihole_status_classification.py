@@ -83,10 +83,13 @@ rows = [  # (status, reply_type, domain)
     (FORWARDED, REPLY_NXDOMAIN, "missing.example"),
     (1, REPLY_NXDOMAIN, "ads.example"),
     (9, REPLY_IP, "cname-blocked.example"),
+    (FORWARDED, REPLY_IP, "txt.example"),
+    (FORWARDED, REPLY_IP, "null.example"),
 ]
+QTYPES = {"txt.example": 7, "null.example": 110}     # FTL numbering: TXT = 7, NULL (wire 10) = 100 + 10
 for i, (st, rt, dom) in enumerate(rows, start=1):
     conn.execute("INSERT INTO queries (id, timestamp, type, status, domain, client, reply_type) VALUES (?,?,?,?,?,?,?)",
-                 (i, int(time.time()), 1, st, dom, "192.0.2.10", rt))
+                 (i, int(time.time()), QTYPES.get(dom, 1), st, dom, "192.0.2.10", rt))
 conn.commit()
 conn.close()
 
@@ -100,6 +103,31 @@ check("reader: an NXDOMAIN answer is NXDOMAIN", polled["missing.example"]["statu
 check("reader: a block answered NXDOMAIN stays blocked", polled["ads.example"]["status"] in BLOCKED_STATUSES)
 check("reader: a deep-CNAME block counts as blocked", polled["cname-blocked.example"]["status"] in BLOCKED_STATUSES)
 check("reader: the raw FTL status is kept alongside", polled["cached.example"]["ftl_status"] == CACHE)
+check("reader: the FTL query type is read from the type column",
+      polled["txt.example"]["qtype"] == 7 and polled["null.example"]["qtype"] == 110
+      and polled["cached.example"]["qtype"] == 1)
+
+# --- dns_txt_null_ratio uses the query type, not the reply type ---------------------------------------------------------
+
+from extractors.pihole_codes import TXT_NULL_QTYPES  # noqa: E402
+check("TXT/NULL/ANY/MX/CNAME in FTL numbering", TXT_NULL_QTYPES == {7, 110, 3, 9, 105})
+check("A and AAAA are not tunnel-shaped query types", not ({1, 2} & TXT_NULL_QTYPES))
+
+
+def _txt_null_ratio(events):
+    """events: (qtype, reply_type) per query; ratio computed by the real extractor over the 1-hour window."""
+    st = DeviceState(device_id="d2", client_ip="192.0.2.20", hostname="h")
+    now = time.time()
+    for i, (qt, rt) in enumerate(events):
+        st.rolling.long_events.append((now - 30, f"q{i}.example.net", classify_status(2, rt), qt))
+    return dns_features.FeatureExtractor().compute(st, now, 300)["dns_txt_null_ratio"]
+
+
+check("answered A queries with reply types 5 (DOMAIN) and 10 (OTHER) no longer count (the old mismeasure)",
+      _txt_null_ratio([(1, 5)] * 5 + [(1, 10)] * 5) == 0.0)
+check("TXT queries count whatever the reply was", _txt_null_ratio([(7, 4)] * 5 + [(1, 4)] * 5) == 0.5)
+check("NULL (110) and ANY (3) queries count", _txt_null_ratio([(110, 4), (3, 4), (1, 4), (2, 4)]) == 0.5)
+check("a database without the type column yields 0, not a guess", _txt_null_ratio([(0, 4)] * 6) == 0.0)
 
 # --- re-learn: per-device EWMA baselines --------------------------------------------------------------------------------
 
