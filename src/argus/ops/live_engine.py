@@ -60,6 +60,7 @@ from argus.graph.store import (
     GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS,
     _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE, _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW,
 )
+from argus.graph.merge_consistency import MergeReport, check_merges, repair_merges
 from argus.graph.window import RollingWindowView
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import MLScorer
@@ -283,6 +284,24 @@ def merge_device_in_own_connection(orphan_id: str, canonical_id: str) -> None:
             _graph_store._invalidate_merge_caches()
     except Exception:
         pass
+
+
+def reconcile_graph_merges_in_own_connection(redirects: Dict[str, str], repair: bool = True) -> MergeReport:
+    """Compares the engine's merge redirects with the graph and, with `repair`, replays the merges the graph is
+    missing (argus/graph/merge_consistency.py). For the identity-reconcile worker thread: a short-lived store of its
+    own, like merge_device_in_own_connection()."""
+    store = GraphStore(_GRAPH_DB_PATH)
+    try:
+        report = repair_merges(store, redirects) if repair else check_merges(redirects, store.get_merge_pointers())
+    finally:
+        store.close()
+    if report.repaired:
+        try:
+            if _graph_store is not None:
+                _graph_store._invalidate_merge_caches()
+        except Exception:
+            pass
+    return report
 
 
 def get_graph_store() -> GraphStore:

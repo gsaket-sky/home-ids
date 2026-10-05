@@ -70,6 +70,10 @@ class LocalPopularity:
         self._etld1 = etld1_fn or (lambda d: d)
         self._now = now_fn
         self.learning_fn = learning_fn
+        # Device-merge source: resolve_fn(device_id) -> the live id it was merged into, or itself (the pipeline binds
+        # StateManager.resolve_merge_redirect). The ledger keeps the ids names were recorded under; without this a
+        # device's own names recorded under an earlier id would count as another device's. None: ids as recorded.
+        self.resolve_fn: Optional[Callable[[str], str]] = None
         # Domain-age source: age_fn(registrable domain) -> registration time (epoch), or None when unknown or switched
         # off. None (the default): the behaviour before domain age existed.
         self.age_fn: Optional[Callable[[str], Optional[float]]] = None
@@ -240,6 +244,14 @@ class LocalPopularity:
         so those never count against the device that brought them."""
         if not device_id:
             return False
+        resolve = self.resolve_fn
+        if resolve is not None:
+            try:
+                device_id = resolve(device_id) or device_id
+                devices = frozenset(resolve(d) or d for d in devices)
+                learning = frozenset(resolve(d) or d for d in learning)
+            except Exception:
+                pass
         others = devices - {device_id}
         if not others or not others <= learning:
             return False          # only this device's own history, or an independent baselined device vouches

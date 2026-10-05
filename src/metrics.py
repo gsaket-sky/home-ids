@@ -391,6 +391,10 @@ autotune_device_profile_correction_total = Gauge("home_ids_autotune_device_profi
 # the autonomous-behavior dashboards had no true per-device drill-down.
 transfer_learning_seeds_total = Counter("home_ids_transfer_learning_seeds_total", "New devices whose starting baselines were seeded from peer devices of the same device_type (cold-start transfer learning)", ["device_type"])
 identity_merges_total = Counter("home_ids_identity_merges_total", "Retroactive device-identity merges: a fragmented orphan device_id folded into its canonical identity", ["device", "hostname"])
+# Graph vs engine merge consistency (argus/graph/merge_consistency.py), checked by the identity-reconcile worker.
+graph_merge_disagreements = Gauge("home_ids_graph_merge_disagreements", "Engine device merges by how the evidence graph matches them after the last check (ok / absent / missing / diverged / unresolved; missing and diverged are repaired automatically when graph_merge_repair_enabled is on)", ["kind"])
+graph_merge_repairs_total = Counter("home_ids_graph_merge_repairs_total", "Engine device merges replayed into the evidence graph because its own mirror of the merge had failed")
+graph_merge_check_last_success_timestamp = Gauge("home_ids_graph_merge_check_last_success_timestamp", "Unix time the graph-vs-engine merge check last completed")
 device_profile_discards_total = Counter("home_ids_device_profile_discards_total", "Per-device FP-calibration profiles discarded, by reason", ["reason"])
 identity_reidentify_migrations_total = Counter("home_ids_identity_reidentify_migrations_total", "DHCP/JA4-fingerprint MAC-rotation re-identifications: a device kept its identity across a MAC change", ["device", "hostname"])
 identity_reidentify_ambiguous_total = Counter("home_ids_identity_reidentify_ambiguous_total", "Re-identification candidates strong enough to log but below the merge-confidence bar -- a reactive capture is dispatched to try to resolve them", ["device", "hostname"])

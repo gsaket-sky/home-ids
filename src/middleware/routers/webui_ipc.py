@@ -129,9 +129,7 @@ def _purge_learned_fp_values(state_dir: str, device_id: str) -> None:
     try:
         store = GraphStore(str(Path(state_dir) / "v13_graph.db"))
         try:
-            if store.get_device_metadata(device_id):
-                store.update_device_metadata(
-                    device_id, {"fp_profile": {}, "sigma_shift": 0.0, "confirmed_threat_counts": {}})
+            store.clear_learned_device_values(device_id)   # every id of the device, trust included
         finally:
             store.close()
     except Exception as exc:

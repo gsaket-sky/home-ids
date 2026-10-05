@@ -403,9 +403,16 @@ class DeviceIdentityManager:
         if ips_mitigator is None:
             return
         target = self.state_manager.pop_last_migrated_isolation_target()
-        if not target:
-            return
-        ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
+        if target:
+            ips_mitigator.unisolate_all(mac_addr=target["mac_addr"], ip_addr=target["ip_addr"])
+        # A retroactive orphan MERGE is not a rotation: the orphan's addresses belong to the
+        # canonical now, so its containment is kept and extended to the canonical's current
+        # mac/ip, never released (StateManager.merge_into_canonical()'s BUGFIX 2026-10-05).
+        pop_merged = getattr(self.state_manager, "pop_last_merged_containment", None)
+        merged = pop_merged() if pop_merged is not None else None
+        carry = getattr(ips_mitigator, "carry_containment_after_merge", None)
+        if merged and carry is not None:
+            carry(**merged)
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:

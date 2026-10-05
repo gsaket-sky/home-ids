@@ -50,10 +50,12 @@ def _load_state_manager() -> StateManager:
 
 
 def _resolve_identity(sm: StateManager, device_id: str) -> Dict[str, Any]:
+    device_id = sm.resolve_merge_redirect(device_id)   # an id merged away since names the device it is part of now
     if not sm.has_device(device_id):
         raise HTTPException(status_code=404, detail=f"No such device '{device_id}'.")
     with sm.lock_device(device_id) as state:
         return {
+            "device_id": device_id,
             "ip": getattr(state, "client_ip", "unknown"),
             "mac": getattr(state, "mac_address", "unknown"),
             "hostname": getattr(state, "hostname", "unknown"),
@@ -109,6 +111,7 @@ def get_mitigation_state(token: str = Depends(verify_token)):
 @router.post("/api/devices/{device_id}/isolate_router")
 def isolate_device_router(device_id: str, payload: ReasonPayload, token: str = Depends(verify_token)):
     sm = _load_state_manager()
+    device_id = sm.resolve_merge_redirect(device_id)   # a link from before a merge names the old id
     identity = _resolve_identity(sm, device_id)
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_isolate_router(
@@ -125,6 +128,7 @@ def isolate_device_router(device_id: str, payload: ReasonPayload, token: str = D
 @router.post("/api/devices/{device_id}/tarpit")
 def tarpit_device(device_id: str, payload: ReasonPayload, token: str = Depends(verify_token)):
     sm = _load_state_manager()
+    device_id = sm.resolve_merge_redirect(device_id)   # a link from before a merge names the old id
     identity = _resolve_identity(sm, device_id)
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_tarpit(
@@ -141,6 +145,7 @@ def tarpit_device(device_id: str, payload: ReasonPayload, token: str = Depends(v
 @router.post("/api/devices/{device_id}/release")
 def release_device_console(device_id: str, token: str = Depends(verify_token)):
     sm = _load_state_manager()
+    device_id = sm.resolve_merge_redirect(device_id)   # a link from before a merge names the old id
     if not sm.has_device(device_id):
         raise HTTPException(status_code=404, detail=f"No such device '{device_id}'.")
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
@@ -156,7 +161,7 @@ def block_domain_console(payload: DomainBlockPayload, token: str = Depends(verif
     hostname, device_ip, dev_id = "manual (console)", "unknown", "manual"
     if payload.device_id:
         identity = _resolve_identity(sm, payload.device_id)
-        hostname, device_ip, dev_id = identity["hostname"], identity["ip"], payload.device_id
+        hostname, device_ip, dev_id = identity["hostname"], identity["ip"], identity["device_id"]
 
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success = ips._block_domain(

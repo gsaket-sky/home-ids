@@ -88,7 +88,9 @@ from metrics import (
     fp_engine_embed_model_status, local_confirmed_intel_size, local_confirmed_intel_hits_total, engine_errors_total,
     autotune_conn_abuse_threshold_effective, autotune_long_conn_threshold_effective,
     autotune_device_profile_correction_total,
+    graph_merge_disagreements, graph_merge_repairs_total, graph_merge_check_last_success_timestamp,
 )
+from argus.graph.merge_consistency import KINDS as GRAPH_MERGE_KINDS, describe as describe_graph_merge
 
 # Argus CL-AFPE stages that mean "hard-stopped: strong evidence, never suppressible".
 CL_AFPE_HARD_STOP_STAGES = frozenset({"STAGE_1_HARD_STOP", "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP"})
@@ -1021,9 +1023,14 @@ class EnginePipeline:
         self.familiarity = DeviceFamiliarity(state_dir)
         # Learning-adoption ledger: popularity records which devices first used a name during their own learning
         # period, so a name only such devices ever used is not "normal" for a baselined device picking it up.
+        # Ids it reads back (from the ledger, the graph) may have been merged away since: resolved to the live device,
+        # whose familiarity profile holds the merged learning days (DeviceFamiliarity.merge_device_profile()).
+        def _device_learning(device_id):
+            return in_learning_period(*self.familiarity.learned_activity(
+                self.state_manager.resolve_merge_redirect(device_id)))
         if self.local_popularity is not None:
-            self.local_popularity.learning_fn = \
-                lambda device_id: in_learning_period(*self.familiarity.learned_activity(device_id))
+            self.local_popularity.learning_fn = _device_learning
+            self.local_popularity.resolve_fn = self.state_manager.resolve_merge_redirect
         argus_live_engine.configure_cl_afpe(
             model_dir=str(Path(self.config.get("model_path", "models/ids_model.pkl")).parent),
             local_intel=self.local_intel, familiarity=self.familiarity)
@@ -1044,7 +1051,7 @@ class EnginePipeline:
                 from argus.ops.telegram import send_telegram
                 self.learning_sweep = LearningIntelSweep(
                     store_fn=argus_live_engine.get_graph_store, threat_intel=self.ti_engine,
-                    learning_fn=lambda device_id: in_learning_period(*self.familiarity.learned_activity(device_id)),
+                    learning_fn=_device_learning,
                     days_back=days_back_for_profile(load_hardware_profile(self.config)),
                     popularity=self.local_popularity, notify=lambda text: send_telegram(self.config, text))
                 self.learning_sweep.attach()
@@ -1164,9 +1171,7 @@ class EnginePipeline:
                 self.familiarity.discard_device_profile(dev_id, reason="purge")
                 if self.ml_registry:
                     self.ml_registry.discard_device(dev_id, reason="purge")
-                if self.cl_afpe.store.get_device_metadata(dev_id):
-                    self.cl_afpe.store.update_device_metadata(
-                        dev_id, {"fp_profile": {}, "sigma_shift": 0.0, "confirmed_threat_counts": {}})
+                self.cl_afpe.store.clear_learned_device_values(dev_id)   # every id of the device, trust included
                 LOGGER.info("Removed device %s at the operator's request", dev_id)
             except Exception as exc:
                 LOGGER.warning("Applying the removal of device %s failed (non-fatal): %s", dev_id, exc)
@@ -1244,6 +1249,7 @@ class EnginePipeline:
             first_pass = False
             try:
                 self._identity_reconcile_pass()
+                self._graph_merge_check_pass()
                 HEARTBEATS.beat("identity_reconcile_worker", health_state="healthy")
             except Exception as exc:
                 LOGGER.error("Identity reconcile worker pass failed (non-fatal, will retry next interval): %s",
@@ -1301,6 +1307,36 @@ class EnginePipeline:
                     f"device(s) into {len(groups)} canonical identit(y/ies)."
                 )
         return merged_count
+
+    def _graph_merge_check_pass(self) -> Optional[Any]:
+        """Checks that the graph agrees with the engine about every device merge and replays the merges whose graph
+        mirror failed (argus/graph/merge_consistency.py). Runs after each identity-reconcile pass, on the same worker
+        thread. A mirror can fail for reasons this worker never sees (another merge path, a locked database, the
+        2026-10-02 cross-thread bug that left 33 of 113 merges on .94 unmirrored), so the stores are compared as a
+        whole rather than trusting each mirror call. Repairs are on by default (graph_merge_repair_enabled); counts
+        go to home_ids_graph_merge_disagreements either way. Never raises."""
+        repair = bool(self.config.get("graph_merge_repair_enabled", True))
+        try:
+            report = argus_live_engine.reconcile_graph_merges_in_own_connection(
+                self.state_manager.get_merge_redirects(), repair=repair)
+        except Exception as exc:
+            LOGGER.warning("Graph merge consistency check failed (non-fatal, retried next pass): %s", exc)
+            return None
+        counts = report.counts()
+        for kind in GRAPH_MERGE_KINDS:
+            graph_merge_disagreements.labels(kind=kind).set(counts.get(kind, 0))
+        graph_merge_check_last_success_timestamp.set(time.time())
+        if report.repaired:
+            graph_merge_repairs_total.inc(report.repaired)
+            LOGGER.warning("🔗 [GRAPH MERGE REPAIR] Replayed %d engine merge(s) into the graph.", report.repaired)
+        # Log what is still out of line once per change, not on every pass.
+        left = sorted(describe_graph_merge(i) for i in report.disagreements())
+        if left != getattr(self, "_graph_merge_last_disagreements", []):
+            self._graph_merge_last_disagreements = left
+            if left:
+                LOGGER.warning("Graph and engine still disagree on %d device merge(s)%s:\n  %s", len(left),
+                               "" if repair else " (graph_merge_repair_enabled is off)", "\n  ".join(left))
+        return report
 
     def run(self) -> None:
         metrics_port = int(self.config.get("metrics_port", 9105))

@@ -114,8 +114,24 @@ class DeviceFamiliarity:
                     mine["hours"] = int(mine.get("hours", 0)) | int(entry.get("hours", 0))
                     mine["count"] = max(int(mine.get("count", 0)), int(entry.get("count", 0)))
                 changed += 1
+            for bucket in device.values():   # same bound and eviction as record_device_baseline_observation()
+                while isinstance(bucket, dict) and len(bucket) > MAX_ENTRIES_PER_KIND:
+                    bucket.pop(min(bucket, key=lambda k: bucket[k].get("last_seen", 0)), None)
             if changed:
                 self._dirty = True
+        return changed
+
+    def merge_device_profile(self, orphan_id: str, canonical_id: str) -> int:
+        """An identity merge: the orphan's learned activity and familiar destinations become the canonical's
+        (import_counts(): active days united, hours OR-ed, each destination keeps the larger count), then the orphan
+        is forgotten. Both move together, so a merged device never leaves its learning period on days whose learned
+        destinations were thrown away. Counts of benign observations of one physical device, not an estimator, so
+        nothing is blended. Returns how many keys were added or raised."""
+        with self._lock:
+            profile = self._data.get(orphan_id)
+            profile = json.loads(json.dumps(profile)) if profile else None
+        changed = self.import_counts(canonical_id, profile) if profile and canonical_id else 0
+        self.discard_device_profile(orphan_id, reason="merge")
         return changed
 
     def discard_device_profile(self, device_id: str, reason: str = "") -> None:

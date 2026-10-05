@@ -111,13 +111,27 @@ def resolve_device_hostname(device_id: Optional[str], state_manager) -> str:
     Moved here (2026-09-22, user request: "apply the same logic in console
     over every view, device id should be replaced by hostname") so every
     console view calls ONE function instead of each tab re-deriving its own
-    slightly-different copy."""
-    if device_id and device_id != "unattributed" and state_manager.has_device(device_id):
-        with state_manager.lock_device(device_id) as st:
+    slightly-different copy. A row recorded under an id since merged into another
+    device shows that device's name."""
+    live_id = _live_device_id(device_id, state_manager)
+    if live_id and live_id != "unattributed" and state_manager.has_device(live_id):
+        with state_manager.lock_device(live_id) as st:
             hostname = getattr(st, "hostname", None)
             if hostname and hostname != "unknown":
                 return hostname
     return device_id or "unattributed"
+
+
+def _live_device_id(device_id: Optional[str], state_manager) -> Optional[str]:
+    """`device_id`, or the live device it was merged into (StateManager's merge redirects)."""
+    if not device_id or device_id == "unattributed":
+        return device_id
+    resolve = getattr(state_manager, "resolve_merge_redirect", None)
+    try:
+        live = resolve(device_id) if resolve is not None else device_id
+    except Exception:
+        return device_id
+    return live if isinstance(live, str) and live else device_id
 
 
 def resolve_device_identity(device_id: Optional[str], state_manager) -> Dict[str, Optional[str]]:
@@ -140,8 +154,9 @@ def resolve_device_identity(device_id: Optional[str], state_manager) -> Dict[str
     if not device_id or device_id == "unattributed":
         return {"device_id": device_id, "hostname": hostname, "ip": None, "display": hostname}
     ip: Optional[str] = None
-    if state_manager.has_device(device_id):
-        with state_manager.lock_device(device_id) as st:
+    live_id = _live_device_id(device_id, state_manager)
+    if state_manager.has_device(live_id):
+        with state_manager.lock_device(live_id) as st:
             raw_ip = getattr(st, "client_ip", None)
             if raw_ip and raw_ip != "unknown":
                 ip = raw_ip

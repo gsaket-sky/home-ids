@@ -562,12 +562,9 @@ def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float
 
         confirming_reason = None
         for ev in near_misses:
-            decision_rows = store._conn.execute(
-                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
-                "AND timestamp >= ? AND timestamp <= ?",
-                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
-                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-            ).fetchall()
+            decision_rows = _decision_rows(
+                store, "decision_id, raw_payload_json", ev["device_id"], "AND timestamp >= ? AND timestamp <= ?",
+                (ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS, ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
             for drow in decision_rows:
                 try:
                     payload = json.loads(drow["raw_payload_json"] or "{}")
@@ -635,12 +632,9 @@ def check_arp_sweep_retroactive_misses_and_rollback(store: GraphStore, now: Opti
 
         confirming_reason = None
         for ev in near_misses:
-            decision_rows = store._conn.execute(
-                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
-                "AND timestamp >= ? AND timestamp <= ?",
-                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
-                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-            ).fetchall()
+            decision_rows = _decision_rows(
+                store, "decision_id, raw_payload_json", ev["device_id"], "AND timestamp >= ? AND timestamp <= ?",
+                (ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS, ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
             for drow in decision_rows:
                 try:
                     payload = json.loads(drow["raw_payload_json"] or "{}")
@@ -727,10 +721,9 @@ def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Op
 
         confirming_reason = None
         for miss_row in near_misses:
-            later_confirmed = store._conn.execute(
-                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? AND timestamp > ?",
-                (miss_row["device_id"], miss_row["timestamp"]),
-            ).fetchall()
+            later_confirmed = _decision_rows(
+                store, "decision_id, raw_payload_json", miss_row["device_id"], "AND timestamp > ?",
+                (miss_row["timestamp"],))
             for drow in later_confirmed:
                 try:
                     payload = json.loads(drow["raw_payload_json"] or "{}")
@@ -873,11 +866,9 @@ def check_reputation_floor_retroactive_misses_and_rollback(
                     f"the parent tier's {parent_value:.3f} would have) and was itself CONFIRMED_THREAT"
                 )
                 break
-            later_confirmed = store._conn.execute(
-                "SELECT decision_id, raw_payload_json FROM decisions WHERE device_id=? "
-                "AND timestamp > ? AND timestamp <= ?",
-                (miss_row["device_id"], miss_row["timestamp"], miss_row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-            ).fetchall()
+            later_confirmed = _decision_rows(
+                store, "decision_id, raw_payload_json", miss_row["device_id"], "AND timestamp > ? AND timestamp <= ?",
+                (miss_row["timestamp"], miss_row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
             for drow in later_confirmed:
                 try:
                     later_payload = json.loads(drow["raw_payload_json"] or "{}")
@@ -906,6 +897,28 @@ def check_reputation_floor_retroactive_misses_and_rollback(
     return rolled_back
 
 
+def _decision_rows(store: GraphStore, columns: str, device_id: str, condition: str, params: tuple) -> list:
+    """`SELECT <columns> FROM decisions` for this device under every id it has had (2026-10-05 merge sweep: evidence
+    recorded under an id merged away since must still find the decision that followed it under the device's current
+    id), plus `condition` (an AND ... clause over `params`)."""
+    ids = store.device_ids_for(device_id)
+    return store._conn.execute(
+        f"SELECT {columns} FROM decisions WHERE device_id IN ({','.join('?' * len(ids))}) {condition}",
+        (*ids, *params),
+    ).fetchall()
+
+
+def _with_merged_ids(store: GraphStore, device_ids: List[str]) -> List[str]:
+    """`device_ids` (live devices) plus every id merged into one of them: a device's decisions and evidence from
+    before a merge are part of its history (2026-10-05 merge sweep). Unchanged when the store cannot say."""
+    try:
+        canonical = store.canonical_id_map()
+    except Exception:
+        return list(device_ids)
+    wanted = set(device_ids)
+    return list(device_ids) + [old for old, live in canonical.items() if live in wanted and old not in wanted]
+
+
 def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], parameter: str,
                                       since: float) -> Dict[str, "tuple[int, int]"]:
     """One pseudo-class ("reputation_recall") hits/n across `device_ids`: n = decisions
@@ -917,6 +930,7 @@ def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], par
     promotion during the window would corrupt this recall calculation)."""
     if not device_ids:
         return {}
+    device_ids = _with_merged_ids(store, device_ids)
     placeholders = ",".join("?" * len(device_ids))
     rows = store._conn.execute(
         f"SELECT raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
@@ -1084,9 +1098,12 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
         if device_type:
             by_category.setdefault(device_type, []).append(device_id)
 
+    canonical_ids = store.canonical_id_map()
+
     def hits_totals_and_flapping(device_ids: List[str]) -> "tuple[Dict[str, tuple], bool]":
         if not device_ids:
             return {}, False
+        device_ids = _with_merged_ids(store, device_ids)
         placeholders = ",".join("?" * len(device_ids))
         incident_rows = store._conn.execute(
             f"SELECT device_id, timestamp, raw_payload_json FROM decisions WHERE device_id IN ({placeholders}) "
@@ -1100,7 +1117,8 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
         ).fetchall()
         regime_by_device: Dict[str, List[float]] = {}
         for r in regime_rows:
-            regime_by_device.setdefault(r["device_id"], []).append(float(r["timestamp"]))
+            regime_by_device.setdefault(canonical_ids.get(r["device_id"], r["device_id"]), []).append(
+                float(r["timestamp"]))
 
         hits = 0
         n = 0
@@ -1113,13 +1131,14 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
             if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
                 continue
             n += 1
+            row_device = canonical_ids.get(row["device_id"], row["device_id"])
             preceding = [
-                ts for ts in regime_by_device.get(row["device_id"], [])
+                ts for ts in regime_by_device.get(row_device, [])
                 if row["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS <= ts <= row["timestamp"]
             ]
             if preceding:
                 hits += 1
-                corroborated_regime_ts.update((row["device_id"], ts) for ts in preceding)
+                corroborated_regime_ts.update((row_device, ts) for ts in preceding)
 
         total_regime_events = sum(len(v) for v in regime_by_device.values())
         uncorroborated = total_regime_events - len(corroborated_regime_ts)
@@ -1262,12 +1281,9 @@ def _propose_peer_deviation_changes(store: GraphStore, run_id: str, now: float) 
             peer_avg = features.get("peer_avg")
             if not isinstance(my_count, (int, float)) or not isinstance(peer_avg, (int, float)) or peer_avg <= 0:
                 continue
-            decision_rows = store._conn.execute(
-                "SELECT raw_payload_json FROM decisions WHERE device_id=? "
-                "AND timestamp >= ? AND timestamp <= ?",
-                (row["device_id"], row["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
-                 row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-            ).fetchall()
+            decision_rows = _decision_rows(
+                store, "raw_payload_json", row["device_id"], "AND timestamp >= ? AND timestamp <= ?",
+                (row["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS, row["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
             is_false_positive = False
             for drow in decision_rows:
                 try:
@@ -1513,12 +1529,9 @@ def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float)
             (row["dst_id"], row["timestamp"], trust_window_end),
         ).fetchall()
         for ev in evidence_rows:
-            decision_rows = store._conn.execute(
-                "SELECT raw_payload_json, timestamp FROM decisions WHERE device_id=? "
-                "AND timestamp >= ? AND timestamp <= ?",
-                (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
-                 ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-            ).fetchall()
+            decision_rows = _decision_rows(
+                store, "raw_payload_json, timestamp", ev["device_id"], "AND timestamp >= ? AND timestamp <= ?",
+                (ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS, ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
             for drow in decision_rows:
                 try:
                     payload = json.loads(drow["raw_payload_json"] or "{}")
@@ -1588,12 +1601,9 @@ def _propose_reputation_propagation_ttl_changes(store: GraphStore, run_id: str, 
     ).fetchall()
     false_positive_confirmed = 0
     for ev in prop_rows:
-        decision_rows = store._conn.execute(
-            "SELECT raw_payload_json FROM decisions WHERE device_id=? "
-            "AND timestamp >= ? AND timestamp <= ?",
-            (ev["device_id"], ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS,
-             ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS),
-        ).fetchall()
+        decision_rows = _decision_rows(
+            store, "raw_payload_json", ev["device_id"], "AND timestamp >= ? AND timestamp <= ?",
+            (ev["timestamp"] - _HARD_STOP_FRESHNESS_SECONDS, ev["timestamp"] + _HARD_STOP_FRESHNESS_SECONDS,))
         for drow in decision_rows:
             try:
                 payload = json.loads(drow["raw_payload_json"] or "{}")

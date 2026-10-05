@@ -420,6 +420,13 @@ device_identity:
   # empirically tuned. [LIVE]
   identity_reconcile_interval_seconds: 600.0
 
+  # After each identity-reconcile pass, compare the engine's device merges with
+  # the evidence graph and replay into the graph any merge whose graph mirror
+  # failed (ghost devices, split histories). The engine is the reference: it
+  # makes every merge decision. false = only count the disagreements
+  # (home_ids_graph_merge_disagreements) and log them. [LIVE]
+  graph_merge_repair_enabled: true
+
   # Your LAN's own gateway/router IP. A router genuinely has multiple distinct
   # physical MACs (LAN/WLAN/WAN interfaces), so MAC-based correlation above can
   # never fully unify it into one device_id on its own -- this pins it to one

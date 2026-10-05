@@ -496,7 +496,12 @@ def main() -> None:
                 if time.time() >= deadline:
                     stopped_for_deadline = True
                     break  # even cache hits cost graph reads -- stop cleanly, report below
-                device_id = decision["device_id"]
+                # The physical device: a decision made before a merge carries an id merged away since (the review
+                # cache, the coordinated-targeting exclusion and the report all key on it).
+                try:
+                    device_id = store.resolve_canonical_device_id(decision["device_id"])
+                except RuntimeError:
+                    device_id = decision["device_id"]
                 evidence_list = window.evidence_in_window(
                     device_id, RollingWindowView.LONG_WINDOW_SECONDS, now=decision["timestamp"],
                 )

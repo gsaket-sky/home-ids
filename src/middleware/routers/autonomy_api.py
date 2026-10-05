@@ -285,6 +285,10 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
     by_category: Dict[str, Dict[str, Any]] = {}
 
     def _bucket(device_id: str) -> Dict[str, Any]:
+        # One bucket per physical device: rows recorded under an id since merged away go to the device it is now part of.
+        if device_id != "unattributed":
+            resolved = sm.resolve_merge_redirect(device_id) if hasattr(sm, "resolve_merge_redirect") else device_id
+            device_id = resolved if isinstance(resolved, str) and resolved else device_id
         if device_id not in by_device:
             identity = resolve_device_identity(device_id, sm)
             by_device[device_id] = {

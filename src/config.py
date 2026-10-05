@@ -171,6 +171,9 @@ DEFAULT_CONFIG = {
     "local_popularity_enabled": True,
     # Learning-period intel sweep (argus/learning_sweep.py): re-checks learning-era traffic after each feed refresh.
     "learning_intel_sweep_enabled": True,
+    # Graph vs engine merge check (argus/graph/merge_consistency.py, after each identity-reconcile pass): replays
+    # engine device merges whose graph mirror failed. Off = count and log only.
+    "graph_merge_repair_enabled": True,
     # Domain age via RDAP (intelligence/rdap_age.py): OFF until the customer opts in (offered at first setup). Each
     # lookup tells a gTLD registry that this network asked about a rare name.
     "rdap_domain_age_enabled": False,

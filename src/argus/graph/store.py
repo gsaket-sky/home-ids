@@ -172,6 +172,46 @@ _SQLITE_DELETE_BATCH_SIZE = 400
 # seen within this window.
 _MERGE_CACHE_TTL_SECONDS = 15.0
 
+# Device metadata on a merge (combine_merged_metadata()). Fields only the graph keeps that belong to the physical device
+# -- its MAC/IP history (argus/identity/live_manager.py) and CL-AFPE's per-signature confirmed-threat counts -- are
+# combined into the canonical. Fields copied from engine state (StateManager's device-state mirror: hostname, counts,
+# known_ips, ...) are not: the engine already combined them in merge_into_canonical() and its next mirror writes them,
+# so adding them here would count twice. Learned calibration (sigma_shift, fp_profile) stays the canonical's own, as
+# StateManager discards an orphan's statistical state. Any such field only fills a gap the canonical has.
+_MERGED_HISTORY_CAPS = {"mac_history": 20, "known_ips_history": 50}   # argus/identity/live_manager.py's own bounds
+_MERGED_COUNT_DICTS = ("confirmed_threat_counts",)
+
+
+def _missing(value: Any) -> bool:
+    return value is None or value == "" or value == "unknown" or value == {} or value == []
+
+
+def combine_merged_metadata(canonical: Dict[str, Any], orphan: Dict[str, Any]) -> Dict[str, Any]:
+    """The canonical device's metadata after `orphan` is merged into it (a new dict; neither input is changed).
+    {address: first seen} histories are united (earliest time kept, oldest dropped past the writer's bound), per-
+    signature counts added; any other field keeps the canonical's value unless it has none."""
+    out = dict(canonical)
+    for key, value in orphan.items():
+        mine = out.get(key)
+        try:
+            if key in _MERGED_HISTORY_CAPS and isinstance(value, dict):
+                merged = dict(mine) if isinstance(mine, dict) else {}
+                for addr, ts in value.items():
+                    merged[addr] = min(ts, merged[addr]) if addr in merged else ts
+                while len(merged) > _MERGED_HISTORY_CAPS[key]:
+                    del merged[min(merged, key=merged.get)]
+                out[key] = merged
+            elif key in _MERGED_COUNT_DICTS and isinstance(value, dict):
+                merged = dict(mine) if isinstance(mine, dict) else {}
+                for name, n in value.items():
+                    merged[name] = int(merged.get(name, 0) or 0) + int(n or 0)
+                out[key] = merged
+            elif _missing(mine) and not _missing(value):
+                out[key] = value
+        except (TypeError, ValueError):
+            continue   # one malformed field never blocks the merge
+    return out
+
 # Alert-trace graph (Documentation/ALERT_TRACE_GRAPH_PLAN.md, 2026-09-22): decisions
 # and alert_events share the SAME retention window -- an alert_event without its
 # parent decision is meaningless, so they're pruned together, in one job. Closes a
@@ -781,6 +821,60 @@ class GraphStore:
             )
         return {row["device_id"] for row in cur.fetchall()}
 
+    def get_merge_pointers(self) -> Dict[str, Optional[str]]:
+        """{device_id: merged_into_device_id or None} for every device row -- one query, for callers that resolve many
+        ids at once (argus/graph/merge_consistency.py) instead of one walk per id."""
+        cur = self._conn.execute("SELECT device_id, merged_into_device_id FROM devices")
+        return {row["device_id"]: row["merged_into_device_id"] for row in cur.fetchall()}
+
+    def canonical_id_map(self) -> Dict[str, str]:
+        """{device_id: canonical id} for every device row that was merged away (live ids are left out -- they map to
+        themselves). One query; for readers that relabel many rows at once. A merge cycle maps to where it started."""
+        pointers = self.get_merge_pointers()
+        out: Dict[str, str] = {}
+        for device_id, merged_into in pointers.items():
+            if not merged_into:
+                continue
+            seen, cur = {device_id}, merged_into
+            while pointers.get(cur) and cur not in seen:
+                seen.add(cur)
+                cur = pointers[cur]
+            out[device_id] = device_id if cur in seen and pointers.get(cur) else cur
+        return out
+
+    _LEARNED_FP_METADATA_RESET = {"fp_profile": {}, "sigma_shift": 0.0, "confirmed_threat_counts": {}}
+
+    def clear_learned_device_values(self, device_id: str) -> int:
+        """Remove device (web UI): forgets what the false-positive engine learned about this device -- per-device
+        thresholds, sensitivity shift, confirmed-threat counts and composite trust -- under every id of it, so trust
+        earned under an id merged into it cannot come back (2026-10-05 merge sweep). Device rows and their history
+        stay (audit). Returns how many trust rows were deleted."""
+        ids = self.device_ids_for(device_id)
+        marks = ",".join("?" * len(ids))
+        with self.transaction():
+            for row in self._conn.execute(
+                    f"SELECT device_id, metadata_json FROM devices WHERE device_id IN ({marks})", ids).fetchall():
+                try:
+                    meta = json.loads(row["metadata_json"] or "{}") or {}
+                except (TypeError, ValueError):
+                    meta = {}
+                if not isinstance(meta, dict) or not any(k in meta for k in self._LEARNED_FP_METADATA_RESET):
+                    continue
+                meta.update(self._LEARNED_FP_METADATA_RESET)
+                self._conn.execute("UPDATE devices SET metadata_json = ? WHERE device_id = ?",
+                                   (json.dumps(meta), row["device_id"]))
+            cur = self._conn.execute(f"DELETE FROM cl_afpe_trust WHERE device_id IN ({marks})", ids)
+        return cur.rowcount
+
+    def device_ids_for(self, device_id: str) -> List[str]:
+        """The canonical id of `device_id` first, then every id merged into it (directly or through a chain): all the
+        ids a per-device read must cover so that history recorded under a device's earlier ids stays its own. Just
+        `device_id` when its merge chain is corrupt (a cycle)."""
+        try:
+            return self._all_ids_resolving_to(self.resolve_canonical_device_id(device_id))
+        except RuntimeError:
+            return [device_id]
+
     def _invalidate_merge_caches(self) -> None:
         self._canon_cache.clear()
         self._resolving_cache.clear()
@@ -860,13 +954,35 @@ class GraphStore:
             self._merge_device_rows(orphan_id, canonical_id, ts)
 
     def _merge_device_rows(self, orphan_id: str, canonical_id: str, ts: float) -> None:
-        self.upsert_device(orphan_id, timestamp=ts)
-        self.upsert_device(canonical_id, timestamp=ts)
+        # Only make sure both rows exist: a merge is not traffic, so it must not move last_seen (upsert_device() did,
+        # and a replayed merge -- argus/graph/merge_consistency.py -- would show long-idle devices as active).
+        for device_id in (orphan_id, canonical_id):
+            self._conn.execute(
+                "INSERT OR IGNORE INTO devices (device_id, first_seen, last_seen, metadata_json) VALUES (?, ?, ?, '{}')",
+                (device_id, ts, ts),
+            )
+        rows = {r["device_id"]: (r["merged_into_device_id"], r["metadata_json"]) for r in self._conn.execute(
+            "SELECT device_id, merged_into_device_id, metadata_json FROM devices WHERE device_id IN (?, ?)",
+            (orphan_id, canonical_id))}
+        already_merged = rows[orphan_id][0] == canonical_id
         self._conn.execute(
             "UPDATE devices SET merged_into_device_id = ? WHERE device_id = ?",
             (canonical_id, orphan_id),
         )
         self._invalidate_merge_caches()
+        # The canonical device's metadata takes in the orphan's (identity history, counts); the orphan keeps its own.
+        # Once per pair: a repeated merge_device() call must not add the counts again.
+        try:
+            orphan_meta = json.loads(rows[orphan_id][1] or "{}") or {}
+            canonical_meta = json.loads(rows[canonical_id][1] or "{}") or {}
+        except (TypeError, ValueError):
+            orphan_meta, canonical_meta = {}, None
+        if (not already_merged and orphan_meta and isinstance(orphan_meta, dict)
+                and isinstance(canonical_meta, dict)):
+            combined = combine_merged_metadata(canonical_meta, orphan_meta)
+            if combined != canonical_meta:
+                self._conn.execute("UPDATE devices SET metadata_json = ? WHERE device_id = ?",
+                                   (json.dumps(combined), canonical_id))
         self.add_edge("device", orphan_id, "device", canonical_id, "merged_into", ts)
         # Phase 8 (behavioral cohorts, autonomy-completion effort): every real
         # identity-merge call site (core/identity.py's real-time path,
@@ -1256,16 +1372,18 @@ class GraphStore:
 
     def get_alert_events(self, limit: int = 50, offset: int = 0, device_id: Optional[str] = None,
                            since: Optional[float] = None, until: Optional[float] = None,
-                           status: Optional[str] = None) -> List[Dict[str, Any]]:
+                           status: Optional[str] = None, resolve_merges: bool = True) -> List[Dict[str, Any]]:
         """Paginated, indexed read over alert_events (idx_alert_events_device_ts /
         idx_alert_events_ts) -- replaces _alert_log_utils.py's bounded-backward-
         scan hack over alerts.json's 170MB+ NDJSON file with a real indexed
-        query, for the console's fired/suppressed alert view."""
+        query, for the console's fired/suppressed alert view. With `device_id`,
+        alerts raised under every id merged into that device are included."""
         clauses: List[str] = []
         params: List[Any] = []
         if device_id is not None:
-            clauses.append("device_id = ?")
-            params.append(device_id)
+            ids = self.device_ids_for(device_id) if resolve_merges else [device_id]
+            clauses.append(f"device_id IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
         if since is not None:
             clauses.append("timestamp >= ?")
             params.append(since)
@@ -1348,8 +1466,9 @@ class GraphStore:
             clauses.append("timestamp <= ?")
             params.append(until)
         if device_id is not None:
-            clauses.append("device_id = ?")
-            params.append(device_id)
+            ids = self.device_ids_for(device_id)   # alerts raised under an id since merged into this device too
+            clauses.append(f"device_id IN ({','.join('?' * len(ids))})")
+            params.extend(ids)
         where = " AND ".join(clauses)
 
         count = self._conn.execute(
@@ -1975,10 +2094,13 @@ class GraphStore:
         cohort average of 2.2" over a 7-day window, both absurd for real devices.
         Now reads device_destinations (record_device_destinations() above),
         populated from real per-cycle traffic (pipeline.py's own
-        zeek_fx.get_dest_ips()), never from evidence-creation as a side effect."""
+        zeek_fx.get_dest_ips()), never from evidence-creation as a side effect.
+        Counts the destinations of every id merged into this device too."""
+        ids = self.device_ids_for(device_id)
         rows = self._conn.execute(
-            "SELECT DISTINCT destination_id FROM device_destinations WHERE device_id = ? AND last_seen >= ?",
-            (device_id, since),
+            f"SELECT DISTINCT destination_id FROM device_destinations WHERE device_id IN ({','.join('?' * len(ids))}) "
+            "AND last_seen >= ?",
+            (*ids, since),
         ).fetchall()
         return sum(1 for r in rows if not is_local_or_multicast_destination(r["destination_id"]))
 
@@ -2043,24 +2165,35 @@ class GraphStore:
         """Distinct (device_id, destination_id) pairs observed since `since` --
         used by retro_hunter.py (Phase 6) to re-scan historical destinations
         against freshly-updated threat intel, replacing the earlier engine's
-        load_historical_domains()'s flat-file JSONL scan with a direct graph query."""
+        load_historical_domains()'s flat-file JSONL scan with a direct graph query.
+        Device ids are canonical (a merged-away id is reported as the device it
+        was merged into)."""
         rows = self._conn.execute(
             "SELECT DISTINCT device_id, destination_id FROM evidence "
             "WHERE timestamp >= ? AND destination_id != '(none)'",
             (since,),
         ).fetchall()
-        return [(r["device_id"], r["destination_id"]) for r in rows]
+        return self._canonical_pairs((r["device_id"], r["destination_id"]) for r in rows)
 
     def get_traffic_destinations_since(self, since: float) -> List[Any]:
         """(device_id, destination_id) pairs from device_destinations (every real destination a device touched,
         recorded each cycle by record_device_destinations()), last seen since `since`, minus local/multicast
         addresses. Unlike get_device_destinations_since() this does not depend on a detector having flagged the
-        destination, so a quiet command-and-control address is in it too."""
+        destination, so a quiet command-and-control address is in it too. Device ids are canonical, as in
+        get_device_destinations_since()."""
         rows = self._conn.execute(
             "SELECT device_id, destination_id FROM device_destinations WHERE last_seen >= ?", (since,)
         ).fetchall()
-        return [(r["device_id"], r["destination_id"]) for r in rows
-                if not is_local_or_multicast_destination(r["destination_id"])]
+        return self._canonical_pairs((r["device_id"], r["destination_id"]) for r in rows
+                                     if not is_local_or_multicast_destination(r["destination_id"]))
+
+    def _canonical_pairs(self, pairs) -> List[Any]:
+        """(device_id, x) pairs with each device id replaced by its canonical id, duplicates dropped, order kept."""
+        canonical = self.canonical_id_map()
+        out: Dict[tuple, None] = {}
+        for device_id, other in pairs:
+            out[(canonical.get(device_id, device_id), other)] = None
+        return list(out)
 
     INTEL_SWEEPS_KEPT = 500
 
@@ -2197,9 +2330,12 @@ class GraphStore:
         device via idx_decisions_device_ts (schema.sql), still an index-order
         scan, not a full-table sort."""
         if device_id:
+            # Every id of the device: decisions made before a merge stay in its history.
+            ids = self.device_ids_for(device_id)
             rows = self._conn.execute(
-                "SELECT * FROM decisions WHERE device_id = ? ORDER BY timestamp DESC LIMIT ?",
-                (device_id, limit),
+                f"SELECT * FROM decisions WHERE device_id IN ({','.join('?' * len(ids))}) "
+                "ORDER BY timestamp DESC LIMIT ?",
+                (*ids, limit),
             ).fetchall()
         else:
             rows = self._conn.execute(
@@ -2275,9 +2411,25 @@ class GraphStore:
             ORDER BY dec.timestamp DESC
             """
         ).fetchall()
+        # A device with ids merged into it: its latest decision may be under one of those ids (one extra indexed
+        # query per such device -- a handful, not one per device).
+        merged_into: Dict[str, List[str]] = {}
+        for old_id, canonical in self.canonical_id_map().items():
+            merged_into.setdefault(canonical, []).append(old_id)
         out = []
         for r in rows:
             d = dict(r)
+            older_ids = merged_into.get(d["device_id"])
+            if older_ids:
+                ids = [d["device_id"], *older_ids]
+                latest = self._conn.execute(
+                    f"SELECT decision_id, state, risk_score, confidence, timestamp FROM decisions "
+                    f"WHERE device_id IN ({','.join('?' * len(ids))}) ORDER BY timestamp DESC LIMIT 1", ids).fetchone()
+                if latest is not None and (d["decision_timestamp"] is None
+                                           or latest["timestamp"] > d["decision_timestamp"]):
+                    d.update(decision_id=latest["decision_id"], state=latest["state"],
+                             risk_score=latest["risk_score"], confidence=latest["confidence"],
+                             decision_timestamp=latest["timestamp"])
             metadata_json = d.pop("metadata_json", None)
             try:
                 meta = json.loads(metadata_json) if metadata_json else {}
@@ -2285,6 +2437,8 @@ class GraphStore:
                 meta = {}
             d["device_type"] = meta.get("device_type") or d["device_type"]
             out.append(d)
+        out.sort(key=lambda d: d["decision_timestamp"] if d["decision_timestamp"] is not None else float("-inf"),
+                 reverse=True)
         return out
 
     def get_edges(self, relation: Optional[str] = None, src_kind: Optional[str] = None,

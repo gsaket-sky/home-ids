@@ -117,7 +117,9 @@ def get_graph(
 
         decisions = store.get_recent_decisions(limit, device_id=device_id)
         decision_ids = [d["decision_id"] for d in decisions]
-        device_ids = sorted({d["device_id"] for d in decisions})
+        # One node per physical device: rows recorded under an id since merged away belong to the device it is part of.
+        canonical_ids = store.canonical_id_map() if hasattr(store, "canonical_id_map") else {}
+        device_ids = sorted({canonical_ids.get(d["device_id"], d["device_id"]) for d in decisions})
 
         edge_totals_by_decision = store.count_edges_grouped_by_dst("decision", decision_ids)
         evidence_edges = store.get_edges_capped_per_dst("decision", decision_ids, EVIDENCE_PER_DECISION_CAP)
@@ -145,14 +147,13 @@ def get_graph(
     nodes = []
     edges = []
 
+    def cid(dev):
+        return canonical_ids.get(dev, dev)
+
     for device_id in device_ids:
-        hostname = None
-        if sm.has_device(device_id):
-            with sm.lock_device(device_id) as state:
-                hostname = state.hostname
         nodes.append({
             "id": f"device:{device_id}", "kind": "device",
-            "label": (hostname if hostname and hostname != "unknown" else device_id),
+            "label": resolve_device_hostname(device_id, sm),
             "sub": device_id,
         })
 
@@ -162,7 +163,7 @@ def get_graph(
     # between repeats of "the same thing happening again."
     groups: dict = {}
     for ev in evidence_by_id.values():
-        key = (ev.device_id, ev.evidence_type, ev.independence_family, ev.destination_id)
+        key = (cid(ev.device_id), ev.evidence_type, ev.independence_family, ev.destination_id)
         groups.setdefault(key, []).append(ev)
 
     evidence_id_to_node_id = {}
@@ -236,7 +237,7 @@ def get_graph(
             "evidence_total": total_edges,
             "evidence_truncated": total_edges > EVIDENCE_PER_DECISION_CAP,
             # see evidence node's own comment above -- same device-clustering reason.
-            "device_id": d["device_id"],
+            "device_id": cid(d["device_id"]),
         })
 
     # Alert-trace graph: alert_event nodes + decision->alert_event 'raised' edges.
@@ -247,7 +248,7 @@ def get_graph(
         nodes.append({
             "id": f"alert_event:{ae['alert_event_id']}", "kind": "alert_event",
             "label": ae["status"], "sub": ae.get("explanation_text") or "",
-            "timestamp": ae["timestamp"], "device_id": ae["device_id"],
+            "timestamp": ae["timestamp"], "device_id": cid(ae["device_id"]),
             "fp_verdict": ae.get("fp_verdict"), "fp_confidence": ae.get("fp_confidence"),
             "incident_id": ae.get("incident_id"),
             # Plain-English narrative (2026-09-22, user request) -- built once at
@@ -273,7 +274,7 @@ def get_graph(
             nodes.append({
                 "id": f"explanation:{ae['alert_event_id']}", "kind": "explanation",
                 "label": preview, "full_text": full_text,
-                "timestamp": ae["timestamp"], "device_id": ae["device_id"],
+                "timestamp": ae["timestamp"], "device_id": cid(ae["device_id"]),
             })
             edges.append({
                 "from": f"alert_event:{ae['alert_event_id']}", "to": f"explanation:{ae['alert_event_id']}",

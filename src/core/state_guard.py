@@ -131,6 +131,9 @@ class StateManager:
         # _last_migrated_isolation_target (which only carries mac/ip) rather than widening
         # that struct for a caller its original mechanism doesn't need.
         self._last_orphan_merge_cleanup: Optional[Dict[str, str]] = None
+        # Consume-once side channel for a merge's containment carry-over (see
+        # merge_into_canonical() and pop_last_merged_containment()).
+        self._last_merged_containment: Optional[Dict[str, str]] = None
         # BUGFIX (identity-merge race, handover 2026-09-20): flat redirect map from a
         # discarded orphan_id -> the canonical_id it was folded into by
         # merge_into_canonical(). Without this, resolve_device_id()'s pure IP/hostname/MAC
@@ -388,6 +391,14 @@ class StateManager:
             self._last_migrated_isolation_target = None
             return val
 
+    def pop_last_merged_containment(self) -> Optional[Dict[str, str]]:
+        """Consume-once: the last merge_into_canonical()'s {"orphan_mac", "orphan_ip", "canonical_id",
+        "canonical_mac", "canonical_ip", "hostname"}, for IPSMitigator.carry_containment_after_merge() -- or None."""
+        with self._global_lock:
+            val = self._last_merged_containment
+            self._last_merged_containment = None
+            return val
+
     def pop_last_orphan_merge_cleanup(self) -> Optional[Dict[str, str]]:
         """Consume-once accessor for the "a retroactive orphan merge just discarded this
         device_id" cleanup side channel (see __init__'s comment). Returns None if
@@ -521,7 +532,11 @@ class StateManager:
         merge handover follow-up): confirmed_threat_count/fp_count/has_validated_threat
         ARE carried forward (summed/OR'd into the canonical) -- these are simple counts
         of real, discrete operator actions against this physical device, not statistical
-        estimators, so summing them is lossless and correct rather than corrupting.
+        estimators, so summing them is lossless and correct rather than corrupting. Same
+        reasoning (2026-10-05): the familiarity profile -- active learning days and
+        familiar destinations, counts of benign observations -- is carried into the
+        canonical too (`familiarity.merge_device_profile()`), so the learning period
+        counts every day the physical device was observed.
 
         Idempotent / safe: a no-op returning False if canonical_id isn't a currently
         tracked device, if orphan_id == canonical_id, or if orphan_id isn't currently
@@ -619,12 +634,33 @@ class StateManager:
                     if canonical_hostname and canonical_hostname != "unknown":
                         meta["hostname"] = canonical_hostname
 
-            # Capture the orphan's OLD mac/ip before discarding its state, and reuse the
-            # existing isolation-release side channel — identity.py's
-            # _release_stale_isolation_if_merged() needs zero changes to pick this up.
-            self._last_migrated_isolation_target = {
-                "mac_addr": orphan_mac or "unknown",
-                "ip_addr": orphan_client_ip or "unknown",
+            # Containment follows the device (BUGFIX 2026-10-05, merge sweep). This used to
+            # hand the orphan's mac/ip to the isolation-RELEASE side channel, the one built
+            # for a MAC rotation (migrate_device_id(), where the old address is dead). In a
+            # merge the orphan's address is folded into the canonical above because it is
+            # the same physical device, usually still using it -- so every merge silently
+            # lifted the tarpit and router isolation of a contained device. Now: the
+            # orphan's containment entries stay and are relabelled to the canonical, an
+            # operator release recorded for the orphan carries over (a merge must not
+            # re-contain a device a person released), and identity.py extends containment
+            # to the canonical's own current mac/ip (pop_last_merged_containment()).
+            for key in ("tarpit_targets", "router_isolated_devices"):
+                for meta in (self._ips_state.get(key) or {}).values():
+                    if isinstance(meta, dict) and meta.get("dev_id") == orphan_id:
+                        meta["dev_id"] = canonical_id
+                        if canonical_hostname and canonical_hostname != "unknown":
+                            meta["hostname"] = canonical_hostname
+            released = self._ips_state.get("operator_released_devices")
+            if isinstance(released, dict) and orphan_id in released:
+                released[canonical_id] = max(float(released.get(canonical_id, 0) or 0),
+                                             float(released[orphan_id] or 0))
+            self._last_merged_containment = {
+                "orphan_mac": orphan_mac or "unknown",
+                "orphan_ip": orphan_client_ip or "unknown",
+                "canonical_id": canonical_id,
+                "canonical_mac": getattr(canonical_state, "mac_address", "unknown") or "unknown",
+                "canonical_ip": getattr(canonical_state, "client_ip", "unknown") or "unknown",
+                "hostname": canonical_hostname or "unknown",
             }
             self._last_orphan_merge_cleanup = {
                 "orphan_id": orphan_id,
@@ -643,10 +679,23 @@ class StateManager:
             )
             identity_merges_total.labels(device=canonical_id, hostname=canonical_hostname or "unknown").inc()
 
+        # A device type the user confirmed in the web UI is about the physical device: it follows the merge (file
+        # write, so outside the lock).
+        try:
+            from core.device_labels import transfer_label
+            transfer_label(orphan_id, canonical_id, str(self.state_path.parent))
+        except Exception as exc:
+            LOGGER.warning("Moving the device label of %s to %s after the merge failed: %s", orphan_id, canonical_id, exc)
         if ml_registry is not None:
             ml_registry.discard_device(orphan_id, reason="merge")
         if familiarity is not None:
-            familiarity.discard_device_profile(orphan_id, reason="merge")
+            # Learned activity (the learning period's active days) and familiar destinations belong to the physical
+            # device: carried into the canonical, not discarded (DeviceFamiliarity.merge_device_profile()).
+            merge_profile = getattr(familiarity, "merge_device_profile", None)
+            if merge_profile is not None:
+                merge_profile(orphan_id, canonical_id)
+            else:
+                familiarity.discard_device_profile(orphan_id, reason="merge")
         return True
 
     def get_all_device_ids(self) -> List[str]:
@@ -670,6 +719,11 @@ class StateManager:
         pointing at the same device_id from both directions minutes apart."""
         with self._global_lock:
             return self._merge_redirects.get(device_id, device_id)
+
+    def get_merge_redirects(self) -> Dict[str, str]:
+        """A copy of the whole redirect map {merged-away id: live canonical id} (flat, see resolve_merge_redirect())."""
+        with self._global_lock:
+            return dict(self._merge_redirects)
 
     def get_ips_state(self) -> Dict[str, Any]:
         """Returns a shallow copy of the IPS state for inspection.
@@ -1118,7 +1172,7 @@ class StateManager:
             try:
                 self._graph_store.update_device_metadata(dev_id, metadata)
             except Exception as exc:
-                LOGGER.debug("Device-state graph mirror failed for %r: %s", dev_id, exc)
+                LOGGER.warning("Device-state graph mirror failed for %r: %s", dev_id, exc)
 
     save_to_disk = flush_to_disk
 

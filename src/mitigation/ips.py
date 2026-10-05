@@ -22,7 +22,7 @@ import threading
 import time
 import requests
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 from metrics import (
     ips_pihole_blocks_metric,
@@ -367,12 +367,13 @@ class IPSMitigator:
         into GraphStore.containment_actions -- never gates or affects the real
         action, which has already happened by the time every call site below
         calls this. No-ops (returns None) when self._graph_store is None (every
-        pre-existing caller). A graph failure here is logged at DEBUG (not
-        WARNING/ERROR) deliberately -- this mirror is audit-trail sugar, not a
-        signal an operator needs paged on; the real containment state
-        (self.state_manager's ips_state dict) is completely unaffected either way.
-        Returns the new action_id, or None if not mirrored (no graph_store, or a
-        failure)."""
+        pre-existing caller). The real containment state (self.state_manager's
+        ips_state dict) is unaffected by a graph failure here, but the failure is
+        logged at WARNING: a mirror that fails silently at DEBUG went unnoticed for
+        weeks in the identity-merge mirror (graph and engine then disagreed on 33 of
+        113 merges on .94, 2026-10-05), and the console reads containment history
+        from the graph. Returns the new action_id, or None if not mirrored (no
+        graph_store, or a failure)."""
         if self._graph_store is None:
             return None
         try:
@@ -381,8 +382,8 @@ class IPSMitigator:
                 target=target, reason=reason,
             )
         except Exception as exc:
-            LOGGER.debug("Containment graph mirror failed (device=%s, action_type=%s): %s",
-                          device_id, action_type, exc)
+            LOGGER.warning("Containment graph mirror failed (device=%s, action_type=%s): %s",
+                           device_id, action_type, exc)
             return None
 
     def _mirror_containment_released(self, action_id: Optional[str]) -> None:
@@ -395,7 +396,7 @@ class IPSMitigator:
         try:
             self._graph_store.update_containment_status(action_id, "released")
         except Exception as exc:
-            LOGGER.debug("Containment graph release-mirror failed (action_id=%s): %s", action_id, exc)
+            LOGGER.warning("Containment graph release-mirror failed (action_id=%s): %s", action_id, exc)
 
     def _save_queues(self):
         with self.state_manager._global_lock:
@@ -913,6 +914,41 @@ class IPSMitigator:
         if tarpit_armed:
             return True, "Isolated via Fritz!Box (IPv4) + Layer-2 tarpit armed (covers IPv6)."
         return True, "Isolated via Fritz!Box."
+
+    def carry_containment_after_merge(self, orphan_mac: str, orphan_ip: str, canonical_id: str,
+                                        canonical_mac: str, canonical_ip: str, hostname: str) -> List[str]:
+        """An identity merge folded a CONTAINED orphan into `canonical_id` (the same physical device): its
+        containment entries stay (StateManager.merge_into_canonical() relabels them) and are extended to the
+        canonical's own current MAC/IP, so the device cannot leave containment by appearing under its other
+        identity. Uses the same calls as the console buttons (each respects its config switch and is a no-op for an
+        address already contained). Returns what was added ("router", "tarpit")."""
+        def usable(v):
+            return bool(v) and v != "unknown"
+        with self._lock:
+            router_contained = usable(orphan_mac) and orphan_mac in self._router_isolated_devices
+            tarpit_contained = usable(orphan_ip) and orphan_ip in self._tarpit_active_targets
+        if not (router_contained or tarpit_contained):
+            return []
+        reason = f"Containment carried over: a contained identity was merged into device {canonical_id}"
+        added: List[str] = []
+        if router_contained and usable(canonical_mac) and canonical_mac != orphan_mac:
+            ok, msg = self.operator_isolate_router(canonical_id, canonical_ip, canonical_mac, hostname, reason=reason)
+            if ok and msg != "Already isolated.":
+                added.append("router")
+            elif not ok:
+                LOGGER.warning("Could not extend router isolation to merged device %s (%s): %s",
+                               canonical_id, canonical_mac, msg)
+        if tarpit_contained and usable(canonical_ip) and canonical_ip != orphan_ip:
+            ok, msg = self.operator_tarpit(canonical_id, canonical_ip, canonical_mac, hostname, reason=reason)
+            if ok and msg != "Already tarpitted.":
+                added.append("tarpit")
+            elif not ok:
+                LOGGER.warning("Could not extend the tarpit to merged device %s (%s): %s",
+                               canonical_id, canonical_ip, msg)
+        LOGGER.critical("🔗 [CONTAINMENT CARRIED OVER] %s (%s): orphan containment kept (mac=%s ip=%s)%s.",
+                        hostname, canonical_id, orphan_mac, orphan_ip,
+                        f", extended to {', '.join(added)}" if added else "")
+        return added
 
     def operator_tarpit(self, dev_id: str, ip: str, mac: str, hostname: str,
                           reason: str = "Operator-requested Layer-2 tarpit") -> "tuple[bool, str]":

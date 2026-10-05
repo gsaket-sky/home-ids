@@ -63,8 +63,9 @@ def device_history(store: GraphStore, device_id: str, since: float = 0.0) -> Dic
     convention -- a merged orphan's history is included transparently."""
     canonical = store.resolve_canonical_device_id(device_id)
     evidence_list = sorted(store.get_evidence_for_device(canonical, since=since), key=lambda e: e.timestamp)
+    device_ids = set(store.device_ids_for(canonical))   # decisions made under its earlier ids too
     decisions = sorted(
-        (d for d in store.get_decisions_since(since) if d["device_id"] == canonical),
+        (d for d in store.get_decisions_since(since) if d["device_id"] in device_ids),
         key=lambda d: d["timestamp"],
     )
     return {"canonical_device_id": canonical, "evidence": evidence_list, "decisions": decisions}

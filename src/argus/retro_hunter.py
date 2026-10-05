@@ -163,15 +163,19 @@ class RetroHunter:
     def _window_pairs(self, since: float, extra_pairs: Optional[Iterable[Tuple[str, str]]]) -> List[Tuple[str, str]]:
         """Every (device, destination) pair in the window, from three sources: flagged destinations (evidence),
         real traffic (device_destinations: includes the quiet ones no detector flagged) and the caller's own pairs
-        (the live job passes the learned-popularity ledger's names). De-duplicated, order kept."""
+        (the live job passes the learned-popularity ledger's names). De-duplicated, order kept. Device ids are
+        canonical: a pair recorded under an id since merged away is reported for the device it was merged into."""
         seen: Dict[Tuple[str, str], None] = {}
         for pair in self.store.get_device_destinations_since(since):
             seen[(pair[0], pair[1])] = None
         for pair in self.store.get_traffic_destinations_since(since):
             seen[(pair[0], pair[1])] = None
-        for device_id, dest in (extra_pairs or ()):
-            if device_id and dest:
-                seen[(device_id, dest)] = None
+        if extra_pairs:
+            canonical_map = getattr(self.store, "canonical_id_map", None)
+            canonical = canonical_map() if canonical_map is not None else {}
+            for device_id, dest in extra_pairs:
+                if device_id and dest:
+                    seen[(canonical.get(device_id, device_id), dest)] = None
         return list(seen)
 
     def hunt(self, days_back: float = 14, now: Optional[float] = None,

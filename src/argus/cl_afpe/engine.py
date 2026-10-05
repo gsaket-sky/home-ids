@@ -222,7 +222,8 @@ class ClAfpeEngine:
         src_id = device_id if (device_id and device_id != "unknown") else "unattributed"
         # A refresh replaces the existing edge rather than accumulating duplicates.
         for e in existing:
-            if device_scoped and not (e["metadata"].get("scope") == TRUST_SCOPE_DEVICE and e["src_id"] == src_id):
+            if device_scoped and not (e["metadata"].get("scope") == TRUST_SCOPE_DEVICE
+                                      and self._same_device(e["src_id"], src_id)):
                 continue
             self.store.delete_edge(e["edge_id"])
 
@@ -317,13 +318,26 @@ class ClAfpeEngine:
             if recorded_hypothesis and recorded_hypothesis != hypothesis_base:
                 continue
             if e["metadata"].get("scope") == TRUST_SCOPE_DEVICE:
-                if e["src_id"] != (device_id if (device_id and device_id != "unknown") else "unattributed"):
+                if not self._same_device(e["src_id"],
+                                         device_id if (device_id and device_id != "unknown") else "unattributed"):
                     continue
             elif recorded_hypothesis in DEVICE_SCOPED_TRUST_HYPOTHESES:
-                if e["metadata"].get("device_id") != device_id:
+                if not self._same_device(e["metadata"].get("device_id"), device_id):
                     continue
             return True
         return False
+
+    def _same_device(self, a: Optional[str], b: Optional[str]) -> bool:
+        """Equal ids, or two ids of one device (one merged into the other): trust earned under a device's earlier
+        id still applies to it."""
+        if a == b:
+            return True
+        if not a or not b or "unattributed" in (a, b) or "unknown" in (a, b):
+            return False
+        try:
+            return self._resolve_canonical_device_id(a) == self._resolve_canonical_device_id(b)
+        except Exception:
+            return False
 
     # --- sigma-shift widening (Phase 6c) -----------------------------------------
 
@@ -458,6 +472,9 @@ class ClAfpeEngine:
                     refused=True,
                     refused_reason=f"device_id '{device_id}' is not a currently-known canonical device.",
                 )
+            # The correction is for the physical device: an alert raised before a merge carries an id merged away
+            # since, and calibration written under that id would never be read (2026-10-05 merge sweep).
+            device_id = canonical
 
         # Hard-stop-signature refusal, ported exactly.
         signature_base = _strip_persistence_suffix(signature) or ""

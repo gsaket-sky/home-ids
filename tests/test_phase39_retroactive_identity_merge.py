@@ -142,14 +142,18 @@ orphan_b.mac_address = "aa:bb:cc:dd:ee:04"
 
 sm_b.merge_into_canonical("orphan_b", "canon_b")
 
-isolation_target = sm_b.pop_last_migrated_isolation_target()
-check("merge_into_canonical() reuses the EXISTING isolation-release side channel "
-      "(identity.py's _release_stale_isolation_if_merged() needs zero changes to pick "
-      "this up) — carries the orphan's own pre-merge mac/ip",
-      isolation_target == {"mac_addr": "aa:bb:cc:dd:ee:04", "ip_addr": IPV6_LL},
-      f"got={isolation_target}")
-check("the isolation side channel is consume-once (drained by the pop above)",
+# BUGFIX 2026-10-05 (merge sweep): a merge used to feed the orphan's mac/ip into the
+# isolation-RELEASE channel (built for MAC rotation), so merging a contained device lifted
+# its containment. A merge now never releases; it reports a containment carry-over instead.
+check("merge_into_canonical() no longer feeds the isolation-RELEASE channel",
       sm_b.pop_last_migrated_isolation_target() is None)
+carry = sm_b.pop_last_merged_containment()
+check("it reports the orphan's mac/ip and the canonical for the containment carry-over",
+      carry is not None and carry["orphan_mac"] == "aa:bb:cc:dd:ee:04" and carry["orphan_ip"] == IPV6_LL
+      and carry["canonical_id"] == "canon_b",
+      f"got={carry}")
+check("the carry-over channel is consume-once (drained by the pop above)",
+      sm_b.pop_last_merged_containment() is None)
 
 sm_c = StateManager(state_path="/tmp/_phase39_test_state_c.json")
 canon_c = sm_c.get_or_create("canon_c", IPV4, "smart-tv")

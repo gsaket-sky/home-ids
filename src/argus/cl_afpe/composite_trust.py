@@ -108,6 +108,7 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
     if not eligible_to_contribute:
         return
     now = now if now is not None else time.time()
+    device_id = _canonical(store, device_id)
     # BUGFIX (2026-09-15, found live on .94 minutes after deploying the "3
     # automated-learning gaps" fix): cl_afpe_trust.hypothesis_id is a real FK
     # against the hypotheses catalog table (GraphStore's PRAGMA foreign_keys=ON
@@ -128,13 +129,19 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
         "INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')",
         (hypothesis_id,),
     )
-    row = store._conn.execute(
-        "SELECT trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id=? AND behavior_fingerprint=? AND "
-        "destination_class=? AND hypothesis_id=? AND evidence_family=? AND regime_id=?",
-        (device_id, behavior_fingerprint, destination_class, hypothesis_id, evidence_family, regime_id),
-    ).fetchone()
+    # Rows of this tuple under every id of the device: an id merged into it keeps contributing, so the new value
+    # builds on the highest (decayed) trust the device already has, whichever id it was earned under.
+    ids = _device_ids(store, device_id)
+    rows = store._conn.execute(
+        f"SELECT device_id, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id IN "
+        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? "
+        f"AND evidence_family=? AND regime_id=?",
+        (*ids, behavior_fingerprint, destination_class, hypothesis_id, evidence_family, regime_id),
+    ).fetchall()
+    row = next((r for r in rows if r["device_id"] == device_id), None)
+    prior = max((_apply_decay(float(r["trust_value"]), float(r["n"]), now, r) for r in rows), default=None)
     if row is None:
-        new_trust = min(1.0, _TRUST_INCREMENT)
+        new_trust = min(1.0, (prior or 0.0) + _TRUST_INCREMENT)
         store._conn.execute(
             "INSERT INTO cl_afpe_trust (device_id, behavior_fingerprint, destination_class, hypothesis_id, "
             "evidence_family, regime_id, trust_value, n, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
@@ -142,8 +149,7 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
              new_trust, now),
         )
     else:
-        decayed = _apply_decay(float(row["trust_value"]), float(row["n"]), now, row)
-        new_trust = min(1.0, decayed + _TRUST_INCREMENT)
+        new_trust = min(1.0, prior + _TRUST_INCREMENT)
         store._conn.execute(
             "UPDATE cl_afpe_trust SET trust_value=?, n=n+1, last_updated=? WHERE device_id=? AND "
             "behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? AND evidence_family=? AND regime_id=?",
@@ -159,14 +165,35 @@ def _apply_decay(trust_value: float, n: float, now: float, row) -> float:
     return max(0.0, trust_value - _TRUST_DECAY_PER_DAY * days_elapsed)
 
 
+def _canonical(store: GraphStore, device_id: str) -> str:
+    """Trust belongs to the physical device: written under its canonical id (an id merged away since resolves to the
+    device it was merged into)."""
+    try:
+        return store.resolve_canonical_device_id(device_id) if device_id else device_id
+    except RuntimeError:
+        return device_id
+
+
+def _device_ids(store: GraphStore, device_id: str):
+    return store.device_ids_for(device_id) if device_id else [device_id]
+
+
 def _family_trusts(store: GraphStore, device_id: str, behavior_fingerprint: str,
                      destination_class: str, hypothesis_id: str, regime_id: int, now: float):
+    """(evidence_family, decayed trust) for this tuple, across every id of the device (trust earned under an id since
+    merged into it still counts). Several ids with the same family: the highest trust, one entry per family."""
+    ids = _device_ids(store, device_id)
     rows = store._conn.execute(
-        "SELECT evidence_family, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id=? AND "
-        "behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? AND regime_id=?",
-        (device_id, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
+        f"SELECT evidence_family, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id IN "
+        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? "
+        f"AND regime_id=?",
+        (*ids, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
     ).fetchall()
-    return [(r["evidence_family"], _apply_decay(float(r["trust_value"]), float(r["n"]), now, r)) for r in rows]
+    best = {}
+    for r in rows:
+        trust = _apply_decay(float(r["trust_value"]), float(r["n"]), now, r)
+        best[r["evidence_family"]] = max(trust, best.get(r["evidence_family"], 0.0))
+    return list(best.items())
 
 
 def permits_suppression(store: GraphStore, device_id: str, behavior_fingerprint: str,
@@ -195,11 +222,12 @@ def reset_tuple(store: GraphStore, device_id: str, behavior_fingerprint: str,
     every family's accumulated trust for this exact tuple. Returns the
     number of rows removed. A normal admin capability, not an autonomous
     decision -- see Sheet 04's own design for why this is deliberately
-    manual, not automatic."""
+    manual, not automatic. Covers every id of the device, like the reads."""
+    ids = _device_ids(store, device_id)
     cur = store._conn.execute(
-        "DELETE FROM cl_afpe_trust WHERE device_id=? AND behavior_fingerprint=? AND destination_class=? "
-        "AND hypothesis_id=? AND regime_id=?",
-        (device_id, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
+        f"DELETE FROM cl_afpe_trust WHERE device_id IN ({','.join('?' * len(ids))}) AND behavior_fingerprint=? "
+        f"AND destination_class=? AND hypothesis_id=? AND regime_id=?",
+        (*ids, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
     )
     store._maybe_commit()
     return cur.rowcount

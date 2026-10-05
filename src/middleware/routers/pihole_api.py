@@ -146,7 +146,10 @@ def _apply_operator_correction(alert_payload: dict, device_id: str, target: str,
     base_domain = "" if _looks_like_ip(immunized) else immunized
 
     # FIX #1 (blast radius): only the device this specific alert was about, not every
-    # tracked device on the network.
+    # tracked device on the network. An alert raised before a merge names an id merged
+    # away since: the device it was merged into is the one corrected.
+    if device_id and device_id != "unknown":
+        device_id = sm.resolve_merge_redirect(device_id)
     if device_id and device_id != "unknown" and sm.has_device(device_id):
         with sm.lock_device(device_id) as state:
             state.fp_count = getattr(state, "fp_count", 0) + 1
@@ -245,7 +248,8 @@ def _ipc_revoke_logic(action_id: str):
         if entry.get("type") == "immunize_domain":
             _get_argus_cl_afpe_engine().revoke(entry.get("target", ""))
 
-        device_id = entry.get("device_id", "")
+        # The device the action was about -- or, if that id was merged away since, the device it is now part of.
+        device_id = sm.resolve_merge_redirect(entry.get("device_id", "")) if entry.get("device_id") else ""
         if device_id and sm.has_device(device_id):
             with sm.lock_device(device_id) as state:
                 state.has_validated_threat = True
@@ -305,6 +309,7 @@ def _ipc_approve_tune_down_logic(device_id: str):
         sm = StateManager(state_path=state_path)
         sm.load_from_disk()
 
+        device_id = sm.resolve_merge_redirect(device_id)   # an approval sent before a merge names the old id
         if not sm.has_device(device_id):
             return {"status": "not_found", "device_id": device_id}
 

@@ -97,5 +97,23 @@ def remove_label(device_id: str, state_dir: str = "state") -> bool:
     return False
 
 
+def transfer_label(orphan_id: str, canonical_id: str, state_dir: str = "state") -> bool:
+    """An identity merge: the orphan's confirmation is about the same physical device, so it moves to the canonical
+    (2026-10-05 merge sweep -- it used to stay under the dead id and the device fell back to a guessed type). If both
+    were confirmed, the more recent confirmation wins. Returns True if the canonical's label changed."""
+    data = _read_all(state_dir)
+    orphan = data.get(orphan_id)
+    if not orphan:
+        return False
+    data = dict(data)
+    del data[orphan_id]
+    mine = data.get(canonical_id)
+    changed = not mine or float(orphan.get("labeled_at", 0) or 0) > float(mine.get("labeled_at", 0) or 0)
+    if changed:
+        data[canonical_id] = dict(orphan)
+    _write_all(data, state_dir)
+    return changed
+
+
 def all_labels(state_dir: str = "state") -> Dict[str, Any]:
     return dict(_read_all(state_dir))

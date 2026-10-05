@@ -863,12 +863,15 @@ def _device_scoped_promoted_value(store: GraphStore, parameter: str, device_id: 
     would currently use including inherited global/category defaults"). Returns None if
     no such row exists (never promoted, or promoted then rolled back) -- direct SQL
     against store._conn, same pattern backtest_job.py's own diagnostic queries use,
-    rather than reaching into AutotuneEngine's own private scope-lookup method."""
+    rather than reaching into AutotuneEngine's own private scope-lookup method. A value
+    promoted under an id since merged into this device counts (get_active_value() does
+    the same)."""
+    ids = store.device_ids_for(device_id)
     row = store._conn.execute(
-        "SELECT new_value FROM threshold_history WHERE parameter=? AND device_id=? AND "
+        f"SELECT new_value FROM threshold_history WHERE parameter=? AND device_id IN ({','.join('?' * len(ids))}) AND "
         "device_type IS NULL AND promoted_at IS NOT NULL AND rolled_back_at IS NULL "
         "ORDER BY promoted_at DESC LIMIT 1",
-        (parameter, device_id),
+        (parameter, *ids),
     ).fetchone()
     return float(row["new_value"]) if row is not None else None
 
@@ -1112,6 +1115,24 @@ def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: s
                       f"(device_id={device_id}, device_type={device_type}, non-fatal): {exc}")
 
 
+def _by_canonical_device(per_device: dict, canonical: dict) -> dict:
+    """Re-keys per-device evidence by canonical device id (2026-10-05 merge sweep). Alerts carry the id the device had
+    when they fired; once ids are merged, one device's corrections would be split across its ids -- each part short of
+    the sample minimum, and calibrations proposed for ids nothing reads. Lists are joined, counts added."""
+    if not canonical:
+        return per_device
+    out: dict = {}
+    for device_id, value in per_device.items():
+        key = canonical.get(device_id, device_id)
+        if key not in out:
+            out[key] = list(value) if isinstance(value, list) else value
+        elif isinstance(value, list):
+            out[key].extend(value)
+        else:
+            out[key] += value
+    return out
+
+
 def _device_profile_default(cl_afpe, device_id: str, key: str, global_default: float) -> float:
     """The device's own CL-AFPE profile value for `key` (raised after corrections), else the global default -- the
     `default` the autotuner's per-device value layers over."""
@@ -1171,6 +1192,11 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         store = None
         engine = None
         cl_afpe = None
+    try:
+        canonical_ids = store.canonical_id_map() if store is not None else {}
+    except Exception as exc:
+        LOGGER.warning(f"[AUTOTUNE] Device merge map unavailable (per-device evidence keyed by alert ids): {exc}")
+        canonical_ids = {}
 
     # 2026-09-27 (Phase 6 of the autonomy-completion effort): resource-aware pause
     # for new candidate generation -- see utils.is_resource_pressure_active()'s own
@@ -1203,6 +1229,8 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         calibration_muted_docs = _read_calibration_muted_docs(state_dir)
         corrected_fp_scores, uncorrected_uncertain_scores, per_device_corrected, per_device_uncorrected = \
             _collect_calibration_evidence(state_dir, muted_docs=calibration_muted_docs)
+        per_device_corrected = _by_canonical_device(per_device_corrected, canonical_ids)
+        per_device_uncorrected = _by_canonical_device(per_device_uncorrected, canonical_ids)
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] Failed to collect calibration evidence (non-fatal): {exc}")
         _write_autotune_relay_stats(state_dir, run_start, global_outcome, global_evidence, device_outcomes, device_evidence,
@@ -1259,6 +1287,8 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
         (corrected_confirmed_scores, uncorrected_confirmed_scores,
          per_device_uncertain_corrected, per_device_uncertain_uncorrected) = \
             _collect_uncertain_calibration_evidence(state_dir, muted_docs=calibration_muted_docs)
+        per_device_uncertain_corrected = _by_canonical_device(per_device_uncertain_corrected, canonical_ids)
+        per_device_uncertain_uncorrected = _by_canonical_device(per_device_uncertain_uncorrected, canonical_ids)
         uncertain_evidence = (len(corrected_confirmed_scores), len(uncorrected_confirmed_scores))
 
         # 0.55 = the engine's default when config has no value.
@@ -1357,7 +1387,8 @@ def run_threshold_calibration(state_dir: Path, now: float = None) -> None:
     # calibrate_arp_sweep_threshold()'s docstring for why a count threshold needs a
     # bidirectional rule instead of calibrate_suppress_threshold()'s one-directional one.
     try:
-        connection_abuse_corrections = _collect_connection_abuse_corrections(state_dir, muted_docs=calibration_muted_docs)
+        connection_abuse_corrections = _by_canonical_device(
+            _collect_connection_abuse_corrections(state_dir, muted_docs=calibration_muted_docs), canonical_ids)
         # Union with the suppress-threshold device set above so a device that ONLY ever
         # had CONNECTION_ABUSE evidence (no UNCERTAIN-verdict alerts at all) still gets
         # considered, not just devices already touched by the pass above.

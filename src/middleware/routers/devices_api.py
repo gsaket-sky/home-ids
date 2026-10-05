@@ -47,6 +47,7 @@ def _load_state_manager() -> StateManager:
 
 
 def _identity_dict(sm: StateManager, device_id: str) -> Optional[Dict[str, Any]]:
+    device_id = sm.resolve_merge_redirect(device_id)   # an id merged away since names the device it is part of now
     if not sm.has_device(device_id):
         return None
     with sm.lock_device(device_id) as state:
