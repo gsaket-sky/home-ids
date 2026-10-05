@@ -53,7 +53,8 @@ from intelligence.geoip import GeoIPEngine  # noqa: E402
 from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
 from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
 from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
-from argus.retro_hunter import RetroHunter, real_threat_intel_lookup_factory  # noqa: E402
+from argus.retro_hunter import RetroHunter, real_threat_intel_lookups_factory  # noqa: E402
+from intelligence.local_popularity import LocalPopularity  # noqa: E402
 from argus.ops.telegram import send_telegram  # noqa: E402
 
 LOGGER = logging.getLogger("live_retro_hunter")
@@ -214,6 +215,19 @@ def _default_days_back() -> float:
     return _DAYS_BACK_BY_PROFILE.get(load_hardware_profile(CONFIG), DEFAULT_EVIDENCE_RETENTION_DAYS)
 
 
+def _ledger_pairs(state_dir: Path, days_back: float) -> list:
+    """(device, name) pairs from the learned-popularity ledger (state/popularity.db): every non-blocked name a device
+    asked for, whether or not any detector flagged it. Empty when there is no ledger yet or it cannot be read."""
+    path = state_dir / "popularity.db"
+    if not path.exists():
+        return []
+    try:
+        return LocalPopularity(path).device_name_pairs_since(time.time() - days_back * 86400)
+    except Exception as e:
+        LOGGER.warning("Could not read the popularity ledger %s (hunting without it): %s", path, e)
+        return []
+
+
 def main() -> None:
     run_start = time.time()
     state_dir = Path(CONFIG.get("state_path", "state/ids_state.json")).parent
@@ -230,11 +244,12 @@ def main() -> None:
     try:
         days_back = _default_days_back()
         store = GraphStore(str(db_path))
-        lookup = real_threat_intel_lookup_factory(CONFIG, str(state_dir), refresh=True)
-        hunter = RetroHunter(store, lookup)
-        findings = hunter.hunt(days_back=days_back)
+        lookup, ip_lookup = real_threat_intel_lookups_factory(CONFIG, str(state_dir), refresh=True)
+        hunter = RetroHunter(store, lookup, ip_lookup=ip_lookup)
+        ledger_pairs = _ledger_pairs(state_dir, days_back)
+        findings = hunter.hunt(days_back=days_back, extra_pairs=ledger_pairs)
         LOGGER.info(
-            "Retro-hunt complete: %d finding(s) against the last %d days of graph history.",
+            "Retro-hunt complete: %d new finding(s) against the last %d days of graph history.",
             len(findings), days_back,
         )
         _notify_external_ti_findings(findings, days_back)
@@ -242,7 +257,7 @@ def main() -> None:
         # Cross-device local-intel correlation against the shared confirmed-intel store
         # (state/local_confirmed_intel.json) -- the same one the engine's CL-AFPE checks and records into.
         local_intel = LocalConfirmedIntel(str(state_dir))
-        local_matches = hunter.check_local_intel_history(local_intel, days_back=days_back)
+        local_matches = hunter.check_local_intel_history(local_intel, days_back=days_back, extra_pairs=ledger_pairs)
         LOGGER.info(
             "Local-intel cross-reference complete: %d match(es) against the last %d days.",
             len(local_matches), days_back,

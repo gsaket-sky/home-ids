@@ -46,7 +46,7 @@ check("main() still writes job_health.json even on the no-op path",
 
 
 # --- real hunt against a real graph: a fake lookup, NO real network call ---
-# real_threat_intel_lookup_factory() is mocked at the call site -- never invoked for
+# real_threat_intel_lookups_factory() is mocked at the call site -- never invoked for
 # real here, matching test_argus_retro_hunter.py's own established convention for the
 # exact same reason (it calls ThreatIntel._refresh_all(), a real network round-trip).
 _real_dir = TMPDIR / "real"
@@ -70,13 +70,13 @@ def fake_lookup_factory(config, state_dir, refresh=True):
         if domain == "evil.example.com":
             return {"confidence": 0.95, "tags": ["malware"], "source": "test_intel"}
         return None
-    return lookup
+    return lookup, (lambda ip: None)
 
 
 live_retro_hunter.CONFIG = {"state_path": str(_real_dir / "ids_state.json")}
-with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory) as mock_factory:
+with patch.object(live_retro_hunter, "real_threat_intel_lookups_factory", side_effect=fake_lookup_factory) as mock_factory:
     live_retro_hunter.main()
-    check("main() calls real_threat_intel_lookup_factory with refresh=True (the real-usage "
+    check("main() calls real_threat_intel_lookups_factory with refresh=True (the real-usage "
           "default -- a warm ThreatIntel cache, matching v-current's own run_retro_hunt())",
           mock_factory.call_args.kwargs.get("refresh") is True or mock_factory.call_args.args[-1] is True)
 
@@ -128,7 +128,7 @@ error_store.insert_evidence(Evidence(
 error_store.close()
 
 live_retro_hunter.CONFIG = {"state_path": str(_error_dir / "ids_state.json")}
-with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=RuntimeError("feed unreachable")):
+with patch.object(live_retro_hunter, "real_threat_intel_lookups_factory", side_effect=RuntimeError("feed unreachable")):
     live_retro_hunter.main()
 
 error_health = json.loads((_error_dir / "job_health.json").read_text())
@@ -158,7 +158,7 @@ LocalConfirmedIntel(str(_li_intel_dir)).record(
 
 live_retro_hunter.CONFIG = {"state_path": str(_li_dir / "ids_state.json"),
                               "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
-with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookups_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram:
     live_retro_hunter.main()
 
@@ -197,7 +197,7 @@ li_store_check.close()
 # confirmed SOURCE for this IOC too, so a second run finds ZERO new matches for it
 # -- without this, the identical match would re-fire and re-notify every single day.
 _reset_telegram_mock = None
-with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookups_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_rerun:
     live_retro_hunter.main()
 check("W5: a SECOND run finds ZERO new local-intel matches for li_victim -- closing "
@@ -222,7 +222,7 @@ quiet_store.close()
 
 live_retro_hunter.CONFIG = {"state_path": str(_quiet_dir / "ids_state.json"),
                               "telegram_token": "fake-token", "telegram_chat_id": "fake-chat"}
-with patch.object(live_retro_hunter, "real_threat_intel_lookup_factory", side_effect=fake_lookup_factory), \
+with patch.object(live_retro_hunter, "real_threat_intel_lookups_factory", side_effect=fake_lookup_factory), \
      patch.object(live_retro_hunter, "send_telegram") as mock_send_telegram_quiet:
     live_retro_hunter.main()
 

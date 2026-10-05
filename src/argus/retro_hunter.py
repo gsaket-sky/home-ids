@@ -63,7 +63,7 @@ See that ops module for Phase 7's Telegram/GeoIP wiring.
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from argus.graph.store import GraphStore, _looks_like_ip
 from argus.evidence.model import Evidence
@@ -86,6 +86,12 @@ def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
     tests/test_argus_retro_hunter.py). Set refresh=False only when reusing an
     already-warm on-disk cache from a prior run without paying for a fresh
     network round-trip."""
+    return real_threat_intel_lookups_factory(config, state_dir, refresh=refresh)[0]
+
+
+def real_threat_intel_lookups_factory(config: Dict[str, Any], state_dir: str, refresh: bool = True):
+    """(lookup_domain, lookup_ip) of one live ThreatIntel. A name must go to lookup_domain() and an address to
+    lookup_ip(): lookup_domain() never consults the IP lists, so an address looked up there can never match."""
     from intelligence.threat_intel import ThreatIntel
     ti = ThreatIntel(
         cache_dir=str(Path(state_dir) / "ti_cache"),
@@ -95,7 +101,12 @@ def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
     )
     if refresh:
         ti._refresh_all()
-    return ti.lookup_domain
+    return ti.lookup_domain, ti.lookup_ip
+
+
+# Evidence written by the retro-hunter carries this source; it is what the next run reads to skip a finding it has
+# already reported for a (device, destination) pair.
+RETRO_HUNTER_SOURCE = "retro_hunter"
 
 
 @dataclass
@@ -108,18 +119,45 @@ class RetroHuntFinding:
 
 
 class RetroHunter:
-    def __init__(self, store: GraphStore, threat_intel_lookup: Callable[[str], Optional[Dict[str, Any]]]):
+    def __init__(self, store: GraphStore, threat_intel_lookup: Callable[[str], Optional[Dict[str, Any]]],
+                 ip_lookup: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None):
+        """`threat_intel_lookup` answers for names. `ip_lookup`, when given, answers for raw addresses; without it
+        every destination goes to `threat_intel_lookup` (the behaviour before it existed)."""
         self.store = store
         self.threat_intel_lookup = threat_intel_lookup
+        self.ip_lookup = ip_lookup
 
-    def hunt(self, days_back: float = 14, now: Optional[float] = None) -> List[RetroHuntFinding]:
+    def _lookup(self, dest: str) -> Optional[Dict[str, Any]]:
+        if self.ip_lookup is not None and _looks_like_ip(dest):
+            return self.ip_lookup(dest)
+        return self.threat_intel_lookup(dest)
+
+    def _window_pairs(self, since: float, extra_pairs: Optional[Iterable[Tuple[str, str]]]) -> List[Tuple[str, str]]:
+        """Every (device, destination) pair in the window, from three sources: flagged destinations (evidence),
+        real traffic (device_destinations: includes the quiet ones no detector flagged) and the caller's own pairs
+        (the live job passes the learned-popularity ledger's names). De-duplicated, order kept."""
+        seen: Dict[Tuple[str, str], None] = {}
+        for pair in self.store.get_device_destinations_since(since):
+            seen[(pair[0], pair[1])] = None
+        for pair in self.store.get_traffic_destinations_since(since):
+            seen[(pair[0], pair[1])] = None
+        for device_id, dest in (extra_pairs or ()):
+            if device_id and dest:
+                seen[(device_id, dest)] = None
+        return list(seen)
+
+    def hunt(self, days_back: float = 14, now: Optional[float] = None,
+             extra_pairs: Optional[Iterable[Tuple[str, str]]] = None) -> List[RetroHuntFinding]:
         """Matches run_retro_hunt()'s core loop exactly in spirit: pull every
         destination touched in the lookback window, look each up against
         (injected) fresh threat intel, and for a match, both record a finding AND
         write it back as real evidence for the device that touched it."""
         now = now if now is not None else time.time()
         since = now - days_back * 86400
-        pairs = self.store.get_device_destinations_since(since)
+        pairs = self._window_pairs(since, extra_pairs)
+        # A pair already reported inside this window is not reported or written again: the evidence it left is the
+        # record, and re-writing it nightly would also re-notify forever.
+        already_reported = self.store.get_pairs_written_by_source_since(RETRO_HUNTER_SOURCE, since)
 
         # Matches load_historical_domains()'s own dedup-by-domain behavior: a
         # domain looked up once here, even if multiple devices touched it, still
@@ -131,7 +169,7 @@ class RetroHunter:
         destinations = {dest for _, dest in pairs}
         intel_by_destination: Dict[str, Dict[str, Any]] = {}
         for dest in destinations:
-            result = self.threat_intel_lookup(dest)
+            result = self._lookup(dest)
             if result:
                 intel_by_destination[dest] = result
 
@@ -150,7 +188,7 @@ class RetroHunter:
         findings: List[RetroHuntFinding] = []
         for device_id, dest in pairs:
             intel = intel_by_destination.get(dest)
-            if not intel:
+            if not intel or (device_id, dest) in already_reported:
                 continue
             confidence = float(intel.get("confidence", 0.0) or 0.0)
             finding = RetroHuntFinding(
@@ -165,7 +203,7 @@ class RetroHunter:
             # carries its own original timestamp separately).
             self.store.insert_evidence(Evidence(
                 device_id=device_id, destination_id=dest, evidence_type="reputation",
-                independence_family="reputation", timestamp=now, source="retro_hunter",
+                independence_family="reputation", timestamp=now, source=RETRO_HUNTER_SOURCE,
                 value=confidence, confidence=min(1.0, max(0.0, confidence)),
                 provenance="retro_hunter:historical_rescan",
                 features={"tags": finding.tags, "retro_hunt_source": finding.source},
@@ -175,7 +213,8 @@ class RetroHunter:
         return findings
 
     def check_local_intel_history(self, local_intel: LocalConfirmedIntel, days_back: float = 14,
-                                     now: Optional[float] = None) -> List[Dict[str, Any]]:
+                                     now: Optional[float] = None,
+                                     extra_pairs: Optional[Iterable[Tuple[str, str]]] = None) -> List[Dict[str, Any]]:
         """the graph-engine migration, Phase 7 -- see this module's own top-of-file
         docstring item #4 for the full design rationale. Matches
         scripts/retro_hunter.py's real check_local_intel_history() exclusion rule
@@ -183,7 +222,7 @@ class RetroHunter:
         new finding (it already triggered its own confirmation at the time)."""
         now = now if now is not None else time.time()
         since = now - days_back * 86400
-        pairs = self.store.get_device_destinations_since(since)
+        pairs = self._window_pairs(since, extra_pairs)
 
         matches: List[Dict[str, Any]] = []
         for device_id, dest in pairs:

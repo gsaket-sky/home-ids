@@ -2044,6 +2044,26 @@ class GraphStore:
         ).fetchall()
         return [(r["device_id"], r["destination_id"]) for r in rows]
 
+    def get_traffic_destinations_since(self, since: float) -> List[Any]:
+        """(device_id, destination_id) pairs from device_destinations (every real destination a device touched,
+        recorded each cycle by record_device_destinations()), last seen since `since`, minus local/multicast
+        addresses. Unlike get_device_destinations_since() this does not depend on a detector having flagged the
+        destination, so a quiet command-and-control address is in it too."""
+        rows = self._conn.execute(
+            "SELECT device_id, destination_id FROM device_destinations WHERE last_seen >= ?", (since,)
+        ).fetchall()
+        return [(r["device_id"], r["destination_id"]) for r in rows
+                if not is_local_or_multicast_destination(r["destination_id"])]
+
+    def get_pairs_written_by_source_since(self, source: str, since: float) -> set:
+        """Distinct (device_id, destination_id) pairs that evidence of `source` was written for since `since`.
+        The retro-hunter uses it to not report or write the same finding again on every run."""
+        rows = self._conn.execute(
+            "SELECT DISTINCT device_id, destination_id FROM evidence WHERE source = ? AND timestamp >= ?",
+            (source, since),
+        ).fetchall()
+        return {(r["device_id"], r["destination_id"]) for r in rows}
+
     def get_decisions_since(self, since: float, until: Optional[float] = None) -> List[Dict[str, Any]]:
         """Real decisions (A7) in [since, until) -- the divergence comparator's
         (A8) own read side. raw_payload is parsed back into a dict (stored as

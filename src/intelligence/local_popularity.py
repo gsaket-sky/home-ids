@@ -333,6 +333,19 @@ class LocalPopularity:
                            (n - MAX_ROWS,))
             db.execute("DELETE FROM names WHERE last_seen < ?", (now - DAY_WINDOW * 86400,))
 
+    def device_name_pairs_since(self, since: float) -> list:
+        """(device_id, name) for every name last asked for since `since`, one pair per device recorded for it (at most
+        MAX_DEVICES_TRACKED per name). Reads the database, so names still in the unflushed buffer are not in it.
+        Empty on a read error: the caller's other sources still apply."""
+        out = []
+        try:
+            with self._connect() as db:
+                for name, devs in db.execute("SELECT name, devices FROM names WHERE last_seen >= ?", (since,)):
+                    out.extend((d, name) for d in devs.split(",") if d)
+        except sqlite3.Error as exc:
+            LOGGER.warning("local popularity: could not read %s: %s", self.db_path, exc)
+        return out
+
     def _rebuild_snapshot(self) -> None:
         oldest_day = _day(self._now()) - DAY_WINDOW
         scored = []

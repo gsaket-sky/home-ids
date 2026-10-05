@@ -139,9 +139,16 @@ store.insert_evidence(Evidence(device_id="dev5", destination_id="less-bad.exampl
                                  timestamp=NOW - 1 * DAY, source="s", value=1.0))
 
 
+store.insert_evidence(Evidence(device_id="dev6", destination_id="mid-bad.example.com",
+                                 evidence_type="dns_entropy", independence_family="dns_behavior",
+                                 timestamp=NOW - 1 * DAY, source="s", value=1.0))
+
+
 def multi_confidence_lookup(domain):
     if domain == "evil-later.example.com":
         return {"confidence": 4.5, "tags": [], "source": "ThreatFox"}
+    if domain == "mid-bad.example.com":
+        return {"confidence": 3.0, "tags": [], "source": "ThreatFox"}
     if domain == "less-bad.example.com":
         return {"confidence": 2.0, "tags": [], "source": "URLHaus"}
     return None
@@ -150,7 +157,11 @@ def multi_confidence_lookup(domain):
 hunter2 = RetroHunter(store, threat_intel_lookup=multi_confidence_lookup)
 findings2 = hunter2.hunt(days_back=14, now=NOW)
 check("findings are sorted by confidence, highest first",
-      findings2[0].confidence >= findings2[-1].confidence and findings2[0].confidence == 4.5)
+      [f.confidence for f in findings2] == [3.0, 2.0])
+check("pairs already reported by the first hunt (dev1/dev2 on evil-later) are not reported again",
+      {f.device_id for f in findings2} == {"dev5", "dev6"})
+check("and no second retro_hunter evidence row is written for an already-reported pair",
+      len([e for e in store.get_evidence_for_device("dev1") if e.source == "retro_hunter"]) == 1)
 
 # --- clean no-op behavior ---
 hunter_no_matches = RetroHunter(store, threat_intel_lookup=lambda d: None)
