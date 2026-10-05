@@ -174,6 +174,7 @@ DEFAULT_CONFIG = {
     # Domain age via RDAP (intelligence/rdap_age.py): OFF until the customer opts in (offered at first setup). Each
     # lookup tells a gTLD registry that this network asked about a rare name.
     "rdap_domain_age_enabled": False,
+    "rdap_domain_age_prompt_answered": False,   # the first-setup opt-in card on Home has been answered (either way)
     "tranco_enabled": False,
     "geoip_iptoasn_path": "state/geoip/ip2asn-combined.tsv.gz",
     "geoip_iptoasn_refresh_days": 7,

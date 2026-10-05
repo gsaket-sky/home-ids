@@ -228,6 +228,8 @@ CONFIG_SCHEMA = [
     {"s": "threat_intel_and_ai", "k": "rdap_domain_age_enabled", "t": "bool", "def": False,
      "desc": "Check how new rare website addresses are (registration date from the official registry) to spot devices "
              "infected before installation. Each check tells the registry that this network asked about that name. Off by default."},
+    {"s": "threat_intel_and_ai", "k": "rdap_domain_age_prompt_answered", "t": "bool", "def": False,
+     "desc": "The first-setup offer to check how new rare website addresses are has been answered. Set by the web page."},
     {"s": "threat_intel_and_ai", "k": "abuseipdb_blacklist_refresh_hours", "t": "number", "def": 8,
      "desc": "How often to download the AbuseIPDB blacklist. The free plan allows about 5 downloads a day."},
     {"s": "threat_intel_and_ai", "k": "et_open_enabled", "t": "bool", "def": True,

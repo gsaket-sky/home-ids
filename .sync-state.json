@@ -1,5 +1,5 @@
 {
- "commit": "c13d52ada0a68a6a25c1813b7518f3a1c30a8594",
+ "commit": "fd4b46595bdc25b6d37e3b7cf119ec4bc9ee0da7",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "1f96179103eec2ec7c206de5667cec096a8f3ba6fd63963cb498a44c0c586905",
@@ -49,7 +49,7 @@
   "src/audit_stale_multi_device_iocs.py": "d23963b65086cc9bba3be06154c7fde705ea27fc5c930f6f9a339d351c9d4469",
   "src/clean_confirmed_intel.py": "faec6d9e2542b7b5d259c1e9b7929f611257b0d979d2ccbc158c726d0dc72339",
   "src/clear_stale_isolation.py": "e7d1708f266e5e67f668cef42af4c2ed865df51221acb0473e4ae7c7f7331245",
-  "src/config.py": "61aa6e1a1ffe95c85497de2d7f5e2ed7e562fe0db11d0871e3844d2a5a7251b4",
+  "src/config.py": "28d641baad733cf30f6afbda22db044f40eec4a1dcfb4e34f744fe06e062b75b",
   "src/core/argus_metrics.py": "2a025b38dd66223fe5d130b764252cfab479a2322482971ba30889e5274af8a6",
   "src/core/backoff.py": "731fb3c5925f1fd8b524ed59e7f1d79a3a7a906c32ee33baece315dc4741f972",
   "src/core/country_centroids.py": "653bf8233d61b7c4c048a5d5bb082a61992f1a31d51693b4ce0e14ded60e8c7f",
@@ -113,7 +113,7 @@
   "src/merge_fragmented_devices.py": "742324495ca7b7f93db8d00706db9d53c1ba55d3ed1e674ffe22a96460737762",
   "src/metrics.py": "01bfedda0b05c07c1467c4708874eb10782408a8b4da54dd701c9f4482fe8f80",
   "src/middleware/auth.py": "e55bf33c53a76fb0bfefaa444d109bf0eed872d1d5065626af8413fac6ae8014",
-  "src/middleware/config_schema.py": "665c25088340b37b68c0172a84affe4d1efc1e83a339216dc3daf666d33acd19",
+  "src/middleware/config_schema.py": "9cc49e2ab58ccbd4439ca8dbef5f6e2f87b26199456bce82880519496e70ec2a",
   "src/middleware/graph_client.py": "f18ec7b21aeb5f83e3ad36ef65d821433cbd3ecd6605e393484ffb67e3a7e648",
   "src/middleware/humanize.py": "95e9baf0437b0527297d87cb663116015fde86f447164dcb07d5377335f37ea8",
   "src/middleware/main_api.py": "28fecfe3f6ffd1311b69e547aaccc9a7b1d03344775c96bac3158f9f209415e1",
