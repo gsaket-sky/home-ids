@@ -138,24 +138,3 @@ def _purge_learned_fp_values(state_dir: str, device_id: str) -> None:
         LOGGER.warning("Clearing learned false-positive values for %s failed (non-fatal): %s", device_id, exc)
 
 
-@router.post("/api/ipc/restart_pipeline")
-def ipc_restart_pipeline(token: str = Depends(verify_token)):
-    """Graceful self-exit -- relies on docker-compose.yml's `restart: unless-stopped`
-    (already set on the pipeline service) to bring the process back up with newly
-    written secrets (state/webui_secrets.env, see config.py) loaded. Used by the
-    WebUI's threat-intel/GeoIP setup wizard after saving restart-required API keys.
-    Responds success BEFORE actually exiting, since the exit itself tears down this
-    same HTTP response's connection."""
-    import os
-    import threading
-
-    LOGGER.warning("🔄 Restart requested via WebUI -- exiting for the container "
-                    "supervisor to restart this process with reloaded secrets.")
-
-    def _delayed_exit():
-        import time
-        time.sleep(0.5)  # let the HTTP response actually flush to the caller first
-        os._exit(0)
-
-    threading.Thread(target=_delayed_exit, daemon=True).start()
-    return {"status": "restarting"}

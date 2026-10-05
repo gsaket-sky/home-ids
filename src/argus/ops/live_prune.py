@@ -102,6 +102,8 @@ def main() -> None:
         # separately made profile-aware the same day) from ever requesting more
         # history than this table -- or evidence itself -- actually retains.
         dd_deleted = store.prune_device_destinations(older_than_days=retention_days)
+        # W-19: the parent `destinations` table, after its children above (rows nothing references any more).
+        destinations_deleted = store.prune_orphaned_destinations(older_than_days=retention_days)
         # BUGFIX (2026-09-20, identity-merge handover follow-up): the concrete
         # "clean up stale/merged devices regularly" half of the device_baselines
         # 89-vs-13 anomaly -- riding along on this job's existing daily cadence
@@ -147,6 +149,7 @@ def main() -> None:
                           extra={"deleted": deleted, "retention_days": retention_days,
                                  "device_destinations_deleted": dd_deleted,
                                  "device_destinations_retention_days": retention_days,
+                                 "orphaned_destinations_deleted": destinations_deleted,
                                  "orphaned_device_baselines_deleted": orphaned_baselines_deleted,
                                  "decision_retention_days": decision_retention_days,
                                  "backtest_runs_deleted": backtest_runs_deleted,

@@ -678,6 +678,34 @@ _CERT_REVOCATION_URL_MARKERS = (".crl", "/ocsp", "ocsp.", "crl.", "ctldl.windows
 _ZEEK_DERIVED_FAMILIES = frozenset({"tls_fingerprint", "network_behavior", "data_transfer_pattern", "zeek_network"})
 
 
+def containment_code(status_text: str) -> str:
+    """Short, stable code for the human-readable containment status the mitigator reports (W-10), using the same
+    substrings the Telegram summary keys on."""
+    text = status_text or ""
+    for needle, code in (("TARPITTED", "TARPITTED"), ("ROUTER ISOLATED", "ROUTER_ISOLATED"),
+                         ("DOMAIN BLOCKED", "DOMAIN_BLOCKED"), ("WAITING FOR APPROVAL", "AWAITING_APPROVAL"),
+                         ("UNBLOCKED", "MONITORING_ONLY")):
+        if needle in text:
+            return code
+    return "OTHER"
+
+
+def _resolve_with_timeout(domain: str, timeout: float = 0.5) -> str:
+    """socket.gethostbyname(domain) bounded by `timeout` seconds; "unknown" on any failure or timeout. Never called
+    while a device lock is held (W-24). The `with ThreadPoolExecutor` form would join the worker on exit and so never
+    be a bound (a 3 s resolver held the caller for 3 s); shutdown(wait=False) returns at the timeout and the lookup
+    finishes (or dies) on its own thread."""
+    import socket
+    from concurrent.futures import ThreadPoolExecutor
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        return executor.submit(socket.gethostbyname, domain).result(timeout=timeout)
+    except Exception:
+        return "unknown"
+    finally:
+        executor.shutdown(wait=False)
+
+
 def _benign_explanations_checked(target: str, app_name: str, http_reqs, ti_risk: float, abuse_risk: float,
                                   asn_owner: Optional[str], asn_owner_is_safe: Optional[bool], families) -> list:
     """Lines for the alert's "Ordinary explanations checked" block: each says what was checked and what it found,
@@ -1590,6 +1618,7 @@ class EnginePipeline:
 
                 # ─── PHASE 3: Compute localized features (re-acquire lock) ──────────────
                 mitigation_pending = None
+                _resolve_live = None
                 with self.state_manager.lock_device(dev_id) as state:
                     features = {**self.dns_extractor.compute(state, now, window_seconds), **_zeek_features}
                     # W-04: novelty-gated features say nothing about a device still in its own learning period
@@ -1637,25 +1666,14 @@ class EnginePipeline:
                             if wire_ip:
                                 dest_ip = wire_ip
                             else:
-                                try:
-                                    import socket
-                                    from concurrent.futures import ThreadPoolExecutor, TimeoutError
-                                    # Use a temporary thread to enforce a 0.5s timeout on gethostbyname
-                                    # without breaking global socket timeouts for other threads.
-                                    # W-24: the `with` form joins the worker on exit, so the 0.5 s
-                                    # bound never held (a 3 s resolver stalled the loop for 3 s).
-                                    # shutdown(wait=False) returns at the timeout; the lookup finishes
-                                    # (or dies) on its own thread.
-                                    executor = ThreadPoolExecutor(max_workers=1)
-                                    try:
-                                        future = executor.submit(socket.gethostbyname, top_domain)
-                                        dest_ip = future.result(timeout=0.5)
-                                    finally:
-                                        executor.shutdown(wait=False)
-                                except Exception:
-                                    dest_ip = "unknown"
+                                # W-24: the live lookup (up to 0.5 s) is done after this device lock is released.
+                                _resolve_live = top_domain
+                                dest_ip = "unknown"
                         else:
                             dest_ip = "unknown"
+
+                if _resolve_live:
+                    dest_ip = _resolve_with_timeout(_resolve_live)
 
                 # BUGFIX (external architecture review, 2026-09-09, "Invariant 8" --
                 # destination==MULTICAST must never independently create a reputation
@@ -3184,6 +3202,9 @@ class EnginePipeline:
                                     and not is_ip_verified_safe
                                 ):
                                     containment_status = "⏳ WAITING FOR APPROVAL (Action Required via Inline Buttons below)"
+                                # W-10: the persisted alert carries the containment outcome (it used to exist only in
+                                # the Telegram text). Absent when the alert was suppressed before any containment step.
+                                alert_payload["containment"] = containment_code(containment_status)
 
                             self.alert_writer.write(alert_payload)
                             alerts_total.labels(client_ip, getattr(state, "hostname", "unknown"), getattr(state, "device_type", "unknown")).inc()

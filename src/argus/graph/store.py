@@ -2591,6 +2591,23 @@ class GraphStore:
         self._maybe_commit()
         return cur.rowcount
 
+    def prune_orphaned_destinations(self, older_than_days: float = DEFAULT_EVIDENCE_RETENTION_DAYS,
+                                      now: Optional[float] = None) -> int:
+        """W-19: `destinations` had no DELETE anywhere while evidence and device_destinations (its children) are
+        pruned, so it grew by one row per distinct destination ever contacted. Deletes rows last seen before the
+        cutoff that nothing references any more: no evidence, no device_destinations row, and no cached reputation
+        verdict (a destination a retro-hunt marked tier 5 keeps its row: dropping it would forget the verdict, and the
+        destination coming back would start as unknown). The '(none)' sentinel is never touched. Returns the number
+        of rows deleted."""
+        cutoff = (now if now is not None else time.time()) - older_than_days * 86400
+        cur = self._conn.execute(
+            "DELETE FROM destinations WHERE destination_id != ? AND last_seen < ? AND reputation_tier_cache IS NULL "
+            "AND destination_id NOT IN (SELECT DISTINCT destination_id FROM evidence) "
+            "AND destination_id NOT IN (SELECT DISTINCT destination_id FROM device_destinations)",
+            (NO_DESTINATION, cutoff))
+        self._maybe_commit()
+        return cur.rowcount
+
     def prune_backtest_runs(self, older_than_days: float = DEFAULT_BACKTEST_RUNS_RETENTION_DAYS,
                               now: Optional[float] = None) -> int:
         """Deletes backtest_runs rows older than the cutoff (disk-retention audit

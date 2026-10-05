@@ -22,6 +22,7 @@ Two channels, because components live in two different places:
   don't have to share a schema with success-only batch-job telemetry.
 """
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -93,17 +94,24 @@ def write_component_heartbeat(state_dir, component: str, extra: Optional[dict] =
     utils.write_job_health() (these are low-frequency writes, once per ~10s at
     most, from a small fixed set of known writers)."""
     path = runtime_dir(state_dir) / COMPONENT_HEARTBEAT_FILENAME
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    except Exception:
-        existing = {}
     entry = {"last_heartbeat": time.time(), "last_success": time.time()}
     if extra:
         entry.update(extra)
-    existing[component] = entry
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        # W-12: five processes read-modify-write this one file. Held across the whole read-merge-write so two writers
+        # cannot lose each other's entry, and replaced atomically so a reader never sees a torn file (a torn read made
+        # a writer start from {} and drop everyone else's entry until they beat again: false "stale" heartbeats).
+        from core.file_lock import exclusive_file_lock
+        with exclusive_file_lock(path):
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+            except Exception:
+                existing = {}
+            existing[component] = entry
+            tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
     except Exception:
         pass  # best-effort -- a missed heartbeat write just reads as stale next cycle, not fatal.
 

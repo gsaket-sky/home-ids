@@ -50,8 +50,6 @@ from metrics import (
     autotune_device_threshold_effective, autotune_calibration_total, autotune_evidence_count,
     autotune_arp_sweep_threshold_effective, autotune_arp_sweep_calibration_total,
     autotune_arp_sweep_evidence_count,
-    ollama_last_run_timestamp, ollama_calls_last_run, ollama_cache_hits_last_run,
-    ollama_deferred_last_run, ollama_validated_total,
     job_last_success_timestamp, job_last_duration_seconds, retro_hunt_findings_total,
     geo_country_marker,
     baseline_poisoning_transitions_total, probation_transitions_total,
@@ -614,18 +612,7 @@ class MetricsExporter:
             except Exception as exc:
                 LOGGER.debug("Failed to sync autotune relay metrics: %s", exc)
 
-        ollama = self._read_relay_file(base / "ollama_run_stats.json")
-        if ollama:
-            try:
-                if "last_run" in ollama:
-                    ollama_last_run_timestamp.set(ollama["last_run"])
-                ollama_calls_last_run.set(ollama.get("calls_made", 0))
-                ollama_cache_hits_last_run.set(ollama.get("cache_hits", 0))
-                ollama_deferred_last_run.set(ollama.get("deferred", 0))
-                for verdict, count in ollama.get("validated_totals", {}).items():
-                    ollama_validated_total.labels(verdict=verdict).set(count)
-            except Exception as exc:
-                LOGGER.debug("Failed to sync Ollama relay metrics: %s", exc)
+        # W-08: the ollama_run_stats.json relay (5 gauges) was removed: nothing ever wrote that file.
 
         jobs = self._read_relay_file(base / "job_health.json")
         if jobs:

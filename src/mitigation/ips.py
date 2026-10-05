@@ -45,6 +45,18 @@ from core.onboarding import is_onboarding_active
 
 LOGGER = logging.getLogger("home_ids.ips")
 
+
+def _remove_gauge_labels(gauge, *labels) -> None:
+    """Drops one label set from a Prometheus gauge. A label set that was never set raises KeyError: that is the
+    expected "nothing to remove" case and stays silent. Anything else is logged (W-14: these used to be bare
+    `except: pass`, which also swallowed KeyboardInterrupt/SystemExit)."""
+    try:
+        gauge.remove(*labels)
+    except KeyError:
+        pass
+    except Exception as exc:
+        LOGGER.warning("Could not remove gauge labels %r: %s", labels, exc)
+
 # SECURITY FIX (P0-2, third-party architecture review, 2026-09-28): mitigate() had no
 # device-criticality check at all before autonomously firing full-host containment
 # (Layer-2 tarpit / router isolation) -- a heuristic false positive on one of these
@@ -1005,8 +1017,7 @@ class IPSMitigator:
                                 ips_state.get("blocked_domains", {}).pop(domain, None)
                                 self.state_manager.save_ips_state(ips_state)
                             # self.state_manager.flush_to_disk()  # Removed to prevent lock contention
-                            try: ips_active_blocks_gauge.remove(dev_id, hostname, domain)
-                            except: pass
+                            _remove_gauge_labels(ips_active_blocks_gauge, dev_id, hostname, domain)
                 except Exception as e:
                     LOGGER.debug("Pi-hole sync check failed: %s", e)
             
@@ -1015,13 +1026,11 @@ class IPSMitigator:
                     modified = False
                     if domain in self._retry_queue:
                         self._retry_queue.pop(domain)
-                        try: ips_queue_status_gauge.remove(dev_id, hostname, domain)
-                        except: pass
+                        _remove_gauge_labels(ips_queue_status_gauge, dev_id, hostname, domain)
                         modified = True
                     if domain in self._dead_letter:
                         self._dead_letter.pop(domain)
-                        try: ips_dead_letter_gauge.remove(dev_id, hostname, domain)
-                        except: pass
+                        _remove_gauge_labels(ips_dead_letter_gauge, dev_id, hostname, domain)
                         modified = True
                     if modified:
                         self._save_queues()
@@ -1106,8 +1115,7 @@ class IPSMitigator:
             if meta["attempts"] > 5:
                 del self._retry_queue[domain]
                 self._add_to_dead_letter(domain, hostname, dev_id, "Max retries exceeded (5/5)")
-                try: ips_queue_status_gauge.remove(dev_id, hostname, domain)
-                except: pass
+                _remove_gauge_labels(ips_queue_status_gauge, dev_id, hostname, domain)
             else:
                 self._retry_queue[domain] = meta
                 ips_queue_status_gauge.labels(device=dev_id, hostname=hostname, domain=domain).set(meta["attempts"])
@@ -1178,13 +1186,11 @@ class IPSMitigator:
             modified = False
             if domain in self._retry_queue:
                 self._retry_queue.pop(domain)
-                try: ips_queue_status_gauge.remove(dev_id, hostname, domain)
-                except: pass
+                _remove_gauge_labels(ips_queue_status_gauge, dev_id, hostname, domain)
                 modified = True
             if domain in self._dead_letter:
                 self._dead_letter.pop(domain)
-                try: ips_dead_letter_gauge.remove(dev_id, hostname, domain)
-                except: pass
+                _remove_gauge_labels(ips_dead_letter_gauge, dev_id, hostname, domain)
                 modified = True
             if modified:
                 self._save_queues()

@@ -46,6 +46,20 @@ RUNTIME_RESTART_KEYS = frozenset({
     # for is_restart_required()'s own correctness, not because it changes behavior.
     "hardware_profile",
     "network.trust_anchors",
+    # W-21 (wiring audit 2026-10-03): read once by their consumer's constructor, no reload hook, so a live edit
+    # was accepted and silently did nothing until a restart. Read sites: IncidentTracker(...) pipeline.py,
+    # ZeekFeatureExtractor(...) pipeline.py, ThreatIntel(...) main.py, AbuseIPDB(...) pipeline.py.
+    "incident_grouping_window_seconds",
+    "incident_update_min_interval_seconds",
+    "reactive_capture_wired_probe_ips",
+    "reactive_capture_ignore_sources",
+    "reactive_capture_ignore_services",
+    "reactive_capture_warmup_seconds",
+    "et_open_enabled",
+    "abuseipdb_blacklist_refresh_hours",
+    # ips_tarpit_enabled is only half-live: switching it OFF takes effect, ON after a boot with it off does not
+    # (tarpit_armed is decided once, ips.py), so as a switch it needs a restart to be reliable.
+    "ips_tarpit_enabled",
 })
 
 

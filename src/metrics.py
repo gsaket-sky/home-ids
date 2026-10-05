@@ -353,16 +353,6 @@ local_confirmed_intel_hits_total = Counter("home_ids_local_confirmed_intel_hits_
 engine_errors_total = Gauge("home_ids_engine_errors", "Decision / false-positive engine errors since the engine started -- each one is a cycle not evaluated (no action) or an alert published unsuppressed", ["engine"])
 
 # ===========================================================================
-# PHASE 18: Ollama (Brain 3) Run Transparency
-# ===========================================================================
-# ollama_soc.py is also a separate cron process -- synced from state/ollama_run_stats.json.
-ollama_last_run_timestamp = Gauge("home_ids_ollama_last_run_timestamp", "Unix timestamp of the most recently completed ollama_soc.py run")
-ollama_calls_last_run = Gauge("home_ids_ollama_calls_last_run", "Fresh LLM calls made in the most recent run")
-ollama_cache_hits_last_run = Gauge("home_ids_ollama_cache_hits_last_run", "Verdicts served from the 7-day cache without an LLM call in the most recent run")
-ollama_deferred_last_run = Gauge("home_ids_ollama_deferred_last_run", "Patterns deferred to next run after hitting the per-run call cap")
-ollama_validated_total = Gauge("home_ids_ollama_validated_total", "Cumulative Ollama verdicts by outcome since state/ollama_run_stats.json existed", ["verdict"])
-
-# ===========================================================================
 # PHASE 18: Scheduled-Job Health (all scripts/*.py cron jobs)
 # ===========================================================================
 # Synced from state/job_health.json, written by each script at the end of a successful

@@ -141,7 +141,7 @@ DEFAULT_CONFIG = {
     "baseline_scoring_enabled": True,
     "state_path": "state/ids_state.json",
     "model_path": "models/ids_model.pkl",
-    "alert_json_path": "alerts.json",
+    "alert_json_path": "state/alerts.json",   # W-22: was "alerts.json", i.e. outside the shared state mount
     "alert_json_max_bytes": 1073741824,
     "pihole_db": "/etc/pihole/pihole-FTL.db",
     "zeek_log_dir": "/opt/zeek/logs/current",
