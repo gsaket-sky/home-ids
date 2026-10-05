@@ -1005,6 +1005,24 @@ class EnginePipeline:
             self.cl_afpe.ml_scorer.warm_up_async()
         if self.ti_engine:
             self.ti_engine.trust_cache_provider = self.cl_afpe
+        # Learning-period intel sweep (MASTER_TODO M2): after each feed refresh, re-check what learning-period devices
+        # (and, while the network warms up or on the first refresh after start, every device) talked to against the
+        # current feeds. Bound after the trust-cache provider so its lookups follow the live path's rules.
+        self.learning_sweep = None
+        if self.ti_engine is not None and bool(self.config.get("learning_intel_sweep_enabled", True)):
+            try:
+                from argus.learning_sweep import LearningIntelSweep
+                from argus.retro_hunter import days_back_for_profile
+                from argus.ops.telegram import send_telegram
+                self.learning_sweep = LearningIntelSweep(
+                    store_fn=argus_live_engine.get_graph_store, threat_intel=self.ti_engine,
+                    learning_fn=lambda device_id: in_learning_period(*self.familiarity.learned_activity(device_id)),
+                    days_back=days_back_for_profile(load_hardware_profile(self.config)),
+                    popularity=self.local_popularity, notify=lambda text: send_telegram(self.config, text))
+                self.learning_sweep.attach()
+            except Exception as e:
+                LOGGER.warning("Learning-period intel sweep unavailable (the nightly retro-hunt still runs): %s", e)
+                self.learning_sweep = None
         try:
             argus_live_engine.merge_retired_local_intel(self.local_intel, state_dir)
             import_legacy_state(state_dir, self.cl_afpe.store, self.familiarity)

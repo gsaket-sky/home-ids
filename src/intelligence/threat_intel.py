@@ -164,6 +164,7 @@ class ThreatIntel:
         self.local_popularity = None
         self.trust_cache_provider = None  # the CL-AFPE engine, bound by the pipeline at boot (get_dynamic_trust_cache())
         self._trust_cache_error_logged_at = 0.0  # rate-limits the is_allowlisted() cache-read error log
+        self._refresh_listeners = []  # called after each feed refresh cycle (add_refresh_listener)
         
         LOGGER.debug("ThreatIntel instantiated. Loading cache from %s", self.cache_dir)
         self._load_cache()
@@ -178,7 +179,7 @@ class ThreatIntel:
         with self._lock:
             return self._stats.get("last_refresh", "never") != "never"
 
-    def is_allowlisted(self, domain: str) -> bool:
+    def is_allowlisted(self, domain: str, trust_cache: Optional[set] = None) -> bool:
         """
         Returns True if:
         1. The domain strictly exists in the static allowlist OR Tranco Top 10k list.
@@ -187,6 +188,9 @@ class ThreatIntel:
         Tranco Top 10k entries NEVER grant wildcard parent-domain immunity,
         preventing malicious subdomains on shared platforms (*.github.io, *.herokuapp.com)
         from bypassing IPS blocking.
+
+        `trust_cache`: a snapshot of the dynamic trust cache to use instead of reading it from the provider. A bulk
+        caller (the learning-period intel sweep) takes one snapshot per run rather than one database read per name.
         """
         try:
             if not domain:
@@ -217,9 +221,10 @@ class ThreatIntel:
             # 3. Autonomous Dynamic Trust Cache (CL-AFPE 14-day immunized domains). Like 1b, a correction can be wrong
             # (an autonomous one, or a person's) and may only shield a name from suffix matches and weak indicators:
             # an activated feed's strong hit on the name, or on any name up to the trusted entry, takes priority.
-            if self.trust_cache_provider:
+            if self.trust_cache_provider or trust_cache is not None:
                 try:
-                    trust_cache = self.trust_cache_provider.get_dynamic_trust_cache()
+                    if trust_cache is None:
+                        trust_cache = self.trust_cache_provider.get_dynamic_trust_cache()
                     # The same fail-closed base CL-AFPE immunizes (etld1_strict): a.example.co.uk -> example.co.uk.
                     # Without a public-suffix list it is "", and only the exact name can match.
                     base_dom = etld1_strict(domain)
@@ -337,11 +342,11 @@ class ThreatIntel:
                 return True
         return False
 
-    def lookup_domain(self, domain: str) -> Optional[dict]:
+    def lookup_domain(self, domain: str, trust_cache: Optional[set] = None) -> Optional[dict]:
         if not domain: 
             return None
         domain = domain.lower().strip(".")
-        if self.is_allowlisted(domain):
+        if self.is_allowlisted(domain, trust_cache=trust_cache):
             return None
         with self._lock:
             if domain in self._bad_domains: 
@@ -386,6 +391,18 @@ class ThreatIntel:
         threading.Thread(target=self._refresh_loop, daemon=True, name="ti-refresh").start()
         threading.Thread(target=self._start_ja3_feed, daemon=True, name="ja3-refresh").start()
 
+    def add_refresh_listener(self, fn) -> None:
+        """`fn()` runs on the refresh thread after every feed refresh cycle that ran (not while paused). It must return
+        quickly (hand real work to its own thread); an exception in it is logged and never stops the refresh loop."""
+        self._refresh_listeners.append(fn)
+
+    def _notify_refresh_listeners(self) -> None:
+        for fn in list(self._refresh_listeners):
+            try:
+                fn()
+            except Exception as e:
+                LOGGER.warning("ThreatIntel refresh listener failed: %s", e)
+
     def _refresh_loop(self) -> None:
         time.sleep(10)
         LOGGER.debug("TI Refresh loop active.")
@@ -401,6 +418,7 @@ class ThreatIntel:
                         self._refresh_tranco_trust_list()
                 except Exception as e:
                     LOGGER.error("TI Refresh cycle encountered an exception: %s", e)
+                self._notify_refresh_listeners()
             HEARTBEATS.beat("ti_refresh", health_state="healthy")
             LOGGER.debug("TI Refresh loop sleeping for %d seconds.", self.refresh_interval)
             time.sleep(self.refresh_interval)

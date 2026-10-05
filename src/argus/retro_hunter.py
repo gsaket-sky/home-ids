@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from argus.graph.store import GraphStore, _looks_like_ip
+from argus.graph.store import GraphStore, _looks_like_ip, DEFAULT_EVIDENCE_RETENTION_DAYS
 from argus.evidence.model import Evidence
 from intelligence.local_intel import LocalConfirmedIntel
 
@@ -109,6 +109,32 @@ def real_threat_intel_lookups_factory(config: Dict[str, Any], state_dir: str, re
 RETRO_HUNTER_SOURCE = "retro_hunter"
 
 
+# Lookback per hardware profile: never longer than what the graph still retains (live_prune.py's retention); see
+# live_retro_hunter.py's comment above _default_days_back() for the incident behind it.
+_DAYS_BACK_BY_PROFILE = {
+    "pi_8gb": 30.0,
+    "x86_16gb": DEFAULT_EVIDENCE_RETENTION_DAYS,
+    "custom": DEFAULT_EVIDENCE_RETENTION_DAYS,
+}
+
+
+def days_back_for_profile(profile: str) -> float:
+    return _DAYS_BACK_BY_PROFILE.get(profile, DEFAULT_EVIDENCE_RETENTION_DAYS)
+
+
+def format_findings_message(findings: list, days_back: float, title: str = "Retroactive Threat Hunt") -> str:
+    """The Telegram text for retro-hunt findings (nightly job and learning-period sweep share it)."""
+    top = findings[:10]
+    lines = [f"\U0001f6a8 <b>{title}: {len(findings)} match(es)</b>",
+             f"Destinations queried in the past {int(days_back)}d, now classified malicious by fresh intel:", ""]
+    for f in top:
+        lines.append(f"• <code>{f.device_id}</code> → <code>{f.destination_id}</code> — {f.source}, "
+                     f"confidence {f.confidence:.2f}")
+    if len(findings) > len(top):
+        lines.append(f"...and {len(findings) - len(top)} more (see state/v13_graph.db decisions/evidence)")
+    return "\n".join(lines)[:4000]
+
+
 @dataclass
 class RetroHuntFinding:
     device_id: str
@@ -126,6 +152,8 @@ class RetroHunter:
         self.store = store
         self.threat_intel_lookup = threat_intel_lookup
         self.ip_lookup = ip_lookup
+        self.last_pairs_checked = 0
+        self.last_destinations_checked = 0
 
     def _lookup(self, dest: str) -> Optional[Dict[str, Any]]:
         if self.ip_lookup is not None and _looks_like_ip(dest):
@@ -147,7 +175,8 @@ class RetroHunter:
         return list(seen)
 
     def hunt(self, days_back: float = 14, now: Optional[float] = None,
-             extra_pairs: Optional[Iterable[Tuple[str, str]]] = None) -> List[RetroHuntFinding]:
+             extra_pairs: Optional[Iterable[Tuple[str, str]]] = None,
+             only_devices: Optional[set] = None) -> List[RetroHuntFinding]:
         """Matches run_retro_hunt()'s core loop exactly in spirit: pull every
         destination touched in the lookback window, look each up against
         (injected) fresh threat intel, and for a match, both record a finding AND
@@ -155,6 +184,8 @@ class RetroHunter:
         now = now if now is not None else time.time()
         since = now - days_back * 86400
         pairs = self._window_pairs(since, extra_pairs)
+        if only_devices is not None:
+            pairs = [p for p in pairs if p[0] in only_devices]
         # A pair already reported inside this window is not reported or written again: the evidence it left is the
         # record, and re-writing it nightly would also re-notify forever.
         already_reported = self.store.get_pairs_written_by_source_since(RETRO_HUNTER_SOURCE, since)
@@ -167,6 +198,7 @@ class RetroHunter:
         # evidence is inherently device-attributed and losing that would be a
         # real regression, not a neutral simplification.
         destinations = {dest for _, dest in pairs}
+        self.last_pairs_checked, self.last_destinations_checked = len(pairs), len(destinations)
         intel_by_destination: Dict[str, Dict[str, Any]] = {}
         for dest in destinations:
             result = self._lookup(dest)
@@ -211,6 +243,12 @@ class RetroHunter:
 
         findings.sort(key=lambda f: f.confidence, reverse=True)
         return findings
+
+    def window_devices(self, days_back: float, now: Optional[float] = None,
+                       extra_pairs: Optional[Iterable[Tuple[str, str]]] = None) -> set:
+        """Every device with at least one destination in the window (same sources as hunt())."""
+        now = now if now is not None else time.time()
+        return {d for d, _ in self._window_pairs(now - days_back * 86400, extra_pairs)}
 
     def check_local_intel_history(self, local_intel: LocalConfirmedIntel, days_back: float = 14,
                                      now: Optional[float] = None,

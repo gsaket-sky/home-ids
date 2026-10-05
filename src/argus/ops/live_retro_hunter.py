@@ -53,7 +53,8 @@ from intelligence.geoip import GeoIPEngine  # noqa: E402
 from argus.cl_afpe.engine import ClAfpeEngine  # noqa: E402
 from argus.config.trust_anchors import load_hardware_profile  # noqa: E402
 from argus.graph.store import GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS  # noqa: E402
-from argus.retro_hunter import RetroHunter, real_threat_intel_lookups_factory  # noqa: E402
+from argus.retro_hunter import RetroHunter, real_threat_intel_lookups_factory, format_findings_message, \
+    days_back_for_profile  # noqa: E402
 from intelligence.local_popularity import LocalPopularity  # noqa: E402
 from argus.ops.telegram import send_telegram  # noqa: E402
 
@@ -146,14 +147,7 @@ def _notify_external_ti_findings(findings: list, days_back: float) -> None:
     when telegram_token/telegram_chat_id aren't configured."""
     if not findings:
         return
-    top = findings[:10]
-    lines = [f"\U0001f6a8 <b>Retroactive Threat Hunt: {len(findings)} match(es)</b>",
-             f"Destinations queried in the past {int(days_back)}d, now classified malicious by fresh intel:", ""]
-    for f in top:
-        lines.append(f"• <code>{f.destination_id}</code> — {f.source}, confidence {f.confidence:.2f}")
-    if len(findings) > len(top):
-        lines.append(f"...and {len(findings) - len(top)} more (see state/v13_graph.db decisions/evidence)")
-    send_telegram(CONFIG, "\n".join(lines)[:4000])
+    send_telegram(CONFIG, format_findings_message(findings, days_back))
 
 
 def _notify_local_intel_matches(matches: list, geoip_engine: GeoIPEngine, days_back: float) -> None:
@@ -204,15 +198,9 @@ def _notify_local_intel_matches(matches: list, geoip_engine: GeoIPEngine, days_b
 # scan than intended with no indication anything was truncated. Now scaled the
 # same way live_prune.py's own retention_days is, so this job's lookback can never
 # exceed what the graph actually still retains, on any profile.
-_DAYS_BACK_BY_PROFILE = {
-    "pi_8gb": 30.0,
-    "x86_16gb": DEFAULT_EVIDENCE_RETENTION_DAYS,
-    "custom": DEFAULT_EVIDENCE_RETENTION_DAYS,
-}
-
-
+# The table itself lives in retro_hunter.py (days_back_for_profile), shared with the learning-period sweep.
 def _default_days_back() -> float:
-    return _DAYS_BACK_BY_PROFILE.get(load_hardware_profile(CONFIG), DEFAULT_EVIDENCE_RETENTION_DAYS)
+    return days_back_for_profile(load_hardware_profile(CONFIG))
 
 
 def _ledger_pairs(state_dir: Path, days_back: float) -> list:

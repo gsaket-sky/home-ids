@@ -399,6 +399,13 @@ class GraphStore:
             );
             CREATE INDEX IF NOT EXISTS idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
 
+            CREATE TABLE IF NOT EXISTS intel_sweeps (
+                sweep_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp     REAL NOT NULL,
+                trigger       TEXT NOT NULL,
+                summary_json  TEXT NOT NULL DEFAULT '{}'
+            );
+
             CREATE INDEX IF NOT EXISTS idx_evidence_type_ts ON evidence(evidence_type, timestamp);
             -- 2026-09-23 (live profiling on .94): get_evidence_for_device()'s capped
             -- per-type query (device_id + evidence_type + timestamp range, newest
@@ -2054,6 +2061,31 @@ class GraphStore:
         ).fetchall()
         return [(r["device_id"], r["destination_id"]) for r in rows
                 if not is_local_or_multicast_destination(r["destination_id"])]
+
+    INTEL_SWEEPS_KEPT = 500
+
+    def record_intel_sweep(self, trigger: str, summary: Dict[str, Any], timestamp: Optional[float] = None) -> None:
+        """One row per learning-period intel sweep (argus/learning_sweep.py). The very first row is kept forever (the
+        onboarding report reads what the sweep found at first install); the rest are capped at INTEL_SWEEPS_KEPT."""
+        ts = timestamp if timestamp is not None else time.time()
+        with self.transaction():
+            self._conn.execute("INSERT INTO intel_sweeps (timestamp, trigger, summary_json) VALUES (?, ?, ?)",
+                               (ts, trigger, json.dumps(summary, default=str)))
+            self._conn.execute(
+                "DELETE FROM intel_sweeps WHERE sweep_id != (SELECT MIN(sweep_id) FROM intel_sweeps) AND sweep_id NOT IN "
+                "(SELECT sweep_id FROM intel_sweeps ORDER BY sweep_id DESC LIMIT ?)", (self.INTEL_SWEEPS_KEPT,))
+
+    def get_intel_sweeps(self, first: bool = False, limit: int = 20) -> List[Dict[str, Any]]:
+        """Recorded intel sweeps, newest first; `first=True` returns only the oldest one (first install)."""
+        sql = ("SELECT * FROM intel_sweeps ORDER BY sweep_id ASC LIMIT 1" if first
+               else "SELECT * FROM intel_sweeps ORDER BY sweep_id DESC LIMIT ?")
+        rows = self._conn.execute(sql, () if first else (int(limit),)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["summary"] = json.loads(d.pop("summary_json") or "{}")
+            out.append(d)
+        return out
 
     def get_pairs_written_by_source_since(self, source: str, since: float) -> set:
         """Distinct (device_id, destination_id) pairs that evidence of `source` was written for since `since`.

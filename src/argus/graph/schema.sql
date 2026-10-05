@@ -174,6 +174,14 @@ CREATE TABLE device_destinations (
 );
 CREATE INDEX idx_device_destinations_device_ts ON device_destinations(device_id, last_seen);
 
+-- One row per learning-period intel sweep (argus/learning_sweep.py); the first row is kept for the onboarding report.
+CREATE TABLE intel_sweeps (
+    sweep_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp     REAL NOT NULL,
+    trigger       TEXT NOT NULL,
+    summary_json  TEXT NOT NULL DEFAULT '{}'
+);
+
 -- Generalized edge table -- every relationship the graph needs is one row here
 -- rather than a bespoke join table per relation type. src/dst are polymorphic
 -- (kind + id), resolved by the reading code, not by foreign keys (SQLite has no

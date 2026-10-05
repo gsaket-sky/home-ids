@@ -169,6 +169,8 @@ DEFAULT_CONFIG = {
     # Domain popularity (2026-10-01): learned on this network (intelligence/local_popularity.py). Tranco is off by
     # default -- one of its inputs is non-commercial-licensed; turning it on is a personal-use choice.
     "local_popularity_enabled": True,
+    # Learning-period intel sweep (argus/learning_sweep.py): re-checks learning-era traffic after each feed refresh.
+    "learning_intel_sweep_enabled": True,
     "tranco_enabled": False,
     "geoip_iptoasn_path": "state/geoip/ip2asn-combined.tsv.gz",
     "geoip_iptoasn_refresh_days": 7,
