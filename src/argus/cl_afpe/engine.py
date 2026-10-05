@@ -20,7 +20,8 @@ Learning (the write paths):
   - mark_false_positive() -- an operator, LLM-validated or autonomous correction: refuses hard-stop and
     unknown-device alerts; for connection-abuse signatures raises the device's own detection thresholds, otherwise
     immunizes the base domain (or the destination IP) -- for that device only when the correction is automatic and
-    the device is in its learning period; always widens the device's sensitivity shift; records
+    the device is in its learning period, or the domain was only ever used by devices during their learning periods
+    (the popularity learning-adoption ledger); always widens the device's sensitivity shift; records
     composite-trust corroboration; writes a training record for the nightly retrain.
   - record_confirmed_threat() -- records the destination in the shared local confirmed-intel store (never a public
     resolver, a safe IP, cloud/CDN infrastructure or a private/reserved address -- each guard exists because such
@@ -71,7 +72,8 @@ MIN_TRUST_ENTRY_TTL_SECONDS = 3600
 MAX_TRUST_ENTRY_TTL_SECONDS = TRUST_CACHE_TTL_SECONDS
 
 # Hypotheses whose benign correction is a
-# claim about THIS DEVICE's own behavior, not the destination's general safety.
+# claim about THIS DEVICE's own behavior, not the destination's general safety. Their edges are matched for that
+# device only (is_trust_cached) and left out of the network-wide get_dynamic_trust_cache().
 DEVICE_SCOPED_TRUST_HYPOTHESES = frozenset({
     "DNS_EVASION", "DNS_ATTRIBUTION_GAP", "DNS_POLICY_BYPASS",
 })
@@ -154,8 +156,11 @@ class ClAfpeEngine:
     def __init__(self, store: GraphStore, resolve_canonical_device_id=None, has_device=None,
                   local_intel: Optional[LocalConfirmedIntel] = None, safe_ips: Optional[Any] = None,
                   ml_scorer: Optional[MLScorer] = None, familiarity: Optional[DeviceFamiliarity] = None,
-                  lateral_targets_threshold=None, config_get=None):
+                  lateral_targets_threshold=None, config_get=None, popularity=None):
         self.store = store
+        # The network's domain-popularity store (intelligence/local_popularity.py), for its learning-adoption ledger.
+        # Optional: without it no domain counts as learning-only (pipeline.py binds its instance at boot).
+        self.popularity = popularity
         # (key, default) -> value; live_engine passes CONFIG.get so console edits apply on the next alert.
         self._config_get = config_get
         # Distinct internal targets needed for the lateral-movement hard stop; a callable is read on every alert so a
@@ -256,10 +261,11 @@ class ClAfpeEngine:
 
     def get_dynamic_trust_cache(self, now: Optional[float] = None) -> set:
         """Every currently-active network-wide immunized destination, not filtered by device or hypothesis (threat
-        intel uses it to skip lookups for destinations already corrected as safe). Device-scoped edges are left out:
-        they trust a destination for one device, not for the network."""
+        intel uses it to skip lookups for destinations already corrected as safe). Left out: device-scoped edges and
+        DEVICE_SCOPED_TRUST_HYPOTHESES edges -- both trust a destination for one device, not for the network."""
         return {e["dst_id"] for e in self._active_trust_edges(now=now)
-                if e["metadata"].get("scope") != TRUST_SCOPE_DEVICE}
+                if e["metadata"].get("scope") != TRUST_SCOPE_DEVICE
+                and e["metadata"].get("hypothesis") not in DEVICE_SCOPED_TRUST_HYPOTHESES}
 
     def device_in_learning_period(self, device_id: Optional[str]) -> bool:
         """True while `device_id` is in its learning period (extractors.dns_features.in_learning_period on its learned
@@ -268,6 +274,20 @@ class ClAfpeEngine:
             return True
         from extractors.dns_features import in_learning_period  # lazy: dns_features pulls in config
         return in_learning_period(*self.familiarity.learned_activity(device_id))
+
+    def domain_learning_only(self, domain: str) -> bool:
+        """True when every device that ever used `domain` first used it during its own learning period (the popularity
+        ledger), so no baselined device's behaviour ever vouched for it. A device that leaves its learning period
+        still talking to a C2 it brought along must not turn an automatic correction into network-wide trust. False
+        without a popularity store, with no recorded history, or when the history cannot be read."""
+        pop = self.popularity
+        if pop is None or not domain:
+            return False
+        try:
+            return pop.is_learning_only(domain) is True
+        except Exception as e:
+            LOGGER.debug("learning-adoption ledger unavailable for %s: %s", domain, e)
+            return False
 
     def is_trust_cached(self, destination_id: str, device_id: Optional[str] = None,
                           hypothesis: Optional[str] = None, now: Optional[float] = None) -> bool:
@@ -503,8 +523,10 @@ class ClAfpeEngine:
         else:
             # Default routing: immunize the eTLD+1 BASE domain -- what evaluate()'s trust-cache check looks up, so
             # immunizing sentry.io also covers xyz.ingest.us.sentry.io (a raw subdomain would only re-match itself).
-            # An automatic correction for a device in its learning period trusts it for that device only.
-            device_scoped = source not in HUMAN_CORRECTION_SOURCES and self.device_in_learning_period(device_id)
+            # An automatic correction trusts it for that device only while the device is in its learning period, or
+            # when the domain was only ever used by learning-period devices.
+            device_scoped = source not in HUMAN_CORRECTION_SOURCES and (
+                self.device_in_learning_period(device_id) or self.domain_learning_only(base_domain))
             if base_domain:
                 target = base_domain
                 is_new = self.immunize(target, device_id=device_id, hypothesis=signature,

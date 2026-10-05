@@ -1000,6 +1000,7 @@ class EnginePipeline:
             model_dir=str(Path(self.config.get("model_path", "models/ids_model.pkl")).parent),
             local_intel=self.local_intel, familiarity=self.familiarity)
         self.cl_afpe = argus_live_engine.get_cl_afpe_engine()
+        self.cl_afpe.popularity = self.local_popularity   # learning-adoption ledger for automatic trust scope
         if self.cl_afpe.ml_scorer is not None:
             self.cl_afpe.ml_scorer.warm_up_async()
         if self.ti_engine:

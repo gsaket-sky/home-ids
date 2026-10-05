@@ -80,8 +80,10 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
     result = fp.mark_false_positive(_evasion_alert(), source="operator")
     check("THE CORE FIX: a DNS_EVASION correction immunizes the alert's destination IP (there is no domain)",
           not result.refused and result.immunized_destination == unexplained_ip, f"got={result}")
-    check("the immunized IP lands in the dynamic trust cache evaluate() checks",
-          unexplained_ip in fp.get_dynamic_trust_cache())
+    check("the immunized IP is trusted for this device and this hypothesis (what evaluate() checks)",
+          fp.is_trust_cached(unexplained_ip, device_id=device_id, hypothesis="DNS_EVASION"))
+    check("... but, as a claim about this device's DNS behaviour, not network-wide (M2 follow-up, 2026-10-05)",
+          unexplained_ip not in fp.get_dynamic_trust_cache())
     check("the sensitivity shift widens for this device (the generic dampener runs regardless of branch)",
           fp.get_sigma_shift(device_id) > 0.0)
 

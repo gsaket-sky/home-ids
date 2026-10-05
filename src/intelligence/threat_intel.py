@@ -34,7 +34,7 @@ from metrics import (pihole_gravity_queries_total, pihole_gravity_last_success_t
 from intelligence import ti_staleness
 from intelligence import ja3_provenance
 
-from utils import etld1
+from utils import etld1, etld1_strict
 from intelligence import feed_health
 from intelligence.et_open_fetch import ETOpenUpdater
 from core.heartbeat import HEARTBEATS
@@ -220,8 +220,10 @@ class ThreatIntel:
             if self.trust_cache_provider:
                 try:
                     trust_cache = self.trust_cache_provider.get_dynamic_trust_cache()
-                    base_dom = ".".join(parts[-2:]) if len(parts) >= 2 else domain
-                    trusted = domain if domain in trust_cache else (base_dom if base_dom in trust_cache else "")
+                    # The same fail-closed base CL-AFPE immunizes (etld1_strict): a.example.co.uk -> example.co.uk.
+                    # Without a public-suffix list it is "", and only the exact name can match.
+                    base_dom = etld1_strict(domain)
+                    trusted = domain if domain in trust_cache else (base_dom if base_dom and base_dom in trust_cache else "")
                     if trusted and not self._strong_ioc_up_to(domain, trusted):
                         LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", trusted)
                         return True

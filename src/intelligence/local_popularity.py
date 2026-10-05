@@ -266,6 +266,21 @@ class LocalPopularity:
             return None
         return False
 
+    def is_learning_only(self, domain: str) -> Optional[bool]:
+        """Whether every device that used `domain` (the exact recorded name) first used it during its own learning
+        period. True: no device adopted it outside a learning period. False: at least one did. None: no recorded
+        history (unknown, or only in the unflushed buffer) or the database is unreadable."""
+        name = (domain or "").lower().strip(".")
+        if not name:
+            return None
+        try:
+            _first_seen, _n_days, devices, learning = self._name_history(name)
+        except sqlite3.Error:
+            return None
+        if not devices:
+            return None
+        return devices <= learning
+
     # --- persistence ------------------------------------------------------------------------------------------------
 
     def flush(self) -> None:

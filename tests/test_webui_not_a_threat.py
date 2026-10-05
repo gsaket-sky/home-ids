@@ -67,8 +67,11 @@ try:
     check("the incident's NEWEST alert is corrected (its base domain becomes trusted)",
           r.status_code == 200 and body.get("status") == "success"
           and body.get("immunized") == "vendor-telemetry.example", str(body))
-    check("the destination is now in the trust cache",
-          "vendor-telemetry.example" in ClAfpeEngine(store).get_dynamic_trust_cache())
+    check("the destination is now trusted for this device and hypothesis (a DNS-behaviour correction is "
+          "device-scoped, so not in the network-wide set)",
+          ClAfpeEngine(store).is_trust_cached("vendor-telemetry.example", device_id="dev_tv",
+                                              hypothesis="DNS_ATTRIBUTION_GAP")
+          and "vendor-telemetry.example" not in ClAfpeEngine(store).get_dynamic_trust_cache())
     check("the response names the incident", body.get("incident_id") == "dev_tv|DNS_ATTRIBUTION_GAP")
     n_actions = store._conn.execute("SELECT COUNT(*) FROM operator_actions").fetchone()[0]
     check("the operator action is recorded against the alert event", n_actions == 1, str(n_actions))
