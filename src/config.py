@@ -171,6 +171,9 @@ DEFAULT_CONFIG = {
     "local_popularity_enabled": True,
     # Learning-period intel sweep (argus/learning_sweep.py): re-checks learning-era traffic after each feed refresh.
     "learning_intel_sweep_enabled": True,
+    # Domain age via RDAP (intelligence/rdap_age.py): OFF until the customer opts in (offered at first setup). Each
+    # lookup tells a gTLD registry that this network asked about a rare name.
+    "rdap_domain_age_enabled": False,
     "tranco_enabled": False,
     "geoip_iptoasn_path": "state/geoip/ip2asn-combined.tsv.gz",
     "geoip_iptoasn_refresh_days": 7,
