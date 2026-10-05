@@ -1037,6 +1037,7 @@ class EnginePipeline:
                     state_dir / "rdap_cache.db",
                     enabled_fn=lambda: bool(self.config.get("rdap_domain_age_enabled", False)))
                 self.local_popularity.age_fn = self.rdap_age.registration_ts
+                argus_live_engine.configure_domain_age(self.local_popularity)
                 self.domain_age_scheduler = DomainAgeScheduler(
                     self.rdap_age, self.local_popularity, registrable_fn=etld1_strict,
                     known_good_fn=self.ti_engine.is_static_allowlisted if self.ti_engine is not None else None)
@@ -1047,6 +1048,7 @@ class EnginePipeline:
                 self.domain_age_scheduler = None
                 if self.local_popularity is not None:
                     self.local_popularity.age_fn = None
+                argus_live_engine.configure_domain_age(None)
         try:
             argus_live_engine.merge_retired_local_intel(self.local_intel, state_dir)
             import_legacy_state(state_dir, self.cl_afpe.store, self.familiarity)

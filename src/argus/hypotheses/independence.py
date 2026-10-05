@@ -195,6 +195,13 @@ INDEPENDENCE_FAMILY_MAP: Dict[str, str] = {
     # corroborates a hypothesis.
     "regime_change": "regime_change",
 
+    # Domain age (opt-in RDAP, intelligence/rdap_age.py; MASTER_TODO M2): the destination's registrable domain was
+    # registered shortly before this network first used it. Owner decision 2026-10-05: supporting only, never an
+    # alert on its own -- so permanently non-attack-family: it can never be one of the >= 2 independent sources.
+    # Its only effect is decision/engine.py's bounded score lift when another detector already scores the same
+    # destination (see _YOUNG_DOMAIN_SCORE_LIFT there), plus the explanation line.
+    "domain_age_young": "registration_age",
+
     # Markov sequence-surprise, all axes (activity-state, destination-tier,
     # beaconing-interval). CORROBORATION DESIGN DECISION (see this file's own
     # docstring conventions): permanently non-attack-family, with NO exception
@@ -252,6 +259,8 @@ NON_ATTACK_FAMILIES = frozenset({
     "local_context", "novelty_context", "peer_cohort_deviation", "ml_anomaly", "policy",
     # Release 15: see each new family's own comment above for why.
     "baseline_deviation", "regime_change", "sequence_dynamics",
+    # 2026-10-05: domain age is supporting context only (see its map entry above).
+    "registration_age",
 })
 
 UNKNOWN_FAMILY = "unregistered"  # visible fallback, see count_independent_families()'s own docstring

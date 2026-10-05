@@ -56,6 +56,7 @@ from argus.evidence.model import Evidence, NO_DESTINATION
 from argus.hypotheses.independence import INDEPENDENCE_FAMILY_MAP
 from argus.decision.engine import DecisionEngine as V13DecisionEngine
 from argus.graph.store import (
+    _looks_like_ip,
     GraphStore, DEFAULT_EVIDENCE_RETENTION_DAYS,
     _MAX_EVIDENCE_PER_TYPE_IN_WINDOW_BY_PROFILE, _DEFAULT_MAX_EVIDENCE_PER_TYPE_IN_WINDOW,
 )
@@ -961,6 +962,42 @@ _BETA_INPUT_KEYS = {ratio_metric_key("nxdomain_ratio"): "nxdomain_ratio",
 _last_risk_score: Dict[str, float] = {}
 
 
+# Domain age (MASTER_TODO M2, opt-in): the popularity ledger whose is_young() reads the stored RDAP registration
+# dates. Bound by pipeline.py (configure_domain_age); None -> no domain-age evidence, the behaviour before it existed.
+_domain_age_source = None
+
+
+def configure_domain_age(source) -> None:
+    global _domain_age_source
+    _domain_age_source = source
+
+
+def _inject_domain_age_evidence(device_id: str, fresh_v2: List, ts: float) -> List[Evidence]:
+    """Context evidence `domain_age_young` for each of THIS cycle's domain destinations whose registrable domain was
+    registered shortly before this network first used it. Family `registration_age` is non-attack (independence.py),
+    so it never counts as a source; decision/engine.py only uses it to lift a score that another detector already
+    earned on the same destination. Derived context: added to merged_v2 only, never written to the graph. Reads the
+    stored dates only (no lookup). Best-effort: any failure means no such evidence this cycle."""
+    source = _domain_age_source
+    if source is None:
+        return []
+    out: List[Evidence] = []
+    try:
+        for dest in sorted({ev.destination_id for ev in fresh_v2}):
+            if not dest or dest == NO_DESTINATION or "." not in dest or _looks_like_ip(dest):
+                continue
+            if source.is_young(dest):
+                out.append(Evidence(
+                    device_id=device_id, destination_id=dest, evidence_type="domain_age_young",
+                    independence_family="registration_age", timestamp=ts, source="v13_live_engine",
+                    confidence=0.5, value=1.0, provenance="v13_live_engine:domain_age",
+                    features={"note": "registered shortly before first use on this network"},
+                ))
+    except Exception as e:
+        LOGGER.debug("domain-age evidence skipped for %r this cycle: %s", device_id, e)
+    return out
+
+
 def _inject_baseline_evidence(device_id: str, features: dict, fresh_v2: List, ts: float) -> List[Evidence]:
     """Sheet 00 baseline/BOCPD scoring, now live on `.94` -- see the module comment
     above this function for the full porting rationale. Best-effort, matching every
@@ -1100,6 +1137,9 @@ def evaluate(active_evidence_v1: List, rep_vector, device_type: str = "",
             # rationale from argus/ingest/daemon.py's (`.19`-only) reference
             # implementation.
             merged_v2 = merged_v2 + _inject_baseline_evidence(device_id, features or {}, fresh_v2, ts)
+
+            # Domain age (opt-in): supporting context only -- see _inject_domain_age_evidence().
+            merged_v2 = merged_v2 + _inject_domain_age_evidence(device_id, fresh_v2, ts)
 
         # Sheet 03a live-wiring follow-up: same `if device_id:` gate as every other
         # graph-touching feature above -- omitting device_id means ZERO graph

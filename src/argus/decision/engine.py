@@ -38,6 +38,16 @@ _PARTIAL_SUPPORT_FAMILIES = frozenset({
 _ZEEK_DERIVED_FAMILIES = frozenset({"tls_fingerprint", "network_behavior", "data_transfer_pattern"})
 
 
+# Domain age (2b, MASTER_TODO M2): a young destination domain adds this much to the winning attack hypothesis's score,
+# only when ALL of these already hold without it: the hypothesis scores >= 2.0 and beats the benign side, it is
+# anchored on that same destination, and >= 2 independent attack families back it. So its one possible effect is to
+# turn an existing two-source SUSPICIOUS finding about that destination into HIGH (an alert, not a block). 1.0, not
+# less: hypotheses score in whole steps (2.0 / 3.0 / 4.0), so a smaller lift could never reach the 3.0 HIGH bar and
+# would change nothing. It never adds a family (registration_age is in NON_ATTACK_FAMILIES).
+_YOUNG_DOMAIN_SCORE_LIFT = 1.0
+_YOUNG_DOMAIN_EVIDENCE = "domain_age_young"
+
+
 def _count_independent_sources(families) -> int:
     zeek = len(set(families) & _ZEEK_DERIVED_FAMILIES)
     return len(families) - max(0, zeek - 1)
@@ -338,6 +348,14 @@ class DecisionEngine:
         independence_families = {family_for(e.evidence_type) for e in attack_evidence}
         num_independent_sources = _count_independent_sources(independence_families)
 
+        young_note = None
+        young = sorted({e.destination_id for e in ev_store if e.evidence_type == _YOUNG_DOMAIN_EVIDENCE
+                        and e.destination_id in hyp_destinations})
+        if young and num_independent_sources >= 2 and attack_score >= 2.0 and attack_score > benign_score:
+            attack_score += _YOUNG_DOMAIN_SCORE_LIFT
+            young_note = (f"Domain age: {', '.join(young)} registered shortly before this network first used it "
+                          f"(supporting only, +{_YOUNG_DOMAIN_SCORE_LIFT:.1f} to the score; never an extra source)")
+
         trail: List[str] = []
         hyp_line = (
             f"Hypotheses: attack='{winning_attack_name}' (score={attack_score:.1f}) "
@@ -347,6 +365,8 @@ class DecisionEngine:
         if attack_score == 0.0 and benign_score == 0.0:
             hyp_line += " — no hypothesis explains this evidence either way; verdict below rests on reputation context alone"
         trail.append(hyp_line)
+        if young_note:
+            trail.append(young_note)
 
         state = DecisionState.BENIGN
         action = "suppress"

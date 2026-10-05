@@ -48,6 +48,7 @@ EVIDENCE_TYPE_LABELS = {
     "fingerprint_campaign": ("TLS fingerprint campaign match", "This connection's JA3/JA4 TLS fingerprint matches a fingerprint seen across a wider malicious campaign."),
     "dga_seed_campaign": ("DGA seed-domain campaign", "This device's queried domains match a known domain-generation-algorithm seed pattern."),
     "peer_deviation": ("Deviates from peer devices", "This device's behavior differs significantly from other devices of the same type on this network."),
+    "domain_age_young": ("Brand-new website address", "The website address was registered only shortly before this device first used it. On its own this is never a reason to alert; it only adds weight when another check already found something about the same address."),
 }
 
 HYPOTHESIS_LABELS = {
