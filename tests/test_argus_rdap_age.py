@@ -133,9 +133,12 @@ advance((NO_DATA_TTL_DAYS - 1) * 86400)
 check("a 'no date' answer is kept for its lifetime", svc.has_fresh_answer("ghost.com"))
 advance(2 * 86400)
 check("and expires after it", not svc.has_fresh_answer("ghost.com"))
-check("a date is kept far longer", svc.registration_ts("young.com") is not None)
+check("a date is kept far longer", svc.registration_ts("young.com") is not None and svc.has_fresh_answer("young.com"))
 advance((DATE_TTL_DAYS) * 86400)
-check("and expires too", svc.registration_ts("young.com") is None)
+check("after its lifetime a date may be asked again (re-registration)", not svc.has_fresh_answer("young.com"))
+check("but stays readable: an old C2 domain must not turn 'unknown' and become normal again",
+      svc.registration_ts("young.com") is not None and svc.has_answer("young.com"))
+check("a name never asked about has no answer", not svc.has_answer("never.com"))
 
 # --- pacing and the daily cap ---------------------------------------------------------------------------------------------
 svc = fresh()

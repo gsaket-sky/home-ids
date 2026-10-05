@@ -97,7 +97,8 @@ class LearningIntelSweep:
         if self.popularity is None:
             return False
         try:
-            return int(self.popularity.active_days()) < self.warmup_days
+            # A property on LocalPopularity (calling it raised TypeError, read as "warm", until 2026-10-05).
+            return int(self.popularity.active_days) < self.warmup_days
         except Exception:
             return False
 

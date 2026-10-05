@@ -289,6 +289,19 @@ class ClAfpeEngine:
             LOGGER.debug("learning-adoption ledger unavailable for %s: %s", domain, e)
             return False
 
+    def domain_young(self, domain: str) -> bool:
+        """True when the opt-in domain-age source (intelligence/rdap_age.py) dates `domain` to shortly before this
+        network first saw it (LocalPopularity.is_young). An automatic correction then trusts it for that device only:
+        nothing has vouched for a brand-new domain beyond the one device. False without the source or a date."""
+        pop = self.popularity
+        if pop is None or not domain:
+            return False
+        try:
+            return pop.is_young(domain) is True
+        except Exception as e:
+            LOGGER.debug("domain age unavailable for %s: %s", domain, e)
+            return False
+
     def is_trust_cached(self, destination_id: str, device_id: Optional[str] = None,
                           hypothesis: Optional[str] = None, now: Optional[float] = None) -> bool:
         """Matches _is_trust_cached() exactly: requires the SAME hypothesis on reuse
@@ -526,7 +539,8 @@ class ClAfpeEngine:
             # An automatic correction trusts it for that device only while the device is in its learning period, or
             # when the domain was only ever used by learning-period devices.
             device_scoped = source not in HUMAN_CORRECTION_SOURCES and (
-                self.device_in_learning_period(device_id) or self.domain_learning_only(base_domain))
+                self.device_in_learning_period(device_id) or self.domain_learning_only(base_domain)
+                or self.domain_young(base_domain))
             if base_domain:
                 target = base_domain
                 is_new = self.immunize(target, device_id=device_id, hypothesis=signature,

@@ -29,6 +29,7 @@ from argus.graph.store import GraphStore  # noqa: E402
 from argus.learning_sweep import (LearningIntelSweep, TRIGGER_FIRST, TRIGGER_WARMUP,  # noqa: E402
                                   TRIGGER_LEARNING)
 from intelligence.threat_intel import ThreatIntel  # noqa: E402
+from intelligence.local_popularity import LocalPopularity  # noqa: E402
 
 NOW = 3_000_000.0
 DAY = 86400.0
@@ -54,7 +55,8 @@ class FakePopularity:
     def __init__(self, active_days, pairs):
         self.days, self.pairs = active_days, pairs
 
-    def active_days(self):
+    @property
+    def active_days(self):            # a property, exactly like LocalPopularity's
         return self.days
 
     def device_name_pairs_since(self, since):
@@ -208,6 +210,19 @@ lazy = LearningIntelSweep(lambda: store, not_ready, lambda d: True, days_back=30
 lazy.attach()
 time.sleep(0.3)
 check("attach() waits for the first refresh when the feeds are not loaded yet", lazy.last_summary is None)
+store.close()
+
+# --- the real LocalPopularity: warm-up is read correctly (active_days is a property) ---------------------------------
+store = GraphStore(str(tmp / "g6.db"))
+real_pop = LocalPopularity(tmp / "pop6.db", now_fn=lambda: NOW)
+real_pop.observe("d1", "x.example.org", NOW - DAY)
+real_pop.flush()
+sweep = LearningIntelSweep(lambda: store, make_ti(), lambda d: False, days_back=30, popularity=real_pop,
+                           now_fn=lambda: NOW)
+sweep.run_once()
+s = sweep.run_once()
+check("with the real popularity ledger, a network with 1 active day is warming up", s and s["trigger"] == TRIGGER_WARMUP,
+      str(s))
 store.close()
 
 # --- a failing listener never breaks the refresh loop -------------------------------------------------------------

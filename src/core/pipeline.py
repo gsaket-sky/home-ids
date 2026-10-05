@@ -1023,6 +1023,30 @@ class EnginePipeline:
             except Exception as e:
                 LOGGER.warning("Learning-period intel sweep unavailable (the nightly retro-hunt still runs): %s", e)
                 self.learning_sweep = None
+        # Domain age via RDAP (MASTER_TODO M2; opt-in, `rdap_domain_age_enabled`, default off). Always constructed so
+        # switching it on takes effect without a restart; while off the scheduler sends nothing and the age source
+        # answers None, i.e. exactly the behaviour without it. Needs the popularity ledger (its only name source).
+        self.rdap_age = None
+        self.domain_age_scheduler = None
+        if self.local_popularity is not None:
+            try:
+                from intelligence.rdap_age import RdapAgeService
+                from intelligence.domain_age_scheduler import DomainAgeScheduler
+                from utils import etld1_strict
+                self.rdap_age = RdapAgeService(
+                    state_dir / "rdap_cache.db",
+                    enabled_fn=lambda: bool(self.config.get("rdap_domain_age_enabled", False)))
+                self.local_popularity.age_fn = self.rdap_age.registration_ts
+                self.domain_age_scheduler = DomainAgeScheduler(
+                    self.rdap_age, self.local_popularity, registrable_fn=etld1_strict,
+                    known_good_fn=self.ti_engine.is_static_allowlisted if self.ti_engine is not None else None)
+                self.domain_age_scheduler.start()
+            except Exception as e:
+                LOGGER.warning("Domain age unavailable (everything else unaffected): %s", e)
+                self.rdap_age = None
+                self.domain_age_scheduler = None
+                if self.local_popularity is not None:
+                    self.local_popularity.age_fn = None
         try:
             argus_live_engine.merge_retired_local_intel(self.local_intel, state_dir)
             import_legacy_state(state_dir, self.cl_afpe.store, self.familiarity)

@@ -48,6 +48,10 @@ FLUSH_SECONDS = 300.0
 # never calendar spans.
 NOVELTY_MIN_DAYS = 3
 HISTORY_WARMUP_ACTIVE_DAYS = 7    # a full weekly rhythm of network history before anything can be called new
+# Domain age (intelligence/rdap_age.py, opt-in): a registrable domain registered at most YOUNG_DAYS before this network
+# first saw it (or after) is "young". A young name never counts as already in use here, however long it is used, so a
+# C2 a device brought along from before installation cannot become normal by persisting. Judged at first use, not today.
+YOUNG_DAYS = 30
 _HISTORY_CACHE_TTL = 300.0
 _HISTORY_CACHE_MAX = 5000
 _LEARNING_MEMO_TTL = 60.0     # observe() is per query; a device's learning status is re-read at most once a minute
@@ -66,6 +70,9 @@ class LocalPopularity:
         self._etld1 = etld1_fn or (lambda d: d)
         self._now = now_fn
         self.learning_fn = learning_fn
+        # Domain-age source: age_fn(registrable domain) -> registration time (epoch), or None when unknown or switched
+        # off. None (the default): the behaviour before domain age existed.
+        self.age_fn: Optional[Callable[[str], Optional[float]]] = None
         self._lock = threading.Lock()
         # name -> [set(device), set(day), last_seen, set(device first seen using it during its learning period)]
         self._pending: Dict[str, list] = {}
@@ -256,15 +263,61 @@ class LocalPopularity:
             return None
         name = domain.lower().strip(".")
         try:
+            # Registration dates exist for registrable domains only, so youth is decided on the base and then applies
+            # to every name under it (a recurring a.evil.com must not count as "in use" just because only evil.com
+            # has a date).
+            young = self.is_young(name)
             for n in dict.fromkeys((name, self._base_of(name))):
                 if n in self._established:
                     return True
                 _first_seen, n_days, devices, learning = self._name_history(n)
-                if n_days >= NOVELTY_MIN_DAYS and not self._unproven_for(device_id, devices, learning):
+                if n_days >= NOVELTY_MIN_DAYS and not young and not self._unproven_for(device_id, devices, learning):
                     return True
         except sqlite3.Error:
             return None
         return False
+
+    def is_young(self, domain: str) -> bool:
+        """True when the domain-age source dates `domain`'s registrable domain to at most YOUNG_DAYS before this network
+        first saw that domain, or later. False without a source, without a date, or without a recorded first use: an
+        unknown age is never treated as young."""
+        fn = self.age_fn
+        if fn is None or not domain:
+            return False
+        base = self._base_of(domain.lower().strip("."))
+        try:
+            registered = fn(base)
+            if registered is None:
+                return False
+            first_seen = self._name_history(base)[0]
+        except Exception:
+            return False
+        return first_seen is not None and registered >= first_seen - YOUNG_DAYS * 86400
+
+    def candidate_names(self, since: float, registrable_fn: Callable[[str], str]) -> list:
+        """Names the domain-age lookups may ask about: [(name, first_seen, devices, n_days, learning devices)] for every
+        registrable domain asked for since `since` that is not established. `registrable_fn` must fail closed (e.g.
+        utils.etld1_strict, "" without a public-suffix list): only a name equal to its own registrable domain
+        qualifies, so a full host name is never sent to a registry. One database read; empty on a read error."""
+        out = []
+        try:
+            with self._connect() as db:
+                rows = db.execute("SELECT name, devices, days, first_seen, learning FROM names WHERE last_seen >= ?",
+                                  (since,)).fetchall()
+        except sqlite3.Error as exc:
+            LOGGER.warning("local popularity: could not read %s: %s", self.db_path, exc)
+            return out
+        for name, devs, days, first_seen, learning in rows:
+            if name in self._established:
+                continue
+            try:
+                if registrable_fn(name) != name:
+                    continue
+            except Exception:
+                continue
+            out.append((name, float(first_seen), [d for d in devs.split(",") if d],
+                        len([d for d in days.split(",") if d]), [d for d in (learning or "").split(",") if d]))
+        return out
 
     def is_learning_only(self, domain: str) -> Optional[bool]:
         """Whether every device that used `domain` (the exact recorded name) first used it during its own learning

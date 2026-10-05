@@ -245,6 +245,17 @@ class ThreatIntel:
             LOGGER.warning("Allowlist evaluation failed for %s: %s", domain, exc)
             return False
 
+    def is_static_allowlisted(self, domain: str) -> bool:
+        """Only the curated, shipped allowlist (and Tranco when switched on): the name or its last-two-label parent.
+        Unlike is_allowlisted() it ignores learned popularity and the CL-AFPE trust cache, both of which can be wrong."""
+        domain = (domain or "").lower().strip(".")
+        if not domain:
+            return False
+        if domain in self._static_allowlist or domain in self._tranco_top10k:
+            return True
+        parts = domain.split(".")
+        return len(parts) >= 2 and ".".join(parts[-2:]) in self._static_allowlist
+
     def is_pihole_gravity_domain(self, domain: str) -> Optional[bool]:
         """Queries YOUR OWN Pi-hole's REST API (v6 /api/search) for whether `domain`
         matches its gravity list (the downloaded ad/tracker blocklists Pi-hole already

@@ -20,7 +20,9 @@ Limits (registries' terms forbid "high volume, automated" use without giving a n
 low): at most one lookup per MIN_INTERVAL_SECONDS and DAILY_CAP per day for the whole unit; HTTP 429 backs that
 registry off for its Retry-After (else BACKOFF_DEFAULT_SECONDS), per RFC 7480 section 5.5. Answers are kept in
 SQLite (no JSON state files): a registration date for DATE_TTL_DAYS, "no date" for NO_DATA_TTL_DAYS, so a name is
-asked about at most a few times a year. The registry list is IANA's bootstrap file, refreshed weekly and kept in the
+asked about at most a few times a year. A stored date stays readable after DATE_TTL_DAYS (a registration date does
+not change; only a re-registration would, which is what the TTL re-asks for): if it expired for reading, an old C2
+domain would stop counting as young and become "normal" again. The registry list is IANA's bootstrap file, refreshed weekly and kept in the
 same database; if it cannot be fetched the last copy is used, and with none, nothing is looked up.
 
 Unknown is always "no signal": a failed, refused or undated lookup never makes a domain look young or old.
@@ -107,6 +109,7 @@ class RdapAgeService:
         self._lock = threading.Lock()
         self._last_lookup_at = 0.0
         self._bootstrap_cache: Optional[Dict[str, str]] = None   # tld -> RDAP base url
+        self._memo: Dict[str, Tuple[Optional[float], float]] = {}  # name -> (registered, read_at): the novelty gate reads per query
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
@@ -148,24 +151,57 @@ class RdapAgeService:
             return None
         return registered, checked_at
 
+    MEMO_SECONDS = 300.0
+    MEMO_MAX = 20_000
+
     def registration_ts(self, name: str) -> Optional[float]:
-        """Registration time (epoch) from a stored answer, or None: not asked yet, no date published, expired, or the
-        feature is switched off. Never sends anything."""
+        """Registration time (epoch) from a stored answer, or None: not asked yet, no date published, or the feature is
+        switched off. A stored date is returned however old the answer is (see the module docstring). Never sends
+        anything; memoised for MEMO_SECONDS because the novelty gate calls this per query."""
         if not self.enabled():
             return None
         name = normalize(name)
+        now = self._now()
+        hit = self._memo.get(name)
+        if hit is not None and now - hit[1] < self.MEMO_SECONDS:
+            return hit[0]
         try:
-            ans = self._answer(name)
+            with self._connect() as db:
+                row = db.execute("SELECT registered FROM answers WHERE name=?", (name,)).fetchone()
         except sqlite3.Error as exc:
             LOGGER.warning("rdap age: could not read %s: %s", self.db_path, exc)
             return None
-        return ans[0] if ans else None
+        registered = row[0] if row else None
+        if len(self._memo) > self.MEMO_MAX:
+            self._memo.clear()
+        self._memo[name] = (registered, now)
+        return registered
 
     def has_fresh_answer(self, name: str) -> bool:
+        """True while a stored answer is inside its lifetime (lookup() would not ask again)."""
         try:
             return self._answer(normalize(name)) is not None
         except sqlite3.Error:
             return False
+
+    def has_answer(self, name: str) -> bool:
+        """True when the registry was ever asked about `name` successfully (date or no date), however long ago."""
+        try:
+            with self._connect() as db:
+                return db.execute("SELECT 1 FROM answers WHERE name=?", (normalize(name),)).fetchone() is not None
+        except sqlite3.Error:
+            return False
+
+    # --- small persistent key/value store for the scheduler ---------------------------------------------------------
+
+    def get_meta(self, key: str) -> Optional[str]:
+        with self._connect() as db:
+            row = db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._connect() as db:
+            db.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
 
     # --- limits ------------------------------------------------------------------------------------------------------
 
@@ -297,6 +333,7 @@ class RdapAgeService:
         return LOOKED_UP
 
     def _store(self, name: str, registered: Optional[float], now: float) -> None:
+        self._memo.pop(name, None)
         with self._connect() as db:
             db.execute("INSERT OR REPLACE INTO answers (name, registered, checked_at) VALUES (?, ?, ?)",
                        (name, registered, now))
