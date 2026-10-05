@@ -85,6 +85,9 @@ def is_generic_hostname(hostname: Optional[str]) -> bool:
         return True
     if re.match(r"^\d+$", clean):
         return True
+    from utils import is_placeholder_hostname   # random UUID / router MAC placeholder (2026-10-06)
+    if is_placeholder_hostname(clean):
+        return True
     return False
 
 

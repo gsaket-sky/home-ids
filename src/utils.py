@@ -20,6 +20,7 @@ RECENT FIXES:
 """
 import math
 import os
+import re
 import ipaddress
 import logging
 import json
@@ -102,6 +103,59 @@ def sanitize_hostname(host):
     if not host:
         return "unknown"
     return host.lower().replace(".", "_").replace("-", "_")[:40]
+
+
+# Hostnames that name nothing (2026-10-06, found on .94). A device using a private/random Wi-Fi MAC may send a random
+# UUID as its DHCP hostname, and a router lists a device that sent none under a placeholder built from its MAC
+# (Fritz!Box: "PC-A6-EB-99-7C-A0-05"). Neither identifies a device, and a UUID changes with the private address. Taken
+# as names, they replaced the device's real name whenever traffic came from that address, and gave the type guess
+# nothing to work with. Both the raw and the sanitize_hostname() forms are matched (- and . become _ there).
+_UUID_HOSTNAME = re.compile(r"^[0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{12}$")
+_MAC_PLACEHOLDER_HOSTNAME = re.compile(r"^pc[-_](?:[0-9a-f]{2}[-_:]){5}[0-9a-f]{2}$")
+# A Fritz!Box appends its own DNS domain to every device; stripped like the configured local suffixes.
+_ROUTER_DNS_SUFFIXES = (".fritz.box",)
+
+
+def hostname_key(name) -> str:
+    """One form of a hostname for comparisons: lower-case, local DNS suffix (built-in, configured, ".fritz.box")
+    removed, and '-', '_' and '.' treated alike -- "Sky-LP", "sky-lp.fritz.box" and sanitize_hostname()'s
+    "sky_lp_fritz_box" all give "sky_lp". "" for no name."""
+    h = str(name or "").strip().lower().rstrip(".")
+    if not h or h == "unknown":
+        return ""
+    for suffix in sorted(set(_local_suffixes() + _ROUTER_DNS_SUFFIXES), key=len, reverse=True):
+        for form in (suffix, suffix.replace(".", "_")):
+            if h.endswith(form) and len(h) > len(form):
+                h = h[: -len(form)]
+                break
+        else:
+            continue
+        break
+    return re.sub(r"[-_.]+", "_", h).strip("_")
+
+
+def is_placeholder_hostname(name) -> bool:
+    """True for a hostname that names nothing: a random UUID, or a router's MAC-derived placeholder (see above)."""
+    key = hostname_key(name)
+    return bool(key) and bool(_UUID_HOSTNAME.match(key) or _MAC_PLACEHOLDER_HOSTNAME.match(key))
+
+
+def device_type_from_dhcp_fingerprint(fingerprint) -> str:
+    """Device type from the DHCP options a device asks for, for a device whose hostname and MAC vendor say nothing
+    (private MAC, no or placeholder name). Apple systems since iOS 16 / macOS 13 request option 108 (IPv6-only
+    preferred, RFC 8925) together with 114 (captive-portal URL, RFC 8910); macOS also requests 95 (LDAP) / 44 and 46
+    (NetBIOS), which iOS and iPadOS do not. Returns "laptop" for a Mac, "phone" for an iPhone (an iPad, or an Apple TV
+    that asks for the same options, reads as a phone too -- the fingerprint cannot tell them apart), else ""."""
+    params = (fingerprint or {}).get("param_list") if isinstance(fingerprint, dict) else None
+    if not isinstance(params, (list, tuple)):
+        return ""
+    try:
+        opts = {int(p) for p in params}
+    except (TypeError, ValueError):
+        return ""
+    if not {108, 114} <= opts:
+        return ""
+    return "laptop" if opts & {95, 44, 46} else "phone"
 
 def etld1_strict(domain) -> str:
     """eTLD+1 for TRUST decisions: like etld1(), but fails closed. Without a public-suffix list (tldextract) a

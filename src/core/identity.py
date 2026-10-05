@@ -19,7 +19,8 @@ import requests
 from collections import OrderedDict
 from typing import Optional, List, Dict, Set, Any, Tuple
 
-from utils import sanitize_hostname, infer_device_type, get_mac_vendor
+from utils import (sanitize_hostname, infer_device_type, get_mac_vendor, hostname_key, is_placeholder_hostname,
+                   device_type_from_dhcp_fingerprint)
 
 # Pi-hole query statuses that mean "blocked" (the one shared definition).
 from extractors.pihole_codes import BLOCKED_STATUSES as _PIHOLE_BLOCKED_STATUSES
@@ -72,6 +73,8 @@ def _is_generic_hostname(hostname: str) -> bool:
     if clean_host in _GENERIC_HOSTNAMES:
         return True
     if re.match(r'^\d+$', clean_host):
+        return True
+    if is_placeholder_hostname(clean_host):   # never an identity anchor or a merge signal
         return True
     return False
 
@@ -149,7 +152,9 @@ class DeviceIdentityManager:
                     for host in hosts_data:
                         ip = host.get("ip")
                         mac = host.get("mac", "unknown").lower()
-                        name = host.get("name", "unknown")
+                        name = host.get("name", "unknown") or "unknown"
+                        if is_placeholder_hostname(name):   # a random UUID or the router's MAC placeholder
+                            name = "unknown"
                         if ip:
                             new_cache[ip] = {"mac": mac, "name": name}
                         if mac and mac != "unknown":
@@ -237,6 +242,8 @@ class DeviceIdentityManager:
         if hostname == "unknown":
             return hostname
         if re.match(r'^[\d_]+(?:_fritz_box|_lan)?$', hostname):
+            return "unknown"
+        if is_placeholder_hostname(hostname):   # random UUID / router MAC placeholder -- names nothing
             return "unknown"
         return hostname
 
@@ -493,8 +500,15 @@ class DeviceIdentityManager:
         # IPv6 addresses instead of only the single "most recently active" client_ip.
         if client_ip and client_ip != "unknown":
             locked_state.known_ips.add(client_ip)
-        if hostname != "unknown":
-            if overwrite_hostname or locked_state.hostname == "unknown":
+        # A device's name stays put unless a really different name arrives (2026-10-06, .94: one laptop's name flipped
+        # between "sky-lp", "sky_lp_fritz_box" and a UUID with every event, depending on which of its addresses the
+        # event came from). The same name in another form ("sky-lp" vs "sky_lp_fritz_box") is not a change; a
+        # placeholder (UUID, router MAC placeholder) never replaces anything and is cleared if one is stored.
+        current = getattr(locked_state, "hostname", "unknown") or "unknown"
+        if is_placeholder_hostname(current):
+            locked_state.hostname = current = "unknown"
+        if hostname and hostname != "unknown" and not is_placeholder_hostname(hostname):
+            if current == "unknown" or (overwrite_hostname and hostname_key(hostname) != hostname_key(current)):
                 locked_state.hostname = hostname
         if zeek_fx:
             dhcp_fp = zeek_fx.get_dhcp_fingerprint(client_ip)
@@ -584,8 +598,13 @@ class DeviceIdentityManager:
             state.device_type_is_override = True
             return
         if hostname and hostname != "unknown":
+            # Compared in one form (hostname_key(): case, '-'/'_'/'.' and the local DNS suffix ignored), so a rule
+            # "sky-lp" also matches the name stored as "sky_lp_fritz_box" (2026-10-06: it did not, and the device kept
+            # its type only because an override, once set, is not re-inferred).
+            host_key = hostname_key(hostname)
             for pattern, dtype in overrides.items():
-                if pattern.lower() in hostname:
+                pattern_key = hostname_key(pattern)
+                if pattern.lower() in hostname or (pattern_key and pattern_key in host_key):
                     state.device_type = dtype
                     state.device_type_is_override = True
                     return
@@ -622,6 +641,10 @@ class DeviceIdentityManager:
             # devices.
             mac_vendor = get_mac_vendor(getattr(state, "mac_address", ""))
             new_type = infer_device_type(hostname, mac_vendor=mac_vendor)
+            if new_type == "unknown":
+                # Last resort for a private MAC with no usable name: the DHCP options the device asks for
+                # (utils.device_type_from_dhcp_fingerprint(); recent Apple systems are recognisable).
+                new_type = device_type_from_dhcp_fingerprint(getattr(state, "dhcp_fingerprint", None)) or "unknown"
             old_type = getattr(state, "device_type", None)
             # Dashboard-redesign metric: only counts an ACTUAL change of the stored
             # value (e.g. the DeviceState constructor's cold-start guess or an earlier

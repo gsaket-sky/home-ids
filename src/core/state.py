@@ -284,6 +284,11 @@ class DeviceState:
         )
         obj.mac_address = data.get("mac_address", "unknown")
         obj.device_type = data.get("device_type", "unknown")
+        # A placeholder hostname stored before 2026-10-06 (random UUID, router MAC placeholder) names nothing: dropped
+        # at load, so devices that are idle now stop showing it (utils.is_placeholder_hostname()).
+        from utils import is_placeholder_hostname
+        if is_placeholder_hostname(obj.hostname):
+            obj.hostname = "unknown"
         
         obj.seen_domains = BoundedSet(max_size=10000, initial=data.get("seen_domains", []))
         obj.geo_exported_ips = BoundedSet(max_size=5000, initial=data.get("geo_exported_ips", []))
