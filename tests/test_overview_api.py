@@ -347,8 +347,10 @@ def test_get_overview_summary_exposes_day_filterable_metrics_and_breakdowns(tmp_
     # be in this list, since there is no honest per-day number for them.
     # fp_uncertain (2026-09-22 fix): the 3rd fp_verdict bucket (UNCERTAIN),
     # previously silently uncounted -- now tracked the same way as the other 3.
+    # fp_previously_flagged / fp_likely_real (2026-10-06): split out of CONFIRMED_THREAT (argus/cl_afpe/verdicts.py).
     assert set(result["day_filterable_metrics"]) == {
-        "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats", "fp_uncertain"
+        "alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats", "fp_uncertain",
+        "fp_previously_flagged", "fp_likely_real",
     }
     assert "pihole_blocks" not in result["day_filterable_metrics"]
 

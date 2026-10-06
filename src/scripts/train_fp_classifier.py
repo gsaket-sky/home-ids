@@ -71,6 +71,7 @@ from utils import entropy as compute_entropy, write_job_health, is_resource_pres
 from config import CONFIG
 from argus.cl_afpe.engine import ClAfpeEngine
 from argus.cl_afpe.ml_scoring import FP_FEATURE_VERSION, QUALITY_FILE_NAME, file_sha256
+from argus.cl_afpe.verdicts import LIKELY_REAL, canonical_verdict
 from argus.graph.store import GraphStore
 from argus.autotune.engine import AutotuneEngine
 
@@ -653,7 +654,7 @@ def _collect_uncertain_calibration_evidence(state_dir: Path, muted_docs: list = 
     combined_uncertain_threshold's own boundary needs:
 
     corrected_confirmed_scores: fp_verdict.confidence of alerts that were published
-      as CONFIRMED_THREAT (full severity -- the current uncertain_threshold's `else`
+      as LIKELY_REAL (CONFIRMED_THREAT at Stage 3 before 2026-10-06; full severity -- the current uncertain_threshold's `else`
       branch) but were LATER confirmed to be false positives. Proof that the
       uncertain/confirmed boundary sat too high for these.
     uncorrected_confirmed_scores: confidence of CONFIRMED_THREAT alerts that were
@@ -670,8 +671,8 @@ def _collect_uncertain_calibration_evidence(state_dir: Path, muted_docs: list = 
             continue
         original = doc.get("original_alert", {}) or {}
         fp_verdict = original.get("fp_verdict", {}) or {}
-        if fp_verdict.get("verdict") != "CONFIRMED_THREAT" or fp_verdict.get("stage") != "STAGE_3_COMBINED":
-            continue  # same STAGE_1_HARD_STOP exclusion Phase 1 applied for the same reason
+        if canonical_verdict(fp_verdict) != LIKELY_REAL:
+            continue  # Stage 3 full severity only (LIKELY_REAL, or CONFIRMED_THREAT at STAGE_3_COMBINED before 2026-10-06)
         conf = fp_verdict.get("confidence")
         if not isinstance(conf, (int, float)):
             continue
@@ -691,7 +692,7 @@ def _collect_uncertain_calibration_evidence(state_dir: Path, muted_docs: list = 
             if payload.get("type") != "ids_alert":
                 continue
             fp_v = payload.get("fp_verdict", {}) or {}
-            if fp_v.get("verdict") != "CONFIRMED_THREAT" or fp_v.get("stage") != "STAGE_3_COMBINED":
+            if canonical_verdict(fp_v) != LIKELY_REAL:
                 continue
             if _alert_dedup_key(payload) in corrected_keys:
                 continue  # this one WAS corrected -- it's positive evidence, not negative

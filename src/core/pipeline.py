@@ -91,6 +91,8 @@ from metrics import (
     graph_merge_disagreements, graph_merge_repairs_total, graph_merge_check_last_success_timestamp,
 )
 from argus.graph.merge_consistency import KINDS as GRAPH_MERGE_KINDS, describe as describe_graph_merge
+from argus.cl_afpe.verdicts import FULL_SEVERITY_VERDICTS, PREVIOUSLY_FLAGGED
+from intelligence.intel_strength import tor_listing_applies
 
 # Argus CL-AFPE stages that mean "hard-stopped: strong evidence, never suppressible".
 CL_AFPE_HARD_STOP_STAGES = frozenset({"STAGE_1_HARD_STOP", "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP"})
@@ -778,6 +780,13 @@ def _build_confidence_line(threat_conf_pct: int, fp_verdict: Dict[str, Any], fp_
     """
     fp_stage = str(fp_verdict.get("stage", ""))
     if "HARD_STOP" in fp_stage:
+        if fp_verdict.get("verdict") == PREVIOUSLY_FLAGGED:
+            # Only the local confirmed-intel store matched: an earlier confirmation on this network, possibly for
+            # another device, not new evidence about this alert (a stale entry once labelled a VPN server this way).
+            return ("Moderate",
+                    "Moderate -- this destination was confirmed as a threat on this network before; nothing new "
+                    "confirms it this time _(check whether that earlier finding still holds)_",
+                    False)
         if _is_signature_based_hard_stop(fp_verdict.get("reasons")):
             return "Very High", "Very High -- matched a known-bad signature directly _(not a probabilistic estimate)_", False
         return ("Very High",
@@ -1760,6 +1769,12 @@ class EnginePipeline:
                             ti_ioc_hits_total.labels(source="threat_intel", ioc_type="domain").inc()
                     if _dest_ip_is_real_host:
                         ip_ti_res = self.ti_engine.lookup_ip(dest_ip)
+                        # A Tor-list entry counts only for a TCP connection seen on the wire: a UDP contact (an
+                        # NTP-pool server that is also a Tor relay) or an address only resolved is not Tor use.
+                        if ip_ti_res and not tor_listing_applies(
+                                ip_ti_res, observed_on_wire=(dest_ip == features.get("last_dest_ip")),
+                                protocol=features.get("dominant_protocol")):
+                            ip_ti_res = None
                         if ip_ti_res:
                             cur_ip_risk = float(ip_ti_res.get("confidence", 0.8) * 4.0)
                             if cur_ip_risk > ti_risk:
@@ -2973,12 +2988,17 @@ class EnginePipeline:
                                 "calibrated_confidence": fp_verdict.get("calibrated_confidence"),
                                 "stage": fp_verdict.get("stage"),
                             }
+                            if fp_verdict.get("stage") in CL_AFPE_HARD_STOP_STAGES:
+                                # Which Stage-1 checks fired (before, the alert never said).
+                                alert_payload["fp_verdict"]["triggers"] = [
+                                    str(r)[:300] for r in (fp_verdict.get("reasons") or [])[:10]]
 
-                            # Tightly coupled ML learning & Anti-Poisoning:
+                            # Tightly coupled ML learning & Anti-Poisoning (every full-severity verdict, as when
+                            # they all shared the CONFIRMED_THREAT label):
                             if self.ml_registry:
                                 if fp_verdict["verdict"] == "FALSE_POSITIVE":
                                     self.ml_registry.learn_normal(dev_id, features)
-                                elif fp_verdict["verdict"] == "CONFIRMED_THREAT":
+                                elif fp_verdict["verdict"] in FULL_SEVERITY_VERDICTS:
                                     self.ml_registry.reject_threat(dev_id, features)
 
                             # BUGFIX: containment_decision_state was previously only assigned

@@ -49,6 +49,7 @@ import requests
 from fastapi import APIRouter, Depends
 from prometheus_client.parser import text_string_to_metric_families
 
+from argus.cl_afpe.verdicts import CONFIRMED_THREAT, LIKELY_REAL, PREVIOUSLY_FLAGGED, canonical_verdict
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from middleware.routers._alert_log_utils import iter_lines_reverse
@@ -210,7 +211,9 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     same scan of the same file, so they always agree."""
     empty = {
         "by_day": {}, "fp_evaluations": 0, "fp_suppressed": 0, "fp_confirmed_threats": 0, "fp_uncertain": 0,
+        "fp_previously_flagged": 0, "fp_likely_real": 0,
         "fp_evaluations_by_day": {}, "fp_suppressed_by_day": {}, "fp_confirmed_threats_by_day": {}, "fp_uncertain_by_day": {},
+        "fp_previously_flagged_by_day": {}, "fp_likely_real_by_day": {},
     }
     if not alerts_path.exists():
         return dict(empty, note=f"No alert log found at {alerts_path}.")
@@ -242,6 +245,13 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
     # explain the gap. Tracked the same way as the other two so
     # Evaluations == Suppressed + Confirmed + Uncertain always holds exactly.
     fp_uncertain_by_day: Dict[str, int] = {}
+    # 2026-10-06: CONFIRMED_THREAT used to cover the Stage-3 "low false-positive probability" result and hard stops
+    # from the local confirmed-intel store alone (373 of 408 alerts on .94 in 11 h); those are now their own
+    # verdicts, counted here, and older records are read through canonical_verdict() (argus/cl_afpe/verdicts.py).
+    fp_previously_flagged_by_day: Dict[str, int] = {}
+    fp_likely_real_by_day: Dict[str, int] = {}
+    fp_previously_flagged = 0
+    fp_likely_real = 0
     fp_evaluations = 0
     fp_suppressed = 0
     fp_confirmed_threats = 0
@@ -263,7 +273,7 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
                 day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
                 by_day[day] = by_day.get(day, 0) + 1
 
-            verdict = (rec.get("fp_verdict") or {}).get("verdict")
+            verdict = canonical_verdict(rec.get("fp_verdict"))
             if verdict is not None:
                 fp_evaluations += 1
                 if day is not None:
@@ -272,10 +282,18 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
                     fp_suppressed += 1
                     if day is not None:
                         fp_suppressed_by_day[day] = fp_suppressed_by_day.get(day, 0) + 1
-                elif verdict == "CONFIRMED_THREAT":
+                elif verdict == CONFIRMED_THREAT:
                     fp_confirmed_threats += 1
                     if day is not None:
                         fp_confirmed_threats_by_day[day] = fp_confirmed_threats_by_day.get(day, 0) + 1
+                elif verdict == PREVIOUSLY_FLAGGED:
+                    fp_previously_flagged += 1
+                    if day is not None:
+                        fp_previously_flagged_by_day[day] = fp_previously_flagged_by_day.get(day, 0) + 1
+                elif verdict == LIKELY_REAL:
+                    fp_likely_real += 1
+                    if day is not None:
+                        fp_likely_real_by_day[day] = fp_likely_real_by_day.get(day, 0) + 1
                 else:
                     # Covers "UNCERTAIN" and any other verdict string a future
                     # the CL-AFPE stage might introduce -- counted here rather
@@ -296,10 +314,14 @@ def _alert_stats(alerts_path: Path) -> Dict[str, Any]:
         "fp_suppressed": fp_suppressed,
         "fp_confirmed_threats": fp_confirmed_threats,
         "fp_uncertain": fp_uncertain,
+        "fp_previously_flagged": fp_previously_flagged,
+        "fp_likely_real": fp_likely_real,
         "fp_evaluations_by_day": fp_evaluations_by_day,
         "fp_suppressed_by_day": fp_suppressed_by_day,
         "fp_confirmed_threats_by_day": fp_confirmed_threats_by_day,
         "fp_uncertain_by_day": fp_uncertain_by_day,
+        "fp_previously_flagged_by_day": fp_previously_flagged_by_day,
+        "fp_likely_real_by_day": fp_likely_real_by_day,
         "scanned_lines": scanned_lines,
         "note": (
             f"Computed from the most recent ~{_ALERT_VOLUME_MAX_SCAN_BYTES // (1024 * 1024)}MB "
@@ -388,6 +410,8 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
     self_healing["fp_suppressed"] = stats["fp_suppressed"]
     self_healing["fp_confirmed_threats"] = stats["fp_confirmed_threats"]
     self_healing["fp_uncertain"] = stats["fp_uncertain"]
+    self_healing["fp_previously_flagged"] = stats["fp_previously_flagged"]
+    self_healing["fp_likely_real"] = stats["fp_likely_real"]
 
     return {
         "counters_available": scrape_ok,
@@ -415,6 +439,9 @@ def get_overview_summary(token: str = Depends(verify_token)) -> dict:
         "fp_suppressed_by_day": stats["fp_suppressed_by_day"],
         "fp_confirmed_threats_by_day": stats["fp_confirmed_threats_by_day"],
         "fp_uncertain_by_day": stats["fp_uncertain_by_day"],
-        "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats", "fp_uncertain"],
+        "fp_previously_flagged_by_day": stats["fp_previously_flagged_by_day"],
+        "fp_likely_real_by_day": stats["fp_likely_real_by_day"],
+        "day_filterable_metrics": ["alerts_triaged", "fp_evaluations", "fp_suppressed", "fp_confirmed_threats",
+                                   "fp_previously_flagged", "fp_likely_real", "fp_uncertain"],
         "per_device_tuning": _per_device_tuning_summary(),
     }

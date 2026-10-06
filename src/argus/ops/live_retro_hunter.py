@@ -27,15 +27,12 @@ now wired in. (1) Per-device job-health breakdown (the earlier engine's own
 _count_findings_by_device() equivalent) -- see _count_by_device() below. (2) The
 loop-closing action: when check_local_intel_history() finds a NEWLY-implicated
 device (one that touched an IOC before it was confirmed by a different device),
-this job now ALSO calls ClAfpeEngine.record_confirmed_threat() +
-_apply_sigma_shift(TUNE_UP) for that device -- the same "close the loop" mutation
-the earlier engine's own run_retro_hunt() performs, previously named as deferred because it needed
-a ClAfpeEngine instance threaded in, which this phase does. This has a real,
-useful side effect beyond the immediate device: it adds the device to the IOC's own
-confirmed `sources` list, so the SAME match correctly stops re-firing on the next
-run (check_local_intel_history()'s own exclusion rule already treats an
-already-a-source device as "not a new finding") -- without this, the identical
-match would otherwise be reported again every single day, forever.
+this job now ALSO calls _apply_sigma_shift(TUNE_UP) for that device and notes it on the
+entry (LocalConfirmedIntel.note_implicated()), so the SAME match stops re-firing on the
+next run (check_local_intel_history() skips sources and noted devices) -- without it, the
+identical match would be reported again every day. Until 2026-10-06 this called
+record_confirmed_threat() instead, which also renewed the entry each time: touching a known
+IOC is not an independent confirmation (see _close_local_intel_loop()).
 """
 import ipaddress
 import logging
@@ -107,11 +104,11 @@ def _count_by_device(items: list, device_id_getter) -> dict:
 
 
 def _close_local_intel_loop(cl_afpe: ClAfpeEngine, matches: list) -> int:
-    """The loop-closing action A25/A26 named as deferred: the earlier engine's own run_retro_hunt()
-    doesn't just NOTIFY about a newly-implicated device, it also confirms the
-    threat against that device's own CL-AFPE state (record_confirmed_threat() +
-    a TUNE_UP sigma-shift, tightening its sensitivity the same way a direct
-    Stage-1 hard-stop would). Returns the number of devices actually closed.
+    """The loop-closing action A25/A26 named as deferred: a newly-implicated device gets a TUNE_UP sigma-shift,
+    tightening its sensitivity the same way a direct Stage-1 hard-stop would, and is noted on the entry so the next
+    run does not report it again. 2026-10-06: it no longer calls record_confirmed_threat() -- touching an already
+    confirmed IOC is not an independent confirmation, and recording it renewed the entry every night a new device
+    touched it (LocalConfirmedIntel.note_implicated()). Returns the number of devices actually closed.
     Best-effort per-match: one failure must not block closing the loop for every
     OTHER match in the same run."""
     closed = 0
@@ -123,15 +120,8 @@ def _close_local_intel_loop(cl_afpe: ClAfpeEngine, matches: list) -> int:
             matched_kind = m.get("matched_kind")
             base_domain = m.get("matched_value") if matched_kind == "domain" else None
             dest_ip = m.get("matched_value") if matched_kind == "ip" else None
-            cl_afpe.record_confirmed_threat(
-                device_id, base_domain, dest_ip,
-                # Matches scripts/retro_hunter.py's own real reason string exactly
-                # (line 389) -- NOT the ORIGINAL confirmer's own reason (m["reason"],
-                # e.g. STAGE_1_HARD_STOP) -- this call is about why THIS device is
-                # being newly confirmed (a retro-hunt cross-reference), a genuinely
-                # different fact than how the FIRST device was originally confirmed.
-                reason="RETRO_HUNT_LOCAL_INTEL_MATCH",
-            )
+            if cl_afpe.local_intel is not None:
+                cl_afpe.local_intel.note_implicated(matched_kind, base_domain or dest_ip, device_id)
             cl_afpe._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous")
             closed += 1
         except Exception as e:
@@ -252,9 +242,8 @@ def main() -> None:
         )
 
         # Release 14, Workstream 5 (item 2): close the loop for each newly-implicated
-        # device -- record_confirmed_threat() + a sigma TUNE_UP, the same real
-        # mutation the earlier engine's own run_retro_hunt() performs, previously deferred pending a
-        # ClAfpeEngine instance being threaded in here. Uses the SAME store/
+        # device -- a sigma TUNE_UP, and the device noted on the entry (no renewal; see
+        # _close_local_intel_loop()). Uses the SAME store/
         # local_intel this run already has open (still open -- store.close() moved
         # below this block).
         closed_count = 0
@@ -279,6 +268,7 @@ def main() -> None:
         write_job_health(state_dir, "live_retro_hunter", time.time() - run_start,
                           extra={
                               "findings_count": len(findings),
+                              "weak_matches_count": hunter.last_weak_matches,   # context only, not findings
                               "local_intel_matches_count": len(local_matches),
                               "local_intel_loop_closed_count": closed_count,
                               # Release 14, Workstream 5 (item 1): per-device breakdown,

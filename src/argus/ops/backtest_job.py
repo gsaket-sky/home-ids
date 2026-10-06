@@ -55,6 +55,7 @@ from argus.autotune.engine import (  # noqa: E402
 )
 from argus.decision.engine import _HARD_STOP_FRESHNESS_SECONDS  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
+from argus.cl_afpe.verdicts import CONFIRMED_THREAT, canonical_verdict, is_confirmed_threat  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
 from utils import is_resource_pressure_active, write_job_health  # noqa: E402
@@ -443,7 +444,10 @@ def _promote_eligible_tuning_changes(store: GraphStore, run_id: str, now: float)
 # own fp_verdict field (the SAME CONFIRMED_THREAT signal overview_api.py's
 # fp_confirmed_threats tile and ai_soc.py's DeterministicValidator already
 # treat as ground truth elsewhere in this codebase -- not a new definition of
-# "confirmed" invented here).
+# "confirmed" invented here). Since 2026-10-06 read through is_confirmed_threat()
+# (argus/cl_afpe/verdicts.py): before then the same label also covered every
+# Stage-3 "low false-positive probability" alert (9 in 10 published alerts on .94),
+# so these checks counted ordinary monitor-only alerts as confirmed threats.
 # Same 7-day window compute_drift_result()'s own _DEFAULT_DRIFT_LOOKBACK_SECONDS
 # uses (argus/autotune/engine.py) -- not imported directly since that name is
 # module-private there too; kept as its own constant here rather than reaching
@@ -570,7 +574,7 @@ def check_retroactive_misses_and_rollback(store: GraphStore, now: Optional[float
                     payload = json.loads(drow["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
                     continue
-                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                if is_confirmed_threat(payload.get("fp_verdict")):
                     confirming_reason = (
                         f"retroactive circuit-breaker: decision {drow['decision_id']} for device "
                         f"{ev['device_id']} was CONFIRMED_THREAT, near a suricata_signature_match "
@@ -640,7 +644,7 @@ def check_arp_sweep_retroactive_misses_and_rollback(store: GraphStore, now: Opti
                     payload = json.loads(drow["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
                     continue
-                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                if is_confirmed_threat(payload.get("fp_verdict")):
                     confirming_reason = (
                         f"retroactive circuit-breaker: decision {drow['decision_id']} for device "
                         f"{ev['device_id']} was CONFIRMED_THREAT, near an arp_sweep evidence item "
@@ -729,7 +733,7 @@ def check_fp_combined_retroactive_misses_and_rollback(store: GraphStore, now: Op
                     payload = json.loads(drow["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
                     continue
-                if (payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                if is_confirmed_threat(payload.get("fp_verdict")):
                     confirming_reason = (
                         f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
                         f"{miss_row['device_id']} was SUPPRESSED at fp_verdict.confidence in "
@@ -858,7 +862,7 @@ def check_reputation_floor_retroactive_misses_and_rollback(
 
         confirming_reason = None
         for miss_row, miss_payload in near_misses:
-            if (miss_payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+            if is_confirmed_threat(miss_payload.get("fp_verdict")):
                 confirming_reason = (
                     f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
                     f"{miss_row['device_id']} scored in [{band_lo:.3f}, {band_hi:.3f}) for {parameter} "
@@ -874,7 +878,7 @@ def check_reputation_floor_retroactive_misses_and_rollback(
                     later_payload = json.loads(drow["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
                     continue
-                if (later_payload.get("fp_verdict") or {}).get("verdict") == "CONFIRMED_THREAT":
+                if is_confirmed_threat(later_payload.get("fp_verdict")):
                     confirming_reason = (
                         f"retroactive circuit-breaker: decision {miss_row['decision_id']} for device "
                         f"{miss_row['device_id']} scored in [{band_lo:.3f}, {band_hi:.3f}) for {parameter} "
@@ -944,7 +948,7 @@ def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], par
             payload = json.loads(row["raw_payload_json"] or "{}")
         except (TypeError, ValueError):
             continue
-        if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+        if not is_confirmed_threat(payload.get("fp_verdict")):
             continue
         score, floor_at_decision = _reputation_score_and_floor(payload, parameter)
         if score is None or floor_at_decision is None:
@@ -1128,7 +1132,7 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
                 payload = json.loads(row["raw_payload_json"] or "{}")
             except (TypeError, ValueError):
                 continue
-            if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+            if not is_confirmed_threat(payload.get("fp_verdict")):
                 continue
             n += 1
             row_device = canonical_ids.get(row["device_id"], row["device_id"])
@@ -1429,8 +1433,8 @@ def _propose_familiarity_trust_bar_changes(store: GraphStore, run_id: str, now: 
             bar_at_decision = state.get(_FAMILIARITY_TRUST_BAR_PARAMETER)
             if not isinstance(familiarity, (int, float)) or not isinstance(bar_at_decision, (int, float)):
                 continue
-            verdict = (payload.get("fp_verdict") or {}).get("verdict")
-            if verdict == "CONFIRMED_THREAT":
+            verdict = canonical_verdict(payload.get("fp_verdict"))
+            if verdict == CONFIRMED_THREAT:
                 confirmed.append(float(familiarity))
             elif verdict == "FALSE_POSITIVE" and familiarity < bar_at_decision:
                 corrected.append(float(familiarity))
@@ -1537,7 +1541,7 @@ def _propose_trust_cache_ttl_changes(store: GraphStore, run_id: str, now: float)
                     payload = json.loads(drow["raw_payload_json"] or "{}")
                 except (TypeError, ValueError):
                     continue
-                if (payload.get("fp_verdict") or {}).get("verdict") != "CONFIRMED_THREAT":
+                if not is_confirmed_threat(payload.get("fp_verdict")):
                     continue
                 new_value = round(max(current - direction * bounds["max_step"], bounds["min"]), 2)
                 if new_value == current:

@@ -154,8 +154,9 @@ ti.trust_cache_provider = TrustProvider({WEAK}, fail=True)
 sweep = LearningIntelSweep(lambda: store, ti, lambda d: False, days_back=30,
                            popularity=FakePopularity(30, [("d1", WEAK)]), now_fn=lambda: NOW)
 s = sweep.run_once()
-check("an unreadable trust cache does not stop the sweep, and shields nothing", s and pairs_of(s) == [("d1", WEAK)],
-      str(s and s["findings"]))
+check("an unreadable trust cache does not stop the sweep, and shields nothing (the weak hit is counted, not "
+      "shielded; a weak hit is never a finding)", s and pairs_of(s) == [] and s["weak_matches_count"] == 1,
+      str(s))
 store.close()
 
 # --- no feeds loaded: runs, finds nothing, says so ----------------------------------------------------------------

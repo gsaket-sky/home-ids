@@ -504,9 +504,9 @@ check("...for that device only: an automatic correction during the learning peri
       and "sentry.io" not in cl_afpe.get_dynamic_trust_cache(now=NOW))
 
 v = _evaluate(cl_afpe, _alert(domain="totally-unrecognized-xyz123.example"))
-check("evaluate() reaches CONFIRMED_THREAT via Stage 2/3 when neither stage finds "
-      "anything vendor-like (low combined confidence)",
-      v["verdict"] == "CONFIRMED_THREAT" and v["stage"] == "STAGE_3_COMBINED")
+check("evaluate() reaches LIKELY_REAL (published at full severity, not a confirmation) via Stage 2/3 when "
+      "neither stage finds anything vendor-like (low combined confidence)",
+      v["verdict"] == "LIKELY_REAL" and v["stage"] == "STAGE_3_COMBINED" and v["suppress"] is False)
 
 # per-device suppress threshold (Phase 6e's own new getter) actually changes the
 # Stage 2/3 branch outcome for the SAME evidence.
@@ -564,7 +564,7 @@ later_verdict = _evaluate(cl_afpe_with_intel, _alert(
 check("evaluate()'s Check 7 gives a DIFFERENT device an immediate hard-stop on the "
       "same confirmed-malicious domain -- the network-wide propagation point of "
       "this whole mechanism, now proven reachable through the composed evaluate()",
-      later_verdict["verdict"] == "CONFIRMED_THREAT"
+      later_verdict["verdict"] == "PREVIOUSLY_FLAGGED" and later_verdict["suppress"] is False
       and any("Local confirmed-threat match" in r for r in later_verdict["reasons"]))
 
 # --- "3 automated-learning gaps" fix (2026-09-15) -----------------------------

@@ -93,6 +93,23 @@ class LocalConfirmedIntel:
                             kind, value, device_id, reason)
         return is_new
 
+    def note_implicated(self, kind: str, value: str, device_id: str) -> bool:
+        """Records that `device_id` touched an existing entry (the retro-hunt's cross-device check), WITHOUT renewing
+        it: no new last_confirmed, count or source. Touching a known IOC is not an independent confirmation -- the
+        same rule as the CL-AFPE's _is_independent_confirmation(); recording it as one renewed the entry every night a
+        new device touched it, so it never expired (how six NordVPN servers stayed "confirmed"). Returns True when the
+        device was newly noted; False when already noted, already a source, or there is no such entry."""
+        if kind not in _KINDS or not value or not device_id:
+            return False
+        self._refresh_if_changed()
+        with self._lock:
+            entry = self._store[kind].get(value)
+            if not entry or device_id in entry.get("sources", []) or device_id in entry.get("implicated", []):
+                return False
+            entry.setdefault("implicated", []).append(device_id)
+        self._save()
+        return True
+
     def check(self, kind: str, value: str) -> Optional[dict]:
         """Returns the (non-expired) entry for value, or None if it isn't a confirmed
         IOC of this kind, or its TTL has lapsed."""

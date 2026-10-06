@@ -1,7 +1,8 @@
 """
 CL-AFPE: the closed-loop false-positive engine. For every alert that reaches it, evaluate() returns one verdict --
-FALSE_POSITIVE (suppressed), UNCERTAIN (published, softer) or CONFIRMED_THREAT -- and every correction or
-confirmation feeds back into what it decides next time.
+FALSE_POSITIVE (suppressed), UNCERTAIN (published, softer), LIKELY_REAL (Stage 3, published at full severity),
+PREVIOUSLY_FLAGGED (a hard stop from the local confirmed-intel store alone) or CONFIRMED_THREAT (an independent hard
+stop); see verdicts.py -- and every correction or confirmation feeds back into what it decides next time.
 
 evaluate(), in order:
   1. Trust-cache fast path: a destination already corrected as safe (a graph 'trusts' edge, device-scoped for the
@@ -45,6 +46,7 @@ from argus.graph.store import GraphStore
 from argus.evidence.model import NO_DESTINATION
 from argus.cl_afpe.ml_scoring import MLScorer, NEUTRAL_LGBM_SCORE, combine_scores, stage3_rule_fallback
 from argus.cl_afpe import composite_trust as ct
+from argus.cl_afpe.verdicts import CONFIRMED_THREAT, LIKELY_REAL, PREVIOUSLY_FLAGGED
 from argus.baseline.engine import derive_activity_state
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.device_familiarity import DeviceFamiliarity
@@ -922,7 +924,8 @@ class ClAfpeEngine:
                 features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
             if stage1_triggers:
                 self._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous", now=now)
-                if _is_independent_confirmation(stage1_triggers):
+                independent = _is_independent_confirmation(stage1_triggers)
+                if independent:
                     self.record_confirmed_threat(
                         device_id,
                         base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
@@ -930,7 +933,7 @@ class ClAfpeEngine:
                         signature=alert_hypothesis,
                     )
                 return {
-                    "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
+                    "verdict": CONFIRMED_THREAT if independent else PREVIOUSLY_FLAGGED, "confidence": 0.0,
                     "calibrated_confidence": None,
                     "stage": "TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP",
                     "reasons": stage1_triggers, "suppress": False,
@@ -950,14 +953,17 @@ class ClAfpeEngine:
             features, hostname, domain, dest_ip, base_domain, decision=decision, asn_owner=asn_owner)
         if stage1_triggers:
             self._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous", now=now)
-            if _is_independent_confirmation(stage1_triggers):
+            independent = _is_independent_confirmation(stage1_triggers)
+            if independent:
                 self.record_confirmed_threat(
                     device_id,
                     base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                     dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
                 )
             return {
-                "verdict": "CONFIRMED_THREAT", "confidence": 0.0,
+                # Only the local confirmed-intel match fired: another device's earlier confirmation. Still never
+                # suppressed, but not a new confirmation of this alert.
+                "verdict": CONFIRMED_THREAT if independent else PREVIOUSLY_FLAGGED, "confidence": 0.0,
                 "calibrated_confidence": None,
                 "stage": "STAGE_1_HARD_STOP",
                 "reasons": stage1_triggers, "suppress": False,
@@ -1108,7 +1114,7 @@ class ClAfpeEngine:
         else:
             self._apply_sigma_shift(device_id, direction="TUNE_UP", source="autonomous", now=now)
             return {
-                "verdict": "CONFIRMED_THREAT", "confidence": combined,
+                "verdict": LIKELY_REAL, "confidence": combined,   # not a confirmation (verdicts.py)
                 "calibrated_confidence": None,
                 "stage": "STAGE_3_COMBINED",
                 "reasons": [

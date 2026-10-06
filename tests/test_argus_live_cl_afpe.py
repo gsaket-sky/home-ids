@@ -200,8 +200,10 @@ _k_before = dict(_k_intel.check("ip", "45.155.205.77"))
 time.sleep(0.05)
 _k_v = _k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.205.77"), features={}, now=NOW + 5)
 _k_after = _k_intel.check("ip", "45.155.205.77")
-check("K: a destination in the confirmed memory is still a confirmed threat for another device",
-      _k_v["verdict"] == "CONFIRMED_THREAT" and _k_v["stage"] == "STAGE_1_HARD_STOP", str(_k_v))
+check("K: a destination in the confirmed memory is still hard-stopped for another device (PREVIOUSLY_FLAGGED, "
+      "never suppressed)",
+      _k_v["verdict"] == "PREVIOUSLY_FLAGGED" and _k_v["stage"] == "STAGE_1_HARD_STOP" and _k_v["suppress"] is False,
+      str(_k_v))
 check("K: ...but that memory-only hard stop does NOT renew the entry (no self-perpetuation)",
       _k_after["count"] == _k_before["count"] and _k_after["last_confirmed"] == _k_before["last_confirmed"],
       f"before={_k_before} after={_k_after}")

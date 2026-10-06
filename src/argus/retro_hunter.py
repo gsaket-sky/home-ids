@@ -68,6 +68,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 from argus.graph.store import GraphStore, _looks_like_ip, DEFAULT_EVIDENCE_RETENTION_DAYS
 from argus.evidence.model import Evidence
 from intelligence.local_intel import LocalConfirmedIntel
+from intelligence.intel_strength import is_strong_match
 
 
 def real_threat_intel_lookup_factory(config: Dict[str, Any], state_dir: str,
@@ -154,6 +155,7 @@ class RetroHunter:
         self.ip_lookup = ip_lookup
         self.last_pairs_checked = 0
         self.last_destinations_checked = 0
+        self.last_weak_matches = 0
 
     def _lookup(self, dest: str) -> Optional[Dict[str, Any]]:
         if self.ip_lookup is not None and _looks_like_ip(dest):
@@ -204,10 +206,19 @@ class RetroHunter:
         destinations = {dest for _, dest in pairs}
         self.last_pairs_checked, self.last_destinations_checked = len(pairs), len(destinations)
         intel_by_destination: Dict[str, Dict[str, Any]] = {}
+        weak = 0
         for dest in destinations:
             result = self._lookup(dest)
-            if result:
-                intel_by_destination[dest] = result
+            if not result:
+                continue
+            if not is_strong_match(result):
+                # Context only (a Tor relay, a "poor reputation" list, an ET misc domain): it cannot confirm anything
+                # on its own, so it is neither a finding nor network-wide tier-5 reputation (intel_strength.py). The
+                # live engine still weighs it as weak evidence when the device contacts it again.
+                weak += 1
+                continue
+            intel_by_destination[dest] = result
+        self.last_weak_matches = weak
 
         # Phase 1a: network-wide reputation propagation.
         # A retro-hunt confirmation IS exactly a "one device's evidence confirms a
@@ -272,8 +283,8 @@ class RetroHunter:
             entry = local_intel.check(kind, dest)
             if not entry:
                 continue
-            if device_id in entry.get("sources", []):
-                continue
+            if device_id in entry.get("sources", []) or device_id in entry.get("implicated", []):
+                continue   # it confirmed the entry itself, or an earlier run already reported it
             matches.append({
                 "device_id": device_id, "matched_kind": kind, "matched_value": dest,
                 "confirmed_by": list(entry.get("sources", []) or []),

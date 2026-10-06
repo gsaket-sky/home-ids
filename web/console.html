@@ -1288,10 +1288,12 @@ function renderOverviewView(){
   // numbers almost-but-not-quite add up with no explanation.
   var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-healing (autonomous FP engine)</div></div>'
     + '<div class="panel-body">'
-    + '<div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">Every alert is evaluated exactly once: it\'s either confirmed as a real threat, automatically suppressed as a false alarm, or left uncertain for you to judge. <span class="cell-mono">Evaluations = Confirmed + Suppressed + Uncertain</span>.</div>'
+    + '<div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">Every alert is evaluated exactly once: confirmed by independent evidence, flagged because this destination was confirmed on this network before, published as likely real (not a false alarm, not confirmed either), automatically suppressed as a false alarm, or left uncertain for you to judge. <span class="cell-mono">Evaluations = Confirmed + Previously flagged + Likely real + Suppressed + Uncertain</span>.</div>'
     + statGrid([
         statTileDayAware('Evaluations', heal.fp_evaluations, d.fp_evaluations_by_day, selectedDay, false),
         statTileDayAware('Confirmed threats', heal.fp_confirmed_threats, d.fp_confirmed_threats_by_day, selectedDay, false),
+        statTileDayAware('Previously flagged here', heal.fp_previously_flagged, d.fp_previously_flagged_by_day, selectedDay, false),
+        statTileDayAware('Likely real (published)', heal.fp_likely_real, d.fp_likely_real_by_day, selectedDay, false),
         statTileDayAware('Suppressed (false alarms)', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
         statTileDayAware('Uncertain (needs your review)', heal.fp_uncertain, d.fp_uncertain_by_day, selectedDay, false),
         statTileDayAware('Domains immunized', heal.domains_immunized, null, selectedDay, true),

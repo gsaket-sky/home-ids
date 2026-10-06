@@ -190,8 +190,8 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir3:
                    "network_context": {"queried_domain": "malicious-metrics-test.example", "destination_ip": "1.1.1.1"},
                    "signature": "", "timestamp": time.time()}
     verdict = fp.evaluate(later_alert, safe_features)
-    check("a different device touching the confirmed domain is a Stage-1 CONFIRMED_THREAT",
-          verdict["verdict"] == "CONFIRMED_THREAT" and verdict["stage"] == "STAGE_1_HARD_STOP", f"got {verdict}")
+    check("a different device touching the confirmed domain is a Stage-1 hard stop, labelled PREVIOUSLY_FLAGGED",
+          verdict["verdict"] == "PREVIOUSLY_FLAGGED" and verdict["stage"] == "STAGE_1_HARD_STOP", f"got {verdict}")
     before_hits = counter_value(local_confirmed_intel_hits_total)
     record_cl_afpe_verdict(verdict, later_alert)
     check("THE CORE FIX: a cross-device local-intel hard-stop increments local_confirmed_intel_hits_total",

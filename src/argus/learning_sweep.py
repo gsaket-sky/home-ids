@@ -161,6 +161,7 @@ class LearningIntelSweep:
             "destinations_checked": hunter.last_destinations_checked,
             "intel_ready": bool(self.ti.is_ready()),
             "findings_count": len(findings),
+            "weak_matches_count": hunter.last_weak_matches,   # context-only matches, not findings (intel_strength.py)
             "findings": [{"device_id": f.device_id, "destination_id": f.destination_id, "source": f.source,
                           "confidence": f.confidence, "tags": f.tags} for f in findings[:_FINDINGS_KEPT_IN_SUMMARY]],
             "duration_seconds": round(time.time() - started, 3),

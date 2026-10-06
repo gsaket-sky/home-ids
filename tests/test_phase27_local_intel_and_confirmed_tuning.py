@@ -253,8 +253,10 @@ with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
                       "outbound_bytes_z": 0.0}
     verdict = fp.evaluate(later_alert, safe_features)
     check("THE CORE FIX: a DIFFERENT device (dev_B) touching a domain dev_A already "
-          "confirmed hard-stops as CONFIRMED_THREAT with NO hard-stop signal of its own",
-          verdict["verdict"] == "CONFIRMED_THREAT" and verdict["stage"] == "STAGE_1_HARD_STOP",
+          "confirmed hard-stops (PREVIOUSLY_FLAGGED: never suppressed, not a new confirmation) with NO "
+          "hard-stop signal of its own",
+          verdict["verdict"] == "PREVIOUSLY_FLAGGED" and verdict["stage"] == "STAGE_1_HARD_STOP"
+          and verdict["suppress"] is False,
           f"got={verdict}")
     check("the trigger text names the local confirmed-intel match specifically",
           any("Local confirmed-threat match" in r for r in verdict["reasons"]), f"got={verdict['reasons']}")

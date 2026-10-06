@@ -36,6 +36,7 @@ from intelligence import ja3_provenance
 
 from utils import etld1, etld1_strict
 from intelligence import feed_health
+from intelligence.intel_strength import is_strong_match
 from intelligence.et_open_fetch import ETOpenUpdater
 from core.heartbeat import HEARTBEATS
 
@@ -342,7 +343,7 @@ class ThreatIntel:
         if not meta:
             return False
         hit = self._decayed(meta)
-        return bool(hit) and float(hit.get("confidence", 0.0) or 0.0) >= 0.5
+        return bool(hit) and is_strong_match(hit)
 
     def _strong_ioc_up_to(self, domain: str, trusted: str) -> bool:
         """_strong_direct_ioc() for `domain` and every parent name of it down to `trusted` (the trust-cache entry

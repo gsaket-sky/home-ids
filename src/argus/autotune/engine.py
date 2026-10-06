@@ -109,7 +109,7 @@ _LESS_SENSITIVE_DIRECTION: Dict[str, int] = {
     "fp_combined_suppress_threshold": -1,     # lower threshold -> suppresses more, less sensitive to real threats
     "peer_deviation_multiplier": 1,          # higher multiplier -> harder for a device to look like a cohort outlier
     "peer_deviation_min_absolute_count": 1,  # higher floor -> harder to clear the "not just a trivial small-number swing" bar
-    "combined_uncertain_threshold": -1,       # lower threshold -> more borderline alerts get the softer UNCERTAIN tag instead of full CONFIRMED_THREAT
+    "combined_uncertain_threshold": -1,       # lower threshold -> more borderline alerts get the softer UNCERTAIN tag instead of full-severity LIKELY_REAL
     "familiarity_trust_bar": -1,              # higher bar -> harder for a device to be treated as "familiar", MORE suspicion generated (increasing is the MORE-sensitive direction here, unlike every other +1 parameter above)
     "trust_cache_ttl_seconds": 1,              # longer TTL -> an immunized destination stays trusted/suppressed longer, less sensitive to it re-offending
     "reputation_propagation_ttl_seconds": -1,  # longer TTL -> a cached suspicious-tier classification keeps propagating as corroborating evidence to OTHER devices longer, more sensitive (like familiarity_trust_bar, increasing is the MORE-sensitive direction)
