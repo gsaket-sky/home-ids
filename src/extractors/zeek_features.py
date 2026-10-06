@@ -21,8 +21,10 @@ import math
 import threading
 import time
 import concurrent.futures
+import functools
 from collections import defaultdict, deque
 from intelligence import ja3_provenance
+from utils import note_network_dns_domain
 from pathlib import Path
 from typing import Callable, Optional, Dict
 
@@ -321,6 +323,23 @@ class ZeekCollector:
         return self._available
 
 
+def _synchronized(method):
+    """Runs a ZeekFeatureExtractor method under the instance's state lock.
+
+    The main loop and the reactive-capture thread both use the same extractor: the capture thread
+    ingests a burst's Zeek logs and then reads destinations for the DNS-evasion audit
+    (fritzbox_capture.ingest_zeek_logs / run_dns_evasion_audit) while the main loop ingests, prunes
+    and iterates the same per-IP deques and dicts. Unlocked, get_features() raised "deque mutated
+    during iteration" on .94 and aborted a whole engine cycle (runtime trace run 2, finding 4.3;
+    _bind_mac() is the same class of race, audit A-05). Every public method holds the lock; it is
+    re-entrant because public methods call each other."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
 class ZeekFeatureExtractor:
     # B3 (2026-10-01): the 8 hashes that used to be hard-coded here had no recorded origin and none of them is listed by
     # abuse.ch SSLBL or ET Open (checked against the live feeds on .94), and one earlier entry was a stock Windows hash.
@@ -344,6 +363,8 @@ class ZeekFeatureExtractor:
     
     def __init__(self, home_subnets: list = None, ti_engine=None, geoip_engine=None, safe_ips: set = None, honeypot_ips: set = None, safe_patterns: set = None, wired_probe_ips: set = None, lateral_ports: set = None, wired_probe_ignore_sources: set = None,
                  wired_probe_ignore_services=None, wired_probe_warmup_seconds: float = 0.0):
+        # See _synchronized(): guards all per-IP state against the reactive-capture thread.
+        self._state_lock = threading.RLock()
         # BUGFIX (live audit): was a fixed 5-port module-level constant (LATERAL_PORTS)
         # -- a real attacker isn't limited to SSH/SMB/RDP/VNC/Telnet, and extending
         # coverage to a new port used to require a code change/deploy. Config-driven,
@@ -403,6 +424,9 @@ class ZeekFeatureExtractor:
         # MAC flips per IP -- see _bind_mac()'s corroboration-gated hard-stop below.
         self._genuine_flip_ts = defaultdict(lambda: deque(maxlen=5))
         self.pending_spoof_evidence: Dict[str, dict] = {}
+        # Written by _bind_mac(), consumed with pop_layer2_spoof() / pop_pending_spoof().
+        self.layer2_spoofs: Dict[str, dict] = {}
+        self._mac_last_seen: Dict[str, float] = {}
         
         self.honeypot_ips = honeypot_ips if honeypot_ips is not None else set()
         # PHASE 21D: "wired-device-visible probe" reactive-capture trigger. The two
@@ -467,6 +491,7 @@ class ZeekFeatureExtractor:
         self.set_home_subnets(home_subnets or ["192.168.1.0/24"])
         LOGGER.debug("ZeekFeatureExtractor initialized.")
 
+    @_synchronized
     def set_home_subnets(self, subnets: list) -> None:
         nets = []
         for net in subnets:
@@ -551,19 +576,25 @@ class ZeekFeatureExtractor:
         self._reverse_dns_cache[ip] = {"host": "pending", "ts": time.time()}
         
         def _bg_lookup():
+            # The lookup itself runs unlocked (it can take seconds); only the cache write takes the
+            # state lock, because prune() iterates this cache and may have evicted the "pending" entry.
             if not self.geoip_engine:
-                self._reverse_dns_cache[ip] = {"host": "unknown", "ts": time.time()}
+                with self._state_lock:
+                    self._reverse_dns_cache[ip] = {"host": "unknown", "ts": time.time()}
                 return
             try:
                 host = self.geoip_engine.reverse_dns(ip)
-                self._reverse_dns_cache[ip] = {"host": host if host else "unknown", "ts": time.time()}
+                with self._state_lock:
+                    self._reverse_dns_cache[ip] = {"host": host if host else "unknown", "ts": time.time()}
                 if host: LOGGER.debug("PTR resolved %s -> %s", ip, host)
             except Exception as e:
-                self._reverse_dns_cache[ip] = {"host": "unknown", "ts": time.time()}
+                with self._state_lock:
+                    self._reverse_dns_cache[ip] = {"host": "unknown", "ts": time.time()}
                 LOGGER.debug("PTR exception for %s: %s", ip, e)
                 
         self._ptr_pool.submit(_bg_lookup)
 
+    @_synchronized
     def get_hostname(self, ip: str) -> Optional[str]:
         entry = self._reverse_dns_cache.get(ip)
         if isinstance(entry, dict):
@@ -590,16 +621,29 @@ class ZeekFeatureExtractor:
         return {"zeek_outbound_top_dest": dst if share >= 0.5 else "unknown",
                 "zeek_outbound_top_dest_share": round(share, 3)}
 
+    @_synchronized
     def get_last_connection_meta(self, device_ip: str) -> dict:
         return self._last_connection_meta.get(device_ip, {
             "last_dest_ip": "unknown", "last_dest_port": 0, "dominant_protocol": "unknown", "zeek_outbound_bytes": 0
         })
 
+    @_synchronized
     def pop_new_lateral_events(self, device_ip: str) -> list[tuple[str, int]]:
         events = self._new_lateral_events.get(device_ip, [])
         if events: self._new_lateral_events[device_ip] = []
         return events
 
+    @_synchronized
+    def pop_layer2_spoof(self, ip: str) -> Optional[dict]:
+        """Consume the confirmed (2nd genuine flip) spoof record for `ip`, if any."""
+        return self.layer2_spoofs.pop(ip, None)
+
+    @_synchronized
+    def pop_pending_spoof(self, ip: str) -> Optional[dict]:
+        """Consume the first-flip (uncorroborated) spoof record for `ip`, if any."""
+        return self.pending_spoof_evidence.pop(ip, None)
+
+    @_synchronized
     def prune(self, now_ts: float, window: int) -> None:
         cutoff = now_ts - window
         
@@ -710,7 +754,7 @@ class ZeekFeatureExtractor:
 
         # Feature 4: Layer-2 Spoofing Detection (ARP/NDP Telemetry)
         if existing_mac and existing_mac != mac:
-            last_seen = getattr(self, "_mac_last_seen", {}).get(ip, 0)
+            last_seen = self._mac_last_seen.get(ip, 0)
             # BUGFIX (production false-positive, feeds a Stage-0 HARD-STOP that bypasses
             # CL-AFPE entirely -- argus/decision/engine.py's has_arp_spoof branch, single evidence
             # item, zero corroboration required): a genuine ARP-spoofing attacker hijacks an
@@ -745,7 +789,6 @@ class ZeekFeatureExtractor:
                 recent_genuine_flips = [t for t in self._genuine_flip_ts[ip] if (ts - t) < 600]
                 if len(recent_genuine_flips) >= 2:
                     LOGGER.critical(f"🚨 LAYER-2 ARP/NDP SPOOFING DETECTED: IP {ip} flipped from {existing_mac} to {mac} in {int(ts - last_seen)}s (2nd genuine flip within window)")
-                    if not hasattr(self, "layer2_spoofs"): self.layer2_spoofs = {}
                     self.layer2_spoofs[ip] = {"old": existing_mac, "new": mac, "ts": ts}
                     self.pending_spoof_evidence.pop(ip, None)
                 else:
@@ -758,14 +801,18 @@ class ZeekFeatureExtractor:
                              f"(mac previously seen for this ip) -- not treated as a new spoof.")
 
         self._mac_bindings[ip] = mac
-        if not hasattr(self, "_mac_last_seen"): self._mac_last_seen = {}
         self._mac_last_seen[ip] = ts
         self._mac_history.setdefault(ip, {})[mac] = ts
         self._enrich_ptr(ip)
 
+    @_synchronized
     def ingest(self, event: dict) -> None:
         etype = event.get("_zeek_type", "")
         if etype == "dhcp":
+            # The network's own DNS domain, from its DHCP server's answer (option 15) -- how a router-agnostic
+            # sensor learns "fritz.box", "lan", "home", ... (see utils.note_network_dns_domain for where it is used).
+            if event.get("domain") and self._is_home_ip(event.get("server_addr", "")):
+                note_network_dns_domain(event.get("domain"))
             mac, ip = event.get("mac"), event.get("client_addr")
             if mac and ip:
                 mac = mac.lower()
@@ -998,17 +1045,24 @@ class ZeekFeatureExtractor:
                     break
                 except ValueError: pass
 
+    @_synchronized
     def get_wire_ip(self, domain: str) -> Optional[str]: return self._wire_dns_resolutions.get(str(domain).lower().strip("."))
+    @_synchronized
     def get_mac(self, ip: str) -> Optional[str]: return self._mac_bindings.get(ip)
+    @_synchronized
     def get_dhcp_fingerprint(self, ip: str) -> Optional[dict]: return self._dhcp_fingerprints.get(ip)
+    @_synchronized
     def get_ja4_set(self, ip: str) -> set: return set(self._ja4_seen.get(ip, set()))
+    @_synchronized
     def get_http_reqs(self, device_ip: str) -> set: return set(self._http_reqs.get(device_ip, {}).keys())
+    @_synchronized
     def get_dest_ips(self, device_ip) -> set:
         out = set()
         for ip in self._as_ip_list(device_ip):
             out.update(self._new_ips.get(ip, {}).keys())
         return out
 
+    @_synchronized
     def get_dest_ports(self, device_ip) -> dict:
         """VERSION 11 (P1): {dest_ip: last-seen destination port} for a device --
         the port-tracking twin of get_dest_ips() above, same _as_ip_list() multi-
@@ -1020,6 +1074,7 @@ class ZeekFeatureExtractor:
             out.update(self._dest_ports.get(ip, {}))
         return out
 
+    @_synchronized
     def get_doh_bypass_ips(self, device_ip) -> set:
         """Destination IPs this device made a TLS connection to with an SNI matching a
         known DoH provider hostname (DOH_SNIS) -- real, SNI-verified DoH, not the
@@ -1039,6 +1094,7 @@ class ZeekFeatureExtractor:
         except (TypeError, ValueError):
             return False
 
+    @_synchronized
     def pop_new_wired_probe_sources(self) -> list:
         """Consume-once accessor for PHASE 21D's wired-device-probe trigger. Returns
         [(wired_ip, new_source_ip), ...] for any first-time-seen source since the last
@@ -1048,6 +1104,7 @@ class ZeekFeatureExtractor:
         self._new_wired_probe_sources = []
         return out
 
+    @_synchronized
     def set_dns_evasion_ratio(self, ip: str, ratio: float) -> None:
         """Records the most recent dns_evasion.py blind-spot-audit result for one IP --
         see _dns_evasion_ratio's __init__ comment for why this is a plain overwrite,
@@ -1127,6 +1184,7 @@ class ZeekFeatureExtractor:
     def _process_notice(self, src: str, ev: dict) -> None: self._notices[src].append({"note": ev.get("note", ""), "msg": ev.get("msg", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
     def _process_weird(self, src: str, ev: dict) -> None: self._notices[src].append({"note": f"weird:{ev.get('name', '')}", "msg": ev.get("addl", ""), "ts": ev.get("ts"), "dest_port": ev.get("id.resp_p", 0), "dest_ip": ev.get("id.resp_h", "")})
 
+    @_synchronized
     def get_scanned_ports(self, device_ip: str) -> list[str]:
         """Returns readable string list of distinct destination ports scanned by device (e.g. ['22 (SSH)', '445 (SMB)'])."""
         port_names = {
@@ -1146,6 +1204,7 @@ class ZeekFeatureExtractor:
             result.append(f"{p} ({name})")
         return result
 
+    @_synchronized
     def get_last_honeypot_ip(self, ips) -> Optional[str]:
         """Returns the honeypot IP most recently hit by any of this device's known
         addresses, or None. honeypot_access evidence (pipeline.py) previously had no
@@ -1164,6 +1223,7 @@ class ZeekFeatureExtractor:
                     best_ts, best_ip = ts, dst_ip
         return best_ip
 
+    @_synchronized
     def get_app_context(self, device_ip: str) -> str:
         """Returns the primary application or process/User-Agent signature for Telegram alerts."""
         uas = list(self._http_uas.get(device_ip, {}).keys())
@@ -1212,6 +1272,7 @@ class ZeekFeatureExtractor:
         except TypeError:
             return [device_ip] if device_ip else []
 
+    @_synchronized
     def get_features(self, device_ip, device_id=None) -> dict:
         ips = self._as_ip_list(device_ip)
         states, durations, rejected_ips = [], [], set()
@@ -1307,6 +1368,7 @@ class ZeekFeatureExtractor:
             "dominant_protocol": meta.get("dominant_protocol", "TCP")
         }
 
+    @_synchronized
     def get_alerts(self, device_ip) -> list[dict]:
         alerts = []
         for ip in self._as_ip_list(device_ip):
@@ -1317,10 +1379,12 @@ class ZeekFeatureExtractor:
             for n in self._notices.get(ip, []): alerts.append({"type": "zeek_notice", "note": n["note"], "msg": n["msg"], "dest_port": n.get("dest_port", 0), "dest_ip": n.get("dest_ip", ""), "confidence": 0.75})
         return alerts
 
+    @_synchronized
     def reset_all(self) -> None:
         for d in (self._conn_ts, self._new_ips, self._dest_ports, self._ja3_hits, self._ja4_hits, self._notices, self._susp_ports, self._http_uas, self._http_reqs, self._outbound_bytes, self._outbound_by_dst, self._doh_bypass_uids, self._doh_sni_hits, self._lateral_moves, self._conn_states, self._conn_durations, self._new_lateral_events, self._honeypot_hits, self._rejected_ips, self._last_connection_meta, self._beacon_pairs, self._outbound_minutes): d.clear()
         if len(self._wire_dns_resolutions) > 10000: self._wire_dns_resolutions.clear()
 
+    @_synchronized
     def reset_client(self, client_ip) -> None:
         """PHASE 6: accepts a single IP (unchanged) or an iterable of IPs (pass
         `state.known_ips`) so post-alert resets clear a device's counters across ALL of

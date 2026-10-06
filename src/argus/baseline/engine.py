@@ -634,7 +634,7 @@ class BaselineEngine:
         # still having valid features worth baseline-scoring. Upserting here
         # too makes this engine self-sufficient regardless of what the
         # caller already did this cycle, not dependent on ordering.
-        self.store.upsert_device(device_id, timestamp=now)
+        self.store.ensure_device(device_id, timestamp=now)
 
         tracker, regime_id = self._load_tracker(device_id, metric, model_kind, hour, now=now)
         model_cls = _MODEL_CLASSES[model_kind]
@@ -704,7 +704,7 @@ class BaselineEngine:
         device_id = self.store.resolve_canonical_device_id(device_id)
         if self.is_learning_paused(device_id, now):
             return None
-        self.store.upsert_device(device_id, timestamp=now)  # same FK fix as score_metric
+        self.store.ensure_device(device_id, timestamp=now)  # same FK fix as score_metric
 
         state = derive_activity_state(evidence_types_this_cycle)
         key = (device_id, axis)

@@ -37,7 +37,7 @@ from typing import Callable, Dict, List, Optional
 
 from intelligence.rdap_age import (RdapAgeService, is_gtld_name, NOT_GTLD, LOCAL, NO_SERVER, BACKOFF, ERROR,
                                    DAILY_LIMIT, TOO_SOON, DISABLED, MIN_INTERVAL_SECONDS, DAILY_CAP)
-from utils import is_local_name
+from utils import is_local_name, is_network_dns_name
 
 LOGGER = logging.getLogger("home_ids.domain_age_scheduler")
 
@@ -108,7 +108,7 @@ class DomainAgeScheduler:
 
     def _eligible(self, name: str, now: float) -> bool:
         if (self._deferred.get(name, 0.0) > now or not is_gtld_name(name) or is_local_name(name)
-                or self.rdap.has_answer(name)):
+                or is_network_dns_name(name) or self.rdap.has_answer(name)):
             return False
         if self.known_good_fn is not None:
             try:

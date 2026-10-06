@@ -28,16 +28,40 @@ the allowlist below), so live wiring is real, separate follow-up work, not
 bundled into this commit -- the same honest-gap pattern already used for
 Sheet 00's `risk` metric and Sheet 02's scheduler wiring.
 """
+import contextlib
+import contextvars
 import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from argus.graph.store import GraphStore
 
 LOGGER = logging.getLogger("argus.autotune.engine")
+
+# Shadow evaluation (argus/shadow/sandbox.py) substitutes ONE candidate value for
+# the duration of one evaluate() call. It used to patch the class attribute
+# AutotuneEngine.get_active_value, which every thread saw: an allowlist check on
+# another thread (is_allowlisted -> _active_trust_edges ->
+# get_active_value("trust_cache_ttl_seconds")) could read the canary value while a
+# shadow call ran (runtime trace run 2, finding 4.4). A ContextVar is per thread
+# (a new thread starts with an empty context), so only the shadow call itself sees
+# the override.
+_SHADOW_OVERRIDE: "contextvars.ContextVar[Optional[Tuple[str, float]]]" = contextvars.ContextVar(
+    "autotune_shadow_override", default=None)
+
+
+@contextlib.contextmanager
+def shadow_override(parameter: str, value: float) -> Iterator[None]:
+    """Within this block, on this thread only, get_active_value(parameter) returns
+    `value` at every scope. Other threads keep reading the promoted value."""
+    token = _SHADOW_OVERRIDE.set((parameter, value))
+    try:
+        yield
+    finally:
+        _SHADOW_OVERRIDE.reset(token)
 
 # Explicit, closed allowlist -- the ONLY parameters this module may ever
 # propose a change to. (name -> (min, max, max_step_per_change)). Adding a
@@ -288,6 +312,9 @@ class AutotuneEngine:
         working unchanged (device_type defaults to None, which simply skips
         the category tier and falls straight through device -> global, the
         exact original 2-tier behavior)."""
+        override = _SHADOW_OVERRIDE.get()
+        if override is not None and override[0] == parameter:
+            return override[1]
         if device_id:
             value = self._promoted_value_at_scope(parameter, device_id, None)
             if value is not None:
@@ -485,7 +512,7 @@ class AutotuneEngine:
         # docstring) -- a no-op UPDATE if the device already exists, never touches
         # device_type/display_label since this call passes neither.
         if row_device_id is not None:
-            self.store.upsert_device(row_device_id, timestamp=now)
+            self.store.ensure_device(row_device_id, timestamp=now)
 
         change_id = uuid.uuid4().hex
         self.store._conn.execute(

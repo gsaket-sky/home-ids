@@ -48,8 +48,8 @@ def main() -> None:
         # Simulate the real poll result directly (bypassing the background
         # thread/HTTP call) -- Fritz!Box only ever reports the device's IPv4
         # lease, never its IPv6 addresses.
-        mgr._fritz_cache = {"192.168.77.26": {"mac": "02:aa:bb:cc:dd:72", "name": "sky_lp_office"}}
-        mgr._fritz_cache_by_mac = {"02:aa:bb:cc:dd:72": {"ip": "192.168.77.26", "name": "sky_lp_office"}}
+        mgr._fritz_cache = {"192.168.77.26": {"mac": "02:aa:bb:cc:dd:72", "name": "office_laptop_2"}}
+        mgr._fritz_cache_by_mac = {"02:aa:bb:cc:dd:72": {"ip": "192.168.77.26", "name": "office_laptop_2"}}
 
         # THE BUG (reproduced): resolving via the device's IPv6 address, with its
         # real MAC already known, used to miss entirely -- IP-keyed lookup can
@@ -57,13 +57,13 @@ def main() -> None:
         mac_ipv4, host_ipv4 = mgr._enrich_from_cache(
             ip="192.168.77.26", current_mac="02:aa:bb:cc:dd:72", current_hostname="unknown")
         check("baseline: the IPv4 path still resolves directly (unaffected by this fix)",
-              host_ipv4 == "sky_lp_office")
+              host_ipv4 == "office_laptop_2")
 
         mac_ipv6, host_ipv6 = mgr._enrich_from_cache(
             ip="fe80::1cc7:5b4f:3229:f108", current_mac="02:aa:bb:cc:dd:72", current_hostname="unknown")
         check("THE FIX: the SAME device, resolved via its IPv6 address this cycle, "
               "now ALSO resolves the real hostname via the MAC fallback",
-              host_ipv6 == "sky_lp_office")
+              host_ipv6 == "office_laptop_2")
         check("THE FIX: the MAC itself is preserved/unchanged by the fallback path",
               mac_ipv6 == "02:aa:bb:cc:dd:72")
 

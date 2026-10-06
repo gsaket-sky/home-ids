@@ -416,10 +416,14 @@ class DeviceIdentityManager:
         # canonical now, so its containment is kept and extended to the canonical's current
         # mac/ip, never released (StateManager.merge_into_canonical()'s BUGFIX 2026-10-05).
         pop_merged = getattr(self.state_manager, "pop_last_merged_containment", None)
-        merged = pop_merged() if pop_merged is not None else None
         carry = getattr(ips_mitigator, "carry_containment_after_merge", None)
-        if merged and carry is not None:
+        if pop_merged is None or carry is None:
+            return
+        # Drain: a merge on the other thread (main loop / identity-reconcile worker) may have queued one too.
+        merged = pop_merged()
+        while merged:
             carry(**merged)
+            merged = pop_merged()
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
@@ -501,8 +505,8 @@ class DeviceIdentityManager:
         if client_ip and client_ip != "unknown":
             locked_state.known_ips.add(client_ip)
         # A device's name stays put unless a really different name arrives (2026-10-06, .94: one laptop's name flipped
-        # between "sky-lp", "sky_lp_fritz_box" and a UUID with every event, depending on which of its addresses the
-        # event came from). The same name in another form ("sky-lp" vs "sky_lp_fritz_box") is not a change; a
+        # between "office-laptop", "office_laptop_fritz_box" and a UUID with every event, depending on which of its addresses the
+        # event came from). The same name in another form ("office-laptop" vs "office_laptop_fritz_box") is not a change; a
         # placeholder (UUID, router MAC placeholder) never replaces anything and is cleared if one is stored.
         current = getattr(locked_state, "hostname", "unknown") or "unknown"
         if is_placeholder_hostname(current):
@@ -599,7 +603,7 @@ class DeviceIdentityManager:
             return
         if hostname and hostname != "unknown":
             # Compared in one form (hostname_key(): case, '-'/'_'/'.' and the local DNS suffix ignored), so a rule
-            # "sky-lp" also matches the name stored as "sky_lp_fritz_box" (2026-10-06: it did not, and the device kept
+            # "office-laptop" also matches the name stored as "office_laptop_fritz_box" (2026-10-06: it did not, and the device kept
             # its type only because an override, once set, is not re-inferred).
             host_key = hostname_key(hostname)
             for pattern, dtype in overrides.items():

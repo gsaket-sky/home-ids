@@ -184,6 +184,18 @@ class LocalConfirmedIntel:
         except OSError:
             return None
 
+    def remove(self, kind: str, value: str) -> bool:
+        """Deletes one entry (an operator removing a wrong confirmation). Reloads first if another process wrote the
+        file, saves atomically, and the writers reload it on their next access (mtime). Returns True when removed."""
+        if kind not in _KINDS or not value:
+            return False
+        self._refresh_if_changed()
+        with self._lock:
+            removed = self._store[kind].pop(value, None) is not None
+        if removed:
+            self._save()
+        return removed
+
     def _refresh_if_changed(self) -> None:
         """Re-reads the file when another process wrote it since our last load/save."""
         mtime = self._file_mtime()

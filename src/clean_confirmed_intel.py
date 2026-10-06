@@ -25,6 +25,13 @@ ongoing reasons, not just one-time historical cleanup:
      something prunes it -- the code fix protects behavior immediately, but the stale
      data doesn't clean itself up.
 
+Removing ONE chosen entry (a wrong confirmation -- e.g. a VPN server that household devices use):
+       python3 src/clean_confirmed_intel.py --remove 203.0.113.7 --remove bad.example         (dry run)
+       python3 src/clean_confirmed_intel.py --remove 203.0.113.7 --apply
+  An address is taken as an IP entry, anything else as a domain. This goes through LocalConfirmedIntel (atomic write,
+  and the running engine reloads the file when it changes), so it needs no service stop. If the same entry comes
+  back, a device produced an INDEPENDENT confirmation: investigate instead of deleting again.
+
 Usage (from anywhere -- resolves the repo root and state file relative to this script):
   1. Stop the service first (systemctl stop soc.service or however you run it) --
      avoids a write race with the live process's own periodic saves.
@@ -46,6 +53,32 @@ if str(SRC_DIR) not in sys.path:
 
 from config import CONFIG
 from utils import is_telemetry_domain, is_cloud_cdn_provider_org
+
+
+def _remove_chosen(intel_path: Path, targets: list, apply_changes: bool) -> int:
+    """--remove <ip|domain> (repeatable). Returns the process exit code."""
+    from intelligence.local_intel import LocalConfirmedIntel
+    store = LocalConfirmedIntel(intel_path.parent)
+    missing = 0
+    for target in targets:
+        try:
+            ipaddress.ip_address(target)
+            kind = "ip"
+        except ValueError:
+            kind, target = "domain", target.lower().strip(".")
+        entry = store._store[kind].get(target)
+        if entry is None:
+            print(f"  {target}: no {kind} entry -- nothing to remove")
+            missing += 1
+            continue
+        print(f"  {target}: {kind} entry (count={entry.get('count')}, sources={len(entry.get('sources', []))} "
+              f"device(s), last_confirmed={entry.get('last_confirmed')}, reason={entry.get('reason', '')})")
+        if apply_changes:
+            store.remove(kind, target)
+            print("    removed")
+    if not apply_changes:
+        print("\nDry run only -- nothing was changed. Re-run with --apply to remove the entr(ies) above.")
+    return 1 if missing == len(targets) else 0
 
 
 def is_protected_ip(ip: str, safe_ips: set) -> bool:
@@ -99,6 +132,12 @@ def main():
         print(f"No file at {intel_path} -- nothing to clean.")
         sys.exit(0)
 
+    chosen = [sys.argv[i + 1] for i, a in enumerate(sys.argv[:-1]) if a == "--remove"]
+    if "--remove" in sys.argv:
+        if not chosen:
+            sys.exit("--remove needs an address or domain")
+        sys.exit(_remove_chosen(intel_path, chosen, apply_changes))
+
     safe_ips = set(CONFIG.get("safe_ips", []) or [])
     geoip_engine = _load_geoip_asn_engine()
     if not geoip_engine:
@@ -151,7 +190,8 @@ def main():
     for ip in ips_to_remove:
         del ips[ip]
 
-    intel_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    from core.file_lock import atomic_write_text
+    atomic_write_text(intel_path, json.dumps(data, indent=2))
     print(f"\nDone. Removed {len(domains_to_remove)} domain + {len(ips_to_remove)} IP entries and saved {intel_path}.")
 
 

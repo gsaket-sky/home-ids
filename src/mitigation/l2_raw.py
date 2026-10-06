@@ -130,7 +130,8 @@ def attach_ns_filter(sock: socket.socket) -> bool:
         buf = ctypes.create_string_buffer(prog)
         fprog = struct.pack("HL", len(_NS_FILTER), ctypes.addressof(buf))
         sock.setsockopt(socket.SOL_SOCKET, SO_ATTACH_FILTER, fprog)
-        sock._ns_filter_buf = buf  # keep the program alive as long as the socket
+        # (no attribute on the socket: socket.socket has __slots__, so that raised AttributeError after the filter was
+        # already attached and made this return False. The kernel copies the program in setsockopt.)
         return True
     except (OSError, AttributeError, ValueError) as exc:
         LOGGER.debug("NS BPF filter not attached (%s); filtering in Python", exc)

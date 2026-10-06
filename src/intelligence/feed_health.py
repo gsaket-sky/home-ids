@@ -71,7 +71,8 @@ def _save_state(state: dict) -> None:
     try:
         path = _state_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        from core.file_lock import atomic_write_text
+        atomic_write_text(path, json.dumps(state, indent=2))
     except Exception as exc:
         LOGGER.debug("Failed to write feed_health.json: %s", exc)
 

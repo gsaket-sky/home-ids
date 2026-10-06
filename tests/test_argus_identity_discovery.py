@@ -55,6 +55,10 @@ def _mock_run(stdout, returncode=0):
 _orig_net_if_addrs = discovery.psutil.net_if_addrs
 _orig_af_link = discovery.psutil.AF_LINK
 _orig_run = discovery.subprocess.run
+# The gateway is read from /proc/net/route first (the host's real one on a Linux CI runner); this test drives the
+# `ip route` fallback through its subprocess mock, so the /proc reader reports nothing here.
+_orig_proc_route = discovery._gateway_from_proc_route
+discovery._gateway_from_proc_route = lambda *a, **k: None
 
 discovery.psutil.net_if_addrs = _mock_net_if_addrs({
     "lo": [_SNICADDR(socket.AF_INET, "127.0.0.1", "255.0.0.0", None, None)],
@@ -185,6 +189,7 @@ discovery.LOGGER.removeHandler(handler)
 discovery.psutil.net_if_addrs = _orig_net_if_addrs
 discovery.psutil.AF_LINK = _orig_af_link
 discovery.subprocess.run = _orig_run
+discovery._gateway_from_proc_route = _orig_proc_route
 discovery._arp_resolve_mac = _orig_arp_resolve
 
 

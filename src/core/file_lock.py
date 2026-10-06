@@ -43,3 +43,38 @@ def exclusive_file_lock(target):
                 yield
             finally:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def atomic_write_text(path, text: str, encoding: str = "utf-8") -> None:
+    """Writes `text` to `path` through a temp file in the same directory and os.replace(): a reader, or a crash
+    mid-write, never sees a torn file (W-12; runtime trace run 2 finding 4.5). The temp name carries the pid so two
+    processes writing the same file never share one."""
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding=encoding)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def atomic_write_gzip_json(path, payload) -> None:
+    """Same, for a gzip-compressed JSON document (the threat-intel feed snapshot)."""
+    import gzip
+    import json
+    path = Path(path)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        with gzip.open(tmp, "wt", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise

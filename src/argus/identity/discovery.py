@@ -66,10 +66,38 @@ def _candidate_this_host_interfaces() -> List[Dict[str, Any]]:
     return candidates
 
 
+def _gateway_from_proc_route(path: str = "/proc/net/route") -> Optional[str]:
+    """The IPv4 default gateway from the kernel's routing table file: no `ip` binary needed (the engine image has
+    none, so trust-anchor discovery always fell through on .94). Columns: Iface Destination Gateway Flags ...; the
+    default route has Destination 00000000 and the RTF_GATEWAY flag (0x2); addresses are little-endian hex."""
+    try:
+        with open(path, "r", encoding="ascii") as fh:
+            next(fh, None)   # header
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 4 or parts[1] != "00000000" or not (int(parts[3], 16) & 0x2):
+                    continue
+                gw = int(parts[2], 16)
+                if gw:
+                    return ".".join(str((gw >> shift) & 0xFF) for shift in (0, 8, 16, 24))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def default_gateway_ip() -> Optional[str]:
+    """This network's default gateway (normally the router), discovered -- never assumed."""
+    return _default_gateway_ip()
+
+
 def _default_gateway_ip() -> Optional[str]:
     """Reads the real default-route gateway IP from the kernel's own routing
-    table. Linux-only (`ip route`) -- matches this project's own Pi 8GB/x86_16gb
-    deployment targets, no cross-platform fallback needed."""
+    table: /proc/net/route first (stdlib, works in the containers, which share
+    the host network), then `ip route`. Linux-only -- matches this project's own
+    Pi 8GB/x86_16gb deployment targets, no cross-platform fallback needed."""
+    gw = _gateway_from_proc_route()
+    if gw:
+        return gw
     try:
         result = subprocess.run(
             ["ip", "route", "show", "default"],

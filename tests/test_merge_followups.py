@@ -62,6 +62,26 @@ def test_merge_keeps_and_relabels_containment(tmp_path):
                      "canonical_mac": CANON_MAC, "canonical_ip": CANON_IP, "hostname": "phone"}
 
 
+def test_two_merges_before_consumption_both_carry_over(tmp_path):
+    # Merges run on the main loop and on the identity-reconcile worker; one slot dropped the first carry-over.
+    from core.identity import DeviceIdentityManager
+    sm = StateManager(state_path=str(tmp_path / "ids_state.json"), max_devices=20)
+    for dev, ip, mac, host in (("o1", "10.0.0.41", "aa:00:00:00:00:41", "unknown"),
+                               ("c1", "10.0.0.51", "bb:00:00:00:00:51", "tv"),
+                               ("o2", "10.0.0.42", "aa:00:00:00:00:42", "unknown"),
+                               ("c2", "10.0.0.52", "bb:00:00:00:00:52", "laptop")):
+        sm.get_or_create(device_id=dev, client_ip=ip, hostname=host).mac_address = mac
+    assert sm.merge_into_canonical("o1", "c1") and sm.merge_into_canonical("o2", "c2")
+    carried = []
+    idm = DeviceIdentityManager.__new__(DeviceIdentityManager)
+    idm.state_manager = sm
+    idm._release_stale_isolation_if_merged(SimpleNamespace(
+        unisolate_all=lambda **kw: None,
+        carry_containment_after_merge=lambda **kw: carried.append((kw["orphan_ip"], kw["canonical_id"]))))
+    assert carried == [("10.0.0.41", "c1"), ("10.0.0.42", "c2")]
+    assert sm.pop_last_merged_containment() is None
+
+
 def _mitigator(tmp_path, sm, armed=True):
     from mitigation.ips import IPSMitigator
     config = {"ips_router_enabled": True, "ips_tarpit_enabled": True, "onboarding_mode_days": 0,
@@ -78,7 +98,9 @@ def test_contained_orphan_extends_containment_to_the_canonical(tmp_path):
     m._router_isolated_devices[ORPHAN_MAC] = {"ip": ORPHAN_IP, "hostname": "unknown", "dev_id": "orph"}
     m._tarpit_active_targets[ORPHAN_IP] = {"mac": ORPHAN_MAC, "hostname": "unknown", "dev_id": "orph"}
     added = m.carry_containment_after_merge(ORPHAN_MAC, ORPHAN_IP, "canon", CANON_MAC, CANON_IP, "phone")
-    assert set(added) == {"router", "tarpit"}
+    # The end state is what matters: on Linux, extending router isolation also arms the tarpit for the same address
+    # (dual-stack coverage), so the tarpit step may report "already tarpitted" and `added` lists only the router.
+    assert "router" in added and set(added) <= {"router", "tarpit"}
     assert m._router_isolated_devices[CANON_MAC]["dev_id"] == "canon"
     assert m._tarpit_active_targets[CANON_IP]["dev_id"] == "canon"
     assert ORPHAN_MAC in m._router_isolated_devices and ORPHAN_IP in m._tarpit_active_targets   # never released

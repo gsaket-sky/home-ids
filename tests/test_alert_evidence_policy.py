@@ -1,5 +1,5 @@
 """
-Policy tests from the 2026-10-01 Aki-PC review (open items B1, B4-B8): fingerprint-only evidence is not a verdict,
+Policy tests from the 2026-10-01 Windows-laptop review (open items B1, B4-B8): fingerprint-only evidence is not a verdict,
 protocol oddities are context, two Zeek-derived families are one source, one lateral connection / a handful of
 NXDOMAINs is not a kill-chain phase.
 """
@@ -104,7 +104,7 @@ def _benign(**kw):
     return _benign_explanations_checked(**args)
 
 
-def test_aki_pc_case_names_cert_checks_telemetry_and_no_reputation():
+def test_windows_laptop_case_names_cert_checks_telemetry_and_no_reputation():
     # The real 2026-10-01 alert: Windows CryptoAPI fetching CRLs, Microsoft telemetry host, JA3 + Zeek notice.
     lines = _benign(target="ic3.events.data.microsoft.com", app_name="Microsoft-CryptoAPI/10.0",
                     http_reqs=["crl.microsoft.com/pki/crl/products/MicRooCerAut2011_2011_03_22.crl"],

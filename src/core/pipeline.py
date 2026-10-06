@@ -665,7 +665,7 @@ _NETWORK_EVIDENCE_STRENGTH = {
 
 
 # B9 (2026-10-01): an alert listed the evidence for an attack but never said which ordinary explanations had been
-# looked at. The Aki-PC alert was certificate-revocation traffic (User-Agent Microsoft-CryptoAPI) and Microsoft
+# looked at. The Windows-laptop alert was certificate-revocation traffic (User-Agent Microsoft-CryptoAPI) and Microsoft
 # telemetry; the reader had to work that out by hand. These are the background agents and URL shapes that explain a
 # lot of "odd" TLS/HTTP traffic from a desktop OS.
 _BENIGN_AGENT_MARKERS = (
@@ -880,6 +880,10 @@ class EnginePipeline:
         )
         if state_manager is None:
             self.state_manager.load_from_disk(alpha=float(self.config.get("baseline_alpha", 0.05)))
+        elif hasattr(state_manager, "attach_graph_store"):
+            # main.py's shared StateManager is built before the graph store; without this the mirror
+            # above never ran in production (runtime trace run 2, finding 4.2).
+            state_manager.attach_graph_store(argus_live_engine.get_graph_store())
 
         # Identity: LiveIdentityManager, a DeviceIdentityManager subclass (Fritz!Box polling,
         # process_dns_identities/process_zeek_identities, apply_device_type and orphan-merge
@@ -1866,8 +1870,10 @@ class EnginePipeline:
                 # for behavioral evidence. Honeypot/geofencing/reputation hard-stops are
                 # untouched -- this is scoped to the MAC-flip heuristic specifically, which
                 # is the one demonstrated to have this exact false-positive shape.
-                if hasattr(self.zeek_fx, "layer2_spoofs") and client_ip in self.zeek_fx.layer2_spoofs:
-                    spoof_info = self.zeek_fx.layer2_spoofs[client_ip]
+                # pop_*: one locked step, so a flip recorded by the reactive-capture thread between
+                # a membership test and a delete is not lost (runtime trace run 2, 4.3).
+                spoof_info = self.zeek_fx.pop_layer2_spoof(client_ip)
+                if spoof_info:
                     if is_safe:
                         LOGGER.info(
                             f"ARP/NDP MAC flip on {client_ip} ({spoof_info['old']} -> {spoof_info['new']}) "
@@ -1881,15 +1887,14 @@ class EnginePipeline:
                         # live, 191 historical alerts showing hostname=unknown + an unrelated
                         # DNS-query/broadcast destination_ip on this exact signature.
                         self.evidence_store.add(Evidence(type="arp_spoofing", source="zeek", timestamp=now, device=dev_id, value=10.0, confidence=1.0, provenance=f"MAC flip: {spoof_info['old']} -> {spoof_info['new']}", domain=client_ip))
-                    del self.zeek_fx.layer2_spoofs[client_ip]
 
                 # BUGFIX (live audit): a single genuinely-new MAC flip (weaker than the 2nd-
                 # flip hard-stop above) -- corroboration-required evidence, same is_safe
                 # dampening as the hard-stop for consistency (a mesh repeater's single flip
                 # shouldn't count here either), feeding NetworkIntrusionHypothesis instead
                 # of bypassing hypothesis competition.
-                if hasattr(self.zeek_fx, "pending_spoof_evidence") and client_ip in self.zeek_fx.pending_spoof_evidence:
-                    pending_info = self.zeek_fx.pending_spoof_evidence.pop(client_ip)
+                pending_info = self.zeek_fx.pop_pending_spoof(client_ip)
+                if pending_info:
                     if not is_safe:
                         self.evidence_store.add(Evidence(
                             type="arp_spoof_pending", source="zeek", timestamp=now, device=dev_id,
@@ -2285,7 +2290,10 @@ class EnginePipeline:
                     # proxy, not real traffic). Reuses this cycle's already-computed
                     # dest_ips rather than a second Zeek query -- best-effort, never
                     # blocks the real decision (record_device_traffic()'s own contract).
-                    argus_live_engine.record_device_traffic(dev_id, dest_ips, now=now)
+                    # seen=: DNS or Zeek activity this cycle -- the only per-cycle signal that moves the graph's
+                    # devices.last_seen (a device evaluated here while idle must not look active).
+                    argus_live_engine.record_device_traffic(dev_id, dest_ips, now=now,
+                                                            seen=dev_id in all_active_ids)
                     # Alert-trace graph gap fix (found live 2026-09-22, real "document-server"
                     # geofencing alert missing from console/Evidence Graph): the
                     # geofencing re-evaluation below deliberately calls evaluate()
@@ -3323,6 +3331,8 @@ class EnginePipeline:
                                     dest_ip, reason="HIGH_CRITICAL_DECISION",
                                     signature=primary_sig,
                                     asn_owner=asn_owner if asn_owner != "Unknown" else "",
+                                    # the port THIS device used for dest_ip: a VPN tunnel endpoint is never recorded
+                                    dest_port=self.zeek_fx.get_dest_ports(known_ips_snapshot).get(dest_ip),
                                 )
 
                             # VERSION 10 (incident aggregation): the same device+target+signature

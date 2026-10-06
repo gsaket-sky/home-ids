@@ -107,7 +107,7 @@ CONFIG_SCHEMA = [
     {"s": "network_and_devices", "k": "safe_cdn_base_domains", "t": "list", "def": [],
      "desc": "eTLD+1 domains treated as known-safe CDN/vendor infra for the DNS-tunneling/evasion exemption checks specifically."},
     {"s": "network_and_devices", "k": "safe_host_patterns", "t": "list",
-     "def": ["pihole", "pi-hole", "pi_hole", "pi.hole", "paperless", "fritz", "repeater"],
+     "def": ["pihole", "pi-hole", "pi_hole", "pi.hole"],
      "desc": "Hostname substrings marking a device as safe infrastructure -- dampens noisy behavioral evidence without suppressing reputation/honeypot findings."},
 
     {"s": "detection_engine", "k": "log_level", "t": "enum", "def": "INFO",

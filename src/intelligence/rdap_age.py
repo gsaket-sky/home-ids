@@ -17,7 +17,8 @@ Owner decisions (2026-10-05, the safest option):
     terms forbid commercial use of the data.
   - Never a local name (utils.is_local_name: the built-in suffixes plus `local_domain_suffixes`). Some home networks
     use a real gTLD as their local suffix (`.sky`, `fritz.box` under `.box`); without this check their own host names
-    would be sent to that registry.
+    would be sent to that registry. Also never a name under the DNS domain this network's DHCP server announces
+    (utils.is_network_dns_name), so an unconfigured network is covered too.
 
 Limits (registries' terms forbid "high volume, automated" use without giving a number, so the ceiling is deliberately
 low): at most one lookup per MIN_INTERVAL_SECONDS and DAILY_CAP per day for the whole unit; HTTP 429 backs that
@@ -40,7 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from utils import is_local_name
+from utils import is_local_name, is_network_dns_name
 
 LOGGER = logging.getLogger("home_ids.rdap_age")
 
@@ -284,7 +285,7 @@ class RdapAgeService:
         name = normalize(name)
         if not is_gtld_name(name):
             return NOT_GTLD
-        if is_local_name(name):
+        if is_local_name(name) or is_network_dns_name(name):
             return LOCAL
         with self._lock:
             try:

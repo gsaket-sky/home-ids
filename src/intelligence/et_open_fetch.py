@@ -111,6 +111,7 @@ class ETOpenUpdater:
         fd, tmp = tempfile.mkstemp(dir=str(self.dir), prefix=self.STATE_FILE + ".", suffix=".tmp")
         with os.fdopen(fd, "w") as f:
             json.dump(st, f)
+        os.chmod(tmp, 0o644)   # mkstemp makes it 0600: the web UI (another uid) read it for the "updated" age and failed
         os.replace(tmp, self.dir / self.STATE_FILE)
 
     def load_current(self) -> Optional[Tuple[ParsedIOCs, dict]]:

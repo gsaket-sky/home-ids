@@ -125,6 +125,21 @@ check("a built-in local suffix is refused too", svc.lookup("printer.internal") i
 with CONFIG._lock:
     CONFIG._config["local_domain_suffixes"] = _saved_suffixes
 
+# Nothing configured: the domain the network's DHCP server announces (learned from Zeek's dhcp.log) is refused too.
+from extractors.zeek_features import ZeekFeatureExtractor  # noqa: E402
+_zfx = ZeekFeatureExtractor(home_subnets=["10.9.0.0/24"])
+_zfx.ingest({"_zeek_type": "dhcp", "server_addr": "203.0.113.9", "domain": "evil-router.shop", "client_addr": "10.9.0.5",
+             "mac": "02:00:00:00:00:05"})
+svc = fresh()
+check("a DHCP domain from a server outside the home network is not learned",
+      svc.lookup("host.evil-router.shop") not in (LOCAL, NOT_GTLD))
+_zfx.ingest({"_zeek_type": "dhcp", "server_addr": "10.9.0.1", "domain": "router.box", "client_addr": "10.9.0.5",
+             "mac": "02:00:00:00:00:05"})
+_before = len(lookups())
+check("an unconfigured router domain learned from DHCP is never looked up",
+      svc.lookup("nas.router.box") == LOCAL and svc.lookup("router.box") == LOCAL and len(lookups()) == _before,
+      str(lookups()))
+
 # --- 404 and failures ---------------------------------------------------------------------------------------------------
 svc = fresh()
 check("404 is stored as 'no date', not an error", svc.lookup("ghost.com") == LOOKED_UP and svc.registration_ts("ghost.com") is None

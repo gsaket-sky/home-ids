@@ -1024,7 +1024,8 @@ def _write_autotune_relay_stats(state_dir: Path, run_start: float, global_outcom
         "devices": devices,
     }
     try:
-        stats_path.write_text(json.dumps(stats, indent=2), encoding="utf-8")
+        from core.file_lock import atomic_write_text
+        atomic_write_text(stats_path, json.dumps(stats, indent=2))
     except Exception as exc:
         LOGGER.debug(f"Failed to write autotune_stats.json: {exc}")
 

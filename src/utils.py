@@ -112,18 +112,51 @@ def sanitize_hostname(host):
 # nothing to work with. Both the raw and the sanitize_hostname() forms are matched (- and . become _ there).
 _UUID_HOSTNAME = re.compile(r"^[0-9a-f]{8}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{4}[-_][0-9a-f]{12}$")
 _MAC_PLACEHOLDER_HOSTNAME = re.compile(r"^pc[-_](?:[0-9a-f]{2}[-_:]){5}[0-9a-f]{2}$")
-# A Fritz!Box appends its own DNS domain to every device; stripped like the configured local suffixes.
-_ROUTER_DNS_SUFFIXES = (".fritz.box",)
+# The network's own DNS domain as its DHCP server announces it (option 15, Zeek dhcp.log `domain`: "fritz.box" from a
+# Fritz!Box, "lan" or "home" from many others). Learned, not configured, so it works with any router; seen on .94 in
+# the wired sensor's DHCP ACKs (2026-10-06). Deliberately NOT part of is_local_name(): that check grants detection
+# exemptions, and any host on the LAN can answer DHCP with a made-up domain. A learned domain is only used where
+# trusting it costs nothing -- comparing host names (hostname_key) and never sending a name to an outside registry
+# (domain age). In memory, per process; renewals re-teach it within minutes of a restart.
+_NETWORK_DNS_DOMAINS_MAX = 4
+_network_dns_domains: tuple = ()
+_DNS_DOMAIN_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def note_network_dns_domain(domain) -> bool:
+    """Record a DNS domain announced by this network's DHCP server. Returns True when it was new."""
+    global _network_dns_domains
+    d = str(domain or "").strip().lower().strip(".")
+    if not d or not _DNS_DOMAIN_RE.match(d):
+        return False
+    suffix = "." + d
+    if suffix in _network_dns_domains:
+        return False
+    _network_dns_domains = (_network_dns_domains + (suffix,))[-_NETWORK_DNS_DOMAINS_MAX:]
+    LOGGER.info("Network DNS domain from DHCP: %s", d)
+    return True
+
+
+def network_dns_domains() -> tuple:
+    return _network_dns_domains
+
+
+def is_network_dns_name(name) -> bool:
+    """True for a name under (or equal to) a DNS domain this network's DHCP server announced. Not a locality
+    verdict for detection (see above); used to keep the network's own names away from outside registries."""
+    norm = str(name or "").lower().strip(".")
+    return bool(norm) and any(norm.endswith(s) or "." + norm == s for s in _network_dns_domains)
 
 
 def hostname_key(name) -> str:
-    """One form of a hostname for comparisons: lower-case, local DNS suffix (built-in, configured, ".fritz.box")
-    removed, and '-', '_' and '.' treated alike -- "Sky-LP", "sky-lp.fritz.box" and sanitize_hostname()'s
-    "sky_lp_fritz_box" all give "sky_lp". "" for no name."""
+    """One form of a hostname for comparisons: lower-case, local DNS suffix (built-in, configured, or the network's
+    own DHCP-announced domain) removed, and '-', '_' and '.' treated alike -- "Laptop-1", "laptop-1.fritz.box" and
+    sanitize_hostname()'s "laptop_1_fritz_box" all give "laptop_1" on a network whose router announces "fritz.box".
+    "" for no name."""
     h = str(name or "").strip().lower().rstrip(".")
     if not h or h == "unknown":
         return ""
-    for suffix in sorted(set(_local_suffixes() + _ROUTER_DNS_SUFFIXES), key=len, reverse=True):
+    for suffix in sorted(set(_local_suffixes() + _network_dns_domains), key=len, reverse=True):
         for form in (suffix, suffix.replace(".", "_")):
             if h.endswith(form) and len(h) > len(form):
                 h = h[: -len(form)]
@@ -163,11 +196,13 @@ def etld1_strict(domain) -> str:
     Returns "" when no public-suffix list is available; callers then fall back to the exact address."""
     if not domain or tldextract is None:
         return ""
-    try:
-        ipaddress.ip_address(str(domain).strip("."))
-        return ""
-    except ValueError:
-        pass
+    bare = str(domain).strip(".")
+    if ":" in bare or bare.replace(".", "").isdigit():   # IP-shaped only: see etld1()
+        try:
+            ipaddress.ip_address(bare)
+            return ""
+        except ValueError:
+            pass
     try:
         ext = tldextract.extract(domain)
     except Exception:
@@ -189,11 +224,15 @@ def etld1(domain):
     # 2-octet "domain" (e.g. "149.154.166.110" -> "166.110") — this silently populated
     # the CL-AFPE's trust cache with a meaningless, collision-prone key (found sitting in
     # state/fp_trust_cache.json as literally "166.110"). Reject IP-shaped input up front.
-    try:
-        ipaddress.ip_address(domain.strip("."))
-        return ""
-    except ValueError:
-        pass
+    # Only IP-shaped input is parsed: ip_address() raising ValueError for every ordinary name was 16.9 M caught
+    # exceptions a day on .94 (runtime trace run 2, 4.7). An IPv4 is digits and dots, an IPv6 has a colon.
+    bare = domain.strip(".")
+    if ":" in bare or bare.replace(".", "").isdigit():
+        try:
+            ipaddress.ip_address(bare)
+            return ""
+        except ValueError:
+            pass
     if tldextract is not None:
         try:
             ext = tldextract.extract(domain)
@@ -542,8 +581,10 @@ def _is_cdn_domain(domain: str) -> bool:
     return False
 
 _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
-    # Homelab & Router TLDs
-    "fritz.box", "sky", "local", "lan", "home", "internal",
+    # Never-delegated private-use names. A router's own local domain ("fritz.box", ".sky", ...) is not listed here: it
+    # differs per network and comes from `local_domain_suffixes` through is_local_name() in _is_cdn_or_cloud_domain()
+    # (2026-10-06, network-agnostic review).
+    "local", "lan", "home", "internal",
     
     # Amazon & Alexa Ecosystem
     "amazon.com", "amazonaws.com", "a2z.com", "amazon.dev", "amazonalexa.com",
@@ -627,7 +668,7 @@ _SYSTEM_SAFE_BASE_DOMAINS = frozenset({
     "akamaized.net", "akamai.net", "akamaihd.net", "akamaiedge.net",
     "appsflyersdk.com", "amplitude.com", "moengage.com", "iterable.com", "mwbsys.com",
     "akadns.net", "edgesuite.net", "edgekey.net", "brave.com", "nordvpn.com",
-    "bitdefender.net", "bitdefender.com", "fritz.box",
+    "bitdefender.net", "bitdefender.com",
     "bugsnag.com",  # PHASE 8 FIX: sessions.bugsnag.com — legit crash reporting (same class as sentry.io)
     "ntp.org",  # PHASE 8 FIX: pool.ntp.org subdomains (e.g. datadog.pool.ntp.org) — standard NTP, never malicious
 })
@@ -666,6 +707,8 @@ def _is_cdn_or_cloud_domain(domain: str) -> bool:
         return True
     base = etld1(norm)
     if base in _SYSTEM_SAFE_BASE_DOMAINS:
+        return True
+    if is_local_name(norm):   # this network's own configured local domain (was a hardcoded "fritz.box")
         return True
     return base in _CONFIG_SAFE_CDN_BASE_DOMAINS
 
@@ -779,6 +822,21 @@ NOT_A_THREAT_INDICATOR_RESOLVERS = KNOWN_PUBLIC_DNS_RESOLVERS | frozenset({
     "45.90.28.0", "45.90.30.0",        # NextDNS (anycast)
     "76.76.2.0", "76.76.10.0",         # Control D
 })
+
+# VPN tunnel endpoints are shared infrastructure too, but no provider list can name them (thousands of servers per
+# provider, rotating). They are recognised by how they are used instead: the destination port of the device's own
+# connection. WireGuard (51820, also NordLynx), OpenVPN (1194), IKEv2/IPsec (500, 4500). 2026-10-05 on .94: six
+# NordVPN servers had become confirmed intel from household devices running the VPN (one over UDP 51820). An address
+# reached on one of these ports is never recorded as local confirmed intel; the alert itself, and any activated feed's
+# hit on the address, are unaffected.
+VPN_TUNNEL_PORTS = frozenset({51820, 1194, 500, 4500})
+
+
+def is_vpn_tunnel_port(port) -> bool:
+    try:
+        return int(port) in VPN_TUNNEL_PORTS
+    except (TypeError, ValueError):
+        return False
 
 @lru_cache(maxsize=4096)
 def is_local_or_multicast_destination(dest: str) -> bool:

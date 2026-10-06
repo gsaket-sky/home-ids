@@ -374,7 +374,8 @@ def _tuned_rep_vector(rep_vector, device_id: Optional[str], autotune: AutotuneEn
     )
 
 
-def record_device_traffic(device_id: str, destination_ids, now: Optional[float] = None) -> None:
+def record_device_traffic(device_id: str, destination_ids, now: Optional[float] = None,
+                          seen: bool = False) -> None:
     """Public entry point for pipeline.py to record THIS cycle's real destinations
     (e.g. its own zeek_fx.get_dest_ips() output) into GraphStore.
     device_destinations -- external architecture review, 2026-09-09: closes the
@@ -387,11 +388,20 @@ def record_device_traffic(device_id: str, destination_ids, now: Optional[float] 
     Best-effort, same "never blocks the real decision" contract as every other
     graph write in this module -- a failure here degrades to today's behavior for
     THIS cycle (peer-cohort baselining simply doesn't see this cycle's traffic
-    yet, not a crash), never raises."""
-    if not device_id or not destination_ids:
+    yet, not a crash), never raises.
+
+    `seen`: the device had DNS or Zeek activity this cycle. Advances the graph's
+    devices.last_seen even with no destination to record (a WiFi device the wired
+    sensor only sees through its DNS queries). This and record_device_destinations()
+    are the only writers that move last_seen; every other graph write only ensures
+    the row exists (GraphStore.ensure_device)."""
+    if not device_id:
         return
     try:
-        _get_graph_store().record_device_destinations(device_id, destination_ids, timestamp=now)
+        if destination_ids:
+            _get_graph_store().record_device_destinations(device_id, destination_ids, timestamp=now)
+        elif seen:
+            _get_graph_store().upsert_device(device_id, timestamp=now)
     except Exception as e:
         LOGGER.warning(
             "Failed to record device traffic for %r into device_destinations "

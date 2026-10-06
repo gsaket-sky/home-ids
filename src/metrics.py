@@ -225,6 +225,7 @@ fp_engine_evaluations_total = Counter("home_ids_fp_evaluations_total", "Total nu
 fp_engine_suppressed_total = Counter("home_ids_fp_suppressed_total", "Total alerts autonomously classified as False Positive and suppressed")
 fp_engine_confirmed_threats_total = Counter("home_ids_fp_confirmed_threats_total", "Total alerts that bypassed FP engine due to hard-stop threat signals")
 fp_engine_confidence_score = Gauge("home_ids_fp_confidence_score", "FP Engine confidence score (0=threat, 1=false positive) for latest alert", ["device", "hostname"])
+fp_trust_cache_read_errors_total = Counter("home_ids_trust_cache_read_errors_total", "Reads of the CL-AFPE dynamic trust cache that failed inside the threat-intel allowlist check (the check falls back to the static lists; a rising value means trust is silently not being applied)")
 fp_engine_trust_cache_size = Gauge("home_ids_fp_trust_cache_size", "Number of base domains currently in the autonomous dynamic trust cache")
 fp_engine_lgbm_model_status = Gauge("home_ids_fp_lgbm_model_status", "LightGBM ONNX classifier model status (1=loaded, 0=unavailable)")
 fp_engine_embed_model_status = Gauge("home_ids_fp_embed_model_status", "FastEmbed ONNX vector similarity model status (1=loaded, 0=unavailable)")

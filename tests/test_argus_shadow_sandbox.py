@@ -25,6 +25,10 @@ Sections:
      shadow_eval_paused gauge to 1 when pressure is active, 0 otherwise.
   F. shadow_decisions row-count bound: _prune_shadow_decisions_if_oversized() clamps
      back down to the documented cap, oldest rows first.
+  G. The candidate is visible to the shadow thread only (2026-10-06, runtime trace run 2
+     finding 4.4): another thread reading the same parameter during a shadow call sees
+     the promoted value. The substitution is a ContextVar (autotune.engine.shadow_override),
+     no longer a class-attribute patch, so B's and C's "restored" checks hold trivially.
 """
 import sys
 import tempfile
@@ -223,6 +227,55 @@ check("C: no shadow_decisions row was recorded for the failed comparison",
       _table_count(store_c, "shadow_decisions") == 0)
 check("C: AutotuneEngine.get_active_value is still restored after a raising evaluate() call",
       AutotuneEngine.get_active_value is _original_get_active_value_c)
+check("C: the candidate override is cleared after a raising evaluate() call",
+      AutotuneEngine(store_c).get_active_value("trust_cache_ttl_seconds", default=7.0) == 7.0)
+
+
+# --- G. the candidate is visible to the shadow thread ONLY (runtime trace run 2, 4.4) ---
+# The old implementation patched the class attribute, so an allowlist check on another
+# thread (is_allowlisted -> get_active_value("trust_cache_ttl_seconds")) read the canary
+# value while a shadow call ran.
+import threading  # noqa: E402
+
+store_g = _fresh_store()
+store_g.upsert_device("shadowDevG", timestamp=NOW)
+change_id_g = _insert_canary(store_g, "trust_cache_ttl_seconds", 172800.0, device_id=None)
+seen_g = {}
+
+
+class _CrossThreadLiveEngine:
+    @staticmethod
+    def evaluate(*a, **kw):
+        seen_g["shadow_thread"] = AutotuneEngine(store_g).get_active_value(
+            "trust_cache_ttl_seconds", default=-1.0)
+
+        def _other_thread():
+            seen_g["other_thread"] = AutotuneEngine(store_g).get_active_value(
+                "trust_cache_ttl_seconds", default=-1.0)
+
+        t = threading.Thread(target=_other_thread)
+        t.start()
+        t.join()
+        return {"state": "BENIGN"}
+
+
+real_evaluate_g = live_engine.evaluate
+live_engine.evaluate = _CrossThreadLiveEngine.evaluate
+try:
+    evaluate_candidate_shadow(
+        store_g, change_id_g, "trust_cache_ttl_seconds", 172800.0, "shadowDevG", "",
+        [], ReputationVector(domain="", tier=0), {}, False, 0.0, "BENIGN", NOW + 4,
+    )
+finally:
+    live_engine.evaluate = real_evaluate_g
+
+check("G: the shadow call itself sees the candidate value",
+      seen_g.get("shadow_thread") == 172800.0, str(seen_g))
+check("G: another thread reading the same parameter DURING the shadow call sees the "
+      "promoted value (here: none, so the default), never the candidate",
+      seen_g.get("other_thread") == -1.0, str(seen_g))
+check("G: after the call, this thread is back to the promoted value",
+      AutotuneEngine(store_g).get_active_value("trust_cache_ttl_seconds", default=-1.0) == -1.0)
 
 
 # --- D. ShadowEvaluator candidate-selection preference order ---

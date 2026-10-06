@@ -132,8 +132,11 @@ class StateManager:
         # that struct for a caller its original mechanism doesn't need.
         self._last_orphan_merge_cleanup: Optional[Dict[str, str]] = None
         # Consume-once side channel for a merge's containment carry-over (see
-        # merge_into_canonical() and pop_last_merged_containment()).
-        self._last_merged_containment: Optional[Dict[str, str]] = None
+        # merge_into_canonical() and pop_last_merged_containment()). A queue, not one
+        # slot: merges run on the main loop and on the identity-reconcile worker thread,
+        # and with one slot a second merge before the first was consumed dropped the
+        # first device's carry-over (2026-10-06 review). Bounded; merges are rare.
+        self._merged_containment_queue: List[Dict[str, str]] = []
         # BUGFIX (identity-merge race, handover 2026-09-20): flat redirect map from a
         # discarded orphan_id -> the canonical_id it was folded into by
         # merge_into_canonical(). Without this, resolve_device_id()'s pure IP/hostname/MAC
@@ -392,12 +395,11 @@ class StateManager:
             return val
 
     def pop_last_merged_containment(self) -> Optional[Dict[str, str]]:
-        """Consume-once: the last merge_into_canonical()'s {"orphan_mac", "orphan_ip", "canonical_id",
-        "canonical_mac", "canonical_ip", "hostname"}, for IPSMitigator.carry_containment_after_merge() -- or None."""
+        """Consume-once: the oldest not yet consumed merge_into_canonical() carry-over {"orphan_mac", "orphan_ip",
+        "canonical_id", "canonical_mac", "canonical_ip", "hostname"}, for
+        IPSMitigator.carry_containment_after_merge() -- or None. Callers drain it until None."""
         with self._global_lock:
-            val = self._last_merged_containment
-            self._last_merged_containment = None
-            return val
+            return self._merged_containment_queue.pop(0) if self._merged_containment_queue else None
 
     def pop_last_orphan_merge_cleanup(self) -> Optional[Dict[str, str]]:
         """Consume-once accessor for the "a retroactive orphan merge just discarded this
@@ -654,14 +656,15 @@ class StateManager:
             if isinstance(released, dict) and orphan_id in released:
                 released[canonical_id] = max(float(released.get(canonical_id, 0) or 0),
                                              float(released[orphan_id] or 0))
-            self._last_merged_containment = {
+            self._merged_containment_queue.append({
                 "orphan_mac": orphan_mac or "unknown",
                 "orphan_ip": orphan_client_ip or "unknown",
                 "canonical_id": canonical_id,
                 "canonical_mac": getattr(canonical_state, "mac_address", "unknown") or "unknown",
                 "canonical_ip": getattr(canonical_state, "client_ip", "unknown") or "unknown",
                 "hostname": canonical_hostname or "unknown",
-            }
+            })
+            del self._merged_containment_queue[:-100]   # bounded; an offline script that never drains it
             self._last_orphan_merge_cleanup = {
                 "orphan_id": orphan_id,
                 "orphan_hostname": getattr(orphan_state, "hostname", "unknown"),
@@ -1153,6 +1156,12 @@ class StateManager:
             LOGGER.error("Failed to flush state store to %s: %s", self.state_path, exc)
             return False
 
+    def attach_graph_store(self, graph_store: Any) -> None:
+        """Sets the mirror target after construction, for a StateManager built before the graph
+        store existed (main.py creates the shared one at boot and hands it to EnginePipeline)."""
+        if self._graph_store is None:
+            self._graph_store = graph_store
+
     def _mirror_graph_metadata(self, graph_metadata_snapshot: Dict[str, dict]) -> None:
         """device-state unification: best-effort,
         write-only mirror of each device's COLD state fields into
@@ -1167,12 +1176,16 @@ class StateManager:
         write, or the whole loop) never affects flush_to_disk()'s own return
         value -- the local flush already completed successfully by the time this
         runs. Runs at most once per flush_to_disk() call (already throttled to
-        once/60s by every real caller), not on any per-cycle hot path."""
-        for dev_id, metadata in graph_metadata_snapshot.items():
-            try:
-                self._graph_store.update_device_metadata(dev_id, metadata)
-            except Exception as exc:
-                LOGGER.warning("Device-state graph mirror failed for %r: %s", dev_id, exc)
+        once/60s by every real caller), not on any per-cycle hot path.
+
+        2026-10-06: GraphStore.mirror_device_metadata() writes only changed rows of
+        devices the graph already has, in one transaction (it never creates a row, so
+        an idle engine device is not stamped as seen)."""
+        try:
+            written = self._graph_store.mirror_device_metadata(graph_metadata_snapshot)
+            LOGGER.debug("Device-state graph mirror: %d changed device(s)", written)
+        except Exception as exc:
+            LOGGER.warning("Device-state graph mirror failed: %s", exc)
 
     save_to_disk = flush_to_disk
 

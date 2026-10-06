@@ -221,6 +221,29 @@ from utils import KNOWN_PUBLIC_DNS_RESOLVERS as _K_DNS  # noqa: E402
 check("K: the DNS-evasion audit's resolver list is unchanged (a VPN resolver stays visible as a policy finding)",
       "103.86.96.100" not in _K_DNS)
 
+# VPN tunnel endpoints (2026-10-06): no list can name them, so the port the device used decides.
+for _k_port in (51820, 1194, 500, 4500):
+    _k_ip = f"45.155.206.{_k_port % 200}"
+    _k_eng.record_confirmed_threat("k_dev_a", None, _k_ip, reason="TEST_CONFIRMED", dest_port=_k_port)
+    check(f"K: an address reached on VPN tunnel port {_k_port} is never recorded as confirmed intel",
+          _k_intel.check("ip", _k_ip) is None)
+_k_eng.record_confirmed_threat("k_dev_a", None, "45.155.206.77", reason="TEST_CONFIRMED", dest_port=4444)
+check("K: the same kind of address on an ordinary port is still recorded (the guard is the port, not the address)",
+      _k_intel.check("ip", "45.155.206.77") is not None)
+_k_eng.record_confirmed_threat("k_dev_a", "vpn-c2.example", "45.155.206.78", reason="TEST_CONFIRMED", dest_port=51820)
+check("K: the tunnel guard drops only the address -- an evidence-linked domain is still recorded",
+      _k_intel.check("ip", "45.155.206.78") is None and _k_intel.check("domain", "vpn-c2.example") is not None)
+_k_feats = {"zeek_honeypot_hits": 1, "last_dest_ip": "45.155.206.79", "last_dest_port": 51820}
+_k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.206.79", features=_k_feats), features=_k_feats,
+                now=NOW + 7)
+check("K: a Stage-1 hard stop on a WireGuard endpoint (port from the device's last connection) records nothing",
+      _k_intel.check("ip", "45.155.206.79") is None)
+_k_feats2 = {"zeek_honeypot_hits": 1, "last_dest_ip": "45.155.206.200", "last_dest_port": 51820}
+_k_eng.evaluate(_alert(device_id="k_dev_b", dest_ip="45.155.206.80", features=_k_feats2), features=_k_feats2,
+                now=NOW + 8)
+check("K: ...but a tunnel port seen for a DIFFERENT address does not protect this one",
+      _k_intel.check("ip", "45.155.206.80") is not None)
+
 # --- D. an engine error never suppresses: the alert is published as UNCERTAIN ---
 
 

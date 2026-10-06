@@ -30,7 +30,7 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError
 
 from metrics import (pihole_gravity_queries_total, pihole_gravity_last_success_timestamp,
-                     threat_intel_index_age_seconds, threat_intel_index_weight)
+                     threat_intel_index_age_seconds, threat_intel_index_weight, fp_trust_cache_read_errors_total)
 from intelligence import ti_staleness
 from intelligence import ja3_provenance
 
@@ -234,6 +234,7 @@ class ThreatIntel:
                         LOGGER.debug("Allowlist match (CL-AFPE Dynamic Trust Cache): %s", trusted)
                         return True
                 except Exception as e:
+                    fp_trust_cache_read_errors_total.inc()   # every failure, not just the one logged per minute
                     # Every static check above has already run and not matched, so this read failing cannot
                     # turn a static-list domain into a non-match. Log once a minute, not once per domain.
                     now = time.monotonic()
@@ -838,8 +839,8 @@ class ThreatIntel:
                 "cidrs": [[str(n), m] for n, m in cidrs], 
                 "saved": time.time()
             }
-            with gzip.open(self.cache_dir / "combined.json.gz", "wt", encoding="utf-8") as f: 
-                json.dump(payload, f)
+            from core.file_lock import atomic_write_gzip_json   # engine and retro-hunter both write it (finding 4.5)
+            atomic_write_gzip_json(self.cache_dir / "combined.json.gz", payload)
             LOGGER.debug("Successfully saved ThreatIntel memory snapshot to disk.")
         except Exception as exc: 
             LOGGER.error("Failed to save ThreatIntel cache: %s", exc)

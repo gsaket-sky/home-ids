@@ -765,6 +765,53 @@ class GraphStore:
             )
         self._maybe_commit()
 
+    def ensure_device(self, device_id: str, timestamp: Optional[float] = None) -> None:
+        """Creates the device row if it does not exist; never moves an existing row's last_seen.
+
+        For every write that needs the row (foreign keys, metadata, evidence, decisions, containment)
+        but is not traffic. last_seen means "last seen on the network": only upsert_device() advances
+        it, from record_device_destinations() and the pipeline's per-cycle activity signal
+        (live_engine.record_device_traffic). On .94 (2026-10-06) baseline scoring, decisions re-written
+        after each restart, CL-AFPE and metadata mirrors kept every known device's last_seen at "now";
+        one device the engine last saw 39 days earlier read as active."""
+        ts = timestamp if timestamp is not None else time.time()
+        self._conn.execute(
+            "INSERT OR IGNORE INTO devices (device_id, first_seen, last_seen, metadata_json) VALUES (?, ?, ?, '{}')",
+            (device_id, ts, ts),
+        )
+        self._maybe_commit()
+
+    def mirror_device_metadata(self, snapshot: Dict[str, Dict[str, Any]]) -> int:
+        """The engine's per-flush mirror of each device's cold state fields
+        (StateManager._mirror_graph_metadata, DeviceState.to_graph_metadata()).
+
+        Unlike update_device_metadata(): only rows that already exist and are not merged away
+        are touched (the engine keeps devices the graph never saw; creating them here would
+        stamp them as seen now), a row is written only when a mirrored value changed, and the
+        whole pass is one transaction -- the flush runs every 60 s for every device in memory,
+        and nearly all of them are unchanged. Returns the number of rows written."""
+        written = 0
+        with self.transaction():
+            for device_id, updates in snapshot.items():
+                row = self._conn.execute(
+                    "SELECT metadata_json FROM devices WHERE device_id = ? AND merged_into_device_id IS NULL",
+                    (device_id,),
+                ).fetchone()
+                if row is None:
+                    continue
+                try:
+                    current = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+                except (TypeError, ValueError):
+                    current = {}
+                merged = dict(current)
+                merged.update(json.loads(json.dumps(updates)))  # same JSON shapes as stored (tuples -> lists)
+                if merged == current:
+                    continue
+                self._conn.execute("UPDATE devices SET metadata_json = ? WHERE device_id = ?",
+                                   (json.dumps(merged), device_id))
+                written += 1
+        return written
+
     def update_device_metadata(self, device_id: str, updates: Dict[str, Any],
                                  timestamp: Optional[float] = None) -> None:
         """Merges `updates` into a device's metadata_json (shallow -- top-level keys in
@@ -773,8 +820,8 @@ class GraphStore:
         device_id that hasn't been seen via insert_evidence()/insert_decision() yet
         (the graph-engine migration, Phase 3 -- used to persist a trust anchor's
         learned MAC, surviving restarts, unlike core/identity.py's own single in-memory
-        `_gateway_mac` field)."""
-        self.upsert_device(device_id, timestamp=timestamp)
+        `_gateway_mac` field). A metadata write is not traffic: it never moves last_seen."""
+        self.ensure_device(device_id, timestamp=timestamp)
         row = self._conn.execute(
             "SELECT metadata_json FROM devices WHERE device_id = ?", (device_id,)
         ).fetchone()
@@ -1063,8 +1110,10 @@ class GraphStore:
     def insert_evidence(self, ev: Evidence) -> None:
         """Auto-upserts the device and destination rows (including the NO_DESTINATION
         sentinel, already seeded by schema.sql) and the observed/targets edges --
-        callers never have to remember the bookkeeping steps in the right order."""
-        self.upsert_device(ev.device_id, timestamp=ev.timestamp)
+        callers never have to remember the bookkeeping steps in the right order.
+        The device row is only ensured: evidence can be retrospective (retro-hunt findings are
+        stamped when found), so it does not move last_seen."""
+        self.ensure_device(ev.device_id, timestamp=ev.timestamp)
         dest_kind = "ip" if ev.destination_id != NO_DESTINATION and _looks_like_ip(ev.destination_id) else "domain"
         self.upsert_destination(ev.destination_id, dest_kind, timestamp=ev.timestamp)
 
@@ -1120,7 +1169,8 @@ class GraphStore:
 
         Returns the generated decision_id."""
         decision_id = uuid.uuid4().hex
-        self.upsert_device(device_id, timestamp=timestamp)
+        # Not traffic: every device writes a decision after a restart (the last-decision memory is in-process).
+        self.ensure_device(device_id, timestamp=timestamp)
 
         all_evidence_ids = list(evidence_ids or [])
         capped_evidence_ids = all_evidence_ids
@@ -1519,7 +1569,7 @@ class GraphStore:
         Returns the generated action_id."""
         ts = timestamp if timestamp is not None else time.time()
         action_id = uuid.uuid4().hex
-        self.upsert_device(device_id, timestamp=ts)
+        self.ensure_device(device_id, timestamp=ts)
         self._conn.execute(
             "INSERT INTO containment_actions (action_id, device_id, decision_id, action_type, "
             "target, status, reason, timestamp, released_at, metadata_json) "

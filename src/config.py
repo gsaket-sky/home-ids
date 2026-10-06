@@ -204,7 +204,7 @@ DEFAULT_CONFIG = {
     "local_domain_suffixes": [],
     # Deployment-agnostic infrastructure-hostname keywords only -- add your own deployment's
     # self-hosted app hostnames via config.yaml rather than baking one household's apps in.
-    "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole", "fritz", "repeater"],
+    "safe_host_patterns": ["pihole", "pi-hole", "pi_hole", "pi.hole"],   # vendor-neutral: no router brand, no household app
     "ollama_url": "",         
     "ollama_model": "llama3", 
     # Background job schedule, polled every 60s by scripts/scheduler.py. Cron fields are

@@ -44,7 +44,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from argus.autotune.engine import AutotuneEngine
+from argus.autotune.engine import shadow_override
 from argus.graph.store import GraphStore
 from metrics import shadow_eval_comparisons_total, shadow_eval_errors_total, shadow_eval_paused
 from utils import is_resource_pressure_active_in_process
@@ -118,34 +118,29 @@ def evaluate_candidate_shadow(store: GraphStore, change_id: str, parameter: str,
     behavior, not a second, possibly-different real evaluation."""
     import argus.ops.live_engine as live_engine  # local import: avoids a live_engine <-> shadow.sandbox import cycle
 
-    original_get_active_value = AutotuneEngine.get_active_value
-
-    def _patched_get_active_value(self, param, device_id=None, device_type=None, default=None):
-        if param == parameter:
-            return candidate_value
-        return original_get_active_value(self, param, device_id=device_id, device_type=device_type, default=default)
-
+    # The candidate value is visible to this thread only (shadow_override() sets a
+    # ContextVar). Patching AutotuneEngine.get_active_value on the class, as this
+    # did before, let every other thread read the candidate while the call ran
+    # (runtime trace run 2, finding 4.4).
     shadow_state: Optional[str] = None
     try:
-        AutotuneEngine.get_active_value = _patched_get_active_value
-        try:
-            with store.transaction():
-                shadow_decision = live_engine.evaluate(
-                    active_evidence_v1, rep_vector, device_type=device_type,
-                    baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
-                    device_id=device_id, now=now,
-                )
-                shadow_state = shadow_decision.get("state")
-                raise _ShadowAbort()
-        except _ShadowAbort:
-            pass
+        with shadow_override(parameter, candidate_value):
+            try:
+                with store.transaction():
+                    shadow_decision = live_engine.evaluate(
+                        active_evidence_v1, rep_vector, device_type=device_type,
+                        baseline_familiarity=baseline_familiarity, features=features, is_safe=is_safe,
+                        device_id=device_id, now=now,
+                    )
+                    shadow_state = shadow_decision.get("state")
+                    raise _ShadowAbort()
+            except _ShadowAbort:
+                pass
     except Exception:
         LOGGER.exception("[SHADOW_EVAL] shadow evaluate() failed for change_id=%r parameter=%r "
                            "device_id=%r, non-fatal, no comparison recorded", change_id, parameter, device_id)
         shadow_eval_errors_total.inc()
         shadow_state = None
-    finally:
-        AutotuneEngine.get_active_value = original_get_active_value
 
     if shadow_state is None:
         return None

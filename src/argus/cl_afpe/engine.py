@@ -51,7 +51,7 @@ from argus.baseline.engine import derive_activity_state
 from intelligence.local_intel import LocalConfirmedIntel
 from intelligence.device_familiarity import DeviceFamiliarity
 from utils import (
-    NOT_A_THREAT_INDICATOR_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain,
+    NOT_A_THREAT_INDICATOR_RESOLVERS, is_cloud_cdn_provider_org, is_telemetry_domain, is_vpn_tunnel_port,
     _is_cdn_or_cloud_domain, etld1_strict as etld1,  # trust decisions fail closed (see utils.etld1_strict)
 )
 
@@ -136,6 +136,15 @@ def _is_independent_confirmation(stage1_triggers: List[str]) -> bool:
     itself for as long as any device kept contacting it and never expired (found 2026-10-03 on .94: one entry
     re-confirmed 1,230 times this way)."""
     return any(not str(t).startswith(LOCAL_INTEL_TRIGGER_PREFIX) for t in stage1_triggers or [])
+
+
+def _dest_port_for(features: Optional[dict], dest_ip: Optional[str]) -> Optional[int]:
+    """The port of the device's last connection, if that connection went to `dest_ip` (Zeek's
+    last_dest_ip / last_dest_port); otherwise unknown. Feeds the VPN-tunnel guard in
+    record_confirmed_threat()."""
+    if not features or not dest_ip or features.get("last_dest_ip") != dest_ip:
+        return None
+    return features.get("last_dest_port")
 
 
 def _strip_persistence_suffix(signature: Optional[str]) -> Optional[str]:
@@ -240,7 +249,7 @@ class ClAfpeEngine:
             metadata["ttl_seconds"] = entry_ttl
 
         self.store.upsert_destination(destination_id, "domain", timestamp=now)
-        self.store.upsert_device(src_id, timestamp=now)
+        self.store.ensure_device(src_id, timestamp=now)
         self.store.add_edge("device", src_id, "destination", destination_id, "trusts", timestamp=now, metadata=metadata)
         return is_new
 
@@ -667,7 +676,8 @@ class ClAfpeEngine:
 
     def record_confirmed_threat(self, device_id: str, base_domain: Optional[str], dest_ip: Optional[str],
                                   reason: str, asn_owner: str = "",
-                                  ttl_seconds: Optional[float] = None, signature: str = "") -> None:
+                                  ttl_seconds: Optional[float] = None, signature: str = "",
+                                  dest_port: Optional[int] = None) -> None:
         """Matches record_confirmed_threat() exactly (lines 967-1037): the write
         path into the shared LocalConfirmedIntel store, so a DIFFERENT device
         touching the same IOC later gets an immediate hard-stop via
@@ -687,6 +697,11 @@ class ClAfpeEngine:
             if base_domain:
                 self.local_intel.record("domain", base_domain, device_id, reason=reason, ttl_seconds=ttl_seconds)
             if dest_ip and dest_ip != "unknown" and self._is_ip_protected_from_confirmed_intel(dest_ip, asn_owner=asn_owner):
+                dest_ip = "unknown"
+            # `dest_port`: the port the device itself used for dest_ip, when known. A VPN tunnel endpoint
+            # (utils.VPN_TUNNEL_PORTS) is shared infrastructure: never recorded, whichever device used it.
+            if dest_ip and dest_ip != "unknown" and is_vpn_tunnel_port(dest_port):
+                LOGGER.info("Not recording %s as confirmed intel: reached on VPN tunnel port %s", dest_ip, dest_port)
                 dest_ip = "unknown"
             if dest_ip and dest_ip != "unknown":
                 self.local_intel.record("ip", dest_ip, device_id, reason=reason, ttl_seconds=ttl_seconds)
@@ -930,7 +945,7 @@ class ClAfpeEngine:
                         device_id,
                         base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                         dest_ip, reason="TRUST_CACHE_OVERRIDDEN_BY_HARD_STOP", asn_owner=asn_owner,
-                        signature=alert_hypothesis,
+                        signature=alert_hypothesis, dest_port=_dest_port_for(features, dest_ip),
                     )
                 return {
                     "verdict": CONFIRMED_THREAT if independent else PREVIOUSLY_FLAGGED, "confidence": 0.0,
@@ -959,6 +974,7 @@ class ClAfpeEngine:
                     device_id,
                     base_domain if self._is_domain_causal_hard_stop(stage1_triggers) else None,
                     dest_ip, reason="STAGE_1_HARD_STOP", asn_owner=asn_owner, signature=alert_hypothesis,
+                    dest_port=_dest_port_for(features, dest_ip),
                 )
             return {
                 # Only the local confirmed-intel match fired: another device's earlier confirmation. Still never

@@ -1,5 +1,5 @@
 """
-Guards against "malicious JA3" false positives (found live 2026-10-01: Aki-PC, a Windows 11 laptop, was reported as a
+Guards against "malicious JA3" false positives (found live 2026-10-01: a Windows 11 laptop was reported as a
 HIGH network intrusion "matched a known-bad signature directly" because its stock TLS stack hashes to
 6a5d235ee78c6aede6a61448b4e9ff1e -- the hash of ET sid 2058288, which only means something together with the SNI
 barefootinc.com.au). A JA3 names a client LIBRARY, not a malware family.
