@@ -119,7 +119,9 @@ CONFIG_SCHEMA = [
     {"s": "detection_engine", "k": "startup_lookback_seconds", "t": "number", "def": 300,
      "desc": "How far back to backfill from existing logs before going live on startup."},
     {"s": "detection_engine", "k": "alert_threshold", "t": "number", "def": 6.0,
-     "desc": "Risk score (0-10) at which an evaluation becomes an alert. Well-calibrated after FP sensitivity fixes."},
+     "desc": "Legacy risk score (0-10). No longer decides alerts -- the argus engine does. Still gates which destinations "
+             "are exported to the GeoIP map metrics and when a device's 'risk subsided' is logged. Changing it does not "
+             "change what you are alerted about (verified 2026-10-06)."},
     {"s": "detection_engine", "k": "threshold_std_dev", "t": "number", "def": 3.0,
      "desc": "Standard-deviation multiplier for statistical anomaly thresholds."},
     {"s": "detection_engine", "k": "ml_warmup_samples", "t": "number", "def": 5000,
@@ -190,7 +192,9 @@ CONFIG_SCHEMA = [
      "desc": "Read-only display of your configured network.trust_anchors (role/ip/mac list) -- edit via config.yaml + restart. See this row's own 'trust_anchors_valid'/'trust_anchors_issues' fields in GET /api/config for real validation against the same rules the live pipeline uses."},
 
     {"s": "ips_mitigation", "k": "ips_enabled", "t": "bool", "def": True,
-     "desc": "Global kill switch for all active response. False = detection-only, nothing gets blocked."},
+     "desc": "Global kill switch for all active response. False = detection-only, nothing gets blocked. CAUTION: set here "
+             "(a live override) it stops DNS blocking at once, but router isolation and the tarpit only stop after a "
+             "restart or a config.yaml reload -- switch those off individually too (found 2026-10-06)."},
     {"s": "ips_mitigation", "k": "ips_pihole_enabled", "t": "bool", "def": True,
      "desc": "Controls DNS sinkholing specifically."},
     {"s": "ips_mitigation", "k": "ips_router_enabled", "t": "bool", "def": False,
@@ -323,9 +327,10 @@ CONFIG_SCHEMA = [
      "desc": "Suricata rules file -- not shipped by this project, manage via suricata-update. Missing file = scan silently finds nothing."},
 
     {"s": "scheduled_jobs", "k": "autotune_enabled", "t": "bool", "def": True,
-     "desc": "Weekly false-positive classifier retrain switch."},
+     "desc": "Nightly false-positive classifier retrain and self-tuning switch. The scheduler reads config.yaml directly, "
+             "so changing it here does not stop or start the nightly run -- edit config.yaml (found 2026-10-06)."},
     {"s": "scheduled_jobs", "k": "autotune_schedule_cron", "t": "string", "def": "0 3 * * *",
-     "desc": "Cron for the weekly retrain (3am)."},
+     "desc": "Cron for the nightly retrain (daily at 3am by default)."},
     {"s": "scheduled_jobs", "k": "scheduler.live_llm_review.enabled", "t": "bool", "def": True,
      "desc": "LLM alert-triage summary job (the sole Layer-3 reviewer as of v16)."},
     {"s": "scheduled_jobs", "k": "scheduler.live_llm_review.cron", "t": "string", "def": "45 */4 * * *",

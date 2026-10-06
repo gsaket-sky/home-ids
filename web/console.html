@@ -4,7 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Home-IDS Console</title>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
   :root{
     --bg:#12141a; --bg-panel:#181b22; --bg-elevated:#1f232c; --bg-hover:#232833;
@@ -13,8 +12,8 @@
     --accent:#22c7e0; --accent-dim:#1a4d57;
     --sev-benign:#3fbf7f; --sev-anomalous:#5aa7f0; --sev-suspicious:#e0b23f; --sev-high:#e0813f; --sev-critical:#e0523f;
     --danger-bg:#2a1d18; --danger-border:#5a3a26;
-    --font-sans:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;
-    --font-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+    --font-sans:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    --font-mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
     --radius:5px;
   }
   *{box-sizing:border-box;}
@@ -51,6 +50,21 @@
   html.embed-light .toast-success{color:#05603a;}
   html.embed-light .graph-legend{background:rgba(255,255,255,.92);}
   html.embed .content{padding:20px 28px 40px;}
+  /* 2026-10-06: embedded, the page grows with its content and reports its height (postHeight below), so the web UI
+     page scrolls as one -- no scroll area inside a scroll area on a phone. The web UI shows the view's name. */
+  html.embed, html.embed body{height:auto;}
+  html.embed #app{height:auto;min-height:0;overflow:visible;}
+  html.embed .main-panel, html.embed .content{overflow:visible;}
+  html.embed .config-body{height:auto;}
+  html.embed .section-nav, html.embed .config-scroll{overflow:visible;}
+  html.embed .main-title{display:none;}
+  html.embed .topbar{padding:12px 28px 10px;}
+  details.view-tech{margin-top:4px;max-width:720px;}
+  details.view-tech > summary{cursor:pointer;font-size:12px;color:var(--text-faint);list-style:none;}
+  details.view-tech > summary::-webkit-details-marker{display:none;}
+  details.view-tech > summary::before{content:"\203A";display:inline-block;width:12px;transition:transform .12s;}
+  details.view-tech[open] > summary::before{transform:rotate(90deg);}
+  .plain-note{font-size:12.5px;color:var(--text-dim);margin:0 0 12px;line-height:1.5;}
 
   .sidebar{width:216px;flex:0 0 216px;background:var(--bg-panel);border-right:1px solid var(--border);display:flex;flex-direction:column;}
   .brand{padding:18px 18px 14px;border-bottom:1px solid var(--border-soft);}
@@ -124,7 +138,7 @@
 
   .kv-row{display:flex;gap:10px;padding:8px 0;border-bottom:1px solid var(--border-soft);font-size:12.5px;}
   .kv-row:last-child{border-bottom:none;}
-  .kv-key{width:170px;flex:0 0 170px;color:var(--text-dim);font-family:var(--font-mono);font-size:11.5px;padding-top:2px;}
+  .kv-key{width:170px;flex:0 0 170px;color:var(--text-dim);font-family:var(--font-mono);font-size:11.5px;padding-top:2px;overflow-wrap:anywhere;}
   .kv-val{flex:1;min-width:0;}
 
   .config-body{display:flex;height:100%;}
@@ -201,6 +215,36 @@
   .graph-canvas.panning{cursor:grabbing;}
   .graph-canvas svg g.node-group{cursor:pointer;}
   .graph-canvas svg g.node-group.dragging{cursor:grabbing;}
+  @media (max-width: 760px){
+    #app{flex-direction:column;height:auto;min-height:100vh;overflow:visible;}
+    .sidebar{width:auto;flex:0 0 auto;border-right:0;border-bottom:1px solid var(--border);}
+    .sidebar .nav{flex-direction:row;overflow-x:auto;padding:6px;}
+    .sidebar .nav-item{white-space:nowrap;}
+    .sidebar-foot{display:none;}
+    .main-panel, .content{overflow:visible;}
+    .topbar, html.embed .topbar{padding:12px 16px 10px;}
+    .topbar-row{flex-wrap:wrap;}
+    .content, html.embed .content{padding:14px 16px 32px;}
+    .grid2{grid-template-columns:1fr !important;}
+    .search-input{width:100%;}
+    .search-wrap{flex:1 1 100%;}
+    .config-body{flex-direction:column;height:auto;}
+    .section-nav{width:auto;flex:0 0 auto;border-right:0;border-bottom:1px solid var(--border-soft);display:flex;overflow-x:auto;gap:4px;}
+    .section-item{white-space:nowrap;margin:0;}
+    .config-scroll{padding:12px 4px;overflow:visible;}
+    .config-row{flex-direction:column;gap:8px;}
+    .config-key-col{width:auto;flex:0 0 auto;}
+    .kv-row{flex-direction:column;gap:2px;}
+    .kv-key{width:auto;flex:0 0 auto;}
+    .graph-wrap{flex-direction:column;height:auto;}
+    .graph-canvas{height:440px;flex:0 0 440px;}
+    .graph-drawer{width:auto;flex:0 0 auto;}
+    .row{flex-wrap:wrap;}
+    .mode-tab{flex:1 1 auto;text-align:center;}
+    .toast-stack{left:12px;right:12px;max-width:none;}
+    td, th{padding:8px 10px;}
+    td:first-child{min-width:140px;}
+  }
 </style>
 </head>
 <body>
@@ -748,14 +792,14 @@ function typeOptionsHtml(selectedVal){
 
 function renderSidebar(){
   if (EMBED) return '';
-  var defs = [['overview','Overview','overview'],['devices','Devices','devices'],['hunt','Threat Hunt','hunt'],['graph','Evidence Graph','graph'],['blocking','Blocking','blocking'],['suricata','Suricata','suricata'],['health','Health','health'],['autonomy','Autonomy','autonomy'],['config','Config','config']];
+  var defs = [['overview','Activity in numbers','overview'],['devices','Device details','devices'],['hunt','Investigate','hunt'],['graph','Evidence map','graph'],['blocking','Blocked & isolated','blocking'],['suricata','Signature scans','suricata'],['health','Engine health','health'],['autonomy','Learning & self-tuning','autonomy'],['config','All settings','config']];
   var items = defs.map(function(d){
     var id=d[0], label=d[1], icon=d[2];
     var active = (state.activeView===id) || (id==='devices' && state.activeView==='deviceDetail');
     return '<div class="nav-item'+(active?' active':'')+'" onclick="app.goView(\''+id+'\')">'+ICONS[icon]+'<span>'+label+'</span></div>';
   }).join('');
   return '<div class="sidebar">'
-    + '<div class="brand"><div class="brand-name">Home-IDS Console</div><div class="brand-sub">Argus · evidence-graph engine</div></div>'
+    + '<div class="brand"><div class="brand-name">Home-IDS · Advanced</div><div class="brand-sub"><a href="/" style="color:inherit">← Back to the main pages</a></div></div>'
     + '<div class="nav">'+items+'</div>'
     + '<div class="sidebar-foot"><div class="status-row"><span class="status-dot"></span><span>LAN-accessible · served from this box</span></div>'
     + '<div class="status-line2 link" onclick="app.changeToken()">'+(getToken() ? 'API token set — click to change' : 'No API token set — click to add one')+'</div></div>'
@@ -774,8 +818,13 @@ function fmtTime(ts){
 function topbarRefreshBtn(reloadFn, loading){
   return '<button class="icon-btn" title="Refresh" onclick="app.'+reloadFn+'()"'+(loading?' disabled':'')+' style="flex:0 0 auto;">'+(loading?'⏳':'⟲')+'</button>';
 }
+// 2026-10-06: the engine-level description of each view is folded away (the web UI shows the plain one); open state
+// survives re-renders. The view's own title is hidden when embedded -- the web UI's heading names it already.
+function techSub(sub){
+  return '<details class="view-tech"'+(state.techOpen?' open':'')+' ontoggle="state.techOpen=this.open"><summary>Technical details</summary><div class="view-sub">'+sub+'</div></details>';
+}
 function topbarWithRefresh(title, sub, reloadFn, loading){
-  return '<div class="topbar"><div class="topbar-row"><div><div class="view-title">'+title+'</div><div class="view-sub">'+sub+'</div></div>'
+  return '<div class="topbar"><div class="topbar-row"><div><div class="view-title main-title">'+title+'</div>'+techSub(sub)+'</div>'
     + topbarRefreshBtn(reloadFn, loading) + '</div></div>';
 }
 
@@ -807,7 +856,7 @@ function sortableTh(table, field, label, extraAttrs){
 
 function renderDevicesView(){
   var topbarHead = '<div class="topbar"><div class="topbar-row">'
-    + '<div><div class="view-title">Devices</div><div class="view-sub">Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the Argus evidence graph\'s most recent decision. Click a row to inspect further.</div></div>'
+    + '<div><div class="view-title main-title">Device details</div>'+techSub('Every device this engine has ever fingerprinted on your LAN — identity from state/ids_state.json, classification/state/risk from the Argus evidence graph\'s most recent decision.')+'<div class="plain-note" style="margin:6px 0 0">Tap a device to see everything known about it, and to block or release it.</div></div>'
     + '<div style="display:flex;align-items:center;gap:8px;">'
     + '<div class="search-wrap">'+ICONS.search+'<input id="deviceSearchInput" class="input search-input" placeholder="Search hostname, IP, MAC…" value="'+esc(state.deviceSearch)+'" oninput="app.onDeviceSearch(this.value)"></div>'
     + topbarRefreshBtn('reloadDevices', state.devicesLoading)
@@ -1067,12 +1116,13 @@ function renderHuntView(){
   }
 
   return ''
-    + '<div class="topbar"><div class="view-title">Ad-hoc threat hunt</div><div class="view-sub">Direct structured queries over the evidence graph — not a log grep. Backed by ops/threat_hunt.py and ops/decision_replay.py.</div></div>'
+    + '<div class="topbar"><div class="view-title main-title">Investigate</div>'+techSub('Direct structured queries over the evidence graph — not a log grep. Backed by ops/threat_hunt.py and ops/decision_replay.py.')
+    + '<div class="plain-note" style="margin:6px 0 0">Ask the evidence a question: which devices talked to an address, what one device did over time, or why the engine decided what it did.</div></div>'
     + '<div class="content"><div class="mode-tabs">'+tabs+'</div><div class="panel" style="margin-bottom:16px;"><div class="panel-body">'+formHtml+'</div></div>'+resultsHtml+'</div>';
 }
 
 function renderBlockingView(){
-  var topbarHead = topbarWithRefresh('Blocking', 'Everything currently contained by this engine — Fritz!Box WAN isolation, Layer-2 tarpit, and Pi-hole domain blocks — with manual release/unblock, plus a form to block a domain by hand.', 'reloadBlocking', state.blockingLoading);
+  var topbarHead = topbarWithRefresh('Blocked & isolated', 'Everything currently contained by this engine — Fritz!Box WAN isolation, Layer-2 tarpit, and Pi-hole domain blocks — with manual release/unblock, plus a form to block a domain by hand.', 'reloadBlocking', state.blockingLoading);
 
   if (state.blockingLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load blocking state: '+esc(state.blockingLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadBlocking()">Retry</button></div></div>';
@@ -1134,7 +1184,7 @@ function renderBlockingView(){
 }
 
 function renderSuricataView(){
-  var topbarHead = topbarWithRefresh('Suricata', 'Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the Argus evidence graph yet — see Documentation/CONSOLE_DATA_API.md).', 'reloadSuricata', state.suricataLoading);
+  var topbarHead = topbarWithRefresh('Signature scans', 'Recent alerts where a real Suricata IDS rule fired against captured traffic, read from state/alerts.json (Suricata runs as a batch subprocess against reactive-capture pcap bursts, not a continuous stream, and isn\'t wired into the Argus evidence graph yet — see Documentation/CONSOLE_DATA_API.md).', 'reloadSuricata', state.suricataLoading);
 
   if (state.suricataLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load Suricata detections: '+esc(state.suricataLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadSuricata()">Retry</button></div></div>';
@@ -1237,7 +1287,7 @@ function alertVolumeBarChart(byDay, selectedDay){
 }
 
 function renderOverviewView(){
-  var topbarHead = topbarWithRefresh('Overview', 'At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics and threat-landscape/geo stay Grafana-only; see Documentation for why).', 'reloadOverview', state.overviewLoading);
+  var topbarHead = topbarWithRefresh('Activity in numbers', 'At-a-glance security posture — the small, highest-signal subset of what the Grafana dashboards track in depth (per-device forensics and threat-landscape/geo stay Grafana-only; see Documentation for why).', 'reloadOverview', state.overviewLoading);
 
   if (state.overviewLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load overview: '+esc(state.overviewLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadOverview()">Retry</button></div></div>';
@@ -1266,14 +1316,14 @@ function renderOverviewView(){
       + '</div>'
     : '';
 
-  var securityPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Security posture</div></div>'
+  var securityPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">What the IDS did</div></div>'
     + '<div class="panel-body">'
     + statGrid([
-        statTileDayAware('Alerts triaged', sec.alerts_triaged, d.alert_volume_by_day, selectedDay, false),
-        statTileDayAware('Pi-hole blocks', sec.pihole_blocks, null, selectedDay, true),
-        statTileDayAware('Router isolations', sec.router_isolations, null, selectedDay, true),
-        statTileDayAware('Tarpit activations', sec.tarpit_activations, null, selectedDay, true),
-        statTileDayAware('IPS errors', sec.ips_errors, null, selectedDay, true),
+        statTileDayAware('Alerts checked', sec.alerts_triaged, d.alert_volume_by_day, selectedDay, false),
+        statTileDayAware('Sites blocked', sec.pihole_blocks, null, selectedDay, true),
+        statTileDayAware('Isolated at the router', sec.router_isolations, null, selectedDay, true),
+        statTileDayAware('Quarantined on the network', sec.tarpit_activations, null, selectedDay, true),
+        statTileDayAware('Blocking errors', sec.ips_errors, null, selectedDay, true),
       ])
     + scrapeWarning
     + restartNote
@@ -1286,17 +1336,18 @@ function renderOverviewView(){
   // BUGFIX comment). Now shown explicitly, with a plain-language line stating
   // the exact relationship, instead of leaving a new reader to notice the
   // numbers almost-but-not-quite add up with no explanation.
-  var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-healing (autonomous FP engine)</div></div>'
+  var healingPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">False-alarm filter</div></div>'
     + '<div class="panel-body">'
-    + '<div style="font-size:11.5px;color:var(--text-dim);margin-bottom:10px;">Every alert is evaluated exactly once: confirmed by independent evidence, flagged because this destination was confirmed on this network before, published as likely real (not a false alarm, not confirmed either), automatically suppressed as a false alarm, or left uncertain for you to judge. <span class="cell-mono">Evaluations = Confirmed + Previously flagged + Likely real + Suppressed + Uncertain</span>.</div>'
+    + '<p class="plain-note">Before an alert reaches you, a second check decides whether it is real. Each alert ends up in exactly one of the boxes below.</p>'
+    + '<details class="view-tech"'+(state.techOpen?' open':'')+' ontoggle="state.techOpen=this.open" style="margin:-4px 0 10px"><summary>Technical details</summary><div class="view-sub">Every alert is evaluated exactly once: confirmed by independent evidence, flagged because this destination was confirmed on this network before, published as likely real (not a false alarm, not confirmed either), automatically suppressed as a false alarm, or left uncertain. <span class="cell-mono">Checked = Confirmed + Previously flagged + Likely real + Hidden + Uncertain</span>.</div></details>'
     + statGrid([
-        statTileDayAware('Evaluations', heal.fp_evaluations, d.fp_evaluations_by_day, selectedDay, false),
+        statTileDayAware('Checked by the filter', heal.fp_evaluations, d.fp_evaluations_by_day, selectedDay, false),
         statTileDayAware('Confirmed threats', heal.fp_confirmed_threats, d.fp_confirmed_threats_by_day, selectedDay, false),
         statTileDayAware('Previously flagged here', heal.fp_previously_flagged, d.fp_previously_flagged_by_day, selectedDay, false),
-        statTileDayAware('Likely real (published)', heal.fp_likely_real, d.fp_likely_real_by_day, selectedDay, false),
-        statTileDayAware('Suppressed (false alarms)', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
-        statTileDayAware('Uncertain (needs your review)', heal.fp_uncertain, d.fp_uncertain_by_day, selectedDay, false),
-        statTileDayAware('Domains immunized', heal.domains_immunized, null, selectedDay, true),
+        statTileDayAware('Likely real (sent to you)', heal.fp_likely_real, d.fp_likely_real_by_day, selectedDay, false),
+        statTileDayAware('Hidden as false alarms', heal.fp_suppressed, d.fp_suppressed_by_day, selectedDay, false),
+        statTileDayAware('Uncertain', heal.fp_uncertain, d.fp_uncertain_by_day, selectedDay, false),
+        statTileDayAware('Sites learned as safe', heal.domains_immunized, null, selectedDay, true),
         statTileDayAware('Sensitivity adjustments', heal.sigma_shifts, null, selectedDay, true),
       ])
     + '</div></div>';
@@ -1326,7 +1377,7 @@ function renderOverviewView(){
         return '<div class="kv-row"><div class="kv-key">'+esc(g.parameter)+'</div><div class="kv-val cell-mono">'+esc(String(g.value))+' <span style="color:var(--text-faint);font-size:10.5px;">('+agoText(g.promoted_at)+')</span></div></div>';
       }).join('')
     : '';
-  var tuningPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Autonomous tuning (global &amp; per-device)</div></div>'
+  var tuningPanel = '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Self-tuning (network-wide and per device)</div></div>'
     + '<div class="panel-body">'
     + statGrid([
         statTile('Network-wide settings changed', fmtCount(tuning.global_params_tuned || 0)),
@@ -1337,10 +1388,10 @@ function renderOverviewView(){
     + (hasGlobalTuning ? '<div style="margin-top:10px;">'+globalList+'</div>' : '')
     + (!hasScopedTuning && !hasGlobalTuning
         ? '<div class="empty-state" style="margin-top:10px;">No autotuner changes have promoted yet — every threshold is still at its shipped default.</div>' : '')
-    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:10px;">Counts live, promoted, non-rolled-back changes from the autotuner\'s Wilson-bound safety gate — see the <a href="#" onclick="app.goView(\'autonomy\');return false;" style="color:var(--accent);">Autonomy tab</a> for the full per-change timeline.</div>'
+    + '<div style="font-size:10.5px;color:var(--text-faint);margin-top:10px;">Counts live, promoted, non-rolled-back changes from the autotuner\'s Wilson-bound safety gate — see the <a href="#" onclick="app.goView(\'autonomy\');return false;" style="color:var(--accent);">Learning &amp; self-tuning view</a> for the full per-change timeline.</div>'
     + '</div></div>';
 
-  var volumePanel = '<div class="panel"><div class="panel-header"><div class="panel-title">Alert volume</div></div>'
+  var volumePanel = '<div class="panel"><div class="panel-header"><div class="panel-title">Alerts per day <span style="font-weight:400;color:var(--text-faint)">(days in UTC)</span></div></div>'
     + '<div class="panel-body">'
     + alertVolumeBarChart(d.alert_volume_by_day, selectedDay)
     + '<div style="font-size:11px;color:var(--text-faint);margin-top:10px;">'+esc(d.alert_volume_note||'')+'</div>'
@@ -1392,7 +1443,7 @@ function componentLabel(name){
 }
 
 function renderHealthView(){
-  var topbarHead = topbarWithRefresh('Health', 'Live watchdog status from core/health_manager.py — component heartbeats, resource-pressure level, and auto-recovery state. Written once per check cycle by the main engine process; this page reads that snapshot, it isn\'t computing anything itself.', 'reloadHealth', state.healthLoading);
+  var topbarHead = topbarWithRefresh('Engine health', 'Live watchdog status from core/health_manager.py — component heartbeats, resource-pressure level, and auto-recovery state. Written once per check cycle by the main engine process; this page reads that snapshot, it isn\'t computing anything itself.', 'reloadHealth', state.healthLoading);
 
   if (state.healthLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load health status: '+esc(state.healthLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadHealth()">Retry</button></div></div>';
@@ -1550,7 +1601,7 @@ function renderAutonomyParamsPanel(){
 }
 
 function renderAutonomyView(){
-  var topbarHead = topbarWithRefresh('Autonomy', 'What Argus has changed on its own, and which direction -- the closed-loop autotuner\'s threshold history, and composite trust\'s auto-resolved corroboration grants. Nothing here needs a human tap; this is a record of what already happened autonomously, and what\'s still accumulating evidence toward a future auto-resolution.', 'reloadAutonomy', state.autonomyLoading);
+  var topbarHead = topbarWithRefresh('Learning & self-tuning', 'What Argus has changed on its own, and which direction -- the closed-loop autotuner\'s threshold history, and composite trust\'s auto-resolved corroboration grants. Nothing here needs a human tap; this is a record of what already happened autonomously, and what\'s still accumulating evidence toward a future auto-resolution.', 'reloadAutonomy', state.autonomyLoading);
 
   if (state.autonomyLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load autonomy data: '+esc(state.autonomyLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadAutonomy()">Retry</button></div></div>';
@@ -1741,7 +1792,7 @@ function renderAutonomyByDevicePanel(){
 }
 
 function renderGraphView(){
-  var topbarHead = topbarWithRefresh('Evidence graph', 'Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions → alerts (orange nodes: fired/suppressed/logged-only). Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background (or press Esc) to deselect/pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence and alerts are each capped per-decision (see the drawer for "N of TOTAL" when truncated).', 'reloadGraph', state.graphLoading);
+  var topbarHead = topbarWithRefresh('Evidence map', 'Most recent 25 decisions and everything connected to them — devices → evidence → destinations, evidence → decisions → alerts (orange nodes: fired/suppressed/logged-only). Repeated same-type evidence against the same device/destination is shown as one node with a "×N" count instead of N separate timestamped copies (click it for first-seen/most-recent). Drag any node to rearrange it; shift-click nodes (or shift-drag a box over several) to select a group and drag any of them to move the whole group together; drag the background (or press Esc) to deselect/pan, scroll to zoom, click a node to inspect it. A single busy decision\'s evidence and alerts are each capped per-decision (see the drawer for "N of TOTAL" when truncated).', 'reloadGraph', state.graphLoading);
 
   if (state.graphLoadError) {
     return topbarHead + '<div class="content"><div class="error-banner">Could not load the graph: '+esc(state.graphLoadError)+'.<br><button class="btn btn-primary btn-sm" onclick="app.reloadGraph()">Retry</button></div></div>';
@@ -1929,7 +1980,7 @@ function renderAlertRow(a){
 }
 
 function renderAlertsListView(){
-  var topbarHead = topbarWithRefresh('Evidence graph', 'Every alert_events row -- one per cycle that crossed SUSPICIOUS+, fired to Telegram, autonomously suppressed by CL-AFPE, or logged-only (monitor-only/deduped repeat). Append-only: unlike the graph\'s decision nodes, a recurring incident never overwrites an earlier entry here. Click a row to open that device.', 'reloadAlerts', state.alertsLoading);
+  var topbarHead = topbarWithRefresh('Evidence map', 'Every alert_events row -- one per cycle that crossed SUSPICIOUS+, fired to Telegram, autonomously suppressed by CL-AFPE, or logged-only (monitor-only/deduped repeat). Append-only: unlike the graph\'s decision nodes, a recurring incident never overwrites an earlier entry here. Click a row to open that device.', 'reloadAlerts', state.alertsLoading);
   var toggle = graphSubViewToggle();
 
   var searchBox = '<div class="panel" style="margin-bottom:12px;padding:10px 12px;">'
@@ -2221,13 +2272,13 @@ function attachGraphInteraction(){
 
 function renderConfigView(){
   if (state.configLoadError) {
-    return '<div class="topbar"><div class="view-title">Config — config.yaml</div></div>'
+    return '<div class="topbar"><div class="view-title main-title">All settings</div></div>'
       + '<div class="content"><div class="error-banner">Could not reach the config API: '+esc(state.configLoadError)+'.<br>'
       + 'This page needs to be served by the home_ids app itself (e.g. <span class="cell-mono">http://&lt;server&gt;:8010/console</span>) — opening it from a plain file or a different origin can\'t reach these endpoints.'
       + '<br><button class="btn btn-primary btn-sm" onclick="app.reloadConfig()">Retry</button></div></div>';
   }
   if (state.configLoading && !state.configLoaded) {
-    return '<div class="topbar"><div class="view-title">Config — config.yaml</div></div><div class="content"><div class="empty-state">Loading live values from the server…</div></div>';
+    return '<div class="topbar"><div class="view-title main-title">All settings</div></div><div class="content"><div class="empty-state">Loading live values from the server…</div></div>';
   }
 
   var sections = [];
@@ -2329,7 +2380,8 @@ function renderConfigView(){
 
   return ''
     + '<div class="topbar"><div class="topbar-row">'
-    + '<div><div class="view-title">Config — config.yaml</div><div class="view-sub">Every LIVE key, grouped as it is on disk. Edits are staged here and only reach the running server — via state/config_overrides.json — when you click Save. RESTART keys show current value but aren\'t editable here.</div></div>'
+    + '<div><div class="view-title main-title">All settings</div>'+techSub('Every LIVE key, grouped as it is on disk. Edits are staged here and only reach the running server — via state/config_overrides.json — when you click Save. RESTART keys show current value but aren\'t editable here.')
+    + '<div class="danger-banner" style="margin:8px 0 0">Only change these if you know what you are doing — a wrong value can hide real attacks or flood you with false alarms. The settings most people need, with explanations and safe limits, are under <a href="/setup#tuning" target="_top">Setup → Expert tuning</a>.</div></div>'
     + '<div class="search-wrap">'+ICONS.search+'<input id="configSearchInput" class="input search-input" placeholder="Search all keys…" value="'+esc(state.configSearch)+'" oninput="app.onConfigSearch(this.value)"></div>'
     + '</div></div>'
     + '<div class="content" style="padding:0;display:flex;flex-direction:column;">'
@@ -2733,7 +2785,7 @@ document.addEventListener('keydown', function(e){
 // FIRST load (loading && !loaded), so a background reload just swaps the data in place. Left alone on purpose:
 // Settings (would overwrite unsaved edits), the evidence graph and alert search (heavy, and reloading moves
 // what you are inspecting), and Autonomy. Overview runs at half the rate -- its summary costs the engine ~5 s.
-var AUTO_REFRESH_MS = 60000;
+var AUTO_REFRESH_MS = 30000;
 var _autoTicks = 0;
 function autoRefreshTick(force){
   if (document.hidden) return;
@@ -2744,6 +2796,11 @@ function autoRefreshTick(force){
     case 'blocking': if (!state.blockingLoading) loadBlockingState(); break;
     case 'suricata': if (!state.suricataLoading) loadSuricata(); break;
     case 'devices': if (!state.devicesLoading) loadDevices(); break;
+    case 'autonomy':
+      if (!state.autonomyLoading) loadAutonomy();
+      if (!state.autonomyByDeviceLoading) loadAutonomyByDevice();
+      if (!state.autonomyParamsLoading) loadAutonomyParams();
+      break;
   }
 }
 setInterval(autoRefreshTick, AUTO_REFRESH_MS);
@@ -2753,6 +2810,19 @@ document.addEventListener('visibilitychange', function(){
   if (_hiddenSince && Date.now() - _hiddenSince > AUTO_REFRESH_MS) autoRefreshTick(true);  // back after a while: catch up now
 });
 
+if (EMBED && window.parent !== window) {
+  var _lastHeight = 0;
+  var postHeight = function(){
+    var h = Math.ceil(document.getElementById('app').getBoundingClientRect().height);
+    if (h && Math.abs(h - _lastHeight) > 2) {
+      _lastHeight = h;
+      try { window.parent.postMessage({ idsHeight: h }, location.origin); } catch (e) {}
+    }
+  };
+  if (window.ResizeObserver) new ResizeObserver(postHeight).observe(document.getElementById('app'));
+  window.addEventListener('load', postHeight);
+  setInterval(postHeight, 2000);
+}
 if (EMBED) {
   app.goView(state.activeView);   // the view the web UI asked for, with that view's own loaders
   if (state.activeView === 'hunt' && EMBED.device) {   // "Investigate" on an alert: that device's history right away

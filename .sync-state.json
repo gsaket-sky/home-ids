@@ -1,5 +1,5 @@
 {
- "commit": "b670631e100d2da2278e9a022f9fdc1c41f79648",
+ "commit": "ccc8d7fd45645fc2f22e15651a9c82105c3d53d9",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "ec6a50f64bc73d04e91eb39c34e64c98b20af2b07989ab614a1528550c826626",
@@ -116,7 +116,7 @@
   "src/merge_fragmented_devices.py": "742324495ca7b7f93db8d00706db9d53c1ba55d3ed1e674ffe22a96460737762",
   "src/metrics.py": "f8b0ea3d135e7b4a66d42adf5c1a8bc94f51d6b4cebbf5b88c297aa778866ada",
   "src/middleware/auth.py": "e55bf33c53a76fb0bfefaa444d109bf0eed872d1d5065626af8413fac6ae8014",
-  "src/middleware/config_schema.py": "5329d99b737a3d7a2b03533be917434276996d0b9ca6bdc79fefb66e27f1a320",
+  "src/middleware/config_schema.py": "58da5257dd6cc7b6d2937946ab70d406acabc1b3fad08f30fa209260a5fd7d7f",
   "src/middleware/graph_client.py": "f18ec7b21aeb5f83e3ad36ef65d821433cbd3ecd6605e393484ffb67e3a7e648",
   "src/middleware/humanize.py": "9aa5f6ffd12025e0351894c069bed67c767036048ed30e3701821b29a164c233",
   "src/middleware/main_api.py": "28fecfe3f6ffd1311b69e547aaccc9a7b1d03344775c96bac3158f9f209415e1",
@@ -336,7 +336,7 @@
   "tests/test_zeek_collector_overflow_logging.py": "f7912425a81c0b46f01477215b3b566e7a9bda1fe61d5f6853f33df5476596f1",
   "tests/test_zeek_extractor_thread_safety.py": "753db7e4d8c1b24412dd2b6bb003eafc4d82147dda6b730a81bdabfba0089e7d",
   "tests/test_zeek_s0_rej_discovery_targets.py": "2603c4e69a3b7e8f00a560972ccccb7eba32469561ad432716e88417ad9265b9",
-  "web/console.html": "077ef860f91d112c6aeb347b38f0f92382b58c4d18bc221750095f8d18f4fb7b",
+  "web/console.html": "7f9ad4bdf8a7473df1c64003d83879258a7a2d1ed4c9fd30cd52e6c6969fa821",
   "zeek_scripts/local-arp-log.zeek": "e45400af4fbe1b93417866d1e5a513646aebb80f4d3b3338214fb4d6ea944767",
   "zeek_scripts/local-dhcp-fingerprint.zeek": "ce153c1ab6ef41389206fa4c167ebf30630226efd93546eb498fe8de564ccc56"
  }
