@@ -5,7 +5,8 @@ Covers: a young domain never counts as "already in use" (is_preexisting), howeve
 every name under it, judged at first use (still young a year later); old, undated or unknown domains keep today's
 behaviour; an established name is unaffected; CL-AFPE keeps automatic trust for a young domain device-scoped; the
 scheduler sends nothing while off; normal mode asks only about learning-period names; filters (established,
-non-registrable, country domains, static allowlist, already answered); switching on re-verifies every device,
+non-registrable, country domains, static allowlist, already answered, local names the ledger recorded before the
+local suffix was configured); switching on re-verifies every device,
 round-robin, with progress, and completes; switching off stops it; switching on again restarts without re-asking.
 
 Run directly: `venv/Scripts/python.exe tests/test_argus_domain_age_gate.py`
@@ -127,7 +128,7 @@ REG = {}
 
 def http(url, headers, timeout):
     if url == BOOTSTRAP_URL:
-        return 200, json.dumps({"services": [[["com", "net", "org"], ["https://rdap.example/"]]]}), {}
+        return 200, json.dumps({"services": [[["com", "net", "org", "sky", "box"], ["https://rdap.example/"]]]}), {}
     name = url.rsplit("/", 1)[1]
     asked.append(name)
     if name in REG:
@@ -242,6 +243,31 @@ check("the old domain is unaffected", pop_e.is_preexisting("c2.com", device_id="
 enabled[0] = False
 check("switching the setting off restores today's behaviour at once",
       pop_e.is_preexisting("c1.com", device_id="cam") is True)
+
+# --- local names already in the ledger (recorded before `local_domain_suffixes` was set) are never asked about ---
+from config import CONFIG  # noqa: E402
+_saved_suffixes = CONFIG.get("local_domain_suffixes")
+
+
+def set_local(value):
+    with CONFIG._lock:
+        CONFIG._config["local_domain_suffixes"] = value
+
+
+set_local([])
+pop_l, rdap_l, sched_l = setup({"cam"})
+for n in ("grafana.sky", "_https.sky", "fritz.box", "my.fritz.box", "shop.box"):
+    pop_l.observe("cam", n, T0 + 8 * DAY)
+pop_l.flush()
+set_local(["sky", "fritz.box"])
+rdap_l.set_meta("enabled_seen", "1")
+enabled[0] = True
+asked.clear()
+run(sched_l, 15)
+check("the scheduler never asks about a local name the ledger already holds",
+      not any(n.endswith(".sky") or n.endswith("fritz.box") for n in asked), str(asked))
+check("a public name under the same gTLD is still asked about", "shop.box" in asked, str(asked))
+set_local(_saved_suffixes)
 
 print()
 if FAILURES:

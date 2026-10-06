@@ -19,7 +19,8 @@ only when absolutely necessary, i.e. for names whose age changes something:
   off stops it; switching on again restarts it (answers already stored are never asked again).
 
   Candidate filters (both modes): registrable domain only (utils.etld1_strict, fails closed without a public-suffix
-  list), not established on this network, not local (the ledger never records local names), gTLD with a registry
+  list), not established on this network, not local (utils.is_local_name, checked here too: the ledger keeps names it
+  recorded before a local suffix was configured), gTLD with a registry
   in the IANA list, not on the shipped static allowlist, and never asked about before. Normal-mode names go before
   re-verify names.
 
@@ -34,8 +35,9 @@ import threading
 import time
 from typing import Callable, Dict, List, Optional
 
-from intelligence.rdap_age import (RdapAgeService, is_gtld_name, NOT_GTLD, NO_SERVER, BACKOFF, ERROR, DAILY_LIMIT,
-                                   TOO_SOON, DISABLED, MIN_INTERVAL_SECONDS, DAILY_CAP)
+from intelligence.rdap_age import (RdapAgeService, is_gtld_name, NOT_GTLD, LOCAL, NO_SERVER, BACKOFF, ERROR,
+                                   DAILY_LIMIT, TOO_SOON, DISABLED, MIN_INTERVAL_SECONDS, DAILY_CAP)
+from utils import is_local_name
 
 LOGGER = logging.getLogger("home_ids.domain_age_scheduler")
 
@@ -105,7 +107,8 @@ class DomainAgeScheduler:
             return False
 
     def _eligible(self, name: str, now: float) -> bool:
-        if self._deferred.get(name, 0.0) > now or not is_gtld_name(name) or self.rdap.has_answer(name):
+        if (self._deferred.get(name, 0.0) > now or not is_gtld_name(name) or is_local_name(name)
+                or self.rdap.has_answer(name)):
             return False
         if self.known_good_fn is not None:
             try:
@@ -185,7 +188,7 @@ class DomainAgeScheduler:
             self._deferred[name] = now + DEFER_BACKOFF_SECONDS
         elif outcome == ERROR:
             self._deferred[name] = now + DEFER_ERROR_SECONDS
-        elif outcome in (NOT_GTLD, NO_SERVER):
+        elif outcome in (NOT_GTLD, LOCAL, NO_SERVER):
             self._deferred[name] = now + 7 * 86400   # the registry list is refreshed weekly
         elif outcome in (DAILY_LIMIT, TOO_SOON):
             self._normal.insert(0, name)              # raced the limits; keep its place

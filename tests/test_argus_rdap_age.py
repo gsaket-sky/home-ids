@@ -3,7 +3,7 @@ RDAP domain-age client (src/intelligence/rdap_age.py), part 1 of the domain-age 
 
 Covers: nothing sent while switched off, and the setting is read live; gTLD-only; the registration date is parsed and
 kept; answers are reused (date and no-date lifetimes); 404 is "no date"; errors and refusals never become answers;
-the 10-second gap, the daily cap, and 429 back-off per registry honouring Retry-After; the registry list is fetched
+never a local name (configured suffixes, even under a real gTLD); the 10-second gap, the daily cap, and 429 back-off per registry honouring Retry-After; the registry list is fetched
 once, kept, refreshed weekly, survives a failed refresh, and with none nothing is looked up; only the name is sent.
 
 Run directly: `venv/Scripts/python.exe tests/test_argus_rdap_age.py`
@@ -26,7 +26,7 @@ def check(name, cond, detail=""):
 
 
 from intelligence import rdap_age  # noqa: E402
-from intelligence.rdap_age import (RdapAgeService, CACHED, LOOKED_UP, DISABLED, NOT_GTLD, NO_SERVER,  # noqa: E402
+from intelligence.rdap_age import (RdapAgeService, CACHED, LOOKED_UP, DISABLED, NOT_GTLD, LOCAL, NO_SERVER,  # noqa: E402
                                    DAILY_LIMIT, TOO_SOON, BACKOFF, ERROR, DAILY_CAP, MIN_INTERVAL_SECONDS,
                                    DATE_TTL_DAYS, NO_DATA_TTL_DAYS, BOOTSTRAP_URL, BOOTSTRAP_REFRESH_SECONDS,
                                    is_gtld_name)
@@ -36,7 +36,8 @@ clock = [T0]
 enabled = [True]
 calls = []
 BOOTSTRAP = {"services": [[["com", "net"], ["http://rdap.verisign.example/", "https://rdap.verisign.example/com/v1/"]],
-                          [["xyz"], ["https://rdap.xyz.example/"]], [["de"], ["https://rdap.denic.example/"]]]}
+                          [["xyz"], ["https://rdap.xyz.example/"]], [["de"], ["https://rdap.denic.example/"]],
+                          [["sky", "box"], ["https://rdap.nic.example/"]]]}
 registered_at = {"young.com": "2026-09-20T10:11:12Z", "old.net": "2009-01-02T00:00:00+00:00"}
 script = {}     # url -> (code, body, headers) overrides
 boot_ok = [True]
@@ -108,6 +109,21 @@ check("an offset date (+00:00) parses too", svc.lookup("old.net") == LOOKED_UP
 advance(MIN_INTERVAL_SECONDS + 1)
 check("a country domain is never looked up", svc.lookup("example.de") == NOT_GTLD and not any("example.de" in c[0] for c in calls))
 check("a gTLD without a registry in the list is not looked up", svc.lookup("example.shop") == NO_SERVER)
+
+# --- local names: never sent, even when the local suffix is a real gTLD (.sky, fritz.box under .box) --------------------
+from config import CONFIG  # noqa: E402
+_saved_suffixes = CONFIG.get("local_domain_suffixes")
+with CONFIG._lock:
+    CONFIG._config["local_domain_suffixes"] = ["sky", "fritz.box"]
+svc = fresh()
+check("a name under a configured local suffix is never looked up",
+      all(svc.lookup(n) == LOCAL for n in ("grafana.sky", "_https.sky", "fritz.box", "my.fritz.box"))
+      and lookups() == [], str(lookups()))
+check("a public name under the same gTLD is still looked up", svc.lookup("shop.box") == LOOKED_UP)
+check("a built-in local suffix is refused too", svc.lookup("printer.internal") in (LOCAL, NOT_GTLD)
+      and not any("printer" in c[0] for c in calls))
+with CONFIG._lock:
+    CONFIG._config["local_domain_suffixes"] = _saved_suffixes
 
 # --- 404 and failures ---------------------------------------------------------------------------------------------------
 svc = fresh()

@@ -15,6 +15,9 @@ Owner decisions (2026-10-05, the safest option):
   - gTLDs only: ICANN requires public RDAP of every gTLD registry (since 2025-01-28). A country-code TLD (two letters,
     or an `xn--` IDN one) is never queried: many have no RDAP, or publish no creation date (.de), and some registries'
     terms forbid commercial use of the data.
+  - Never a local name (utils.is_local_name: the built-in suffixes plus `local_domain_suffixes`). Some home networks
+    use a real gTLD as their local suffix (`.sky`, `fritz.box` under `.box`); without this check their own host names
+    would be sent to that registry.
 
 Limits (registries' terms forbid "high volume, automated" use without giving a number, so the ceiling is deliberately
 low): at most one lookup per MIN_INTERVAL_SECONDS and DAILY_CAP per day for the whole unit; HTTP 429 backs that
@@ -37,6 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
+from utils import is_local_name
+
 LOGGER = logging.getLogger("home_ids.rdap_age")
 
 BOOTSTRAP_URL = "https://data.iana.org/rdap/dns.json"
@@ -50,8 +55,8 @@ HTTP_TIMEOUT_SECONDS = 10.0
 USER_AGENT = "Home-IDS"
 
 # Outcomes of lookup()
-CACHED, LOOKED_UP, DISABLED, NOT_GTLD, NO_SERVER, DAILY_LIMIT, TOO_SOON, BACKOFF, ERROR = (
-    "cached", "looked_up", "disabled", "not_gtld", "no_server", "daily_limit", "too_soon", "backoff", "error")
+CACHED, LOOKED_UP, DISABLED, NOT_GTLD, LOCAL, NO_SERVER, DAILY_LIMIT, TOO_SOON, BACKOFF, ERROR = (
+    "cached", "looked_up", "disabled", "not_gtld", "local", "no_server", "daily_limit", "too_soon", "backoff", "error")
 
 HttpGet = Callable[[str, Dict[str, str], float], Tuple[int, str, Dict[str, str]]]
 
@@ -279,6 +284,8 @@ class RdapAgeService:
         name = normalize(name)
         if not is_gtld_name(name):
             return NOT_GTLD
+        if is_local_name(name):
+            return LOCAL
         with self._lock:
             try:
                 return self._lookup_locked(name)
