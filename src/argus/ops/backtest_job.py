@@ -57,7 +57,7 @@ from argus.decision.engine import _HARD_STOP_FRESHNESS_SECONDS  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from argus.synthetic.injector import sweep  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
-from utils import is_resource_pressure_active  # noqa: E402
+from utils import is_resource_pressure_active, write_job_health  # noqa: E402
 
 LOGGER = logging.getLogger("argus.ops.backtest_job")
 
@@ -1907,8 +1907,15 @@ def main() -> None:
     parser.add_argument("--max-devices", type=int, default=None)
     args = parser.parse_args()
 
+    run_start = time.time()
+    state_dir = Path(args.db).resolve().parent
     store = GraphStore(args.db)
-    result = run_backtest(store, max_devices=args.max_devices)
+    try:
+        result = run_backtest(store, max_devices=args.max_devices)
+    except Exception as exc:
+        # Reported before the traceback ends the process, so the web UI shows "Failing" instead of "Not run yet".
+        write_job_health(state_dir, "backtest_job", time.time() - run_start, extra={"error": f"backtest crashed: {exc}"})
+        raise
     LOGGER.info(
         "Backtest run %s: overall_pass=%s golden_set=%s synthetic_detection=%.2f coverage=%d/%d",
         result["run_id"], result["overall_pass"], result["golden_set"]["passed"],
@@ -1934,8 +1941,22 @@ def main() -> None:
         LOGGER.info("[AUTOTUNE_TRIGGER] per-device/category: %s", result["scoped_tuning_proposals"])
     if result["tuning_promoted"]:
         LOGGER.info("[AUTOTUNE_TRIGGER] promoted: %s", result["tuning_promoted"])
-    if not result["overall_pass"]:
-        raise SystemExit(1)
+    failed_gates = [name for name, ok in (("golden set", result["golden_set"]["passed"]),
+                                          ("synthetic sweep", result["synthetic"]["passed"])) if not ok]
+    detail = {"run_id": result["run_id"], "overall_pass": result["overall_pass"],
+              "synthetic_detection": round(result["synthetic"]["avg_detection_rate"], 3),
+              "drift_detected": bool(result["drift"]["drift_detected"]),
+              "rollbacks": len(result["circuit_breaker_rollbacks"]), "promoted": len(result["tuning_promoted"] or [])}
+    if result["overall_pass"]:
+        write_job_health(state_dir, "backtest_job", time.time() - run_start, extra=detail)
+        return
+    # A failed backtest blocks new autotune candidates and promotions (run_backtest()), so it is reported as a failed
+    # run, with the gate that failed and why -- not left looking like a job that never ran.
+    why = "; ".join(f"{g}: {(result['golden_set'].get('detail') or '')[:160]}" if g == "golden set" else g
+                    for g in failed_gates) or "unknown gate"
+    write_job_health(state_dir, "backtest_job", time.time() - run_start,
+                     extra={**detail, "error": f"backtest failed ({why}); autotuning is paused"})
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

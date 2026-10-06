@@ -83,7 +83,7 @@ from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENS
 from argus.baseline.engine import ACTIVITY_STATES  # noqa: E402
 from argus.graph.store import GraphStore  # noqa: E402
 from core.heartbeat import write_component_heartbeat  # noqa: E402
-from utils import is_resource_pressure_active  # noqa: E402
+from utils import is_resource_pressure_active, write_job_health  # noqa: E402
 
 LOGGER = logging.getLogger("argus.ops.population_prior_builder")
 
@@ -796,8 +796,15 @@ def main() -> None:
     parser.add_argument("--db", default="state/v13_graph.db")
     args = parser.parse_args()
 
+    run_start = time.time()
+    state_dir = Path(args.db).resolve().parent
     store = GraphStore(args.db)
-    result = build_population_priors(store)
+    try:
+        result = build_population_priors(store)
+    except Exception as exc:
+        write_job_health(state_dir, "population_prior_builder", time.time() - run_start,
+                         extra={"error": f"build crashed: {exc}"})
+        raise
     LOGGER.info(
         "Population prior build complete: %d pool(s) written, %d skipped (too few "
         "eligible contributors), %d stale pool(s) removed, %d failed, %d group(s) "
@@ -819,8 +826,14 @@ def main() -> None:
     except Exception:
         LOGGER.exception("[HEARTBEAT] failed to write population_prior_builder heartbeat, non-fatal")
 
+    health = {"written": result["written"], "skipped_insufficient_contributors": result["skipped_insufficient_contributors"],
+              "removed_stale": result["removed_stale"], "failed": result["failed"],
+              "cohorts_computed": result["cohorts_computed"]}
     if result["failed"]:
+        write_job_health(state_dir, "population_prior_builder", time.time() - run_start,
+                         extra={**health, "error": f"{result['failed']} pool(s) failed to build"})
         raise SystemExit(1)
+    write_job_health(state_dir, "population_prior_builder", time.time() - run_start, extra=health)
 
 
 if __name__ == "__main__":

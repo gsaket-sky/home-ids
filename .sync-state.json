@@ -1,5 +1,5 @@
 {
- "commit": "4508c65ec8d06b6e5b6680beec4ffa3bf0400d6a",
+ "commit": "5efc76fdc577588c408b70a54c5e9809dc5e2160",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "ec6a50f64bc73d04e91eb39c34e64c98b20af2b07989ab614a1528550c826626",
@@ -30,7 +30,7 @@
   "src/argus/learning_sweep.py": "b1eb08ade53719c2f781eb0864df5f0911f94271116bb5763736b0133c6826a0",
   "src/argus/llm_review/ollama_client.py": "3d3b6754ef484e07a0500df0c166f7a121a9bdb87132871b5e355e112dda1d40",
   "src/argus/llm_review/validator.py": "b5c1751fcbd48441ca161cd15f2a9bcd2b8ae7aa3a1977d7325bad22613c4fd1",
-  "src/argus/ops/backtest_job.py": "06cfff7839cd117a0faa99a5e9c93928b7515dc8a8981e70a9b0a8c8a7414a65",
+  "src/argus/ops/backtest_job.py": "16ed5557287a70ffadb8f6445fe810b66af1c997b4ae3e3102c05702c4c781aa",
   "src/argus/ops/decision_replay.py": "b93008d89a4cbf4699408df4e64ed8af3805e7850c16302e08cd1d05dcf50a88",
   "src/argus/ops/disk_budget_governor.py": "cf02dea60c85afe0ace3b5555d563553eb232d21416676821de3d02b8f0d1247",
   "src/argus/ops/live_decision_archive.py": "bf259629a9b3836607df2255175eda948c32a19ff1ed4057d77af53067220a0c",
@@ -39,7 +39,7 @@
   "src/argus/ops/live_prune.py": "aab99bf513347f336b7a81a0c877b30e75c2f165ed3e55e028bd4c92ce5e7ade",
   "src/argus/ops/live_prune_weak_notices.py": "707b62d79d7c337e06bdcef9a3011c2b647ec6c319ef641e0c5a41959e807287",
   "src/argus/ops/live_retro_hunter.py": "88bc3d0d58978d943402c6ae6648444b63a908813dba833005477e63d4ea488e",
-  "src/argus/ops/population_prior_builder.py": "b98b5683c2b6e462d89e624618d748cb3537b18da1d39a9ce0dae082522182ee",
+  "src/argus/ops/population_prior_builder.py": "81c21052546af4a767db8ae8204dd6b17a2d859ec1b5050edf78c8d293d8fd8c",
   "src/argus/ops/telegram.py": "c5327a844cb3d471da16b917f7ea855d266289d8eab825b3701fc00129ee55c7",
   "src/argus/ops/threat_hunt.py": "c1b1717e4a99339a4ed751683b13f9f7c32880a3f76f4d2477c20c631ef0c24c",
   "src/argus/ops/zeek_log_prune.py": "d340ff10402b24c433b44e2d1450fc9b314be06c7ae02531e0c89f974786355e",
@@ -231,6 +231,7 @@
   "tests/test_ips_state_only.py": "4f2a5ae63af13ec5e797ad1089bd5bff5774579a6f23a440c6bb1c221abdc1ab",
   "tests/test_ja3_false_positive_guard.py": "5031f09a318646a75f785ad505e446c421a696e408bc9e323df7fbfbd2184fc8",
   "tests/test_job_coordinator.py": "b0059f62020bf368bf68f485c97b2bcccff60efe289b8a4ba46c797bfede3a0d",
+  "tests/test_job_health_reporting.py": "afed9ffd47203bc28ad6e56e5a70828991b67e7fb872ed246c983f86e68283cd",
   "tests/test_l2_raw.py": "966b6fcf4bd19b9b22ef65b2d0e4fb8da2dfc6f36897a5e8212bcf399bff71b6",
   "tests/test_learning_adoption_ledger.py": "411b5c78240b653c4a6be4ac3ea433e37082d7f406d5c69c89e0d7fd5ffc430f",
   "tests/test_local_ioc_index.py": "75c4e251a1a4de0d32f9d9bab10b041dd40b214b5d579bab3f11959587dfdace",
