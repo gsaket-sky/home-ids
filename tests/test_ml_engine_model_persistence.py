@@ -25,8 +25,10 @@ import metrics  # noqa: E402
 
 
 def _fitted_model(seed=0):
+    # Stamped like the engine's own fits: load_models() discards a model learned under another DNS ratio scheme, so an
+    # unstamped test model was dropped on load and these tests no longer guarded the 09-22 bug (they failed instead).
     rng = np.random.default_rng(seed)
-    return IsolationForest(n_estimators=10, random_state=seed).fit(rng.normal(size=(64, 11)))
+    return ml_engine._stamp(IsolationForest(n_estimators=10, random_state=seed).fit(rng.normal(size=(64, 11))))
 
 
 def _registry_with(tmp_path, device_ids):

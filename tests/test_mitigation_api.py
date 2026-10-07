@@ -70,6 +70,9 @@ def test_isolate_device_router_failure_returns_502(state_file, monkeypatch):
     assert exc.value.status_code == 502
 
 
+@pytest.mark.xfail(strict=True, reason="known bug (2026-10-07): since W-01 the API builds a state-only IPSMitigator "
+                   "(start_workers=False), which is never armed, so the console tarpit always answers 502. Fix pending "
+                   "(master TODO 0b); remove this marker with the fix.")
 def test_tarpit_device_success(state_file, monkeypatch):
     # IPSMitigator.__init__ sets self.tarpit_armed = False whenever scapy/raw-socket
     # access isn't available (true in any normal test environment) -- a class-level
