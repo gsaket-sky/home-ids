@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, Query
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
-from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR
+from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR, pattern_hypothesis
 from core.state_guard import StateManager
 from middleware.state_client import get_cached_state_manager
 from middleware.humanize import resolve_device_identity
@@ -180,7 +180,7 @@ def _serialize_building_trust(rows: List[Dict[str, Any]], sm) -> List[Dict[str, 
             "device_display": identity["display"],
             "behavior_fingerprint": row.get("behavior_fingerprint"),
             "destination_class": row.get("destination_class"),
-            "hypothesis": row.get("hypothesis_id"),
+            "hypothesis": pattern_hypothesis(row.get("hypothesis_id")),    # rows from before 10-07: raw signature
             "evidence_family": row.get("evidence_family"),
             "trust_value": trust_value,
             "trust_floor": _SUPPRESSION_TRUST_FLOOR,

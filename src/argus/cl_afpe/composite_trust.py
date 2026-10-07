@@ -11,20 +11,18 @@ the remaining three (behavior_fingerprint instead of raw evidence_type,
 destination_class instead of a literal destination_id, evidence_family, and
 regime) as a SEPARATE, MORE CONSERVATIVE gate.
 
-WIRED 2026-09-15 (write-side live, read-side shadow-logged, not yet hard-gating):
-record_corroborating_signal() is called for real on every genuine STAGE_3_COMBINED
-suppression in ClAfpeEngine.evaluate(), so the table starts accumulating real data
-now. permits_suppression() is also computed there and logged, but deliberately NOT
-yet AND-ed onto the existing is_trust_cached() fast path as a hard gate -- since
-this table starts completely empty, hard-gating immediately would strip away every
-currently-working trust-cache suppression until real corroboration re-accumulates
-(days, possibly longer), a significant live behavior change with zero real data
-behind it on day one. Promote to a hard gate once shadow data shows
-permits_suppression() agreeing with real outcomes, the same shadow-then-promote
-shape CL-AFPE itself already went through (argus is the default engine since 2026-10-02). When
-promoted, the intended integration is AND, not OR: a suppression decision requires
-BOTH is_trust_cached() AND permits_suppression() below to agree, so this module can
-only ever TIGHTEN what already exists, never loosen it.
+LIVE HARD GATE since 2026-09-15 (an earlier version of this docstring still called it shadow-only):
+record_corroborating_signal() runs for every genuine correction (ClAfpeEngine.mark_false_positive(): person,
+Stage 2/3, Stage 1b) and for Stage 1b's local-origin corroboration. permits_suppression() is AND-ed onto the
+trust-cache fast path (a cached destination is only suppressed when this gate agrees) and decides Stage 1b, so this
+module can only TIGHTEN what the trust cache allows, never loosen it.
+
+THE PATTERN KEY (fixed 2026-10-07): the hypothesis is the alert kind -- incident_key.signature_base() of the signature,
+the same key the trust cache and the incident grouping use. The raw signature carries a run-specific suffix
+("NETWORK_INTRUSION (persisted 600s)"), so keying by it split every pattern into one row per escalation length: on .94
+873 hypothesis ids for 10 alert kinds, median one observation each, 1 of 1,240 patterns ever permitted -- learning to
+stop alerting practically never happened. Rows written before the fix are read as their alert kind (highest trust per
+evidence family, never summed), so old fragments count no more than one observation's worth.
 
 Two of the six dimensions are first-pass simplifications, not the schema's original
 full intent -- see classify_destination() below and engine.py's call site for what
@@ -52,6 +50,7 @@ import uuid
 from typing import Optional
 
 from argus.graph.store import GraphStore
+from incident_key import signature_base
 from utils import is_cloud_cdn_provider_org, is_telemetry_domain
 
 # First-pass, not-yet-empirically-tuned constants (this codebase's own
@@ -67,6 +66,21 @@ _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST = 2
 # is_telemetry_domain, stdlib ipaddress) rather than inventing a second taxonomy that
 # could quietly disagree with the first -- same reasoning as this module's own
 # docstring for why it uses existing dimensions instead of new ones.
+
+
+_SUFFIX = " (persisted "
+
+
+def pattern_hypothesis(hypothesis_id: str) -> str:
+    """The hypothesis dimension of the key: the alert kind, without the persistence suffix (see the module docstring)."""
+    return signature_base(hypothesis_id) if hypothesis_id else (hypothesis_id or "")
+
+
+def _hypothesis_match(hypothesis_id: str):
+    """SQL condition + args matching this alert kind's rows: the kind itself, and rows written before 2026-10-07
+    under the raw signature ('<kind> (persisted Ns)'). substr, not LIKE: kinds contain '_' (a LIKE wildcard)."""
+    prefix = hypothesis_id + _SUFFIX
+    return "(hypothesis_id=? OR substr(hypothesis_id, 1, ?)=?)", (hypothesis_id, len(prefix), prefix)
 
 
 def classify_destination(dest_ip: str = "", base_domain: str = "", asn_owner: str = "") -> str:
@@ -109,6 +123,7 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
         return
     now = now if now is not None else time.time()
     device_id = _canonical(store, device_id)
+    hypothesis_id = pattern_hypothesis(hypothesis_id)
     # BUGFIX (2026-09-15, found live on .94 minutes after deploying the "3
     # automated-learning gaps" fix): cl_afpe_trust.hypothesis_id is a real FK
     # against the hypotheses catalog table (GraphStore's PRAGMA foreign_keys=ON
@@ -130,15 +145,17 @@ def record_corroborating_signal(store: GraphStore, device_id: str, behavior_fing
         (hypothesis_id,),
     )
     # Rows of this tuple under every id of the device: an id merged into it keeps contributing, so the new value
-    # builds on the highest (decayed) trust the device already has, whichever id it was earned under.
+    # builds on the highest (decayed) trust the device already has, whichever id it was earned under. The same for
+    # rows written under the raw signature before the pattern key: the highest one, never the sum.
     ids = _device_ids(store, device_id)
+    hyp_sql, hyp_args = _hypothesis_match(hypothesis_id)
     rows = store._conn.execute(
-        f"SELECT device_id, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id IN "
-        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? "
+        f"SELECT device_id, hypothesis_id, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id IN "
+        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND {hyp_sql} "
         f"AND evidence_family=? AND regime_id=?",
-        (*ids, behavior_fingerprint, destination_class, hypothesis_id, evidence_family, regime_id),
+        (*ids, behavior_fingerprint, destination_class, *hyp_args, evidence_family, regime_id),
     ).fetchall()
-    row = next((r for r in rows if r["device_id"] == device_id), None)
+    row = next((r for r in rows if r["device_id"] == device_id and r["hypothesis_id"] == hypothesis_id), None)
     prior = max((_apply_decay(float(r["trust_value"]), float(r["n"]), now, r) for r in rows), default=None)
     if row is None:
         new_trust = min(1.0, (prior or 0.0) + _TRUST_INCREMENT)
@@ -181,13 +198,15 @@ def _device_ids(store: GraphStore, device_id: str):
 def _family_trusts(store: GraphStore, device_id: str, behavior_fingerprint: str,
                      destination_class: str, hypothesis_id: str, regime_id: int, now: float):
     """(evidence_family, decayed trust) for this tuple, across every id of the device (trust earned under an id since
-    merged into it still counts). Several ids with the same family: the highest trust, one entry per family."""
+    merged into it still counts) and every row of its alert kind (rows from before the pattern key included). Several
+    rows with the same family: the highest trust, one entry per family."""
     ids = _device_ids(store, device_id)
+    hyp_sql, hyp_args = _hypothesis_match(pattern_hypothesis(hypothesis_id))
     rows = store._conn.execute(
         f"SELECT evidence_family, trust_value, n, last_updated FROM cl_afpe_trust WHERE device_id IN "
-        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND hypothesis_id=? "
+        f"({','.join('?' * len(ids))}) AND behavior_fingerprint=? AND destination_class=? AND {hyp_sql} "
         f"AND regime_id=?",
-        (*ids, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
+        (*ids, behavior_fingerprint, destination_class, *hyp_args, regime_id),
     ).fetchall()
     best = {}
     for r in rows:
@@ -216,18 +235,38 @@ def permits_suppression(store: GraphStore, device_id: str, behavior_fingerprint:
     return len(qualifying_families) >= _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST
 
 
+def learning_summary(conn, now: Optional[float] = None) -> dict:
+    """For the web UI's Learning card, from a plain (read-only) connection: `patterns` = distinct
+    (device id, fingerprint, destination class, alert kind, regime) patterns being learned -- rows from before the
+    pattern key fold into their kind, and one row per evidence family is not a pattern of its own -- and `trusted` =
+    how many of them permits_suppression() would allow right now (same floor, family count and decay). Device ids
+    are taken as stored (an id merged into another still counts on its own here; the gate itself resolves merges)."""
+    now = now if now is not None else time.time()
+    families = {}
+    for r in conn.execute("SELECT device_id, behavior_fingerprint, destination_class, hypothesis_id, regime_id, "
+                          "evidence_family, trust_value, n, last_updated FROM cl_afpe_trust"):
+        key = (r[0], r[1], r[2], pattern_hypothesis(r[3]), r[4])
+        trust = _apply_decay(float(r[6] or 0.0), float(r[7] or 0.0), now, {"last_updated": r[8]})
+        fam = families.setdefault(key, {})
+        fam[r[5]] = max(trust, fam.get(r[5], 0.0))
+    trusted = sum(1 for fam in families.values()
+                  if sum(1 for t in fam.values() if t >= _SUPPRESSION_TRUST_FLOOR) >= _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST)
+    return {"patterns": len(families), "trusted": trusted}
+
+
 def reset_tuple(store: GraphStore, device_id: str, behavior_fingerprint: str,
                   destination_class: str, hypothesis_id: str, regime_id: int) -> int:
     """Operator-invoked reset (Sheet 04's reset/undo, not yet built) -- wipes
     every family's accumulated trust for this exact tuple. Returns the
     number of rows removed. A normal admin capability, not an autonomous
     decision -- see Sheet 04's own design for why this is deliberately
-    manual, not automatic. Covers every id of the device, like the reads."""
+    manual, not automatic. Covers every id of the device and every row of the alert kind, like the reads."""
     ids = _device_ids(store, device_id)
+    hyp_sql, hyp_args = _hypothesis_match(pattern_hypothesis(hypothesis_id))
     cur = store._conn.execute(
         f"DELETE FROM cl_afpe_trust WHERE device_id IN ({','.join('?' * len(ids))}) AND behavior_fingerprint=? "
-        f"AND destination_class=? AND hypothesis_id=? AND regime_id=?",
-        (*ids, behavior_fingerprint, destination_class, hypothesis_id, regime_id),
+        f"AND destination_class=? AND {hyp_sql} AND regime_id=?",
+        (*ids, behavior_fingerprint, destination_class, *hyp_args, regime_id),
     )
     store._maybe_commit()
     return cur.rowcount

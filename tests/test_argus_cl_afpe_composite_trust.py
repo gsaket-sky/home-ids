@@ -159,6 +159,94 @@ check("permits_suppression: false immediately after reset",
       ct.permits_suppression(store, DEVICE, FINGERPRINT, DEST_CLASS, HYPOTHESIS, REGIME, now=NOW + 200) is False)
 
 
+# =============================================================================
+# 2026-10-07: the pattern key is the alert kind, not the raw signature. Live, a repeating alert is re-sent as
+# 'KIND (persisted 300s)', '(persisted 600s)', ...; keyed by that, every repeat was a new pattern with one
+# observation (on .94: 873 ids for 10 kinds, 1 of 1,240 patterns ever permitted).
+# =============================================================================
+dev3 = "dev_ct_persist"
+store.upsert_device(dev3, device_type="laptop", timestamp=NOW)
+for i in range(5):
+    sig = f"{HYPOTHESIS} (persisted {300 * (i + 1)}s)"
+    ct.record_corroborating_signal(store, dev3, FINGERPRINT, DEST_CLASS, sig, "dns_behavior", REGIME, now=NOW + i)
+    ct.record_corroborating_signal(store, dev3, FINGERPRINT, DEST_CLASS, sig, "reputation", REGIME, now=NOW + i)
+check("persisted suffixes: five repeats with different '(persisted Ns)' suffixes build ONE pattern that is now "
+      "permitted (before the fix: ten one-observation fragments, never permitted)",
+      ct.permits_suppression(store, dev3, FINGERPRINT, DEST_CLASS, HYPOTHESIS, REGIME, now=NOW + 5) is True)
+check("persisted suffixes: a lookup with yet another suffix finds the same pattern",
+      ct.permits_suppression(store, dev3, FINGERPRINT, DEST_CLASS, f"{HYPOTHESIS} (persisted 9999s)", REGIME,
+                             now=NOW + 5) is True)
+stored = {r["hypothesis_id"] for r in store._conn.execute(
+    "SELECT DISTINCT hypothesis_id FROM cl_afpe_trust WHERE device_id=?", (dev3,))}
+check("persisted suffixes: rows are stored under the alert kind only", stored == {HYPOTHESIS}, str(stored))
+
+# Rows written before the fix (raw signature) are read as their alert kind: the HIGHEST trust per family, never the
+# sum -- ten old one-observation fragments are worth one observation, not ten.
+dev4 = "dev_ct_legacy"
+store.upsert_device(dev4, device_type="laptop", timestamp=NOW)
+for i in range(10):
+    legacy = f"{HYPOTHESIS} (persisted {60 * (i + 1)}s)"
+    store._conn.execute("INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')", (legacy,))
+    for fam in ("dns_behavior", "reputation"):
+        store._conn.execute(
+            "INSERT INTO cl_afpe_trust (device_id, behavior_fingerprint, destination_class, hypothesis_id, "
+            "evidence_family, regime_id, trust_value, n, last_updated) VALUES (?, ?, ?, ?, ?, ?, 0.15, 1, ?)",
+            (dev4, FINGERPRINT, DEST_CLASS, legacy, fam, REGIME, NOW))
+legacy_trusts = dict(ct._family_trusts(store, dev4, FINGERPRINT, DEST_CLASS, HYPOTHESIS, REGIME, NOW))
+check("legacy rows: read as the alert kind, highest per family (0.15), not summed (1.5)",
+      legacy_trusts == {"dns_behavior": 0.15, "reputation": 0.15}, str(legacy_trusts))
+check("legacy rows: ten old fragments do not permit suppression on their own",
+      ct.permits_suppression(store, dev4, FINGERPRINT, DEST_CLASS, HYPOTHESIS, REGIME, now=NOW) is False)
+ct.record_corroborating_signal(store, dev4, FINGERPRINT, DEST_CLASS, f"{HYPOTHESIS} (persisted 900s)",
+                               "dns_behavior", REGIME, now=NOW + 1)
+new_row = store._conn.execute(
+    "SELECT trust_value, n FROM cl_afpe_trust WHERE device_id=? AND hypothesis_id=? AND evidence_family='dns_behavior'",
+    (dev4, HYPOTHESIS)).fetchone()
+check("legacy rows: a new observation builds on the highest old value (0.15 + 0.15 = 0.30) under the alert kind",
+      new_row is not None and abs(new_row["trust_value"] - 0.30) < 1e-4 and new_row["n"] == 1,
+      str(dict(new_row) if new_row else None))
+
+# The legacy match is an exact prefix, not LIKE: '_' in a kind is not a wildcard, and a longer kind sharing the
+# prefix is a different kind.
+for other in ("NETWORKXINTRUSION (persisted 60s)", "NETWORK_INTRUSION_WIDE (persisted 60s)"):
+    store._conn.execute("INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')", (other,))
+    store._conn.execute(
+        "INSERT INTO cl_afpe_trust (device_id, behavior_fingerprint, destination_class, hypothesis_id, "
+        "evidence_family, regime_id, trust_value, n, last_updated) VALUES (?, ?, ?, ?, 'other_family', ?, 1.0, 9, ?)",
+        (dev4, FINGERPRINT, DEST_CLASS, other, REGIME, NOW))
+check("legacy rows: other kinds ('NETWORKXINTRUSION', 'NETWORK_INTRUSION_WIDE') are not read as NETWORK_INTRUSION",
+      "other_family" not in dict(ct._family_trusts(store, dev4, FINGERPRINT, DEST_CLASS, HYPOTHESIS, REGIME, NOW)))
+
+summary = ct.learning_summary(store._conn, now=NOW + 5)
+check("learning_summary: dev3's five suffixed repeats are one pattern, and it counts as trusted",
+      summary["trusted"] >= 1, str(summary))
+rows_dev3 = store._conn.execute("SELECT COUNT(*) AS c FROM cl_afpe_trust WHERE device_id=?", (dev3,)).fetchone()["c"]
+check("learning_summary: one pattern per alert kind, not one per row (dev3 has 2 rows, one per family)",
+      rows_dev3 == 2)
+
+store2 = GraphStore(":memory:")
+store2.upsert_device("dev_sum", device_type="laptop", timestamp=NOW)
+for i in range(5):
+    for fam in ("dns_behavior", "reputation"):
+        ct.record_corroborating_signal(store2, "dev_sum", FINGERPRINT, DEST_CLASS,
+                                       f"{HYPOTHESIS} (persisted {60 * i}s)", fam, REGIME, now=NOW + i)
+    ct.record_corroborating_signal(store2, "dev_sum", FINGERPRINT, DEST_CLASS, "PORT_SCAN", "dns_behavior", REGIME,
+                                   now=NOW + i)
+check("learning_summary (exact): two alert kinds -> 2 patterns; only the two-family one is trusted",
+      ct.learning_summary(store2._conn, now=NOW + 5) == {"patterns": 2, "trusted": 1},
+      str(ct.learning_summary(store2._conn, now=NOW + 5)))
+check("learning_summary: trust decays like the gate's (60 days later nothing is trusted)",
+      ct.learning_summary(store2._conn, now=NOW + 60 * 86400) == {"patterns": 2, "trusted": 0})
+store2.close()
+
+removed = ct.reset_tuple(store, dev4, FINGERPRINT, DEST_CLASS, f"{HYPOTHESIS} (persisted 5s)", REGIME)
+left = store._conn.execute("SELECT hypothesis_id FROM cl_afpe_trust WHERE device_id=?", (dev4,)).fetchall()
+check("reset_tuple: clears the alert kind's new and legacy rows (21), and only those",
+      removed == 21 and {r["hypothesis_id"] for r in left} == {"NETWORKXINTRUSION (persisted 60s)",
+                                                                "NETWORK_INTRUSION_WIDE (persisted 60s)"},
+      f"removed {removed}, left {[r['hypothesis_id'] for r in left]}")
+
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} check(s) FAILED:")

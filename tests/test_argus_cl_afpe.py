@@ -661,6 +661,29 @@ _run_local_origin_sequence(
     {"destination_port": 47823, "service_name": "totally-made-up-protocol-xyz"},
 )
 
+# --- 2026-10-07: the persistence suffix no longer fragments the learned pattern ---
+# Live, an alert that keeps firing is re-sent as 'KIND (persisted 300s)', '(persisted 600s)', ... Composite trust
+# keyed each of those as a separate pattern (on .94: 873 ids for 10 kinds, 1 of 1,240 patterns ever permitted), so
+# the same sequence as above never resolved. Keyed by the alert kind, it resolves on the same 4th occurrence.
+persist_decision = {"evidence_families": ["dns_behavior", "reputation"], "evidence_types": []}
+store.upsert_device("lo_dev_persist", timestamp=NOW)
+store.upsert_device("lo_dest_persist", timestamp=NOW)
+store.update_device_metadata("lo_dest_persist", {"known_ips_history": {"10.20.30.45": NOW}}, timestamp=NOW)
+for i in range(3):
+    persisted_alert = _own_device_alert("lo_dev_persist", "10.20.30.45")
+    persisted_alert["signature"] = f"LOCAL_ORIGIN_TEST (persisted {300 * (i + 1)}s)"
+    v = _evaluate(cl_afpe, persisted_alert, decision=persist_decision)
+check("[persisted suffix] occurrences 1-3 with growing '(persisted Ns)' suffixes: not resolved yet",
+      v.get("stage") != "STAGE_1B_LOCAL_ORIGIN")
+persisted_alert["signature"] = "LOCAL_ORIGIN_TEST (persisted 1200s)"
+v = _evaluate(cl_afpe, persisted_alert, decision=persist_decision)
+check("[persisted suffix] occurrence 4 resolves like the plain-signature sequence: the four occurrences built ONE "
+      "pattern, not four fragments",
+      v.get("verdict") == "FALSE_POSITIVE" and v.get("stage") == "STAGE_1B_LOCAL_ORIGIN")
+persist_ids = {r["hypothesis_id"] for r in store._conn.execute(
+    "SELECT DISTINCT hypothesis_id FROM cl_afpe_trust WHERE device_id='lo_dev_persist'")}
+check("[persisted suffix] stored under the alert kind only", persist_ids == {"LOCAL_ORIGIN_TEST"}, str(persist_ids))
+
 # --- gap 3 negative cases: must NOT auto-resolve ---
 store.upsert_device("lo_dev_dirty_ti", timestamp=NOW)
 store.upsert_device("lo_dest_dirty_ti", timestamp=NOW)
