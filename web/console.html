@@ -1600,6 +1600,32 @@ function renderAutonomyParamsPanel(){
     + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Current</th><th>Shipped default</th><th>Bounds</th><th>Status</th></tr></thead><tbody>'+rows+'</tbody></table></div></div>';
 }
 
+// 2026-10-07: "still building" as one row per alert pattern (was one row per evidence family, which read as
+// unrelated rows). Plain words; the internal names stay in the tooltips.
+var LEARNING_PATTERN_NOTE = '<div style="padding:10px 16px 0;font-size:11.5px;color:var(--text-dim);line-height:1.5;">'
+  + 'When the same kind of alert from a device keeps turning out harmless, the IDS learns to stop raising it. '
+  + 'For safety it needs <b>two different kinds of evidence</b> (for example DNS behaviour and network behaviour) '
+  + 'that each confirmed it several times; trust fades again without new confirmations, and verified threats are '
+  + 'never learned as harmless. Each row is one alert pattern: device + alert kind + what it talked to. A pattern '
+  + 'that only ever has one kind of evidence keeps alerting, by design.</div>';
+
+function learningPatternCells(row){
+  var chips = (row.evidence||[]).map(function(e){
+    var pct = Math.floor((e.progress||0)*100 + 1e-9);
+    return '<span class="tag" title="'+esc(e.family)+' — trust '+esc(String(e.trust))+' of '+esc(String(row.trust_floor))+' needed"'
+      + ' style="margin:0 4px 4px 0;'+(e.confirmed?'border-color:var(--sev-benign);color:var(--sev-benign);':'')+'">'
+      + esc(e.label)+' '+(e.confirmed?'✓':pct+'%')+'</span>';
+  }).join('');
+  var pct = Math.floor((row.progress_fraction||0)*100 + 1e-9);
+  var bar = '<div style="width:80px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;display:inline-block;vertical-align:middle;">'
+    + '<div style="width:'+pct+'%;height:100%;background:'+(row.trusted?'var(--sev-benign)':SEV_HEX.ANOMALOUS)+';"></div></div>';
+  return '<td style="font-size:11.5px;" title="behaviour: '+esc(row.behavior_fingerprint||'')+'"><div class="cell-title">'+esc(row.hypothesis||'—')+'</div>'
+      + '<div style="color:var(--text-faint);">→ '+esc(row.destination_label||row.destination_class||'')+'</div></td>'
+    + '<td style="font-size:11.5px;">'+(chips||'—')+'</td>'
+    + '<td style="font-size:11.5px;">'+bar+'<div style="margin-top:4px;">'+esc(row.status||'')+'</div></td>'
+    + '<td class="cell-mono">'+agoText(row.last_updated)+'</td>';
+}
+
 function renderAutonomyView(){
   var topbarHead = topbarWithRefresh('Learning & self-tuning', 'What Argus has changed on its own, and which direction -- the closed-loop autotuner\'s threshold history, and composite trust\'s auto-resolved corroboration grants. Nothing here needs a human tap; this is a record of what already happened autonomously, and what\'s still accumulating evidence toward a future auto-resolution.', 'reloadAutonomy', state.autonomyLoading);
 
@@ -1645,16 +1671,10 @@ function renderAutonomyView(){
 
   var buildingRows = buildingTrust.length
     ? buildingTrust.map(function(row){
-        var pct = Math.floor((row.progress_fraction||0)*100 + 1e-9);
-        var bar = '<div style="width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;">'
-          + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
         return '<tr><td class="cell-mono" title="'+esc(row.device_id||'')+'">'+esc(row.device_display||row.device_id||'')+'</td>'
-          + '<td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
-          + '<td style="font-size:11.5px;">'+esc(row.destination_class||'')+' / '+esc(row.evidence_family||'')+'</td>'
-          + '<td>'+bar+'<span class="cell-mono" style="font-size:11px;margin-left:6px;">'+pct+'%</span></td>'
-          + '<td class="cell-mono">'+agoText(row.last_updated)+'</td></tr>';
+          + learningPatternCells(row) + '</tr>';
       }).join('')
-    : '<tr><td colspan="5"><div class="empty-state">Nothing currently accumulating corroboration.</div></td></tr>';
+    : '<tr><td colspan="5"><div class="empty-state">No alert pattern is being learned yet.</div></td></tr>';
 
   return topbarHead + '<div class="content">'
     + renderAutonomyParamsPanel()
@@ -1663,8 +1683,9 @@ function renderAutonomyView(){
     + '<div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Direction</th><th>Value</th><th>Status</th><th>Reason</th><th>Proposed</th></tr></thead><tbody>'+autotuneRows+'</tbody></table></div></div>'
     + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — resolved</div></div>'
     + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Destination</th><th>Hypothesis</th><th>How it was resolved</th><th>Granted</th></tr></thead><tbody>'+trustRows+'</tbody></table></div></div>'
-    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Composite trust — still building</div></div>'
-    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Hypothesis</th><th>Destination class / family</th><th>Progress toward auto-resolution</th><th>Updated</th></tr></thead><tbody>'+buildingRows+'</tbody></table></div></div>'
+    + '<div class="panel" style="margin-bottom:16px;"><div class="panel-header"><div class="panel-title">Alerts learning to stay quiet</div></div>'
+    + LEARNING_PATTERN_NOTE
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Alert kind → towards</th><th>Evidence that it is harmless</th><th>Status</th><th>Updated</th></tr></thead><tbody>'+buildingRows+'</tbody></table></div></div>'
     + renderAutonomyByDevicePanel()
     + '</div>';
 }
@@ -1739,26 +1760,21 @@ function renderAutonomyByDevicePanel(){
       : '<div class="empty-state" style="padding:8px 0;">No resolved trust grants for this device.</div>';
 
     var buildingDetail = dev.building_trust.length
-      ? '<table style="width:100%;"><thead><tr><th>Hypothesis</th><th>Destination class / family</th><th>Progress</th><th>Updated</th></tr></thead><tbody>'
-        + dev.building_trust.map(function(row){
-            var pct = Math.floor((row.progress_fraction||0)*100 + 1e-9);
-            var bar = '<div style="width:80px;height:6px;border-radius:3px;background:var(--border);overflow:hidden;display:inline-block;vertical-align:middle;">'
-              + '<div style="width:'+pct+'%;height:100%;background:'+SEV_HEX.ANOMALOUS+';"></div></div>';
-            return '<tr><td style="font-size:11.5px;">'+esc(row.hypothesis||'—')+'</td>'
-              + '<td style="font-size:11.5px;">'+esc(row.destination_class||'')+' / '+esc(row.evidence_family||'')+'</td>'
-              + '<td>'+bar+'<span class="cell-mono" style="font-size:11px;margin-left:6px;">'+pct+'%</span></td>'
-              + '<td class="cell-mono">'+agoText(row.last_updated)+'</td></tr>';
-          }).join('')
+      ? '<table style="width:100%;"><thead><tr><th>Alert kind → towards</th><th>Evidence that it is harmless</th><th>Status</th><th>Updated</th></tr></thead><tbody>'
+        + dev.building_trust.map(function(row){ return '<tr>' + learningPatternCells(row) + '</tr>'; }).join('')
         + '</tbody></table>'
-      : '<div class="empty-state" style="padding:8px 0;">Nothing currently accumulating for this device.</div>';
+      : '<div class="empty-state" style="padding:8px 0;">No alert pattern of this device is being learned.</div>';
 
     return summaryRow + '<tr><td colspan="6" style="background:var(--bg-hover);padding:12px 16px;">'
       + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">Resolved trust grants</div>'
       + grantsDetail
-      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Still building</div>'
+      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Alerts learning to stay quiet</div>'
       + buildingDetail
-      + '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Autotuner changes for THIS device</div>'
-      + autotunerDetailTable(dev.autotuner)
+      // Shown only when self-tuning actually changed something for this device (the API leaves out no-change rows).
+      + (dev.autotuner.length
+          ? '<div style="font-size:10.5px;color:var(--text-faint);text-transform:uppercase;letter-spacing:.04em;margin:12px 0 6px;">Self-tuning changes for this device</div>'
+            + autotunerDetailTable(dev.autotuner)
+          : '')
       + '</td></tr>';
   }).join('');
 
@@ -1786,7 +1802,7 @@ function renderAutonomyByDevicePanel(){
 
   return '<div class="panel" style="margin-top:16px;">'+header
     + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Composite trust is device-scoped only. Autotuner changes shown here are DEVICE-scoped specifically -- see "Per-category autotuner status" below for category-wide changes, and the Autotuner history panel above for global ones. Click a row to see its own detail.</div>'
-    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Building trust</th><th>Autotuner (device)</th><th>Last activity</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
+    + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Alerts learning</th><th>Self-tuning changes</th><th>Last activity</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
     + '<div class="panel" style="margin-top:16px;">'+categoryHeader
     + '<div class="table-wrap"><table><thead><tr><th>Category (device type)</th><th>Autotuner changes</th><th>Last activity</th><th></th></tr></thead><tbody>'+categoryRows+'</tbody></table></div></div>';
 }

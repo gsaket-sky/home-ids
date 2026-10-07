@@ -74,6 +74,18 @@ check("propose_change: refuses a proposal backed by a FAILED backtest run",
       r_failed_bt.accepted is False and "did not pass" in r_failed_bt.reason)
 
 # =============================================================================
+# 2026-10-07: a proposal that moves nothing is refused, not recorded (.94 had 27 promoted 'old == new' rows that the
+# console listed per device as changes)
+# =============================================================================
+rows_before = store._conn.execute("SELECT COUNT(*) AS c FROM threshold_history").fetchone()["c"]
+r_noop = engine.propose_change("arp_sweep_unique_targets_threshold", 8.0, "same as the value in effect",
+                               device_id="dev_noop", backtest_run_id="bt_pass_1", now=NOW, default=8.0)
+check("propose_change: a change to the value already in effect is refused with 'no change' and writes no row",
+      r_noop.accepted is False and r_noop.reason.startswith("no change")
+      and store._conn.execute("SELECT COUNT(*) AS c FROM threshold_history").fetchone()["c"] == rows_before,
+      f"got {r_noop}")
+
+# =============================================================================
 # Bounded-step clamping
 # =============================================================================
 bounds = TUNABLE_PARAMETERS["reputation_tier_suspicious_floor"]

@@ -241,17 +241,36 @@ def learning_summary(conn, now: Optional[float] = None) -> dict:
     pattern key fold into their kind, and one row per evidence family is not a pattern of its own -- and `trusted` =
     how many of them permits_suppression() would allow right now (same floor, family count and decay). Device ids
     are taken as stored (an id merged into another still counts on its own here; the gate itself resolves merges)."""
+    rows = conn.execute("SELECT device_id, behavior_fingerprint, destination_class, hypothesis_id, regime_id, "
+                        "evidence_family, trust_value, n, last_updated FROM cl_afpe_trust")
+    patterns = group_patterns(
+        ({"device_id": r[0], "behavior_fingerprint": r[1], "destination_class": r[2], "hypothesis_id": r[3],
+          "regime_id": r[4], "evidence_family": r[5], "trust_value": r[6], "n": r[7], "last_updated": r[8]}
+         for r in rows), now)
+    return {"patterns": len(patterns), "trusted": sum(1 for p in patterns if p["trusted"])}
+
+
+def group_patterns(rows, now: Optional[float] = None) -> list:
+    """cl_afpe_trust rows (dicts) as the patterns the gate judges: one entry per (device id, fingerprint,
+    destination class, alert kind, regime) with each evidence family's decayed trust (highest row per family) and
+    whether permits_suppression()'s rule holds now. Newest first. Shared by learning_summary() and the console."""
     now = now if now is not None else time.time()
-    families = {}
-    for r in conn.execute("SELECT device_id, behavior_fingerprint, destination_class, hypothesis_id, regime_id, "
-                          "evidence_family, trust_value, n, last_updated FROM cl_afpe_trust"):
-        key = (r[0], r[1], r[2], pattern_hypothesis(r[3]), r[4])
-        trust = _apply_decay(float(r[6] or 0.0), float(r[7] or 0.0), now, {"last_updated": r[8]})
-        fam = families.setdefault(key, {})
-        fam[r[5]] = max(trust, fam.get(r[5], 0.0))
-    trusted = sum(1 for fam in families.values()
-                  if sum(1 for t in fam.values() if t >= _SUPPRESSION_TRUST_FLOOR) >= _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST)
-    return {"patterns": len(families), "trusted": trusted}
+    out = {}
+    for r in rows:
+        key = (r.get("device_id"), r.get("behavior_fingerprint"), r.get("destination_class"),
+               pattern_hypothesis(r.get("hypothesis_id")), r.get("regime_id"))
+        trust = _apply_decay(float(r.get("trust_value") or 0.0), float(r.get("n") or 0.0), now,
+                             {"last_updated": r.get("last_updated")})
+        p = out.setdefault(key, {"device_id": key[0], "behavior_fingerprint": key[1], "destination_class": key[2],
+                                 "hypothesis": key[3], "regime_id": key[4], "families": {}, "last_updated": None})
+        p["families"][r.get("evidence_family")] = max(trust, p["families"].get(r.get("evidence_family"), 0.0))
+        ts = r.get("last_updated")
+        if ts is not None and (p["last_updated"] is None or ts > p["last_updated"]):
+            p["last_updated"] = ts
+    for p in out.values():
+        p["families_confirmed"] = sum(1 for t in p["families"].values() if t >= _SUPPRESSION_TRUST_FLOOR)
+        p["trusted"] = p["families_confirmed"] >= _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST
+    return sorted(out.values(), key=lambda p: p["last_updated"] or 0, reverse=True)
 
 
 def reset_tuple(store: GraphStore, device_id: str, behavior_fingerprint: str,

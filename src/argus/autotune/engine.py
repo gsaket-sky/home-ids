@@ -467,6 +467,11 @@ class AutotuneEngine:
         # its category's value here, not skip straight to global).
         old_value = self.get_active_value(parameter, device_id, device_type, default=default_mid)
         clamped_new_value = _clamp_step(parameter, old_value, new_value)
+        # 2026-10-07: a proposal that moves nothing is refused, not recorded. Callers compute "current" from their
+        # own state (e.g. the legacy ARP-sweep rule's per-device threshold); when that already equals the active
+        # value here, a row 'old == new' was written, promoted, and listed as a change (27 such rows on .94).
+        if abs(clamped_new_value - old_value) < 1e-12:
+            return ProposalResult(False, reason=f"no change: {parameter} is already {old_value:g} at this scope")
 
         # Trust-radius failsafe: a device-scoped value may never diverge from
         # its category's current value (or global, if no category value

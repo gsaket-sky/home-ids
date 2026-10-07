@@ -130,9 +130,54 @@ def test_autonomy_building_trust_reports_progress_toward_the_floor(graph_db):
     assert len(result["building_trust"]) == 1
     row = result["building_trust"][0]
     assert row["device_id"] == "dev_b"
-    assert row["trust_value"] == pytest.approx(0.3)
+    assert row["hypothesis"] == "COORDINATED_TARGETING"
+    assert row["destination_label"] == "a device in this network"
     assert row["trust_floor"] == pytest.approx(0.6)
-    assert row["progress_fraction"] == pytest.approx(0.5)
+    # one pattern, one kind of evidence half-way to the floor; two kinds are needed, so the pattern is a quarter done
+    assert [(e["label"], e["trust"], e["progress"]) for e in row["evidence"]] == [
+        ("seen on other devices", pytest.approx(0.3, abs=1e-3), pytest.approx(0.5, abs=1e-3))]
+    assert row["progress_fraction"] == pytest.approx(0.25, abs=1e-3)
+    assert row["trusted"] is False and row["status"] == "Needs a second kind of evidence"
+
+
+def test_autonomy_building_trust_is_one_row_per_alert_pattern(graph_db):
+    """2026-10-07: rows per evidence family (and, before the pattern key, per '(persisted Ns)' repeat) are ONE
+    pattern; two kinds of evidence past the floor make it 'learned'."""
+    store = GraphStore(str(graph_client.GRAPH_DB_PATH))
+    now = time.time()
+    store._conn.executemany(
+        "INSERT OR IGNORE INTO hypotheses (hypothesis_id, kind) VALUES (?, 'attack')",
+        [("NETWORK_INTRUSION",), ("NETWORK_INTRUSION (persisted 600s)",)])
+    store._conn.executemany(
+        "INSERT INTO cl_afpe_trust (device_id, behavior_fingerprint, destination_class, hypothesis_id, "
+        "evidence_family, regime_id, trust_value, n, last_updated) VALUES ('dev_b', 'NORMAL', 'private', ?, ?, 0, ?, 4, ?)",
+        [("NETWORK_INTRUSION (persisted 600s)", "dns_behavior", 0.9, now - 5),
+         ("NETWORK_INTRUSION", "network_behavior", 0.7, now - 1)])
+    store._maybe_commit()
+    store.close()
+    rows = [r for r in autonomy_api.get_autonomy(limit=50, token="test")["building_trust"]
+            if r["hypothesis"] == "NETWORK_INTRUSION"]
+    assert len(rows) == 1
+    assert rows[0]["trusted"] is True and rows[0]["status"] == "Learned: stays quiet"
+    assert rows[0]["families_confirmed"] == 2 and rows[0]["progress_fraction"] == pytest.approx(1.0)
+    assert {e["label"] for e in rows[0]["evidence"]} == {"DNS behaviour", "network behaviour"}
+
+
+def test_autonomy_no_change_autotune_rows_are_not_listed(graph_db, state_file):
+    """2026-10-07: a promoted row with old == new changed nothing and is neither listed nor counted per device."""
+    store = GraphStore(str(graph_client.GRAPH_DB_PATH))
+    now = time.time()
+    store.upsert_device("dev_noop", timestamp=now)
+    store._conn.execute(
+        "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+        "proposed_at, canary_until, promoted_at, reason, backtest_run_id) VALUES "
+        "('chg_noop', 'dev_noop', NULL, 'arp_sweep_unique_targets_threshold', 20.0, 20.0, ?, ?, ?, "
+        "'tightened from 21.0 to 20.0', 'run_3')", (now - 50, now - 40, now - 30))
+    store._maybe_commit()
+    store.close()
+    assert "chg_noop" not in {r["change_id"] for r in autonomy_api.get_autonomy(limit=50, token="test")["autotuner"]}
+    devices = {d["device_id"] for d in autonomy_api.get_autonomy_by_device(limit=200, token="test")["devices"]}
+    assert "dev_noop" not in devices
 
 
 def test_autonomy_respects_limit(graph_db):
@@ -175,7 +220,7 @@ def test_autonomy_by_device_groups_by_device_not_globally(graph_db, state_file):
     dev_b = by_id["dev_b"]
     assert dev_b["trust_grants_count"] == 0
     assert dev_b["building_trust_count"] == 1
-    assert dev_b["building_trust"][0]["trust_value"] == pytest.approx(0.3)
+    assert dev_b["building_trust"][0]["evidence"][0]["trust"] == pytest.approx(0.3, abs=1e-3)
 
 
 def test_autonomy_by_device_resolves_real_hostname_from_state_manager(graph_db, state_file):

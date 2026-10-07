@@ -19,6 +19,22 @@ from argus.synthetic.attacks import ATTACK_GENERATORS, benign_drift
 
 _DETECTED_STATES = frozenset({"SUSPICIOUS", "HIGH", "CRITICAL"})
 
+# Live, some decision rules read a raw feature, not the evidence store: the honeypot hard stop checks
+# features["zeek_honeypot_hits"] (argus/decision/engine.py), the same count pipeline.py creates the
+# honeypot_access evidence from. A synthetic attack injects only the evidence, so the sweep supplies the feature the
+# live pipeline would have had (2026-10-07: without it the honeypot class scored 0-10 % every night and drove a
+# tighten-only autotune proposal that could never fix it).
+_LIVE_FEATURE_FOR_EVIDENCE = {"honeypot_access": "zeek_honeypot_hits"}
+
+
+def _live_features(synthetic_items: List[Evidence]) -> Dict[str, float]:
+    features: Dict[str, float] = {}
+    for ev in synthetic_items:
+        name = _LIVE_FEATURE_FOR_EVIDENCE.get(ev.evidence_type)
+        if name:
+            features[name] = features.get(name, 0.0) + float(ev.value or 0.0)
+    return features
+
 
 def clone_device_state(source_store: GraphStore, device_id: str,
                          lookback_seconds: float = 86400.0, now: Optional[float] = None) -> GraphStore:
@@ -81,7 +97,8 @@ def inject_and_evaluate(source_store: GraphStore, device_id: str, attack_class: 
                 target_domain = ev.destination_id
                 break
         rep = (reputation_classifier or ReputationClassifier()).classify(target_domain)
-        decision = (decision_engine or DecisionEngine()).evaluate(evidence_list, rep, now=now)
+        decision = (decision_engine or DecisionEngine()).evaluate(
+            evidence_list, rep, features=_live_features(synthetic_items) or None, now=now)
     finally:
         clone.close()
 

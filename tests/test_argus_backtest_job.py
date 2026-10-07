@@ -600,7 +600,15 @@ check("check_reputation_floor_retroactive_misses_and_rollback: rolls back a "
 # --- bocpd_hazard_rate generator: a confirmed incident with NO preceding regime_change tightens (raises) the hazard rate ---
 store_bocpd1 = GraphStore(":memory:")
 store_bocpd1.upsert_device("bocpd_dev_a", device_type="iot", timestamp=CB_NOW)
-_add_confirmed_threat_decision(store_bocpd1, "bocpd_dev_a", timestamp=CB_NOW - 100)  # no regime_change evidence at all
+_add_confirmed_threat_decision(store_bocpd1, "bocpd_dev_a", timestamp=CB_NOW - 100)  # no regime_change BEFORE it
+# 2026-10-07: a regime detector must be running on this network at all (some regime_change evidence in the window,
+# here on another device, long before) -- otherwise there is no signal and no proposal (checked below).
+store_bocpd1.upsert_device("bocpd_other", device_type="iot", timestamp=CB_NOW)
+store_bocpd1.insert_evidence(Evidence(
+    device_id="bocpd_other", destination_id=NO_DESTINATION, evidence_type="regime_change",
+    independence_family="behavioral_baseline", timestamp=CB_NOW - 400000, source="baseline_engine",
+    confidence=1.0, value=1.0,
+))
 _insert_passing_backtest_run(store_bocpd1, "bocpd_run_1", CB_NOW)
 bocpd_drift1 = backtest_job.compute_drift_result(store_bocpd1, now=CB_NOW)
 bocpd_proposals1 = backtest_job._propose_bocpd_hazard_changes(store_bocpd1, bocpd_drift1, "bocpd_run_1", CB_NOW)
@@ -611,6 +619,38 @@ check("_propose_bocpd_hazard_changes: a confirmed incident with no preceding "
       len(bocpd_device_proposals1) == 1 and bocpd_device_proposals1[0]["accepted"]
       and bocpd_device_proposals1[0]["proposed_new_value"] > backtest_job._BOCPD_HAZARD_DEFAULT,
       f"got {bocpd_device_proposals1}")
+
+# --- 2026-10-07: no regime detector producing evidence here -> no signal, no proposal at any scope ---
+# (.94: BOCPD runs only on the shadow ingest host, so every confirmed incident read as a "missed shift" (0/n)
+# and the hazard rate was raised every passing night.)
+store_bocpd0 = GraphStore(":memory:")
+store_bocpd0.upsert_device("bocpd_dev_z", device_type="iot", timestamp=CB_NOW)
+for i in range(5):
+    _add_confirmed_threat_decision(store_bocpd0, "bocpd_dev_z", timestamp=CB_NOW - 100 - i)
+_insert_passing_backtest_run(store_bocpd0, "bocpd_run_0", CB_NOW)
+bocpd_proposals0 = backtest_job._propose_bocpd_hazard_changes(
+    store_bocpd0, backtest_job.compute_drift_result(store_bocpd0, now=CB_NOW), "bocpd_run_0", CB_NOW)
+check("_propose_bocpd_hazard_changes: with no regime_change evidence anywhere on the network (no regime detector "
+      "running) confirmed incidents are not 'missed shifts' -- no proposal at any scope",
+      bocpd_proposals0 == [], f"got {bocpd_proposals0}")
+
+# --- 2026-10-07: reputation recall counts only threats a floor in range could have caught ---
+store_rep0 = GraphStore(":memory:")
+store_rep0.upsert_device("rep_dev_z", device_type="iot", timestamp=CB_NOW)
+for i in range(5):     # confirmed threats with reputation score 0 (DNS/behaviour findings, not reputation ones)
+    _add_confirmed_decision_with_autotune_state(
+        store_rep0, "rep_dev_z", timestamp=CB_NOW - 100 - i,
+        autotune_state={"reputation_tier_suspicious_floor": 2.0, "reputation_tier_high_floor": 4.0,
+                        "reputation_vt_score": 0.0, "reputation_ti_score": 0.0, "reputation_abuse_score": 0.0})
+_insert_passing_backtest_run(store_rep0, "rep_run_0", CB_NOW)
+rep_proposals0 = backtest_job._propose_reputation_floor_changes(
+    store_rep0, backtest_job.compute_drift_result(store_rep0, now=CB_NOW), "rep_run_0", CB_NOW)
+check("_propose_reputation_floor_changes: confirmed threats whose reputation score no floor in range could clear "
+      "(score 0) are not reputation misses -- no proposal (was: lower both floors every night, 0/160 on .94)",
+      rep_proposals0 == [], f"got {rep_proposals0}")
+check("_reputation_recall_hits_totals: those threats are not counted at all",
+      backtest_job._reputation_recall_hits_totals(store_rep0, ["rep_dev_z"], "reputation_tier_suspicious_floor",
+                                                  CB_NOW - 86400) == {})
 
 # --- bocpd_hazard_rate generator: flapping (repeated uncorroborated regime_change) blocks loosening ---
 store_bocpd2 = GraphStore(":memory:")

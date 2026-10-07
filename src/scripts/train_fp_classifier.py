@@ -1110,8 +1110,10 @@ def _propose_and_promote(engine: AutotuneEngine, store: GraphStore, parameter: s
             backtest_run_id=propose_run_id, now=now, default=default,
         )
         if not result.accepted:
-            LOGGER.warning(f"[AUTOTUNE] propose_change rejected for {parameter} "
-                            f"(device_id={device_id}, device_type={device_type}): {result.reason}")
+            # "no change" (the value is already in effect) is the normal steady state, not a rejection to warn about.
+            log = LOGGER.info if result.reason.startswith("no change") else LOGGER.warning
+            log(f"[AUTOTUNE] propose_change rejected for {parameter} "
+                f"(device_id={device_id}, device_type={device_type}): {result.reason}")
     except Exception as exc:
         LOGGER.error(f"[AUTOTUNE] propose_change failed for {parameter} "
                       f"(device_id={device_id}, device_type={device_type}, non-fatal): {exc}")

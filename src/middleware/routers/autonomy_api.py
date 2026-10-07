@@ -32,7 +32,8 @@ from fastapi import APIRouter, Depends, Query
 from middleware.auth import verify_token, CONFIG
 from middleware.graph_client import open_store
 from argus.autotune.engine import AutotuneEngine, TUNABLE_PARAMETERS, _LESS_SENSITIVE_DIRECTION
-from argus.cl_afpe.composite_trust import _SUPPRESSION_TRUST_FLOOR, pattern_hypothesis
+from argus.cl_afpe.composite_trust import (_MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST, _SUPPRESSION_TRUST_FLOOR,
+                                           group_patterns)
 from core.state_guard import StateManager
 from middleware.state_client import get_cached_state_manager
 from middleware.humanize import resolve_device_identity
@@ -108,11 +109,15 @@ def _threshold_status(row: Dict[str, Any]) -> str:
 
 
 def _serialize_threshold_history(rows: List[Dict[str, Any]], sm) -> List[Dict[str, Any]]:
+    """Every proposal that CHANGES a value. Rows with old == new are left out (2026-10-07: 27 such rows on .94 were
+    listed per device as changes; AutotuneEngine.propose_change() no longer records them)."""
     out = []
     for row in rows:
         parameter = row.get("parameter", "")
         old_value = float(row.get("old_value") or 0.0)
         new_value = float(row.get("new_value") or 0.0)
+        if abs(new_value - old_value) < 1e-12:
+            continue
         # 2026-09-28 (console audit, user request: "Display always hostname and
         # ip address instead of device id"): a global/category-scoped row's own
         # device_id is None -- resolve_device_identity() falls back to
@@ -168,26 +173,58 @@ def _serialize_trust_grants(edges: List[Dict[str, Any]], sm) -> List[Dict[str, A
     return out
 
 
-def _serialize_building_trust(rows: List[Dict[str, Any]], sm) -> List[Dict[str, Any]]:
+_FAMILY_LABELS: Dict[str, str] = {
+    "dns_behavior": "DNS behaviour", "network_behavior": "network behaviour",
+    "cross_device_correlation": "seen on other devices", "network_recon": "network scanning",
+    "data_transfer_pattern": "data transfer", "reputation": "destination reputation",
+    "zeek_network": "connection log", "tls_fingerprint": "TLS fingerprint",
+}
+_DESTINATION_LABELS: Dict[str, str] = {
+    "private": "a device in this network", "public": "the internet", "cdn": "a cloud/CDN service",
+    "telemetry": "a telemetry service", "multicast": "local broadcast", "loopback": "itself",
+}
+
+
+def _pattern_status(p: Dict[str, Any]) -> str:
+    seen, confirmed = len(p["families"]), p["families_confirmed"]
+    if p["trusted"]:
+        return "Learned: stays quiet"
+    if seen < _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST:
+        return "Needs a second kind of evidence"
+    return f"{confirmed} of {_MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST} kinds of evidence confirmed"
+
+
+def _serialize_building_trust(rows: List[Dict[str, Any]], sm, limit: int = 0) -> List[Dict[str, Any]]:
+    """One entry per alert pattern the false-alarm filter is learning (2026-10-07; was one row per evidence family,
+    which read as unrelated rows): which device, which alert kind, towards what, and for each kind of evidence how
+    far it is toward the bar. Same grouping and rule as the gate itself (composite_trust.group_patterns())."""
     out = []
-    for row in rows:
-        trust_value = float(row.get("trust_value") or 0.0)
-        identity = resolve_device_identity(row.get("device_id"), sm)
+    for p in group_patterns(rows):
+        identity = resolve_device_identity(p["device_id"], sm)
+        families = sorted(p["families"].items(), key=lambda kv: -kv[1])
+        top = [min(1.0, t / _SUPPRESSION_TRUST_FLOOR) for _, t in families[:_MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST]]
         out.append({
-            "device_id": row.get("device_id"),
+            "device_id": p["device_id"],
             "device_hostname": identity["hostname"],
             "device_ip": identity["ip"],
             "device_display": identity["display"],
-            "behavior_fingerprint": row.get("behavior_fingerprint"),
-            "destination_class": row.get("destination_class"),
-            "hypothesis": pattern_hypothesis(row.get("hypothesis_id")),    # rows from before 10-07: raw signature
-            "evidence_family": row.get("evidence_family"),
-            "trust_value": trust_value,
+            "behavior_fingerprint": p["behavior_fingerprint"],
+            "destination_class": p["destination_class"],
+            "destination_label": _DESTINATION_LABELS.get(p["destination_class"], p["destination_class"]),
+            "hypothesis": p["hypothesis"],
+            "evidence": [{"family": f, "label": _FAMILY_LABELS.get(f, f), "trust": round(t, 3),
+                          "progress": round(min(1.0, t / _SUPPRESSION_TRUST_FLOOR), 3),
+                          "confirmed": t >= _SUPPRESSION_TRUST_FLOOR} for f, t in families],
+            "families_confirmed": p["families_confirmed"],
+            "families_needed": _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST,
+            "trusted": p["trusted"],
+            "status": _pattern_status(p),
+            # both strongest kinds of evidence toward the bar, averaged: 100 % = learned
+            "progress_fraction": sum(top) / _MIN_DISTINCT_FAMILIES_TO_BUILD_TRUST,
             "trust_floor": _SUPPRESSION_TRUST_FLOOR,
-            "progress_fraction": min(1.0, trust_value / _SUPPRESSION_TRUST_FLOOR) if _SUPPRESSION_TRUST_FLOOR else 0.0,
-            "last_updated": row.get("last_updated"),
+            "last_updated": p["last_updated"],
         })
-    return out
+    return out[:limit] if limit else out
 
 
 @router.get("/api/autonomy")
@@ -197,13 +234,13 @@ def get_autonomy(limit: int = Query(50, ge=1, le=200), token: str = Depends(veri
             return {"autotuner": [], "trust_grants": [], "building_trust": []}
         threshold_rows = store.get_recent_threshold_history(limit)
         trust_edges = store.get_edges(relation="trusts", limit_most_recent=limit)
-        building_trust_rows = store.get_recent_composite_trust(limit)
+        building_trust_rows = store.get_recent_composite_trust(limit * 20)   # rows -> patterns: fetch enough rows
 
     sm = _load_state_manager()
     return {
         "autotuner": _serialize_threshold_history(threshold_rows, sm),
         "trust_grants": _serialize_trust_grants(trust_edges, sm),
-        "building_trust": _serialize_building_trust(building_trust_rows, sm),
+        "building_trust": _serialize_building_trust(building_trust_rows, sm, limit),
     }
 
 
@@ -273,7 +310,7 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
         if store is None:
             return {"devices": [], "by_category": []}
         trust_edges = store.get_edges(relation="trusts", limit_most_recent=limit)
-        building_trust_rows = store.get_recent_composite_trust(limit)
+        building_trust_rows = store.get_recent_composite_trust(limit * 20)   # rows -> patterns: fetch enough rows
         threshold_rows = store.get_recent_threshold_history(limit)
 
     sm = _load_state_manager()

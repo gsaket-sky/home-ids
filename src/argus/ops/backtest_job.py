@@ -931,9 +931,15 @@ def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], par
     already cleared this SAME decision's own recorded floor -- the floor that was
     actually in effect when the decision was made, not today's (a decision made under
     a since-changed floor must be judged against the floor it actually saw, or a
-    promotion during the window would corrupt this recall calculation)."""
+    promotion during the window would corrupt this recall calculation).
+
+    2026-10-07: only threats the floor could have caught count. A confirmed threat whose score cannot clear even the
+    parameter's LOWEST allowed floor (TUNABLE_PARAMETERS min) was not a reputation finding at all -- most confirmed
+    threats are DNS/behaviour findings with a reputation score of 0. Counting them made this read 0/160 on .94 every
+    night and proposed lowering both floors every night, a tightening no floor value could ever satisfy."""
     if not device_ids:
         return {}
+    lowest_floor = TUNABLE_PARAMETERS[parameter]["min"]
     device_ids = _with_merged_ids(store, device_ids)
     placeholders = ",".join("?" * len(device_ids))
     rows = store._conn.execute(
@@ -953,9 +959,11 @@ def _reputation_recall_hits_totals(store: GraphStore, device_ids: List[str], par
         score, floor_at_decision = _reputation_score_and_floor(payload, parameter)
         if score is None or floor_at_decision is None:
             continue
+        suspicious = parameter == _REPUTATION_SUSPICIOUS_PARAMETER
+        if not (score > lowest_floor if suspicious else score >= lowest_floor):
+            continue                               # no floor in range would have caught it: not a reputation miss
         n += 1
-        comparison = score > floor_at_decision if parameter == _REPUTATION_SUSPICIOUS_PARAMETER \
-            else score >= floor_at_decision
+        comparison = score > floor_at_decision if suspicious else score >= floor_at_decision
         if comparison:
             hits += 1
     return {"reputation_recall": (hits, n)} if n else {}
@@ -1087,6 +1095,13 @@ def _propose_bocpd_hazard_changes(store: GraphStore, drift: Dict[str, Any], run_
     miss can still force a tighten regardless -- becoming MORE cautious is never
     something flapping evidence should block)."""
     since = now - _BOCPD_LOOKBACK_SECONDS
+    # 2026-10-07: no regime_change evidence anywhere on the network in the window means no regime detector is
+    # producing it here (BOCPD runs only on the shadow ingest host, see cl_afpe/engine.py's _DEFAULT_REGIME_ID note).
+    # Then every confirmed incident counted as a "missed shift" (0/n on .94) and the hazard rate was raised every
+    # night -- tuning a detector that is not running. No signal, no proposal.
+    if store._conn.execute("SELECT 1 FROM evidence WHERE evidence_type='regime_change' AND timestamp >= ? LIMIT 1",
+                           (since,)).fetchone() is None:
+        return []
     engine = AutotuneEngine(store)
     bounds = TUNABLE_PARAMETERS[_BOCPD_HAZARD_PARAMETER]
     direction = _LESS_SENSITIVE_DIRECTION[_BOCPD_HAZARD_PARAMETER]

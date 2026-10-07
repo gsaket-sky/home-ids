@@ -72,6 +72,16 @@ check("inject_and_evaluate: a real majority of the 7 attack classes are "
       "not inert",
       len(detected_classes) >= 4, f"detected={detected_classes}")
 
+# 2026-10-07: the honeypot hard stop reads features["zeek_honeypot_hits"] (the live pipeline's count), not the
+# evidence store. The sweep used to pass no features, so this class scored 0-10 % every night on .94 and drove a
+# tighten-only autotune proposal no parameter could satisfy.
+hp = injector.inject_and_evaluate(source, device, "honeypot_touch", intensity="high", now=NOW + 150)
+check("inject_and_evaluate[honeypot_touch]: detected through the real hard stop, given the feature the live "
+      "pipeline derives from the same touch", hp["detected"] and hp["decision_path"] == "hard_stop",
+      f"got state={hp['state']} path={hp['decision_path']}")
+check("inject_and_evaluate: every one of the 7 attack classes is detectable at high intensity",
+      sorted(detected_classes) == sorted(ATTACK_GENERATORS), f"detected={detected_classes}")
+
 # =============================================================================
 # Unknown attack class raises, doesn't silently no-op
 # =============================================================================
