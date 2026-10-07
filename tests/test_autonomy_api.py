@@ -274,6 +274,24 @@ def test_autonomy_by_device_device_scoped_autotuner_change_appears_on_its_device
     assert result["by_category"] == []
 
 
+def test_autonomy_by_device_rolled_back_change_is_not_a_device_change(graph_db, state_file):
+    """2026-10-07: a rolled-back proposal changed nothing that applies now -- not listed or counted per device (on
+    .94 every device showed 'self-tuning changes' that were all rolled back), still kept in the global history."""
+    now = time.time()
+    with graph_client.open_store() as store:
+        store.upsert_device("dev_rb", timestamp=now)
+        store._conn.execute(
+            "INSERT INTO threshold_history (change_id, device_id, device_type, parameter, old_value, new_value, "
+            "proposed_at, canary_until, rolled_back_at, reason, backtest_run_id) VALUES "
+            "('chg_rb', 'dev_rb', NULL, 'hard_stop_candidate_sensitivity', 0.9, 0.85, ?, ?, ?, "
+            "'tightening | rollback: mis-measured signal', 'run_rb')", (now - 60, now - 50, now - 40))
+        store._maybe_commit()
+    devices = {d["device_id"]: d for d in autonomy_api.get_autonomy_by_device(limit=200, token="test")["devices"]}
+    assert "dev_rb" not in devices
+    history = {r["change_id"]: r for r in autonomy_api.get_autonomy(limit=50, token="test")["autotuner"]}
+    assert history["chg_rb"]["status"] == "rolled_back"
+
+
 def test_autonomy_by_device_category_scoped_autotuner_change_appears_in_by_category(graph_db, state_file):
     with graph_client.open_store() as store:
         store._conn.execute(

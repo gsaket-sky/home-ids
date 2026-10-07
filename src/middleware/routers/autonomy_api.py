@@ -360,6 +360,11 @@ def get_autonomy_by_device(limit: int = Query(200, ge=1, le=1000), token: str = 
             bucket["last_activity_at"] = ts
 
     for a in autotuner:
+        # Per device / category: only changes in effect or on trial. A rolled-back proposal changed nothing that
+        # applies now (2026-10-07: on .94 every device was listed with "self-tuning changes" that were all rolled
+        # back); the global Autotuner history keeps the full record with its status.
+        if a.get("status") == "rolled_back":
+            continue
         ts = a.get("proposed_at")
         if a.get("device_id"):
             bucket = _bucket(a["device_id"])

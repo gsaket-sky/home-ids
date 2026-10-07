@@ -1,5 +1,5 @@
 {
- "commit": "bbb79505c6347d6b69672f5da572ac78b0d98a30",
+ "commit": "5fafc79dc5b6688c469f0db34c1dcec38ea51740",
  "files": {
   ".env.example": "07072b6d8853462a1a80d365d21dca153e1a38a04f2e277dd3e25b0ed38c03de",
   "config.yaml.example": "ec6a50f64bc73d04e91eb39c34e64c98b20af2b07989ab614a1528550c826626",
@@ -122,7 +122,7 @@
   "src/middleware/main_api.py": "28fecfe3f6ffd1311b69e547aaccc9a7b1d03344775c96bac3158f9f209415e1",
   "src/middleware/routers/__init__.py": "cbacc8761833b64aa017a3df2d933c3897f9f19997044efaea49f206ec1b205a",
   "src/middleware/routers/_alert_log_utils.py": "dba9ecc3918650184b1b9fa1554eb1ecc190fcd92f3882e5f73f1c0de66b716e",
-  "src/middleware/routers/autonomy_api.py": "22c77a62a161a92690c6b57153638371b969e4805c907daf15095319750e5ee1",
+  "src/middleware/routers/autonomy_api.py": "7a8356103a7e7da5951d98475af23dab53ebd1f6de70272bee1ca2ca78128baa",
   "src/middleware/routers/config_api.py": "11d88bda37579218dfa2ff305fa369db409fb01bb93949234313544c1beca2c1",
   "src/middleware/routers/devices_api.py": "8096794da1672109650b120687659a390d7127ee407e62fe84e564a11a2e9d27",
   "src/middleware/routers/fritzbox_api.py": "1c78b2cc6c89b168358a2e641745b0380808676693843f93a270b319ccf715d3",
@@ -205,7 +205,7 @@
   "tests/test_argus_young_domain_evidence.py": "0e557970bee5825f6c7b8e8c95fc06a6ab6b3f2129452b0e80b808863c0db5d4",
   "tests/test_argus_zeek_log_prune.py": "73f166568d5298338391b83610fa75b8e855885e1304785ef12eddbdc39b412c",
   "tests/test_atomic_writes_and_intel_remove.py": "b492e5cb5c4c38bda3a5a9142dfc40add542cd4f68c88fbe9f393115477b2d75",
-  "tests/test_autonomy_api.py": "f2411d6a1bdfa7db208bdcd3a15359905ac85b5411b76303c3a21f5d167f6ce2",
+  "tests/test_autonomy_api.py": "f6b4ed1fb5aaa0f9e369160d74b74830751f73612d01471b5e0eb31b11bf3401",
   "tests/test_config_api.py": "2ed17b5763b338ef24a9293f4705a2e82f2ea954a07498cea39e0681fa3c7b9b",
   "tests/test_device_last_seen_traffic_only.py": "35dc3e50ab6546f29280c7290b8d71b4e60cf1fdb93e172dfccd8a4a761bc460",
   "tests/test_device_merge_carryover.py": "b40dbf98c4df4b85c68272a3ee1cf6858bcfd03aaeb0aa7047fc80d94cbac3df",
@@ -336,7 +336,7 @@
   "tests/test_zeek_collector_overflow_logging.py": "f7912425a81c0b46f01477215b3b566e7a9bda1fe61d5f6853f33df5476596f1",
   "tests/test_zeek_extractor_thread_safety.py": "753db7e4d8c1b24412dd2b6bb003eafc4d82147dda6b730a81bdabfba0089e7d",
   "tests/test_zeek_s0_rej_discovery_targets.py": "2603c4e69a3b7e8f00a560972ccccb7eba32469561ad432716e88417ad9265b9",
-  "web/console.html": "c4330206305e59f555e5a73762ffcd1eb550c747b1b141d77bcee585ca87052b",
+  "web/console.html": "bdbb884a3f0f431f9e9ef48023cfad5937e349cae7fbd6201f47f80716022733",
   "zeek_scripts/local-arp-log.zeek": "e45400af4fbe1b93417866d1e5a513646aebb80f4d3b3338214fb4d6ea944767",
   "zeek_scripts/local-dhcp-fingerprint.zeek": "ce153c1ab6ef41389206fa4c167ebf30630226efd93546eb498fe8de564ccc56"
  }

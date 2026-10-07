@@ -1801,7 +1801,7 @@ function renderAutonomyByDevicePanel(){
   }).join('');
 
   return '<div class="panel" style="margin-top:16px;">'+header
-    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Composite trust is device-scoped only. Autotuner changes shown here are DEVICE-scoped specifically -- see "Per-category autotuner status" below for category-wide changes, and the Autotuner history panel above for global ones. Click a row to see its own detail.</div>'
+    + '<div style="padding:10px 16px 0;font-size:10.5px;color:var(--text-faint);">Composite trust is device-scoped only. Self-tuning changes shown here are the ones in effect or on trial for that device (rolled-back proposals stay in the Autotuner history above only), DEVICE-scoped specifically -- see "Per-category autotuner status" below for category-wide changes, and the Autotuner history panel above for global ones. Click a row to see its own detail.</div>'
     + '<div class="table-wrap"><table><thead><tr><th>Device</th><th>Trust grants</th><th>Alerts learning</th><th>Self-tuning changes</th><th>Last activity</th><th></th></tr></thead><tbody>'+deviceRows+'</tbody></table></div></div>'
     + '<div class="panel" style="margin-top:16px;">'+categoryHeader
     + '<div class="table-wrap"><table><thead><tr><th>Category (device type)</th><th>Autotuner changes</th><th>Last activity</th><th></th></tr></thead><tbody>'+categoryRows+'</tbody></table></div></div>';
