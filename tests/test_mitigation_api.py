@@ -70,19 +70,40 @@ def test_isolate_device_router_failure_returns_502(state_file, monkeypatch):
     assert exc.value.status_code == 502
 
 
-@pytest.mark.xfail(strict=True, reason="known bug (2026-10-07): since W-01 the API builds a state-only IPSMitigator "
-                   "(start_workers=False), which is never armed, so the console tarpit always answers 502. Fix pending "
-                   "(master TODO 0b); remove this marker with the fix.")
-def test_tarpit_device_success(state_file, monkeypatch):
-    # IPSMitigator.__init__ sets self.tarpit_armed = False whenever scapy/raw-socket
-    # access isn't available (true in any normal test environment) -- a class-level
-    # monkeypatch of the attribute wouldn't survive __init__ setting the instance
-    # attribute, so patch the arming step itself instead.
-    def fake_init_arp_tarpit(self):
-        self.tarpit_armed = True
-    monkeypatch.setattr(IPSMitigator, "_init_arp_tarpit", fake_init_arp_tarpit)
+def _publish_engine_tarpit(state_file, armed):
+    """What the engine's own IPSMitigator does at start (_publish_engine_tarpit_state), then flushes."""
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    engine_side = IPSMitigator(config={"state_path": str(state_file)}, state_manager=sm, start_workers=False)
+    engine_side.tarpit_armed = armed
+    engine_side._publish_engine_tarpit_state()
+    sm.flush_to_disk()
+
+
+def test_tarpit_device_success(state_file):
+    """2026-10-07: the console tarpit always answered 502 since W-01 -- the API's state-only mitigator was never
+    armed. It now follows the ENGINE's published armed state, registers the target in the shared state, and the
+    engine applies it on the sync signal."""
+    _publish_engine_tarpit(state_file, armed=True)
     result = mitigation_api.tarpit_device("dev_a", mitigation_api.ReasonPayload(), token="test")
     assert result["status"] == "success"
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    targets = sm.get_ips_state()["tarpit_targets"]
+    assert targets["192.168.1.50"]["dev_id"] == "dev_a" and targets["192.168.1.50"]["mac"] == "aa:bb:cc:dd:ee:ff"
+    assert (state_file.parent / ".ipc_sync_signal").exists()          # the engine is told to pick it up
+
+
+@pytest.mark.parametrize("published", [False, None])
+def test_tarpit_device_refused_when_the_engine_tarpit_is_not_armed(state_file, published):
+    if published is not None:
+        _publish_engine_tarpit(state_file, armed=published)        # engine started without raw-socket access
+    with pytest.raises(HTTPException) as exc:                       # None: engine never published (not started yet)
+        mitigation_api.tarpit_device("dev_a", mitigation_api.ReasonPayload(), token="test")
+    assert exc.value.status_code == 502 and "engine" in exc.value.detail
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    assert sm.get_ips_state().get("tarpit_targets", {}) == {}
 
 
 def test_release_device_console(state_file):

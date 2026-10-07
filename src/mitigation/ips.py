@@ -82,6 +82,8 @@ import socket as _socket_mod
 from mitigation import l2_raw
 from mitigation import pihole_auth
 L2_AVAILABLE = hasattr(_socket_mod, "AF_PACKET")
+# Key in the shared IPS state: {"armed": bool, "updated_at": epoch} as the engine's own IPSMitigator found it at start.
+ENGINE_TARPIT_STATE_KEY = "engine_tarpit"
 
 
 def check_pihole_health(config: Dict[str, Any], timeout: float = 3.0,
@@ -169,14 +171,19 @@ class IPSMitigator:
         self._router_isolated_devices = ips_state.get("router_isolated_devices", {})
         self._operator_released_devices = ips_state.get("operator_released_devices", {})
         
+        self._state_only = not start_workers
         if not start_workers:
-            # State-only instance (W-01): no tarpit threads, no sockets, no background workers.
-            self.tarpit_armed = False
+            # State-only instance (W-01): no tarpit threads, no sockets, no background workers. A tarpit target it
+            # registers is applied by the ENGINE's tarpit (pipeline.py reloads tarpit_targets on .ipc_sync_signal),
+            # so "armed" here means the engine's tarpit is armed, as the engine last published it. Before
+            # 2026-10-07 this was a hard False, so the console's Tarpit always answered 502.
+            self.tarpit_armed = bool((ips_state.get(ENGINE_TARPIT_STATE_KEY) or {}).get("armed"))
             self._tarpit_thread = None
             self._ndp_tarpit_thread = None
             return
 
         self._init_arp_tarpit()
+        self._publish_engine_tarpit_state()
         self._sync_metrics_from_state()
 
         interactive_mode = bool(self.config.get("interactive_blocking_enabled", False))
@@ -218,6 +225,16 @@ class IPSMitigator:
 
         LOGGER.info("Starting Router Isolation Reconcile Worker Thread...")
         threading.Thread(target=self._router_reconcile_worker, daemon=True, name="ips_router_reconcile_worker").start()
+
+    def _publish_engine_tarpit_state(self) -> None:
+        """The engine's instance records whether its tarpit is armed in the shared IPS state, for state-only instances
+        in the API process (see __init__). Written at every engine start, so a restart without raw-socket access
+        turns it off again."""
+        try:
+            self.state_manager.update_ips_state_atomic(
+                {ENGINE_TARPIT_STATE_KEY: {"armed": bool(self.tarpit_armed), "updated_at": time.time()}})
+        except Exception as exc:
+            LOGGER.warning("Could not publish the tarpit's armed state: %s", exc)
 
     def _init_arp_tarpit(self) -> None:
         # BUGFIX (live audit): tarpit_armed is what the boot-time Telegram status
@@ -960,6 +977,9 @@ class IPSMitigator:
         if not bool(self.config.get("ips_tarpit_enabled", True)):
             return False, "Tarpit is disabled in config (ips_tarpit_enabled=false)."
         if not self.tarpit_armed:
+            if getattr(self, "_state_only", False):
+                return False, ("The engine's Layer-2 tarpit isn't armed (no AF_PACKET support or no raw-socket "
+                               "permission where the engine runs, or the engine has not started yet) -- see the engine log.")
             return False, "Tarpit subsystem isn't armed on this server (no AF_PACKET support, or no raw-socket permission) -- see server logs."
         if not ip or ip == "unknown":
             return False, "No known IP address for this device -- the tarpit needs one."
@@ -977,6 +997,8 @@ class IPSMitigator:
         except Exception:
             pass
         LOGGER.critical("⚠️ [OPERATOR TARPIT] Console-requested Layer-2 isolation for %s (%s).", hostname, ip)
+        if getattr(self, "_state_only", False):
+            return True, "Tarpit requested (Layer-2 ARP/NDP) -- the engine applies it within one cycle."
         return True, "Tarpitted (Layer-2 ARP/NDP)."
 
     def _arp_tarpit_loop(self) -> None:
