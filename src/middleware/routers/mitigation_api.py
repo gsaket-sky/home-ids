@@ -63,6 +63,18 @@ def _resolve_identity(sm: StateManager, device_id: str) -> Dict[str, Any]:
         }
 
 
+def _require_exact_identity(sm: StateManager, device_id: str) -> None:
+    """An operator containment action acts only on a device identified exactly (StateManager.identity_check: its own
+    MAC, no other device with that MAC or currently using its address) -- otherwise it could cut off another device
+    that shares an address or a record with it (2026-10-12: on .94 a laptop's addresses were filed under a phone).
+    Not exact means wait: the device is identified again the next time its traffic is observed."""
+    check = sm.identity_check(device_id)
+    if not check["exact"]:
+        raise HTTPException(status_code=409, detail=f"This device is not identified exactly yet: {check['reason']} "
+                                                    "It is identified again the next time its traffic is observed; "
+                                                    "try again then.")
+
+
 def _touch_sync_signal() -> None:
     Path(CONFIG.get("state_path", "state/ids_state.json")).parent.joinpath(".ipc_sync_signal").touch()
 
@@ -114,6 +126,7 @@ def isolate_device_router(device_id: str, payload: ReasonPayload, token: str = D
     sm = _load_state_manager()
     device_id = sm.resolve_merge_redirect(device_id)   # a link from before a merge names the old id
     identity = _resolve_identity(sm, device_id)
+    _require_exact_identity(sm, device_id)
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_isolate_router(
         dev_id=device_id, ip=identity["ip"], mac=identity["mac"], hostname=identity["hostname"],
@@ -131,6 +144,7 @@ def tarpit_device(device_id: str, payload: ReasonPayload, token: str = Depends(v
     sm = _load_state_manager()
     device_id = sm.resolve_merge_redirect(device_id)   # a link from before a merge names the old id
     identity = _resolve_identity(sm, device_id)
+    _require_exact_identity(sm, device_id)
     ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
     success, reason = ips.operator_tarpit(
         dev_id=device_id, ip=identity["ip"], mac=identity["mac"], hostname=identity["hostname"],

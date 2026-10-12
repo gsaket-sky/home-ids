@@ -241,7 +241,7 @@ class LiveIdentityManager(DeviceIdentityManager):
         self._mirror_identity_signals(locked_state.device_id, mac_addr, client_ip, time.time())
 
     def resolve_device_id(self, client_ip: str, mac_addr: Optional[str] = None,
-                            hostname: Optional[str] = None) -> str:
+                            hostname: Optional[str] = None, *, mac_observed: bool = False) -> str:
         mac_addr = mac_addr or "unknown"
         randomized = mac_addr != "unknown" and is_locally_administered_mac(mac_addr)
 
@@ -308,12 +308,27 @@ class LiveIdentityManager(DeviceIdentityManager):
         # core/identity.py's own resolve_device_id() got the same fix -- this class
         # fully overrides that method rather than delegating to it (see this module's
         # docstring), so the fix has to be applied here too, not inherited.
-        return self.state_manager.resolve_merge_redirect(v13_resolve_device_id(
+        # ... and a redirect the observed MAC proves wrong is undone, not followed (_follow_merge_redirect, 2026-10-12).
+        return self._follow_merge_redirect(v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
-        ))
+        ), mac_addr, mac_observed)
+
+    def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
+        """Mirrors an undone merge into the graph: the id is un-tombstoned, so what the graph holds under it (evidence,
+        decisions, device-scoped thresholds) is its own again instead of resolving to the device it was wrongly merged
+        into. Best-effort like every graph mirror; the identity-reconcile worker replays a failed one from the engine's
+        split record (StateManager.get_identity_splits)."""
+        if self._graph_store is None:
+            return
+        try:
+            self._graph_store.unmerge_device(device_id)
+        except Exception as e:
+            LOGGER.warning("Failed to mirror the identity split of %s (was merged into %s) into the graph -- the "
+                           "reconcile worker retries: %s", device_id, former_canonical, e)
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
-                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
+                                      ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any, *,
+                                      event_mac: str = "unknown", mac_observed: bool = False) -> Optional[str]:
         """Runs the state-side merge unchanged (every side effect -- ml_registry/
         familiarity/ips_mitigator/evidence_store/metrics_exporter cleanup -- still
         happens exactly as before), then mirrors the SAME merge into the argus
@@ -321,6 +336,7 @@ class LiveIdentityManager(DeviceIdentityManager):
         for the full design rationale."""
         orphan_id = super()._merge_orphan_if_fragmented(
             client_ip, dev_id, ml_registry, familiarity, ips_mitigator, evidence_store, metrics_exporter,
+            event_mac=event_mac, mac_observed=mac_observed,
         )
         if orphan_id is None or self._graph_store is None:
             return orphan_id

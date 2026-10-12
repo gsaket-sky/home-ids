@@ -261,6 +261,7 @@ state_f.get_or_create(device_id="canonical_f", client_ip="192.168.77.202", hostn
 returned_orphan_id = live_mgr_f._merge_orphan_if_fragmented(
     "192.168.77.201", "canonical_f", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+    event_mac="aa:bb:cc:dd:ee:f0", mac_observed=True,  # what process_*_identities passes once the MAC is observed
 )
 check("F: _merge_orphan_if_fragmented returns the orphan_id that was actually "
       "merged (previously returned None always, discarded by every caller)",
@@ -299,6 +300,7 @@ state_f3.get_or_create(device_id="canonical_f3", client_ip="192.168.77.205", hos
 result_f3 = live_mgr_f3._merge_orphan_if_fragmented(
     "192.168.77.204", "canonical_f3", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+    event_mac="aa:bb:cc:dd:ee:f0", mac_observed=True,  # what process_*_identities passes once the MAC is observed
 )
 check("F: with graph_store=None, the v1-side merge still fully succeeds (the "
       "real, load-bearing merge is never gated on graph availability)",
@@ -320,6 +322,7 @@ state_f4.get_or_create(device_id="canonical_f4", client_ip="192.168.77.207", hos
 result_f4 = live_mgr_f4._merge_orphan_if_fragmented(
     "192.168.77.206", "canonical_f4", ml_registry=None, familiarity=None,
     ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+    event_mac="aa:bb:cc:dd:ee:f0", mac_observed=True,  # what process_*_identities passes once the MAC is observed
 )
 check("F: FAIL-SAFE -- a graph_store.merge_device() failure never raises out to "
       "the caller, and the real v1 merge (already committed by this point) is "
@@ -466,6 +469,7 @@ for rotation_ip in IPV6_ROTATIONS:
     merged_id = live_mgr_i._merge_orphan_if_fragmented(
         rotation_ip, canonical_id_i, ml_registry=None, familiarity=None,
         ips_mitigator=None, evidence_store=None, metrics_exporter=None,
+        event_mac=MAC_I, mac_observed=True,  # the MAC mac-logging observed for this address
     )
     check(f"I: rotation {rotation_ip} -- the orphan created for THIS address is the "
           "one actually merged", merged_id == orphan_id, f"got={merged_id}")

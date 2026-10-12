@@ -66,6 +66,12 @@ def _is_trackable_local_ip(ip: str) -> bool:
         return False
 
 
+def _is_observed(observed_mac: str, mac_addr: str) -> bool:
+    """The event's MAC is the one its traffic was observed from (Zeek), not one filled in from the router's table or a
+    cache. Only an observed MAC may decide that two identities are one device."""
+    return bool(observed_mac) and observed_mac != "unknown" and mac_addr == observed_mac
+
+
 def _is_generic_hostname(hostname: str) -> bool:
     if not hostname or hostname == "unknown":
         return True
@@ -77,6 +83,27 @@ def _is_generic_hostname(hostname: str) -> bool:
     if is_placeholder_hostname(clean_host):   # never an identity anchor or a merge signal
         return True
     return False
+
+
+def router_host_caches(hosts_data: List[Dict[str, Any]]) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    """The router's host list as (by address: {"mac", "name"}, by MAC: {"ip", "name"}). A router lists devices it has
+    not seen for a while with the address they LAST had, which DHCP may have handed to another device since: only an
+    active entry says who uses an address now (2026-10-12; "active" absent = the adapter cannot tell, treated as
+    active). An inactive entry still names its MAC."""
+    by_ip: Dict[str, Dict[str, str]] = {}
+    by_mac: Dict[str, Dict[str, str]] = {}
+    for host in hosts_data or []:
+        ip = host.get("ip")
+        mac = (host.get("mac") or "unknown").lower()
+        name = host.get("name", "unknown") or "unknown"
+        if is_placeholder_hostname(name):   # a random UUID or the router's MAC placeholder
+            name = "unknown"
+        active = host.get("active", True) is not False
+        if ip and active:
+            by_ip[ip] = {"mac": mac, "name": name}
+        if mac and mac != "unknown":
+            by_mac[mac] = {"ip": (ip if active else None) or "unknown", "name": name}
+    return by_ip, by_mac
 
 
 class DeviceIdentityManager:
@@ -146,19 +173,7 @@ class DeviceIdentityManager:
                     poll_timeout = 20.0
                 resp = session.get(webhook_url, headers=headers, timeout=poll_timeout)
                 if resp.status_code == 200:
-                    hosts_data = resp.json()  
-                    new_cache = {}
-                    new_cache_by_mac = {}
-                    for host in hosts_data:
-                        ip = host.get("ip")
-                        mac = host.get("mac", "unknown").lower()
-                        name = host.get("name", "unknown") or "unknown"
-                        if is_placeholder_hostname(name):   # a random UUID or the router's MAC placeholder
-                            name = "unknown"
-                        if ip:
-                            new_cache[ip] = {"mac": mac, "name": name}
-                        if mac and mac != "unknown":
-                            new_cache_by_mac[mac] = {"ip": ip or "unknown", "name": name}
+                    new_cache, new_cache_by_mac = router_host_caches(resp.json())
                     with self._lock:
                         self._fritz_cache = new_cache
                         self._fritz_cache_by_mac = new_cache_by_mac
@@ -186,15 +201,24 @@ class DeviceIdentityManager:
             time.sleep(60)
 
     def _enrich_from_cache(self, ip: str, current_mac: str, current_hostname: str) -> Tuple[str, str]:
+        """Fills in what the event lacks. The MAC the traffic was observed from (current_mac, from Zeek) always wins:
+        the router's table and this cache only fill a MAC that was not observed. Before 2026-10-12 the router's MAC
+        replaced the observed one, so a stale lease entry could hand an address -- and the identity merges that follow
+        from it -- to the device that had the address before."""
+        current_mac = current_mac or "unknown"
+        observed = current_mac != "unknown"
         if ip and ip != "unknown":
             with self._lock:
                 fritz_data = self._fritz_cache.get(ip)
             if fritz_data:
                 f_mac = fritz_data.get("mac", "unknown")
                 f_name = fritz_data.get("name", "unknown")
-                best_mac = f_mac if f_mac != "unknown" else current_mac
-                best_host = f_name if f_name != "unknown" else current_hostname
-                return best_mac, best_host
+                if not (observed and f_mac != "unknown" and f_mac != current_mac):
+                    best_mac = current_mac if observed else f_mac
+                    best_host = f_name if f_name != "unknown" else current_hostname
+                    return best_mac, best_host
+                # The router's entry for this address names another MAC: it describes another device (the address was
+                # handed on), so neither its MAC nor its name applies to this traffic.
 
         # BUGFIX (live audit, continuation session): the IP-keyed lookup above can
         # never match for a dual-stack device's IPv6 addresses at all -- Fritz!Box's
@@ -227,6 +251,8 @@ class DeviceIdentityManager:
                 self._ip_cache[ip] = entry
             else:
                 self._ip_cache.move_to_end(ip)  # promote to MRU
+            if observed and entry["mac"] not in ("unknown", current_mac):
+                entry["hostname"] = "unknown"   # the remembered name was another device's (the address changed hands)
 
             if current_hostname and current_hostname != "unknown":
                 entry["hostname"] = current_hostname
@@ -247,7 +273,32 @@ class DeviceIdentityManager:
             return "unknown"
         return hostname
 
-    def resolve_device_id(self, client_ip: str, mac_addr: Optional[str] = None, hostname: Optional[str] = None) -> str:
+    def _follow_merge_redirect(self, device_id: str, mac_addr: Optional[str], mac_observed: bool) -> str:
+        """resolve_merge_redirect(), except when this traffic's OBSERVED MAC proves the redirect wrong: the id was
+        merged into a device that has a different MAC of its own, so the merge folded another device in (an address is
+        a lease, not an identity -- StateManager). Then the merge is undone (split_merged_id()) and the id is its own
+        device again; without this every later sighting of a wrongly merged id kept landing on the wrong device,
+        since a redirect is permanent (2026-10-12, .94: a laptop's address-anchored ids all redirected to a phone)."""
+        target = self.state_manager.resolve_merge_redirect(device_id)
+        if target == device_id or not mac_observed or not mac_addr or mac_addr == "unknown":
+            return target
+        try:
+            with self.state_manager.lock_device(target) as st:
+                target_mac = getattr(st, "mac_address", "unknown") or "unknown"
+        except KeyError:
+            return target
+        if target_mac == "unknown" or target_mac == mac_addr or self.state_manager.get_device_id_for_mac(mac_addr) == target:
+            return target
+        former = self.state_manager.split_merged_id(device_id, mac_addr)
+        if former:
+            self._on_identity_split(device_id, former)
+        return device_id
+
+    def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
+        """Hook: a merge was undone (LiveIdentityManager mirrors it into the graph)."""
+
+    def resolve_device_id(self, client_ip: str, mac_addr: Optional[str] = None, hostname: Optional[str] = None, *,
+                          mac_observed: bool = False) -> str:
         # DEVICE-IDENTITY FRAGMENTATION FIX (router special-case): a router genuinely has
         # multiple distinct physical MACs (one per LAN/WLAN/WAN interface), so the
         # MAC-first branch below can never fully unify it into one device_id -- its
@@ -318,8 +369,9 @@ class DeviceIdentityManager:
         # identity -- confirmed live via merge_into_canonical()'s own abort-warning
         # firing because the resurrected id is, by definition, "not a currently tracked
         # device". Resolving through the redirect map transparently upgrades any dead id
-        # straight to its live successor, so the resurrection never happens.
-        return self.state_manager.resolve_merge_redirect(result)
+        # straight to its live successor, so the resurrection never happens -- unless the observed MAC proves that
+        # redirect wrong (_follow_merge_redirect).
+        return self._follow_merge_redirect(result, mac_addr, mac_observed)
 
     def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
                                 ips_mitigator: Any = None, familiarity: Any = None,
@@ -345,16 +397,18 @@ class DeviceIdentityManager:
                     hostname = sanitize_hostname(zeek_host) or "unknown"
 
             hostname = self._clean_fake_hostname(hostname)
-            mac_addr = zeek_fx.get_mac(client_ip) if zeek_fx else "unknown"
-            mac_addr, hostname = self._enrich_from_cache(client_ip, mac_addr, hostname)
+            observed_mac = (zeek_fx.get_mac(client_ip) if zeek_fx else None) or "unknown"
+            mac_addr, hostname = self._enrich_from_cache(client_ip, observed_mac, hostname)
 
-            dev_id = self.resolve_device_id(client_ip, mac_addr, hostname)
+            dev_id = self.resolve_device_id(client_ip, mac_addr, hostname,
+                                            mac_observed=_is_observed(observed_mac, mac_addr))
             # DEVICE-IDENTITY FRAGMENTATION FIX: dev_id may differ from a device_id this
             # exact client_ip was ALREADY tracked under (e.g. its MAC just became known
             # for the first time and resolves to a different, richer canonical identity)
             # -- fold that now-orphaned identity in before creating/reusing dev_id below.
             self._merge_orphan_if_fragmented(client_ip, dev_id, ml_registry, familiarity,
-                                              ips_mitigator, evidence_store, metrics_exporter)
+                                              ips_mitigator, evidence_store, metrics_exporter,
+                                              event_mac=mac_addr, mac_observed=_is_observed(observed_mac, mac_addr))
             # PHASE 6: publish/refresh the MAC->device_id binding as soon as we know it, so
             # the NEXT address family (or the next batch's IPv6 row for this same device)
             # can find it via resolve_device_id()'s MAC-first check above.
@@ -426,7 +480,8 @@ class DeviceIdentityManager:
             merged = pop_merged()
 
     def _merge_orphan_if_fragmented(self, client_ip: str, dev_id: str, ml_registry: Any, familiarity: Any,
-                                     ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any) -> Optional[str]:
+                                     ips_mitigator: Any, evidence_store: Any, metrics_exporter: Any, *,
+                                     event_mac: str = "unknown", mac_observed: bool = False) -> Optional[str]:
         """DEVICE-IDENTITY FRAGMENTATION FIX: resolve_device_id() can return a DIFFERENT
         device_id for client_ip than whatever it was already tracked under -- most
         commonly because this IP's MAC just became known and resolves (via the MAC-first
@@ -462,13 +517,35 @@ class DeviceIdentityManager:
         orphan_id = self.state_manager.get_device_id_for_ip(client_ip)
         if not orphan_id or orphan_id == dev_id:
             return None
+        # An address is a lease, not an identity (2026-10-12, StateManager section of the same name). That this address
+        # was last tracked under orphan_id makes orphan_id the same device only when the MAC the traffic came from was
+        # OBSERVED, and orphan_id either never had a MAC of its own (an address-only fragment) or has that same MAC.
+        # An orphan with a different known MAC is another device that used the address before: the address changed
+        # hands -- it leaves the orphan, nothing is merged. Without an observed MAC nothing is decided yet (wait for
+        # exact recognition): a MAC from the router's table or a cache is a guess.
+        orphan_mac = "unknown"
+        try:
+            with self.state_manager.lock_device(orphan_id) as orphan_state:
+                orphan_mac = getattr(orphan_state, "mac_address", "unknown") or "unknown"
+        except KeyError:
+            return None
+        event_mac = event_mac or "unknown"
+        if not mac_observed or event_mac == "unknown":
+            LOGGER.debug("Identity: %s tracked under %s, now resolved to %s without an observed MAC -- not merged.",
+                         client_ip, orphan_id, dev_id)
+            return None
+        if orphan_mac != "unknown" and orphan_mac != event_mac:
+            self.state_manager.release_address(orphan_id, client_ip)
+            LOGGER.info("🔀 ADDRESS CHANGED HANDS: %s moved from device %s (mac %s) to device %s (mac %s) -- different "
+                        "devices, not merged.", client_ip, orphan_id, orphan_mac, dev_id, event_mac)
+            return None
         merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, familiarity=familiarity)
         if not merged:
             return None
         LOGGER.warning(
-            "🔗 RETROACTIVE IDENTITY MERGE: orphan %s folded into canonical %s (ip=%s) -- "
+            "🔗 RETROACTIVE IDENTITY MERGE: orphan %s (mac %s) folded into canonical %s (ip=%s, observed mac %s) -- "
             "its own accumulated state was discarded per merge policy, not blended.",
-            orphan_id, dev_id, client_ip
+            orphan_id, orphan_mac, dev_id, client_ip, event_mac
         )
         self._release_stale_isolation_if_merged(ips_mitigator)
         self._cleanup_merged_orphan(evidence_store, metrics_exporter)
@@ -544,14 +621,16 @@ class DeviceIdentityManager:
                     hostname = sanitize_hostname(resolved_host) or "unknown"
 
             hostname = self._clean_fake_hostname(hostname)
-            mac_addr = zeek_fx.get_mac(src_ip) if zeek_fx else "unknown"
-            mac_addr, hostname = self._enrich_from_cache(src_ip, mac_addr, hostname)
+            observed_mac = (zeek_fx.get_mac(src_ip) if zeek_fx else None) or "unknown"
+            mac_addr, hostname = self._enrich_from_cache(src_ip, observed_mac, hostname)
 
-            dev_id = self.resolve_device_id(src_ip, mac_addr, hostname)
+            dev_id = self.resolve_device_id(src_ip, mac_addr, hostname,
+                                            mac_observed=_is_observed(observed_mac, mac_addr))
             # DEVICE-IDENTITY FRAGMENTATION FIX: see matching comment in
             # process_dns_identities() above.
             self._merge_orphan_if_fragmented(src_ip, dev_id, ml_registry, familiarity,
-                                              ips_mitigator, evidence_store, metrics_exporter)
+                                              ips_mitigator, evidence_store, metrics_exporter,
+                                              event_mac=mac_addr, mac_observed=_is_observed(observed_mac, mac_addr))
             # PHASE 6: see matching comment in process_dns_identities() above.
             if mac_addr and mac_addr != "unknown":
                 self.state_manager.bind_mac(mac_addr, dev_id)

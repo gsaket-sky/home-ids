@@ -226,11 +226,24 @@ def _ipc_block_logic(target: str):
         ips = IPSMitigator(config=CONFIG, state_manager=sm, start_workers=False)
         
         dev_id = target
+        matches = []
         for id_str in sm.get_all_device_ids():
             with sm.lock_device(id_str) as st:
                 if st.client_ip == target or st.mac_address == target:
-                    dev_id = id_str
-                    break
+                    matches.append(id_str)
+        # 2026-10-12: act only on a device identified exactly -- this used to take the FIRST device claiming the
+        # address, so with two claimants it could block the wrong one (StateManager.identity_check).
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail=f"{target} is claimed by {len(matches)} devices "
+                                                        f"({', '.join(matches)}); not blocked. Wait until it is "
+                                                        "identified exactly (src/identify_device.py shows the state).")
+        if matches:
+            dev_id = matches[0]
+            check = sm.identity_check(dev_id)
+            if not check["exact"]:
+                raise HTTPException(status_code=409, detail=f"This device is not identified exactly yet: "
+                                                            f"{check['reason']} Not blocked; it is identified again "
+                                                            "the next time its traffic is observed.")
 
         if not sm.has_device(dev_id):
             sm.get_or_create(dev_id, target, "unknown")
@@ -252,6 +265,8 @@ def _ipc_block_logic(target: str):
         sm.flush_to_disk()
         Path(state_path).parent.joinpath(".ipc_sync_signal").touch()
         return {"status": "success"}
+    except HTTPException:
+        raise
     except Exception as e:
         LOGGER.error("IPC block failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

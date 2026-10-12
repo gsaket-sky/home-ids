@@ -1000,6 +1000,24 @@ class GraphStore:
         with self.transaction():
             self._merge_device_rows(orphan_id, canonical_id, ts)
 
+    def unmerge_device(self, device_id: str) -> bool:
+        """Undoes merge_device() for `device_id`: the engine found the merge wrong (the id's own traffic came from
+        another MAC than the device it had been merged into -- StateManager.split_merged_id(), 2026-10-12). The
+        tombstone and the merged_into edge go; every row the graph holds under the id itself (evidence, decisions,
+        device-scoped thresholds, trust) resolves to the id again instead of to the wrong device -- possible because
+        merges here are audit-preserving (nothing was moved or deleted). What the merge combined into the other
+        device's metadata stays there (it cannot be told apart). True if the id was merged."""
+        with self.transaction():
+            row = self._conn.execute("SELECT merged_into_device_id FROM devices WHERE device_id = ?",
+                                     (device_id,)).fetchone()
+            if row is None or not row["merged_into_device_id"]:
+                return False
+            self._conn.execute("UPDATE devices SET merged_into_device_id = NULL WHERE device_id = ?", (device_id,))
+            self._conn.execute("DELETE FROM edges WHERE src_kind = 'device' AND src_id = ? AND relation = 'merged_into'",
+                               (device_id,))
+        self._invalidate_merge_caches()
+        return True
+
     def _merge_device_rows(self, orphan_id: str, canonical_id: str, ts: float) -> None:
         # Only make sure both rows exist: a merge is not traffic, so it must not move last_seen (upsert_device() did,
         # and a replayed merge -- argus/graph/merge_consistency.py -- would show long-idle devices as active).

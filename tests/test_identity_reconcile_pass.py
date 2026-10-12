@@ -40,6 +40,7 @@ def check(label: str, condition: bool) -> None:
 from core.state_guard import StateManager  # noqa: E402
 from core.identity import DeviceIdentityManager  # noqa: E402
 from core.pipeline import EnginePipeline  # noqa: E402
+import argus.ops.live_engine as argus_live_engine  # noqa: E402
 
 
 class _FakeEvidenceStore:
@@ -81,18 +82,22 @@ class _FakeConfig(dict):
 
 def main() -> None:
     with tempfile.TemporaryDirectory() as d:
+        # The graph mirror of each merge goes to this run's own graph, not the repo's state/v13_graph.db (runs used to
+        # leak into each other through it: a later run's reversed merge was refused as a cycle).
+        argus_live_engine._GRAPH_DB_PATH = str(Path(d) / "v13_graph.db")
         config = _FakeConfig({"telegram_enabled": True})
         sm = StateManager(state_path=str(Path(d) / "ids_state.json"), max_devices=100)
         identity_manager = DeviceIdentityManager(sm, config)
 
-        # Fragmented pair sharing a known IP -- the real live pattern this session
-        # found (MAC-randomized device, IP stayed constant across the rotation).
+        # A fragmented pair: devB is an address-only fragment (cold-started at devA's address before its MAC was
+        # known), devA the device that uses the address. (Until 2026-10-12 this pair was two devices with DIFFERENT
+        # MACs sharing an address in their histories -- an address is a lease, not an identity, so that no longer
+        # merges: test_identity_address_is_not_identity.py.)
         a = sm.get_or_create(device_id="devA", client_ip="10.0.0.2", hostname="unknown")
         a.known_ips.add("10.0.0.2")
         a.mac_address = "ee:df:70:c2:5b:15"
-        b = sm.get_or_create(device_id="devB", client_ip="10.0.0.99", hostname="unknown")
-        b.known_ips.add("10.0.0.2")
-        b.mac_address = "0a:df:70:c2:5b:15"
+        b = sm.get_or_create(device_id="devB", client_ip="10.0.0.2", hostname="unknown")
+        b.last_seen = a.last_seen - 60
 
         # Unrelated device -- must never be touched.
         sm.get_or_create(device_id="devC", client_ip="10.0.0.50", hostname="printer_office")
@@ -137,8 +142,9 @@ def main() -> None:
         config["telegram_enabled"] = False
         e = sm.get_or_create(device_id="devE", client_ip="10.0.0.7", hostname="unknown")
         e.known_ips.add("10.0.0.7")
-        f = sm.get_or_create(device_id="devF", client_ip="10.0.0.8", hostname="unknown")
-        f.known_ips.add("10.0.0.7")
+        e.mac_address = "02:00:00:00:00:0e"
+        f = sm.get_or_create(device_id="devF", client_ip="10.0.0.7", hostname="unknown")   # address-only fragment
+        f.last_seen = e.last_seen - 60
         merged_count_3 = EnginePipeline._identity_reconcile_pass(fake_self)
         check("REGRESSION GUARD: a real merge with telegram_enabled=False sends no notification",
               merged_count_3 == 1 and len(fake_self.alert_manager.sent) == 1)

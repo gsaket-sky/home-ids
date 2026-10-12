@@ -1274,8 +1274,25 @@ class EnginePipeline:
         own sleep-loop so it's directly callable/testable without an infinite loop
         (e.g. to assert on a specific merge's cleanup side effects) and so a boot-time
         immediate pass and the periodic one share exactly one implementation. Returns
-        the number of device_ids actually merged this pass."""
-        groups = find_fragmented_groups(self.state_manager)
+        the number of device_ids actually merged this pass.
+
+        2026-10-12: first drops addresses that now belong to another device from each device's history
+        (StateManager.prune_reassigned_addresses -- an address is a lease, not an identity), and logs every merge with
+        both identities and the reason (the summary line alone did not say which devices were merged)."""
+        window = float(self.config.get("identity_reidentify_window_seconds", 1800.0))
+        for r in self.state_manager.prune_reassigned_addresses():
+            LOGGER.info("🔀 [IDENTITY RECONCILE] %s left the history of device %s: it is now the address of device %s.",
+                        r["address"], r["device_id"], r["now_owned_by"])
+        ambiguous: list = []
+        groups = find_fragmented_groups(self.state_manager, window=window, ambiguous=ambiguous)
+        seen_ambiguous = getattr(self, "_identity_ambiguous_logged", set())
+        for amb in ambiguous:
+            key = frozenset(m["device_id"] for m in amb["members"])
+            if key not in seen_ambiguous:      # once per group, not every pass
+                LOGGER.warning("🔗 [IDENTITY RECONCILE] Not merged, identity not certain: %s -- %s.",
+                               ", ".join(f"{m['device_id']} (mac {m['mac_address']}, ip {m['client_ip']})"
+                                         for m in amb["members"]), amb["reason"])
+        self._identity_ambiguous_logged = {frozenset(m["device_id"] for m in a["members"]) for a in ambiguous}
         merged_count = 0
         for group in groups:
             canonical = pick_canonical(group)
@@ -1287,6 +1304,10 @@ class EnginePipeline:
                     ml_registry=self.ml_registry, familiarity=self.familiarity,
                 ):
                     merged_count += 1
+                    LOGGER.warning("🔗 [IDENTITY RECONCILE] Merged %s (mac %s, ip %s) into %s (mac %s, ip %s): %s.",
+                                   orphan["device_id"], orphan["mac_address"], orphan["client_ip"],
+                                   canonical["device_id"], canonical["mac_address"], canonical["client_ip"],
+                                   "; ".join(orphan.get("linked_by") or ["linked"]))
                     try:
                         self.identity_manager._release_stale_isolation_if_merged(self.ips_mitigator)
                         self.identity_manager._cleanup_merged_orphan(self.evidence_store, self.metrics_exporter)
@@ -1329,6 +1350,18 @@ class EnginePipeline:
         whole rather than trusting each mirror call. Repairs are on by default (graph_merge_repair_enabled); counts
         go to home_ids_graph_merge_disagreements either way. Never raises."""
         repair = bool(self.config.get("graph_merge_repair_enabled", True))
+        if repair:
+            # Merges the engine undid (StateManager.split_merged_id, 2026-10-12) are un-merged in the graph first, so
+            # what the graph holds under the id is its own again; the merge repair below never re-merges them (a
+            # split id has no engine redirect).
+            try:
+                undone = argus_live_engine.reconcile_graph_splits_in_own_connection(
+                    self.state_manager.get_identity_splits())
+                if undone:
+                    LOGGER.warning("🔓 [GRAPH SPLIT REPAIR] Un-merged %d id(s) the engine had split: %s",
+                                   len(undone), ", ".join(undone))
+            except Exception as exc:
+                LOGGER.warning("Graph split replay failed (non-fatal, retried next pass): %s", exc)
         try:
             report = argus_live_engine.reconcile_graph_merges_in_own_connection(
                 self.state_manager.get_merge_redirects(), repair=repair)

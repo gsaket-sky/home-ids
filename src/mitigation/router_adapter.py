@@ -56,6 +56,9 @@ class RouterAdapter:
         raise NotImplementedError
 
     def get_hosts(self) -> List[Dict[str, Any]]:
+        """The router's host list: [{"ip", "mac", "name", "active"}]. "active" = the router sees the host now; an
+        inactive entry carries the address the host LAST had. Omit it only if the router cannot tell (then every
+        entry is treated as active)."""
         raise NotImplementedError
 
     def get_isolation_status(self, ip: str) -> bool:
@@ -115,6 +118,9 @@ class FritzBoxAdapter(RouterAdapter):
                     "ip": host.get("ip"),
                     "mac": host.get("mac", "unknown").lower(),
                     "name": host.get("name", "unknown"),
+                    # The router also lists hosts it has not seen for a while, with the address they last had (which
+                    # DHCP may have handed on since); identity uses the address only from active entries.
+                    "active": bool(host.get("status", True)),
                 })
         return parsed_hosts
 

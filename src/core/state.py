@@ -40,6 +40,10 @@ class BoundedSet:
                 # Evict the oldest (Least Recently Used) item from the left end
                 self._data.popitem(last=False)
 
+    def discard(self, item) -> bool:
+        """Removes `item` if present; True when it was."""
+        return self._data.pop(item, False) is None
+
     def __contains__(self, item):
         return item in self._data
 

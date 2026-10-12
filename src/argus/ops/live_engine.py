@@ -286,6 +286,30 @@ def merge_device_in_own_connection(orphan_id: str, canonical_id: str) -> None:
         pass
 
 
+def reconcile_graph_splits_in_own_connection(splits: Dict[str, Any]) -> List[str]:
+    """Un-merges in the graph every id the engine split (StateManager.get_identity_splits()) that the graph still has
+    merged -- a split's own graph mirror is best-effort, like a merge's (LiveIdentityManager._on_identity_split). For
+    the identity-reconcile worker thread: a short-lived store of its own. Returns the ids un-merged."""
+    if not splits:
+        return []
+    store = GraphStore(_GRAPH_DB_PATH)
+    done: List[str] = []
+    try:
+        pointers = store.get_merge_pointers()
+        for device_id in splits:
+            if pointers.get(device_id) and store.unmerge_device(device_id):
+                done.append(device_id)
+    finally:
+        store.close()
+    if done:
+        try:
+            if _graph_store is not None:
+                _graph_store._invalidate_merge_caches()
+        except Exception:
+            pass
+    return done
+
+
 def reconcile_graph_merges_in_own_connection(redirects: Dict[str, str], repair: bool = True) -> MergeReport:
     """Compares the engine's merge redirects with the graph and, with `repair`, replays the merges the graph is
     missing (argus/graph/merge_consistency.py). For the identity-reconcile worker thread: a short-lived store of its

@@ -31,13 +31,14 @@ Usage (from anywhere -- resolves state relative to config.yaml's state_path):
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 SRC_DIR = Path(__file__).resolve().parent
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from config import CONFIG
-from core.state_guard import StateManager
+from core.state_guard import ADDRESS_HOLD_WINDOW_SECONDS, StateManager
 from core.identity import _is_generic_hostname
 from core.device_matching import (
     dhcp_fingerprint_match, ja4_overlap, hostname_corroborates,
@@ -58,6 +59,7 @@ def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
         return {
             "device_id": dev_id,
             "hostname": getattr(state, "hostname", "unknown"),
+            "client_ip": client_ip or "",
             "mac_address": getattr(state, "mac_address", "unknown"),
             "device_type": getattr(state, "device_type", "unknown"),
             "known_ips": known_ips,
@@ -77,19 +79,56 @@ def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
         }
 
 
-def find_fragmented_groups(sm: StateManager) -> list:
-    """Union-find over every currently-tracked device_id: two device_ids are unioned if
-    they share ANY known IP, OR share a non-'unknown' mac_address, OR share a
-    non-generic hostname (reuses identity.py's own _is_generic_hostname() so two
-    devices that both merely fell back to the same generic name, e.g. two different
-    "laptop"s, don't get falsely unioned -- only an exact, specific, real hostname
-    match counts), OR clear device_matching.py's own AUTO_MERGE_CONFIDENCE bar via
-    DHCP-fingerprint/JA4-overlap/hostname scoring (the same signal set cold-start
-    reidentify already trusts live, applied retroactively -- see _device_snapshot()'s
-    own comment for why this 4th signal was added). Returns a list of groups (each a
-    list of device_id snapshots), groups of size 1 (no fragmentation) excluded."""
+def _mac(snap: dict) -> Optional[str]:
+    mac = snap.get("mac_address")
+    return mac if mac and mac != "unknown" else None
+
+
+def _link_reason(sa: dict, sb: dict, window: float) -> Optional[str]:
+    """Why two devices are one physical device, or None. An address is a lease, not an identity (2026-10-12, see
+    StateManager): before, ANY address shared by the two histories linked them, so DHCP reuse merged unrelated devices
+    (on .94 a laptop's whole identity was folded into a phone's), and every merge grew the history behind the next."""
+    ma, mb = _mac(sa), _mac(sb)
+    if ma and mb and ma == mb:
+        return "same MAC"
+    both_macs = bool(ma and mb)                       # here: two different MACs
+    if not both_macs:
+        # An address-only fragment (cold-started before its MAC was known) is the device that has used its address,
+        # if that device was active at least as recently: a fragment seen after the device stopped using the address
+        # is more likely a new device that got the address.
+        for frag, dev in ((sa, sb), (sb, sa)):
+            if (_mac(frag) is None and _mac(dev) and frag.get("client_ip") and frag["client_ip"] in dev["known_ips"]
+                    and (frag.get("last_seen") or 0.0) <= (dev.get("last_seen") or 0.0) + window):
+                return f"address-only fragment {frag['client_ip']}"
+    if both_macs and abs((sa.get("last_seen") or 0.0) - (sb.get("last_seen") or 0.0)) < window:
+        return None                                   # two MACs active at the same time: two devices (or two NICs)
+    rotation = " (MAC rotation)" if both_macs else ""
+    if (not _is_generic_hostname(sa["hostname"]) and not _is_generic_hostname(sb["hostname"])
+            and sa["hostname"].lower() == sb["hostname"].lower()):
+        return f"same name {sa['hostname']!r}{rotation}"
+    # The SAME DHCP-fingerprint/JA4-overlap/hostname scoring cold-start reidentify already trusts live
+    # (device_matching.py), applied retroactively -- catches a MAC-randomized device with no shared MAC/name but a real
+    # fingerprint corroboration. Same AUTO_MERGE_CONFIDENCE bar, not a separately-tuned threshold.
+    dhcp_score = dhcp_fingerprint_match(sa["dhcp_fingerprint"], sb["dhcp_fingerprint"])
+    ja4_score = ja4_overlap(sa["ja4_seen"], sb["ja4_seen"])
+    hostname_ok = hostname_corroborates(sa["hostname"], sb["hostname"])
+    if match_confidence(dhcp_score, ja4_score, hostname_ok) >= AUTO_MERGE_CONFIDENCE:
+        return f"fingerprint{rotation}"
+    return None
+
+
+def find_fragmented_groups(sm: StateManager, window: float = ADDRESS_HOLD_WINDOW_SECONDS,
+                           ambiguous: Optional[list] = None) -> list:
+    """Union-find over every currently-tracked device_id, linked by _link_reason() (same MAC; an address-only fragment
+    and the device that used its address; a MAC rotation by name or fingerprint). Returns the groups (each a list of
+    snapshots, every member with "linked_by": the reasons of its links), groups of size 1 excluded.
+
+    A group that still holds two different MACs not directly linked as a rotation was chained through a third member
+    (e.g. an address-only fragment whose address both devices used): it is not merged -- which device the fragment
+    belongs to is not known yet -- and is appended to `ambiguous` (if given) as {"members": [...], "reason": str}."""
     dev_ids = sm.get_all_device_ids()
     snapshots = {dev_id: _device_snapshot(sm, dev_id) for dev_id in dev_ids}
+    reasons: dict = {}
 
     parent = {dev_id: dev_id for dev_id in dev_ids}
 
@@ -107,36 +146,33 @@ def find_fragmented_groups(sm: StateManager) -> list:
     for i, a in enumerate(dev_ids):
         sa = snapshots[a]
         for b in dev_ids[i + 1:]:
-            sb = snapshots[b]
-            linked = False
-            if sa["known_ips"] & sb["known_ips"]:
-                linked = True
-            elif (sa["mac_address"] not in ("unknown", "") and sb["mac_address"] not in ("unknown", "")
-                  and sa["mac_address"] == sb["mac_address"]):
-                linked = True
-            elif (not _is_generic_hostname(sa["hostname"]) and not _is_generic_hostname(sb["hostname"])
-                  and sa["hostname"].lower() == sb["hostname"].lower()):
-                linked = True
-            else:
-                # 4th signal: the SAME DHCP-fingerprint/JA4-overlap/hostname scoring
-                # cold-start reidentify already trusts live (device_matching.py),
-                # applied retroactively between two already-existing devices -- catches
-                # a MAC-randomized device with no shared IP/MAC/hostname but a real
-                # fingerprint corroboration. Same AUTO_MERGE_CONFIDENCE bar, not a
-                # separately-tuned threshold.
-                dhcp_score = dhcp_fingerprint_match(sa["dhcp_fingerprint"], sb["dhcp_fingerprint"])
-                ja4_score = ja4_overlap(sa["ja4_seen"], sb["ja4_seen"])
-                hostname_ok = hostname_corroborates(sa["hostname"], sb["hostname"])
-                if match_confidence(dhcp_score, ja4_score, hostname_ok) >= AUTO_MERGE_CONFIDENCE:
-                    linked = True
-            if linked:
+            reason = _link_reason(sa, snapshots[b], window)
+            if reason:
+                reasons[frozenset((a, b))] = reason
                 union(a, b)
 
     groups_by_root = {}
     for dev_id in dev_ids:
         groups_by_root.setdefault(find(dev_id), []).append(snapshots[dev_id])
 
-    return [members for members in groups_by_root.values() if len(members) > 1]
+    groups = []
+    for members in groups_by_root.values():
+        if len(members) < 2:
+            continue
+        ids = [m["device_id"] for m in members]
+        for m in members:
+            m["linked_by"] = sorted({r for pair, r in reasons.items() if m["device_id"] in pair and pair <= set(ids)})
+        macs = [(m["device_id"], _mac(m)) for m in members if _mac(m)]
+        unlinked = [(x, y) for i, (x, mx) in enumerate(macs) for y, my in macs[i + 1:]
+                    if mx != my and "MAC rotation" not in reasons.get(frozenset((x, y)), "")]
+        if unlinked:
+            if ambiguous is not None:
+                ambiguous.append({"members": members, "reason": f"{len({m for _, m in macs})} different MACs "
+                                                               f"(e.g. {unlinked[0][0]} and {unlinked[0][1]}) "
+                                                               f"not linked as a MAC rotation"})
+            continue
+        groups.append(members)
+    return groups
 
 
 def pick_canonical(group: list) -> dict:
@@ -170,7 +206,14 @@ def main():
     sm = StateManager(state_path=state_path)
     sm.load_from_disk()
 
-    groups = find_fragmented_groups(sm)
+    ambiguous: list = []
+    groups = find_fragmented_groups(sm, window=float(CONFIG.get("identity_reidentify_window_seconds", 1800.0)),
+                                    ambiguous=ambiguous)
+    for amb in ambiguous:
+        print("NOT merged, identity not certain (" + amb["reason"] + "): " + ", ".join(
+            f"{m['device_id']} (mac={m['mac_address']!r}, ip={m['client_ip']!r})" for m in amb["members"]))
+    if ambiguous:
+        print()
     if not groups:
         print("No fragmented device groups found -- nothing to merge.")
         return
@@ -189,7 +232,7 @@ def main():
             print(f"  orphan: {orphan['device_id']}  "
                   f"(hostname={orphan['hostname']!r}, mac={orphan['mac_address']!r}, "
                   f"type={orphan['device_type']!r}, {len(orphan['known_ips'])} known IP(s), "
-                  f"last seen {_age_str(orphan['last_seen'])})")
+                  f"last seen {_age_str(orphan['last_seen'])}) -- {'; '.join(orphan.get('linked_by') or [])}")
         print()
 
     # continuation session: mirror each merge into the

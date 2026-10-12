@@ -35,10 +35,22 @@ OTHER_MAC = "aa:bb:cc:dd:ee:06"
 # ═══════════════════════════════════════════════════════════════════════════════════
 sm = StateManager(state_path="/tmp/_phase39_script_test_a.json")
 
-# (a) two devices sharing a known_ip get grouped
+# (a) an address-only fragment (no MAC: cold-started before its MAC was known) is grouped with the device that has
+# used its address. 2026-10-12: an address alone no longer links two devices that have MACs (a1x/a2x, different MACs)
+# or two that have none (a1y/a2y) -- an address is a lease, not an identity (StateManager).
 a1 = sm.get_or_create("share_ip_1", IPV4, "unknown")
+a1.mac_address = "aa:bb:cc:dd:ee:a1"
+a1.known_ips.add(IPV6_LL)  # the device has used the fragment's address
 a2 = sm.get_or_create("share_ip_2", IPV6_LL, "unknown")
-a2.known_ips.add(IPV4)  # a2 also knows about a1's address
+a2.last_seen = a1.last_seen - 60
+a1x = sm.get_or_create("diff_mac_1", "192.168.1.40", "unknown")
+a1x.mac_address = "aa:bb:cc:dd:ee:b1"
+a2x = sm.get_or_create("diff_mac_2", "192.168.1.41", "unknown")
+a2x.mac_address = "aa:bb:cc:dd:ee:b2"
+a2x.known_ips.add("192.168.1.40")  # used the address before: it changed hands
+a1y = sm.get_or_create("no_mac_1", "192.168.1.44", "unknown")
+a2y = sm.get_or_create("no_mac_2", "192.168.1.45", "unknown")
+a2y.known_ips.add("192.168.1.44")
 
 # (b) two devices sharing a mac_address get grouped
 b1 = sm.get_or_create("share_mac_1", "192.168.1.50", "unknown")
@@ -70,8 +82,12 @@ f3.mac_address = OTHER_MAC  # f3 <-> f2 via shared MAC
 groups = find_fragmented_groups(sm)
 group_id_sets = [set(m["device_id"] for m in g) for g in groups]
 
-check("(a) two devices sharing a known_ip are grouped together",
+check("(a) an address-only fragment is grouped with the device that used its address",
       {"share_ip_1", "share_ip_2"} in group_id_sets, f"groups={group_id_sets}")
+check("(a) two devices with DIFFERENT MACs sharing an address are NOT grouped (the address changed hands)",
+      not any({"diff_mac_1", "diff_mac_2"} <= s for s in group_id_sets), f"groups={group_id_sets}")
+check("(a) two devices without any MAC sharing an address are NOT grouped (wait for an observed MAC)",
+      not any({"no_mac_1", "no_mac_2"} <= s for s in group_id_sets), f"groups={group_id_sets}")
 check("(b) two devices sharing a mac_address are grouped together",
       {"share_mac_1", "share_mac_2"} in group_id_sets, f"groups={group_id_sets}")
 check("(c) two devices sharing a real hostname are grouped together",

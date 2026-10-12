@@ -38,6 +38,10 @@ from metrics import (
 
 LOGGER = logging.getLogger("home_ids.state_guard")
 
+# Two devices "use" the same address at once when both were seen within this of each other; the same window as the
+# re-identification candidate window (identity_reidentify_window_seconds' default).
+ADDRESS_HOLD_WINDOW_SECONDS = 1800.0
+
 
 class StateManager:
     # Cap for _merge_redirects (see __init__'s comment) -- LRU-evicted like _states'
@@ -156,6 +160,10 @@ class StateManager:
         # churn, not traffic volume, so this grows far slower than the evidence tables, but
         # it's still unbounded in principle over a long enough uptime.
         self._merge_redirects: "OrderedDict[str, str]" = OrderedDict()
+        # Merges undone because the merged-away id's own traffic came from another device (split_merged_id(), 2026-10-12):
+        # {id: {"from": the device it had been merged into, "mac": the MAC its traffic came from, "ts": when}}. Persisted
+        # like _merge_redirects; read by the graph consistency pass so the graph un-merges the id too.
+        self._identity_splits: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -207,6 +215,86 @@ class StateManager:
                 del self._ip_to_device_id[ip]
                 return None
             return dev_id
+
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # An address is a lease, not an identity (2026-10-12)
+    # ══════════════════════════════════════════════════════════════════════════════════
+    # A device is the MAC its traffic was observed from. Addresses move between devices (DHCP reuse, a dual-stack
+    # host's several addresses, temporary IPv6 addresses), so "this address was last tracked under device A and is now
+    # seen from device B" proves that the address changed hands, not that A and B are one device -- unless A never
+    # had a MAC of its own (an address-only fragment cold-started before its MAC was known). Found on .94: a laptop's
+    # whole identity (both NICs' addresses) was folded into a phone's because addresses in their histories overlapped.
+
+    def release_address(self, device_id: str, ip: str) -> bool:
+        """The address no longer belongs to `device_id`: drops it from its history and from the address index if the
+        index still points at it. True when anything changed."""
+        if not ip or ip == "unknown":
+            return False
+        with self._global_lock:
+            changed = False
+            st = self._states.get(device_id)
+            if st is not None and hasattr(st, "known_ips"):
+                changed = st.known_ips.discard(ip)
+            if self._ip_to_device_id.get(ip) == device_id:
+                del self._ip_to_device_id[ip]
+                changed = True
+            return changed
+
+    def prune_reassigned_addresses(self) -> List[Dict[str, str]]:
+        """Self-healing: an address that is now the CURRENT address of a device with a known MAC leaves the history
+        (known_ips) of every other device that has a different known MAC and no longer uses it. History feeds feature
+        aggregation (state.known_ips) and the identity reconcile, so a stale entry both mixes another device's traffic
+        into this one and links unrelated devices. Devices without a MAC (address-only fragments) are left to the
+        reconcile, which folds a fragment into the device that holds its address. Returns what was removed."""
+        removed: List[Dict[str, str]] = []
+        with self._global_lock:
+            holder: Dict[str, Any] = {}
+            for dev_id, st in self._states.items():
+                ip, mac = getattr(st, "client_ip", ""), getattr(st, "mac_address", "unknown")
+                if not ip or ip == "unknown" or not mac or mac == "unknown":
+                    continue
+                cur = holder.get(ip)
+                if cur is None or (getattr(st, "last_seen", 0.0) or 0.0) > (getattr(cur[1], "last_seen", 0.0) or 0.0):
+                    holder[ip] = (dev_id, st)
+            for dev_id, st in self._states.items():
+                mac = getattr(st, "mac_address", "unknown")
+                if not mac or mac == "unknown":
+                    continue
+                for ip in list(getattr(st, "known_ips", None) or []):
+                    owner = holder.get(ip)
+                    if owner is None or owner[0] == dev_id or ip == getattr(st, "client_ip", ""):
+                        continue
+                    if getattr(owner[1], "mac_address", "unknown") == mac:
+                        continue
+                    st.known_ips.discard(ip)
+                    removed.append({"device_id": dev_id, "address": ip, "now_owned_by": owner[0]})
+        return removed
+
+    def identity_check(self, device_id: str) -> Dict[str, Any]:
+        """Whether `device_id` is identified exactly enough for an operator containment action: it has a real MAC, no
+        other device has that MAC, and no other device currently uses its address. {"exact": bool, "reason": str}.
+        Not exact means wait -- the device is identified again the next time its traffic is observed."""
+        with self._global_lock:
+            st = self._states.get(device_id)
+            if st is None:
+                return {"exact": False, "reason": f"No such device '{device_id}'."}
+            mac = getattr(st, "mac_address", "unknown") or "unknown"
+            ip = getattr(st, "client_ip", "") or ""
+            if mac == "unknown":
+                return {"exact": False, "reason": "No MAC address has been observed for this device yet."}
+            same_mac = sorted(d for d, s in self._states.items() if d != device_id and getattr(s, "mac_address", "") == mac)
+            if same_mac:
+                return {"exact": False, "reason": f"Its MAC address is also recorded for device(s) {', '.join(same_mac)}."}
+            # Another device that last used this address well before this one did is a stale holder (the address was
+            # handed on since); one seen later, or about as recently, makes it unclear whose address it is now.
+            seen = getattr(st, "last_seen", 0.0) or 0.0
+            same_ip = sorted(d for d, s in self._states.items()
+                             if d != device_id and ip and ip != "unknown" and getattr(s, "client_ip", "") == ip
+                             and (getattr(s, "last_seen", 0.0) or 0.0) > seen - ADDRESS_HOLD_WINDOW_SECONDS)
+            if same_ip:
+                return {"exact": False, "reason": f"Its current address {ip} is also the current address of device(s) "
+                                                  f"{', '.join(same_ip)}, seen as recently or later."}
+            return {"exact": True, "reason": ""}
 
     @contextmanager
     def lock_device(self, device_id: str) -> Generator[DeviceState, None, None]:
@@ -620,6 +708,7 @@ class StateManager:
                     self._merge_redirects[old_orphan] = canonical_id
             self._merge_redirects[orphan_id] = canonical_id
             self._merge_redirects.move_to_end(orphan_id)
+            self._identity_splits.pop(orphan_id, None)
             while len(self._merge_redirects) > self._MAX_MERGE_REDIRECTS:
                 self._merge_redirects.popitem(last=False)
 
@@ -722,6 +811,33 @@ class StateManager:
         pointing at the same device_id from both directions minutes apart."""
         with self._global_lock:
             return self._merge_redirects.get(device_id, device_id)
+
+    def split_merged_id(self, device_id: str, observed_mac: str) -> Optional[str]:
+        """Undoes the merge of `device_id`: its own traffic was observed from `observed_mac`, which is not the MAC of
+        the device it had been merged into -- so it was another device, merged on address evidence (an address is a
+        lease, not an identity: before 2026-10-12 address overlaps merged unrelated devices, and a merge redirect is
+        permanent, so every later sighting of the merged-away id kept landing on the wrong device). Drops the
+        redirect and records the split (persisted; the graph consistency pass un-merges the id in the graph too).
+        Returns the device it had been merged into, or None if it was not merged. What the merge carried into that
+        device (its address history, operator counters, familiarity) stays there; what the graph holds under the id
+        itself (evidence, decisions, device-scoped thresholds) becomes the id's own again with the graph un-merge."""
+        with self._global_lock:
+            former = self._merge_redirects.pop(device_id, None)
+            if former is None:
+                return None
+            self._identity_splits[device_id] = {"from": former, "mac": observed_mac, "ts": time.time()}
+            self._identity_splits.move_to_end(device_id)
+            while len(self._identity_splits) > self._MAX_MERGE_REDIRECTS:
+                self._identity_splits.popitem(last=False)
+        LOGGER.warning("🔓 IDENTITY SPLIT: %s had been merged into %s, but its traffic comes from MAC %s, not that "
+                       "device's -- the merge was wrong; %s is its own device again.", device_id, former, observed_mac,
+                       device_id)
+        return former
+
+    def get_identity_splits(self) -> Dict[str, Dict[str, Any]]:
+        """A copy of the split record {id: {"from", "mac", "ts"}} (split_merged_id())."""
+        with self._global_lock:
+            return dict(self._identity_splits)
 
     def get_merge_redirects(self) -> Dict[str, str]:
         """A copy of the whole redirect map {merged-away id: live canonical id} (flat, see resolve_merge_redirect())."""
@@ -928,9 +1044,11 @@ class StateManager:
             # discarded id and re-open the exact resurrection window this map
             # exists to close.
             self._merge_redirects = OrderedDict(data["merge_redirects"] or {})
+        if isinstance(data, dict) and "identity_splits" in data:
+            self._identity_splits = OrderedDict(data["identity_splits"] or {})
 
         for dev_id, d in devices_data.items():
-            if dev_id in ("ips_state", "action_ledger", "merge_redirects"):
+            if dev_id in ("ips_state", "action_ledger", "merge_redirects", "identity_splits"):
                 continue
             st = DeviceState.from_dict(d, alpha=alpha)
             self._states[dev_id] = st
@@ -946,6 +1064,16 @@ class StateManager:
             mac = getattr(st, "mac_address", "unknown")
             if mac and mac != "unknown":
                 self._mac_to_device_id[mac] = dev_id
+        # The address index is derived the same way, from each device's CURRENT address only -- never from known_ips,
+        # which is history (an address can since belong to another device). Before 2026-10-12 it was not rebuilt at
+        # all: empty after a restart, while a long-running engine kept every address a merge had pointed at the
+        # survivor, so identity behaved differently before and after a restart. If two devices claim one address, the
+        # most recently seen holds it.
+        self._ip_to_device_id.clear()
+        for dev_id, st in sorted(self._states.items(), key=lambda kv: getattr(kv[1], "last_seen", 0.0) or 0.0):
+            ip = getattr(st, "client_ip", "")
+            if ip and ip != "unknown":
+                self._ip_to_device_id[ip] = dev_id
 
     def load_from_disk(self, alpha: float = 0.05, ledger: bool = True) -> int:
         """Loads the SQLite state (core/state_store.py); without a database yet, an existing ids_state.json -- it is
@@ -966,7 +1094,8 @@ class StateManager:
                 kv = {k: json.loads(v) for k, v in rows["kv"].items()}
                 data = {"devices": {k: json.loads(v) for k, v in rows["devices"].items()},
                         "action_ledger": {k: json.loads(v) for k, v in rows["ledger"].items()},
-                        "ips_state": kv.get("ips_state") or {}, "merge_redirects": kv.get("merge_redirects") or {}}
+                        "ips_state": kv.get("ips_state") or {}, "merge_redirects": kv.get("merge_redirects") or {},
+                        "identity_splits": kv.get("identity_splits") or {}}
                 source = state_store.db_path_for(self.state_path)
             else:
                 LOGGER.debug("Reading legacy state snapshot from %s", legacy)
@@ -1058,7 +1187,8 @@ class StateManager:
                         # mitigation/ips.py's release_device() for the same pattern).
                         graph_metadata_snapshot[dev_id] = state.to_graph_metadata()
                 kv_json = {"ips_state": json.dumps(self._ips_state, separators=(",", ":")),
-                           "merge_redirects": json.dumps(dict(self._merge_redirects), separators=(",", ":"))}
+                           "merge_redirects": json.dumps(dict(self._merge_redirects), separators=(",", ":")),
+                           "identity_splits": json.dumps(dict(self._identity_splits), separators=(",", ":"))}
                 # A2: per-entry JSON cache (see __init__). Misses -- normally the one or two alerts published since
                 # the last flush -- are encoded here, under the lock, so a concurrent revoke can never leave a stale
                 # string in the cache; the full first flush after a restart is the only large one.
