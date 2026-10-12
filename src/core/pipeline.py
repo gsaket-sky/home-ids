@@ -26,6 +26,7 @@ from utils import sanitize_hostname, is_telemetry_domain, _is_cdn_or_cloud_domai
 from config import resolve_home_subnets
 from core.state import BoundedSet
 from core.state_guard import StateManager
+from core.identity_journal import IdentityJournal
 from core.heartbeat import HEARTBEATS
 from core.metrics_sync import MetricsExporter
 from core.subprocess_launchers import rotate_subprocess_log_if_oversized
@@ -895,6 +896,20 @@ class EnginePipeline:
         self.identity_manager = LiveIdentityManager(
             self.state_manager, self.config, argus_live_engine.get_graph_store(), trust_anchors,
         )
+        # The identity journal (Documentation/internal/IDENTITY_MODEL.md, P1, shadow): every identity change, with
+        # time-bounded bindings, written to the graph after each state flush. Nothing reads it to decide identity yet.
+        self.identity_journal = IdentityJournal()
+        try:
+            _graph = argus_live_engine.get_graph_store()
+            if _graph is not None:
+                self.identity_journal.load_open(_graph.load_open_identity_bindings())
+        except Exception as exc:
+            LOGGER.warning("Identity journal: loading the open bindings failed (starts empty): %s", exc)
+        self.state_manager.journal = self.identity_journal
+        self.identity_manager.journal = self.identity_journal
+        for _role, _anchor in (trust_anchors or {}).items():
+            self.identity_journal.event("anchor_recognised", address=getattr(_anchor, "ip", None),
+                                        mac=getattr(_anchor, "mac", None), reason=f"trust anchor {_role}")
 
         self.ti_engine = ti_engine
         self.ml_registry = ml_registry
@@ -1288,6 +1303,11 @@ class EnginePipeline:
         seen_ambiguous = getattr(self, "_identity_ambiguous_logged", set())
         for amb in ambiguous:
             key = frozenset(m["device_id"] for m in amb["members"])
+            if key not in seen_ambiguous and getattr(self.state_manager, "journal", None) is not None:
+                self.state_manager.journal.event(
+                    "group_held", device_id=amb["members"][0]["device_id"], reason=amb["reason"],
+                    detail={"members": [{"device_id": m["device_id"], "mac": m["mac_address"], "address": m["client_ip"]}
+                                        for m in amb["members"]]})
             if key not in seen_ambiguous:      # once per group, not every pass
                 LOGGER.warning("🔗 [IDENTITY RECONCILE] Not merged, identity not certain: %s -- %s.",
                                ", ".join(f"{m['device_id']} (mac {m['mac_address']}, ip {m['client_ip']})"
@@ -1302,6 +1322,7 @@ class EnginePipeline:
                 if self.state_manager.merge_into_canonical(
                     orphan["device_id"], canonical["device_id"],
                     ml_registry=self.ml_registry, familiarity=self.familiarity,
+                    reason="reconcile: " + "; ".join(orphan.get("linked_by") or ["linked"]),
                 ):
                     merged_count += 1
                     LOGGER.warning("🔗 [IDENTITY RECONCILE] Merged %s (mac %s, ip %s) into %s (mac %s, ip %s): %s.",
@@ -1341,6 +1362,19 @@ class EnginePipeline:
                     f"device(s) into {len(groups)} canonical identit(y/ies)."
                 )
         return merged_count
+
+    def _flush_identity_journal(self) -> int:
+        """Writes the identity journal's pending batch to the graph (main-loop thread: the graph singleton's
+        connection belongs to it). Shadow: a failure is logged and retried at the next flush, nothing else depends on
+        it."""
+        journal = getattr(self, "identity_journal", None)
+        if journal is None:
+            return 0
+        try:
+            return journal.flush(argus_live_engine.get_graph_store())
+        except Exception as exc:
+            LOGGER.warning("Identity journal flush failed (retried next flush): %s", exc)
+            return 0
 
     def _graph_merge_check_pass(self) -> Optional[Any]:
         """Checks that the graph agrees with the engine about every device merge and replays the merges whose graph
@@ -4323,6 +4357,7 @@ class EnginePipeline:
             if self.ml_registry: self.ml_registry.save_models()
             self.familiarity.flush()
             self._export_cl_afpe_gauges()
+            self._flush_identity_journal()
             self._last_flush = now
 
         LOGGER.debug("Pipeline step finished.")

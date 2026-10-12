@@ -143,6 +143,8 @@ class DeviceIdentityManager:
         # OTHER address presenting the same MAC. Generic: works for any router on any
         # deployment, not tied to a specific address family or literal value.
         self._gateway_mac: Optional[str] = None
+        # The identity journal (core/identity_journal.py, IDENTITY_MODEL.md P1), set by the pipeline. Shadow only.
+        self.journal = None
         
         threading.Thread(target=self._poll_fritzbox_hosts, daemon=True, name="fritz-hosts-poller").start()
 
@@ -306,6 +308,9 @@ class DeviceIdentityManager:
             if anchor:
                 return target
             own = self.state_manager.resolve_merge_redirect(stable_device_id(mac))
+            if self.journal is not None:
+                self.journal.event("new_device_on_reused_address", device_id=own, other_device_id=target, mac=mac,
+                                   address=client_ip, reason="a new MAC on an address another device's record holds")
             LOGGER.info("🔀 NEW DEVICE ON A REUSED ADDRESS: %s (mac %s) used to be device %s (mac %s); the new device "
                         "is %s.", client_ip, mac, target, ", ".join(sorted(target_macs)), own)
             return own
@@ -472,6 +477,8 @@ class DeviceIdentityManager:
             with self.state_manager.lock_device(dev_id) as locked_state:
                 self._refresh_identity_signals(locked_state, mac_addr, client_ip, hostname, zeek_fx)
                 self.apply_device_type(locked_state, type_overrides)
+            if self.journal is not None:
+                self.journal.observe(dev_id, client_ip, mac_addr, _is_observed(observed_mac, mac_addr))
 
             active_device_ids.add(dev_id)
 
@@ -583,11 +590,15 @@ class DeviceIdentityManager:
                          client_ip, orphan_id, dev_id)
             return None
         if orphan_macs and event_mac not in orphan_macs:
-            self.state_manager.release_address(orphan_id, client_ip)
+            self.state_manager.release_address(orphan_id, client_ip,
+                                               reason=f"changed hands: now device {dev_id} (MAC {event_mac})")
             LOGGER.info("🔀 ADDRESS CHANGED HANDS: %s moved from device %s (mac %s) to device %s (mac %s) -- different "
                         "devices, not merged.", client_ip, orphan_id, orphan_mac, dev_id, event_mac)
             return None
-        merged = self.state_manager.merge_into_canonical(orphan_id, dev_id, ml_registry=ml_registry, familiarity=familiarity)
+        merged = self.state_manager.merge_into_canonical(
+            orphan_id, dev_id, ml_registry=ml_registry, familiarity=familiarity,
+            reason=f"fragment: {client_ip} observed with MAC {event_mac}" if orphan_mac == "unknown"
+            else f"same MAC {event_mac}")
         if not merged:
             return None
         LOGGER.warning(
@@ -653,6 +664,9 @@ class DeviceIdentityManager:
             locked_state.hostname = current = "unknown"
         if hostname and hostname != "unknown" and not is_placeholder_hostname(hostname):
             if current == "unknown" or (overwrite_hostname and certain and hostname_key(hostname) != hostname_key(current)):
+                if self.journal is not None and current != "unknown":
+                    self.journal.event("name_changed", device_id=getattr(locked_state, "device_id", None),
+                                       detail={"old": current, "new": hostname})
                 locked_state.hostname = hostname
         if zeek_fx:
             dhcp_fp = zeek_fx.get_dhcp_fingerprint(client_ip)
@@ -710,6 +724,8 @@ class DeviceIdentityManager:
                 self._refresh_identity_signals(locked_state, mac_addr, src_ip, hostname, zeek_fx,
                                                  overwrite_hostname=False)
                 self.apply_device_type(locked_state, type_overrides)
+            if self.journal is not None:
+                self.journal.observe(dev_id, src_ip, mac_addr, _is_observed(observed_mac, mac_addr))
 
             active_device_ids.add(dev_id)
 

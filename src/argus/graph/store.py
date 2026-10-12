@@ -623,6 +623,40 @@ class GraphStore:
                 updated_at              REAL NOT NULL,
                 PRIMARY KEY (cohort_key, metric, hour)
             );
+
+            -- Device identity model, P1 (Documentation/internal/IDENTITY_MODEL.md, 2026-10-12)
+            CREATE TABLE IF NOT EXISTS identity_bindings (
+                binding_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id     TEXT NOT NULL,
+                id_kind       TEXT NOT NULL CHECK (id_kind IN ('mac','address','legacy_id')),
+                id_value      TEXT NOT NULL,
+                valid_from    REAL NOT NULL,
+                valid_to      REAL,
+                last_seen     REAL NOT NULL,
+                evidence      TEXT NOT NULL DEFAULT '',
+                reason        TEXT NOT NULL DEFAULT '',
+                created_at    REAL NOT NULL,
+                retracted_at  REAL,
+                retracted_by  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_identity_bindings_id ON identity_bindings(id_kind, id_value, valid_from);
+            CREATE INDEX IF NOT EXISTS idx_identity_bindings_device ON identity_bindings(device_id, valid_from);
+            CREATE TABLE IF NOT EXISTS identity_events (
+                event_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts               REAL NOT NULL,
+                kind             TEXT NOT NULL,
+                device_id        TEXT,
+                other_device_id  TEXT,
+                id_kind          TEXT,
+                id_value         TEXT,
+                mac              TEXT,
+                address          TEXT,
+                reason           TEXT NOT NULL DEFAULT '',
+                detail_json      TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_identity_events_ts ON identity_events(ts);
+            CREATE INDEX IF NOT EXISTS idx_identity_events_device ON identity_events(device_id, ts);
+            CREATE INDEX IF NOT EXISTS idx_identity_events_id ON identity_events(id_kind, id_value, ts);
             """
         )
         # alert_event_id on containment_actions predates this column on any db created
@@ -955,6 +989,46 @@ class GraphStore:
             if row is None or row["merged_into_device_id"] is None:
                 return current
             current = row["merged_into_device_id"]
+
+    # --- device identity model, P1 (Documentation/internal/IDENTITY_MODEL.md) -----------------------------------
+
+    def write_identity_journal(self, events: List[Dict[str, Any]], opened: List[Dict[str, Any]],
+                               updates: List[Dict[str, Any]]) -> Dict[int, int]:
+        """Writes one batch of the identity journal (core/identity_journal.py) in one transaction: `events` appended to
+        identity_events, `opened` bindings inserted (each carries a journal-local "tmp" key), `updates` applied to
+        existing bindings by binding_id (last_seen / valid_to / retracted_at / retracted_by). Returns {tmp: binding_id}
+        for the inserted bindings."""
+        ids: Dict[int, int] = {}
+        with self.transaction():
+            for e in events:
+                self._conn.execute(
+                    "INSERT INTO identity_events (ts, kind, device_id, other_device_id, id_kind, id_value, mac, "
+                    "address, reason, detail_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (e["ts"], e["kind"], e.get("device_id"), e.get("other_device_id"), e.get("id_kind"),
+                     e.get("id_value"), e.get("mac"), e.get("address"), e.get("reason") or "",
+                     json.dumps(e.get("detail") or {})))
+            for b in opened:
+                cur = self._conn.execute(
+                    "INSERT INTO identity_bindings (device_id, id_kind, id_value, valid_from, valid_to, last_seen, "
+                    "evidence, reason, created_at, retracted_at, retracted_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (b["device_id"], b["id_kind"], b["id_value"], b["valid_from"], b.get("valid_to"), b["last_seen"],
+                     b.get("evidence") or "", b.get("reason") or "", b.get("created_at", b["valid_from"]),
+                     b.get("retracted_at"), b.get("retracted_by")))
+                ids[b["tmp"]] = cur.lastrowid
+            for u in updates:
+                fields = [k for k in ("last_seen", "valid_to", "retracted_at", "retracted_by") if k in u]
+                if fields:
+                    self._conn.execute(
+                        f"UPDATE identity_bindings SET {', '.join(f + ' = ?' for f in fields)} WHERE binding_id = ?",
+                        (*[u[f] for f in fields], u["binding_id"]))
+        return ids
+
+    def load_open_identity_bindings(self) -> List[Dict[str, Any]]:
+        """Bindings still open (valid_to NULL, not retracted) -- the journal's starting point after a restart."""
+        rows = self._conn.execute(
+            "SELECT binding_id, device_id, id_kind, id_value, valid_from, last_seen FROM identity_bindings "
+            "WHERE valid_to IS NULL AND retracted_at IS NULL").fetchall()
+        return [dict(r) for r in rows]
 
     def merge_device(self, orphan_id: str, canonical_id: str, timestamp: Optional[float] = None) -> None:
         """Audit-preserving merge -- a deliberate improvement over StateManager's

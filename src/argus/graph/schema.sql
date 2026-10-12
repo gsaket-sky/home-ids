@@ -484,3 +484,38 @@ VALUES ('(none)', 'domain', 0, 0, '{"sentinel": true}');
 --     hypothesis (utils.py's ZEEK_NOTICE_TIER_SCORE_WEIGHT["weak"] == 0.0), so the
 --     full 90-day window has no benefit to any live decision for this specific
 --     evidence_type, only disk cost
+
+-- Device identity model, P1 (Documentation/internal/IDENTITY_MODEL.md, 2026-10-12): time-bounded bindings of
+-- identifiers (MAC, address, legacy device id) to physical devices, and the exact history of every identity change.
+CREATE TABLE IF NOT EXISTS identity_bindings (
+    binding_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id     TEXT NOT NULL,
+    id_kind       TEXT NOT NULL CHECK (id_kind IN ('mac','address','legacy_id')),
+    id_value      TEXT NOT NULL,
+    valid_from    REAL NOT NULL,
+    valid_to      REAL,
+    last_seen     REAL NOT NULL,
+    evidence      TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL,
+    retracted_at  REAL,
+    retracted_by  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_identity_bindings_id ON identity_bindings(id_kind, id_value, valid_from);
+CREATE INDEX IF NOT EXISTS idx_identity_bindings_device ON identity_bindings(device_id, valid_from);
+CREATE TABLE IF NOT EXISTS identity_events (
+    event_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               REAL NOT NULL,
+    kind             TEXT NOT NULL,
+    device_id        TEXT,
+    other_device_id  TEXT,
+    id_kind          TEXT,
+    id_value         TEXT,
+    mac              TEXT,
+    address          TEXT,
+    reason           TEXT NOT NULL DEFAULT '',
+    detail_json      TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_identity_events_ts ON identity_events(ts);
+CREATE INDEX IF NOT EXISTS idx_identity_events_device ON identity_events(device_id, ts);
+CREATE INDEX IF NOT EXISTS idx_identity_events_id ON identity_events(id_kind, id_value, ts);

@@ -170,6 +170,8 @@ class LiveIdentityManager(DeviceIdentityManager):
                 _anchor_device_id(role), {"learned_mac": mac, "role": role},
             )
             self._learned_written[role] = mac
+            if self.journal is not None:
+                self.journal.event("anchor_mac_learned", device_id=None, mac=mac, reason=f"trust anchor {role}")
             self._learned_macs_cache = None  # re-read on next use
         except Exception as e:
             LOGGER.warning("Failed to persist learned MAC for anchor %r: %s", role, e)

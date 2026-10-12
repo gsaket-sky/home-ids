@@ -46,7 +46,36 @@ def _summary(sm: StateManager, dev_id: str) -> dict:
     return out
 
 
-def identify(sm: StateManager, query: str) -> dict:
+def timeline(conn, kind: str, value: str, limit: int = 30) -> dict:
+    """The identity ledger for `value` (IDENTITY_MODEL.md P1): its bindings -- which device held this identifier when
+    -- and the identity events about it, newest first. `conn` is a read-only sqlite3 connection to the graph; a graph
+    without the ledger tables (before P1) gives empty lists."""
+    out = {"bindings": [], "events": []}
+    if conn is None:
+        return out
+    try:
+        if kind == "device_id":
+            b = conn.execute("SELECT * FROM identity_bindings WHERE device_id = ? ORDER BY valid_from DESC LIMIT ?",
+                             (value, limit)).fetchall()
+            e = conn.execute("SELECT * FROM identity_events WHERE device_id = ? OR other_device_id = ? "
+                             "ORDER BY ts DESC, event_id DESC LIMIT ?", (value, value, limit)).fetchall()
+        else:
+            id_kind = "mac" if kind == "mac" else "address"
+            b = conn.execute("SELECT * FROM identity_bindings WHERE id_kind = ? AND id_value = ? "
+                             "ORDER BY valid_from DESC LIMIT ?", (id_kind, value, limit)).fetchall()
+            e = conn.execute("SELECT * FROM identity_events WHERE (id_kind = ? AND id_value = ?) OR mac = ? OR "
+                             "address = ? ORDER BY ts DESC, event_id DESC LIMIT ?",
+                             (id_kind, value, value, value, limit)).fetchall()
+        cols_b = [d[0] for d in conn.execute("SELECT * FROM identity_bindings LIMIT 0").description]
+        cols_e = [d[0] for d in conn.execute("SELECT * FROM identity_events LIMIT 0").description]
+        out["bindings"] = [dict(zip(cols_b, r)) for r in b]
+        out["events"] = [dict(zip(cols_e, r)) for r in e]
+    except Exception:
+        pass
+    return out
+
+
+def identify(sm: StateManager, query: str, graph_conn=None) -> dict:
     """{"query", "kind", "merged_into", "current": [summary], "history": [summary], "verdict", "detail"}."""
     q = query.strip()
     kind, current, history, merged_into = "name", [], [], None
@@ -94,8 +123,10 @@ def identify(sm: StateManager, query: str) -> dict:
         detail = (f"no device currently holds {q}; in the history of " + ", ".join(s["device_id"] for s in hist)
                   if hist else f"no device known for {q}")
     split = sm.get_identity_splits().get(q)
+    value = q.lower().replace("-", ":") if kind == "mac" else q
     return {"query": q, "kind": kind, "merged_into": merged_into, "current": cur, "history": hist,
-            "verdict": verdict, "detail": detail, "split_from": split}
+            "verdict": verdict, "detail": detail, "split_from": split,
+            "timeline": timeline(graph_conn, kind if kind in ("mac", "address", "device_id") else "address", value)}
 
 
 def _age(ts: float) -> str:
@@ -103,6 +134,10 @@ def _age(ts: float) -> str:
         return "never"
     s = max(0.0, time.time() - ts)
     return f"{int(s // 60)} min ago" if s < 3600 else f"{s / 3600:.1f} h ago" if s < 86400 else f"{s / 86400:.1f} d ago"
+
+
+def _when(ts) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts))) if ts else "-"
 
 
 def _print(result: dict) -> None:
@@ -120,6 +155,20 @@ def _print(result: dict) -> None:
             print(f"      address history: {', '.join(s['address_history']) or '-'}")
             if not s["identity"]["exact"]:
                 print(f"      not exact: {s['identity']['reason']}")
+    tl = result.get("timeline") or {}
+    if tl.get("bindings"):
+        print("  bindings (who held it when, newest first):")
+        for b in tl["bindings"]:
+            until = "now" if b.get("valid_to") is None else _when(b["valid_to"])
+            flag = f"  RETRACTED ({b['retracted_by']})" if b.get("retracted_at") else ""
+            print(f"    {b['id_kind']} {b['id_value']} -> {b['device_id']}  {_when(b['valid_from'])} .. {until}"
+                  f"  [{b.get('evidence') or '-'}]{flag}")
+    if tl.get("events"):
+        print("  identity events (newest first):")
+        for e in tl["events"]:
+            parts = [e["kind"], e.get("device_id") or "", ("-> " + e["other_device_id"]) if e.get("other_device_id") else "",
+                     e.get("id_value") or e.get("mac") or e.get("address") or "", e.get("reason") or ""]
+            print(f"    {_when(e['ts'])}  " + "  ".join(p for p in parts if p))
 
 
 def main() -> int:
@@ -130,7 +179,12 @@ def main() -> int:
     from config import CONFIG
     sm = StateManager(state_path=CONFIG.get("state_path", "state/ids_state.json"))
     sm.load_from_disk(ledger=False)          # read-only: such an instance never flushes
-    result = identify(sm, args[0])
+    graph_conn = None
+    graph = Path(CONFIG.get("state_path", "state/ids_state.json")).parent / "v13_graph.db"
+    if graph.exists():
+        import sqlite3
+        graph_conn = sqlite3.connect(f"file:{graph}?mode=ro", uri=True)      # read-only: no migrations, no writes
+    result = identify(sm, args[0], graph_conn)
     if "--json" in sys.argv:
         print(json.dumps(result, indent=1, default=str))
     else:

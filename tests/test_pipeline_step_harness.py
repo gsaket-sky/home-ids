@@ -75,6 +75,12 @@ except Exception as exc:  # report, do not hide
 
 check("the device that uses the address now gets its traffic", "1.1.1.1" in seen.get("new", set()), str(seen))
 check("the device that used the address before does not", "1.1.1.1" not in seen.get("old", set()), str(seen))
+# The identity journal (IDENTITY_MODEL.md P1) records the cycle's attributions and writes them to the graph.
+written = p._flush_identity_journal()
+g = live.get_graph_store()
+rows = g._conn.execute("SELECT id_kind, id_value, device_id FROM identity_bindings WHERE valid_to IS NULL").fetchall()
+check("the identity journal is written by the pipeline", written > 0 and ("address", "10.9.0.20", "new") in
+      [tuple(r) for r in rows], str([tuple(r) for r in rows]))
 print("STEP HARNESS", "OK" if ok else "FAILED")
 sys.stdout.flush()
 try:   # os._exit skips coverage.py's exit hook: save what the ledger build measured before leaving

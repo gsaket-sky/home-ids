@@ -165,6 +165,9 @@ class StateManager:
         # {id: {"from": the device it had been merged into, "mac": the MAC its traffic came from, "ts": when}}. Persisted
         # like _merge_redirects; read by the graph consistency pass so the graph un-merges the id too.
         self._identity_splits: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # The identity journal (core/identity_journal.py, IDENTITY_MODEL.md P1): set by the pipeline; every identity
+        # change made here is recorded in it. Shadow only -- nothing here reads it.
+        self.journal = None
         LOGGER.debug("StateManager instantiated. Target persistence path: %s", self.state_path)
 
     # ══════════════════════════════════════════════════════════════════════════════════
@@ -226,7 +229,15 @@ class StateManager:
     # had a MAC of its own (an address-only fragment cold-started before its MAC was known). Found on .94: a laptop's
     # whole identity (both NICs' addresses) was folded into a phone's because addresses in their histories overlapped.
 
-    def release_address(self, device_id: str, ip: str) -> bool:
+    def _journal(self, method: str, *args: Any, **kwargs: Any) -> None:
+        j = self.journal
+        if j is not None:
+            try:
+                getattr(j, method)(*args, **kwargs)
+            except Exception as exc:          # the record never breaks identity
+                LOGGER.debug("identity journal %s failed: %s", method, exc)
+
+    def release_address(self, device_id: str, ip: str, reason: str = "released") -> bool:
         """The address no longer belongs to `device_id`: drops it from its history and from the address index if the
         index still points at it. True when anything changed."""
         if not ip or ip == "unknown":
@@ -241,7 +252,8 @@ class StateManager:
             if self._ip_to_device_id.get(ip) == device_id:
                 del self._ip_to_device_id[ip]
                 changed = True
-            return changed
+        self._journal("unbind", "address", ip, device_id, reason=reason)
+        return changed
 
     def prune_reassigned_addresses(self) -> List[Dict[str, str]]:
         """Self-healing: an address that is now the CURRENT address of a device with a known MAC leaves the history
@@ -285,6 +297,10 @@ class StateManager:
                     st.known_ips.discard(ip)
                     st.forget_address(ip)
                     removed.append({"device_id": dev_id, "address": ip, "now_owned_by": owner[0]})
+        for r in removed:
+            self._journal("event", "history_pruned", device_id=r["device_id"], other_device_id=r["now_owned_by"],
+                          id_kind="address", id_value=r["address"], address=r["address"],
+                          reason="the address is provably another device's")
         return removed
 
     def identity_check(self, device_id: str) -> Dict[str, Any]:
@@ -388,10 +404,16 @@ class StateManager:
                         "device rather than a cold start.", matched_old_id, device_id, hostname, client_ip
                     )
                     identity_reidentify_migrations_total.labels(device=device_id, hostname=hostname or "unknown").inc()
+                    self._journal("bind", "legacy_id", matched_old_id, device_id, evidence="fingerprint",
+                                  reason="re-identified: DHCP/JA4/hostname fingerprint")
+                    self._journal("event", "reidentified", device_id=device_id, other_device_id=matched_old_id,
+                                  address=client_ip, reason="DHCP/JA4/hostname fingerprint")
                     self._prune_lru_capacity()
                     return state
 
             LOGGER.info("Initializing new DeviceState tracking profile for %s (%s)", hostname, client_ip)
+            self._journal("event", "device_created", device_id=device_id, address=client_ip,
+                          detail={"hostname": hostname})
             state = DeviceState(
                 device_id=device_id,
                 client_ip=client_ip,
@@ -614,7 +636,7 @@ class StateManager:
                 self._mac_to_device_id[mac_key] = new_id
 
     def merge_into_canonical(self, orphan_id: str, canonical_id: str,
-                              ml_registry: Any = None, familiarity: Any = None) -> bool:
+                              ml_registry: Any = None, familiarity: Any = None, reason: str = "") -> bool:
         """Folds an ORPHAN device_id into an already-existing, richer CANONICAL identity
         -- the opposite direction from migrate_device_id(). migrate_device_id() assumes
         its destination (new_id) does NOT already exist yet (it overwrites
@@ -729,6 +751,9 @@ class StateManager:
             self._merge_redirects[orphan_id] = canonical_id
             self._merge_redirects.move_to_end(orphan_id)
             self._identity_splits.pop(orphan_id, None)
+            self._journal("bind", "legacy_id", orphan_id, canonical_id, evidence="merge", reason=reason)
+            self._journal("event", "merge", device_id=canonical_id, other_device_id=orphan_id, reason=reason,
+                          detail={"addresses": sorted(orphan_ips), "orphan_mac": orphan_mac})
             while len(self._merge_redirects) > self._MAX_MERGE_REDIRECTS:
                 self._merge_redirects.popitem(last=False)
 
@@ -860,6 +885,10 @@ class StateManager:
             self._identity_splits.move_to_end(device_id)
             while len(self._identity_splits) > self._MAX_MERGE_REDIRECTS:
                 self._identity_splits.popitem(last=False)
+        self._journal("unbind", "legacy_id", device_id, former, reason=f"split: traffic from MAC {observed_mac}",
+                      retract=True)
+        self._journal("event", "split", device_id=device_id, other_device_id=former, mac=observed_mac,
+                      reason="its traffic comes from another MAC than the device it was merged into")
         LOGGER.warning("🔓 IDENTITY SPLIT: %s had been merged into %s, but its traffic comes from MAC %s, not that "
                        "device's -- the merge was wrong; %s is its own device again.", device_id, former, observed_mac,
                        device_id)

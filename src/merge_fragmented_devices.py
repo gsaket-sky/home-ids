@@ -301,7 +301,8 @@ def main():
         for orphan in group:
             if orphan["device_id"] == canonical["device_id"]:
                 continue
-            if sm.merge_into_canonical(orphan["device_id"], canonical["device_id"]):
+            if sm.merge_into_canonical(orphan["device_id"], canonical["device_id"],
+                                        reason="offline merge script: " + "; ".join(orphan.get("linked_by") or ["linked"])):
                 merged_count += 1
                 if graph_store is not None:
                     try:
