@@ -29,6 +29,11 @@ from middleware.auth import CONFIG
 # need to, rather than trying to fake a loopback connection.
 _TEST_TOKEN = "test-token-for-run-script-whitelist"
 CONFIG._config["fritz_api_token"] = _TEST_TOKEN
+# Its own state directory: every run touches <state dir>/.ipc_sync_signal, and the default (state/, relative to the
+# working directory) exists only if an earlier test created it -- in the ledger's sharded coverage build this file once
+# ran first in its shard and failed with FileNotFoundError (2026-10-12, PR #42).
+import tempfile
+CONFIG._config["state_path"] = str(_PathForSysPath(tempfile.mkdtemp(prefix="run_script_whitelist_")) / "ids_state.json")
 _AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_TOKEN}"}
 
 from fastapi import FastAPI

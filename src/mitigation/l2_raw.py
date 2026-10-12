@@ -214,6 +214,22 @@ def _read_neighbor(ip: str) -> Optional[str]:
     return None
 
 
+def ipv4_for_mac(mac: str, arp_table: str = "/proc/net/arp") -> Optional[str]:
+    """The IPv4 address the kernel's neighbour table currently holds for `mac` (complete entries only, flag 0x2), or
+    None. The ARP tarpit needs a device's IPv4 address; a dual-stack device can be known by an IPv6 address."""
+    want = (mac or "").lower()
+    if not want:
+        return None
+    try:
+        for line in Path(arp_table).read_text().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) >= 4 and parts[3].lower() == want and int(parts[2], 16) & 0x2:
+                return parts[0]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def neighbor_mac(ip: str, timeout: float = 2.0) -> Optional[str]:
     """MAC of a LAN neighbour from the kernel's neighbour table. If the entry is missing, send one
     harmless UDP datagram (discard port 9) so the kernel resolves it, then read again. No raw

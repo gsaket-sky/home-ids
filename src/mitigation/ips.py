@@ -78,6 +78,7 @@ CRITICAL_DEVICE_TYPES = frozenset({"router", "gateway", "nas", "smart_tv"})
 
 # Layer-2 tarpit primitives are our own stdlib raw-socket code (mitigation/l2_raw.py), replacing scapy (GPL-2.0).
 # Linux-only, like the tarpit always was: AF_PACKET must exist. (Still needs root/CAP_NET_RAW at runtime.)
+import ipaddress
 import socket as _socket_mod
 from mitigation import l2_raw
 from mitigation import pihole_auth
@@ -225,6 +226,46 @@ class IPSMitigator:
 
         LOGGER.info("Starting Router Isolation Reconcile Worker Thread...")
         threading.Thread(target=self._router_reconcile_worker, daemon=True, name="ips_router_reconcile_worker").start()
+
+    @staticmethod
+    def _is_arp_ipv4(a) -> bool:
+        try:
+            return not ipaddress.IPv4Address(a).is_link_local
+        except (ValueError, TypeError):
+            return False
+
+    @classmethod
+    def _arp_target_ip(cls, ip: str, mac: str, ipv4_candidates=()) -> str:
+        """The IPv4 address the ARP half of the tarpit forges its reply to. A dual-stack device's client_ip can be
+        its fe80::/ULA address; the target stays registered under that key (every lookup by client_ip -- release,
+        the safe-device auto-release, merge carry-over, status -- keeps working), and the ARP loop resolves the IPv4
+        here on every round: the one the kernel's neighbour table holds for the MAC now, else the most recent IPv4
+        the caller knew (known_ips, newest last; link-local skipped). Found 2026-10-07 on .94: the console would have
+        tarpitted a wired test host by its fe80:: address -- the ARP half skipped it and only the IPv6 (NDP) half
+        acted. Without any IPv4 the address is returned as is and the ARP half skips it: the NDP loop still covers
+        the device by MAC."""
+        if cls._is_arp_ipv4(ip):
+            return ip
+        found = l2_raw.ipv4_for_mac(mac)
+        if cls._is_arp_ipv4(found):
+            return found
+        try:
+            candidates = list(ipv4_candidates or ())   # a live BoundedSet can change while copied
+        except RuntimeError:
+            candidates = []
+        for cand in reversed(candidates):
+            if cls._is_arp_ipv4(cand):
+                return cand
+        return ip
+
+    @classmethod
+    def _arp_ip_hint(cls, ip: str, mac: str, ipv4_candidates=()) -> Optional[str]:
+        """IPv4 fallback stored with a target registered under a non-IPv4 address (meta "arp_ip"), for the rounds in
+        which the neighbour table has no entry for its MAC. None when the key is already IPv4 or nothing resolves."""
+        if cls._is_arp_ipv4(ip):
+            return None
+        found = cls._arp_target_ip(ip, mac, ipv4_candidates)
+        return found if cls._is_arp_ipv4(found) else None
 
     def _publish_engine_tarpit_state(self) -> None:
         """The engine's instance records whether its tarpit is armed in the shared IPS state, for state-only instances
@@ -880,6 +921,9 @@ class IPSMitigator:
                                 "mac": mac_addr, "hostname": hostname, "dev_id": dev_id,
                                 "_graph_action_id": graph_action_id,
                             }
+                            arp_ip = self._arp_ip_hint(client_ip, mac_addr, getattr(st, "known_ips", None) or ())
+                            if arp_ip:   # IPv4 fallback for the ARP half (see _arp_target_ip)
+                                self._tarpit_active_targets[client_ip]["arp_ip"] = arp_ip
                             self._save_queues()
                             ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac_addr).set(1.0)
                             try:
@@ -968,7 +1012,8 @@ class IPSMitigator:
         return added
 
     def operator_tarpit(self, dev_id: str, ip: str, mac: str, hostname: str,
-                          reason: str = "Operator-requested Layer-2 tarpit") -> "tuple[bool, str]":
+                          reason: str = "Operator-requested Layer-2 tarpit",
+                          ipv4_candidates=()) -> "tuple[bool, str]":
         """Console 'Tarpit (Layer-2)' button -- see operator_isolate_router()'s docstring
         for why this bypasses mitigate()'s own autonomous-path gating. Purely local (no
         network I/O of its own beyond the tarpit's background threads, already running),
@@ -985,11 +1030,14 @@ class IPSMitigator:
             return False, "No known IP address for this device -- the tarpit needs one."
         if not mac or mac == "unknown":
             return False, "No known MAC address for this device -- the tarpit needs one."
+        arp_ip = self._arp_ip_hint(ip, mac, ipv4_candidates)   # IPv4 fallback for the ARP half (see _arp_target_ip)
         with self._lock:
             if ip in self._tarpit_active_targets:
                 return True, "Already tarpitted."
             graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active", target=ip, reason=reason)
             self._tarpit_active_targets[ip] = {"mac": mac, "hostname": hostname, "dev_id": dev_id, "_graph_action_id": graph_action_id}
+            if arp_ip:
+                self._tarpit_active_targets[ip]["arp_ip"] = arp_ip
             self._save_queues()
         try:
             ips_tarpit_active.labels(device=dev_id, hostname=hostname, mac=mac).set(1.0)
@@ -1008,23 +1056,33 @@ class IPSMitigator:
         except Exception as exc:
             LOGGER.debug("ARP Tarpit socket exception: %s", exc)
             return
+        no_ipv4_logged = set()
         while True:
-            try:
-                gateway_ip = self.config.get("fritz_ip", "192.168.1.1")
-                with self._lock:
-                    targets = dict(self._tarpit_active_targets)
-                for ip, meta in targets.items():
+            gateway_ip = self.config.get("fritz_ip", "192.168.1.1")
+            with self._lock:
+                targets = dict(self._tarpit_active_targets)
+            for ip, meta in targets.items():
+                # One target per try: an exception here used to abort the round for every target after it.
+                try:
                     mac = meta["mac"]
-                    ifname = l2_raw.interface_for(ip)
+                    arp_ip = self._arp_target_ip(ip, mac, [meta["arp_ip"]] if meta.get("arp_ip") else ())
+                    if not self._is_arp_ipv4(arp_ip):
+                        if ip not in no_ipv4_logged:
+                            no_ipv4_logged.add(ip)
+                            LOGGER.info("ARP Tarpit: no IPv4 address known for %s (%s); only the NDP half covers it.",
+                                        ip, mac)
+                        continue
+                    no_ipv4_logged.discard(ip)
+                    ifname = l2_raw.interface_for(arp_ip)
                     src_mac = l2_raw.interface_mac(ifname) if ifname else None
                     if not (ifname and src_mac):
-                        LOGGER.debug("ARP Tarpit: no interface/MAC found for %s", ip)
+                        LOGGER.debug("ARP Tarpit: no interface/MAC found for %s", arp_ip)
                         continue
                     pkt = l2_raw.build_arp_reply(eth_src=src_mac, eth_dst=mac, sender_mac=bogus_mac,
-                                                 sender_ip=gateway_ip, target_mac=mac, target_ip=ip)
+                                                 sender_ip=gateway_ip, target_mac=mac, target_ip=arp_ip)
                     l2_raw.send_frame(sock, ifname, pkt)
-            except Exception as exc:
-                LOGGER.debug("ARP Tarpit iteration exception: %s", exc)
+                except Exception as exc:
+                    LOGGER.debug("ARP Tarpit exception for %s: %s", ip, exc)
             time.sleep(2.0)
 
     def _pihole_domain_url(self, api_url: str, api_path: str, domain: str = "") -> str:

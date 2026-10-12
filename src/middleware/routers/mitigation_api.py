@@ -59,6 +59,7 @@ def _resolve_identity(sm: StateManager, device_id: str) -> Dict[str, Any]:
             "ip": getattr(state, "client_ip", "unknown"),
             "mac": getattr(state, "mac_address", "unknown"),
             "hostname": getattr(state, "hostname", "unknown"),
+            "known_ips": list(getattr(state, "known_ips", None) or []),   # newest last (BoundedSet LRU order)
         }
 
 
@@ -134,6 +135,7 @@ def tarpit_device(device_id: str, payload: ReasonPayload, token: str = Depends(v
     success, reason = ips.operator_tarpit(
         dev_id=device_id, ip=identity["ip"], mac=identity["mac"], hostname=identity["hostname"],
         reason=payload.reason or "Operator-requested Layer-2 tarpit (console)",
+        ipv4_candidates=identity["known_ips"],   # the ARP half needs IPv4; client_ip can be an IPv6 address
     )
     sm.flush_to_disk()
     _touch_sync_signal()
