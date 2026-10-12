@@ -468,3 +468,86 @@ def test_block_refuses_a_single_device_not_identified_exactly(tmp_path, monkeypa
     with pytest.raises(HTTPException) as exc:
         fritzbox_api._ipc_block_logic("10.20.0.96")
     assert exc.value.status_code == 409 and "No MAC address" in exc.value.detail
+
+
+# --- MAC-less events (live on .94 after the deploy, 2026-10-12) ---------------------------------------------------------
+# After a restart a laptop's DNS queries reached the engine before Zeek had seen its traffic again (no MAC). The old
+# wrong redirect was followed and the record's MAC was reset to "unknown": the phone's record took the laptop's
+# address and name and lost the very MAC the split needs.
+
+def _phone_with_laptop_redirect(sm, host="pocket-phone"):
+    laptop_id = stable_device_id(LAPTOP_IP)
+    _dev(sm, "phone", PHONE_IP, PHONE_MAC, host=host, history=[LAPTOP_IP])
+    sm._merge_redirects[laptop_id] = "phone"                      # the old wrong merge
+    return laptop_id
+
+
+def test_an_event_without_a_mac_never_wipes_a_known_mac(sm, mgr):
+    st = _dev(sm, "d", "10.20.0.10", LAPTOP_MAC)
+    with sm.lock_device("d") as locked:
+        mgr._refresh_identity_signals(locked, "unknown", "10.20.0.10", "unknown", None)
+        assert locked.mac_address == LAPTOP_MAC
+        mgr._refresh_identity_signals(locked, None, "10.20.0.10", "unknown", None)
+        assert locked.mac_address == LAPTOP_MAC
+
+
+def test_live_sequence_macless_dns_first_then_the_laptop_is_observed(sm, mgr):
+    laptop_id = _phone_with_laptop_redirect(sm)
+    # 1. the laptop's DNS query, no MAC yet (Zeek has not seen .59 since the restart)
+    mgr.process_dns_identities([{"client_ip": LAPTOP_IP, "hostname": "laptop-host", "domain": "example.org"}], _Zeek({}))
+    with sm.lock_device("phone") as p:          # the redirect is followed, but a MAC-less event changes no identity
+        assert (p.mac_address, p.client_ip, p.hostname) == (PHONE_MAC, PHONE_IP, "pocket-phone")
+    assert not sm.has_device(laptop_id) and sm.get_identity_splits() == {}
+    # 2. Zeek has seen the laptop's traffic: its MAC is observed
+    mgr.process_dns_identities([{"client_ip": LAPTOP_IP, "hostname": "laptop-host", "domain": "example.org"}],
+                               _Zeek({LAPTOP_IP: LAPTOP_MAC}))
+    assert sm.get_device_id_for_mac(LAPTOP_MAC) == laptop_id
+    assert sorted(sm.get_all_device_ids()) == sorted(["phone", laptop_id])
+    with sm.lock_device("phone") as p:
+        assert (p.mac_address, p.client_ip) == (PHONE_MAC, PHONE_IP)
+    assert identify_device.identify(sm, LAPTOP_IP)["verdict"] == "EXACT"
+    assert identify_device.identify(sm, PHONE_IP)["verdict"] == "EXACT"
+
+
+def test_live_sequence_on_an_already_damaged_record(sm, mgr):
+    """The record as found on .94: MAC wiped, the laptop's address and name -- but the MAC index still binds the
+    phone's MAC to it. The laptop's observed MAC must still split it off."""
+    laptop_id = _phone_with_laptop_redirect(sm)
+    with sm.lock_device("phone") as p:
+        p.mac_address, p.client_ip, p.hostname = "unknown", LAPTOP_IP, "laptop-host"
+    sm._ip_to_device_id[LAPTOP_IP] = "phone"
+    mgr.process_dns_identities([{"client_ip": LAPTOP_IP, "hostname": "laptop-host", "domain": "example.org"}],
+                               _Zeek({LAPTOP_IP: LAPTOP_MAC}))
+    assert sm.get_device_id_for_mac(LAPTOP_MAC) == laptop_id and sm.get_device_id_for_mac(PHONE_MAC) == "phone"
+    assert sm.get_identity_splits()[laptop_id]["mac"] == LAPTOP_MAC
+    # the phone's own traffic repairs its record
+    mgr.process_zeek_identities([{"id.orig_h": PHONE_IP}], _Zeek({PHONE_IP: PHONE_MAC}))
+    with sm.lock_device("phone") as p:
+        assert (p.mac_address, p.client_ip) == (PHONE_MAC, PHONE_IP) and LAPTOP_IP not in p.known_ips
+
+
+def test_a_new_mac_on_an_address_anchored_record_is_a_new_device(sm, mgr):
+    old_id = stable_device_id("10.20.0.70")
+    _dev(sm, old_id, "10.20.0.70", "aa:00:00:00:00:71")             # the address's previous owner
+    mgr.process_zeek_identities([{"id.orig_h": "10.20.0.70"}], _Zeek({"10.20.0.70": "aa:00:00:00:00:72"}))
+    new_id = sm.get_device_id_for_mac("aa:00:00:00:00:72")
+    assert new_id == stable_device_id("aa:00:00:00:00:72") and new_id != old_id
+    with sm.lock_device(old_id) as old:
+        assert old.mac_address == "aa:00:00:00:00:71" and "10.20.0.70" not in old.known_ips
+
+
+def test_a_macless_event_follows_the_redirect_while_the_target_still_uses_the_address(sm, mgr):
+    frag_id = stable_device_id("10.20.0.75")
+    _dev(sm, "device", "10.20.0.75", LAPTOP_MAC)
+    sm._merge_redirects[frag_id] = "device"                       # an old, correct fragment merge
+    assert mgr.resolve_device_id("10.20.0.75", None, "unknown") == "device"
+    assert sm.get_identity_splits() == {}
+
+
+def test_reconcile_never_takes_a_damaged_record_for_an_address_only_fragment(sm):
+    now = time.time()
+    _dev(sm, "phone", LAPTOP_IP, PHONE_MAC, seen=now - 60)          # bound in the MAC index ...
+    with sm.lock_device("phone") as p:
+        p.mac_address = "unknown"                                     # ... but its field was wiped
+    _dev(sm, "laptop", LAPTOP_IP, LAPTOP_MAC, seen=now)
+    assert _groups(sm) == []

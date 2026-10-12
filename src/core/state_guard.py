@@ -812,6 +812,17 @@ class StateManager:
         with self._global_lock:
             return self._merge_redirects.get(device_id, device_id)
 
+    def macs_of(self, device_id: str) -> set:
+        """Every MAC this device is known by: its current MAC and every MAC the MAC index binds to it (the index keeps a
+        binding even when a field was wiped, and holds the MACs a legitimate merge carried in)."""
+        with self._global_lock:
+            out = {m for m, d in self._mac_to_device_id.items() if d == device_id}
+            st = self._states.get(device_id)
+            mac = getattr(st, "mac_address", "unknown") if st is not None else "unknown"
+            if mac and mac != "unknown":
+                out.add(mac)
+            return out
+
     def split_merged_id(self, device_id: str, observed_mac: str) -> Optional[str]:
         """Undoes the merge of `device_id`: its own traffic was observed from `observed_mac`, which is not the MAC of
         the device it had been merged into -- so it was another device, merged on address evidence (an address is a

@@ -273,26 +273,37 @@ class DeviceIdentityManager:
             return "unknown"
         return hostname
 
-    def _follow_merge_redirect(self, device_id: str, mac_addr: Optional[str], mac_observed: bool) -> str:
-        """resolve_merge_redirect(), except when this traffic's OBSERVED MAC proves the redirect wrong: the id was
-        merged into a device that has a different MAC of its own, so the merge folded another device in (an address is
-        a lease, not an identity -- StateManager). Then the merge is undone (split_merged_id()) and the id is its own
-        device again; without this every later sighting of a wrongly merged id kept landing on the wrong device,
-        since a redirect is permanent (2026-10-12, .94: a laptop's address-anchored ids all redirected to a phone)."""
+    def _follow_merge_redirect(self, device_id: str, mac_addr: Optional[str], mac_observed: bool,
+                               client_ip: Optional[str] = None) -> str:
+        """Where an address-anchored id leads -- resolve_merge_redirect(), unless what is known now contradicts it (an
+        address is a lease, not an identity -- StateManager). A device's MACs are its current MAC and every MAC the MAC
+        index binds to it (the index survives a field wiped by a MAC-less event).
+
+        - The traffic's MAC was OBSERVED and the id leads to a device with other MACs: the id was another device's.
+          If it had been merged there, the merge was wrong and is undone (split_merged_id); if the id is that device's
+          own record (it used this address before), this MAC is a new device: its own MAC-anchored id.
+        - No MAC observed: the redirect is followed (a dual-stack device's other addresses rely on it); such an event
+          cannot change who the device is (_refresh_identity_signals), so a wrongly redirected one only adds history,
+          which leaves again once the address's owner is observed (StateManager.prune_reassigned_addresses).
+        Without this, a redirect is permanent: every later sighting of a wrongly merged id lands on the wrong device."""
         target = self.state_manager.resolve_merge_redirect(device_id)
-        if target == device_id or not mac_observed or not mac_addr or mac_addr == "unknown":
+        if not self.state_manager.has_device(target):
             return target
-        try:
-            with self.state_manager.lock_device(target) as st:
-                target_mac = getattr(st, "mac_address", "unknown") or "unknown"
-        except KeyError:
-            return target
-        if target_mac == "unknown" or target_mac == mac_addr or self.state_manager.get_device_id_for_mac(mac_addr) == target:
-            return target
-        former = self.state_manager.split_merged_id(device_id, mac_addr)
-        if former:
-            self._on_identity_split(device_id, former)
-        return device_id
+        target_macs = self.state_manager.macs_of(target)
+        mac = mac_addr if mac_addr and mac_addr != "unknown" else None
+        if mac_observed and mac:
+            if not target_macs or mac in target_macs or self.state_manager.get_device_id_for_mac(mac) == target:
+                return target
+            if target != device_id:
+                former = self.state_manager.split_merged_id(device_id, mac)
+                if former:
+                    self._on_identity_split(device_id, former)
+                return device_id
+            own = self.state_manager.resolve_merge_redirect(stable_device_id(mac))
+            LOGGER.info("🔀 NEW DEVICE ON A REUSED ADDRESS: %s (mac %s) used to be device %s (mac %s); the new device "
+                        "is %s.", client_ip, mac, target, ", ".join(sorted(target_macs)), own)
+            return own
+        return target
 
     def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
         """Hook: a merge was undone (LiveIdentityManager mirrors it into the graph)."""
@@ -371,7 +382,7 @@ class DeviceIdentityManager:
         # device". Resolving through the redirect map transparently upgrades any dead id
         # straight to its live successor, so the resurrection never happens -- unless the observed MAC proves that
         # redirect wrong (_follow_merge_redirect).
-        return self._follow_merge_redirect(result, mac_addr, mac_observed)
+        return self._follow_merge_redirect(result, mac_addr, mac_observed, client_ip)
 
     def process_dns_identities(self, dns_rows: List[Dict[str, Any]], zeek_fx: Any, ml_registry: Any = None,
                                 ips_mitigator: Any = None, familiarity: Any = None,
@@ -523,18 +534,18 @@ class DeviceIdentityManager:
         # An orphan with a different known MAC is another device that used the address before: the address changed
         # hands -- it leaves the orphan, nothing is merged. Without an observed MAC nothing is decided yet (wait for
         # exact recognition): a MAC from the router's table or a cache is a guess.
-        orphan_mac = "unknown"
-        try:
-            with self.state_manager.lock_device(orphan_id) as orphan_state:
-                orphan_mac = getattr(orphan_state, "mac_address", "unknown") or "unknown"
-        except KeyError:
+        if not self.state_manager.has_device(orphan_id):
             return None
+        # Every MAC the orphan is known by, not only its MAC field: a field wiped by a MAC-less event (before 2026-10-12)
+        # made a real device look like an address-only fragment, and it would have been merged into the new device.
+        orphan_macs = self.state_manager.macs_of(orphan_id)
+        orphan_mac = ", ".join(sorted(orphan_macs)) or "unknown"
         event_mac = event_mac or "unknown"
         if not mac_observed or event_mac == "unknown":
             LOGGER.debug("Identity: %s tracked under %s, now resolved to %s without an observed MAC -- not merged.",
                          client_ip, orphan_id, dev_id)
             return None
-        if orphan_mac != "unknown" and orphan_mac != event_mac:
+        if orphan_macs and event_mac not in orphan_macs:
             self.state_manager.release_address(orphan_id, client_ip)
             LOGGER.info("🔀 ADDRESS CHANGED HANDS: %s moved from device %s (mac %s) to device %s (mac %s) -- different "
                         "devices, not merged.", client_ip, orphan_id, orphan_mac, dev_id, event_mac)
@@ -572,8 +583,21 @@ class DeviceIdentityManager:
         """Updates the mutable per-cycle identity fields on an already-locked DeviceState:
         MAC/IP/hostname (existing behavior, unchanged per-caller semantics via
         `overwrite_hostname`) plus the new PHASE 4 fingerprint/heartbeat fields."""
-        locked_state.mac_address = mac_addr or "unknown"
-        locked_state.client_ip = client_ip
+        # An event without a MAC (a DNS query before Zeek has seen the address's traffic) never wipes a known MAC: before
+        # 2026-10-12 it reset it to "unknown", so one MAC-less event erased the very fact that tells two devices apart
+        # (seen live on .94: a phone's record lost its MAC to a laptop's MAC-less DNS queries).
+        # More generally, an event without a MAC cannot tell whose traffic it is, so it never changes who a device with a
+        # known MAC is -- its MAC, current address and name -- and only adds to its history (a wrong entry leaves again
+        # once the address's owner is observed: StateManager.prune_reassigned_addresses). Live on .94 such events moved
+        # a laptop's address and name onto a phone's record through an old wrong merge redirect.
+        has_mac = bool(mac_addr) and mac_addr != "unknown"
+        certain = has_mac or getattr(locked_state, "mac_address", "unknown") in (None, "", "unknown")
+        if has_mac:
+            locked_state.mac_address = mac_addr
+        elif not getattr(locked_state, "mac_address", None):
+            locked_state.mac_address = "unknown"
+        if certain:
+            locked_state.client_ip = client_ip
         locked_state.last_seen = time.time()
         # PHASE 6 (cross-address-family correlation): record every address this device has
         # been seen at, so feature/evidence aggregation (zeek_features.get_features et al.,
@@ -589,7 +613,7 @@ class DeviceIdentityManager:
         if is_placeholder_hostname(current):
             locked_state.hostname = current = "unknown"
         if hostname and hostname != "unknown" and not is_placeholder_hostname(hostname):
-            if current == "unknown" or (overwrite_hostname and hostname_key(hostname) != hostname_key(current)):
+            if current == "unknown" or (overwrite_hostname and certain and hostname_key(hostname) != hostname_key(current)):
                 locked_state.hostname = hostname
         if zeek_fx:
             dhcp_fp = zeek_fx.get_dhcp_fingerprint(client_ip)

@@ -311,7 +311,7 @@ class LiveIdentityManager(DeviceIdentityManager):
         # ... and a redirect the observed MAC proves wrong is undone, not followed (_follow_merge_redirect, 2026-10-12).
         return self._follow_merge_redirect(v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
-        ), mac_addr, mac_observed)
+        ), mac_addr, mac_observed, client_ip)
 
     def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
         """Mirrors an undone merge into the graph: the id is un-tombstoned, so what the graph holds under it (evidence,

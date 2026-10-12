@@ -61,6 +61,9 @@ def _device_snapshot(sm: StateManager, dev_id: str) -> dict:
             "hostname": getattr(state, "hostname", "unknown"),
             "client_ip": client_ip or "",
             "mac_address": getattr(state, "mac_address", "unknown"),
+            # every MAC the device is known by (its field and the MAC index): a field wiped by a MAC-less event must
+            # not make a real device look like an address-only fragment (2026-10-12)
+            "macs": set(),
             "device_type": getattr(state, "device_type", "unknown"),
             "known_ips": known_ips,
             "last_seen": getattr(state, "last_seen", 0.0),
@@ -84,12 +87,19 @@ def _mac(snap: dict) -> Optional[str]:
     return mac if mac and mac != "unknown" else None
 
 
+def _macs(snap: dict) -> set:
+    macs = set(snap.get("macs") or ())
+    if _mac(snap):
+        macs.add(_mac(snap))
+    return macs
+
+
 def _link_reason(sa: dict, sb: dict, window: float) -> Optional[str]:
     """Why two devices are one physical device, or None. An address is a lease, not an identity (2026-10-12, see
     StateManager): before, ANY address shared by the two histories linked them, so DHCP reuse merged unrelated devices
     (on .94 a laptop's whole identity was folded into a phone's), and every merge grew the history behind the next."""
-    ma, mb = _mac(sa), _mac(sb)
-    if ma and mb and ma == mb:
+    ma, mb = _macs(sa), _macs(sb)
+    if ma & mb:
         return "same MAC"
     both_macs = bool(ma and mb)                       # here: two different MACs
     if not both_macs:
@@ -97,7 +107,7 @@ def _link_reason(sa: dict, sb: dict, window: float) -> Optional[str]:
         # if that device was active at least as recently: a fragment seen after the device stopped using the address
         # is more likely a new device that got the address.
         for frag, dev in ((sa, sb), (sb, sa)):
-            if (_mac(frag) is None and _mac(dev) and frag.get("client_ip") and frag["client_ip"] in dev["known_ips"]
+            if (not _macs(frag) and _macs(dev) and frag.get("client_ip") and frag["client_ip"] in dev["known_ips"]
                     and (frag.get("last_seen") or 0.0) <= (dev.get("last_seen") or 0.0) + window):
                 return f"address-only fragment {frag['client_ip']}"
     if both_macs and abs((sa.get("last_seen") or 0.0) - (sb.get("last_seen") or 0.0)) < window:
@@ -128,6 +138,11 @@ def find_fragmented_groups(sm: StateManager, window: float = ADDRESS_HOLD_WINDOW
     belongs to is not known yet -- and is appended to `ambiguous` (if given) as {"members": [...], "reason": str}."""
     dev_ids = sm.get_all_device_ids()
     snapshots = {dev_id: _device_snapshot(sm, dev_id) for dev_id in dev_ids}
+    for dev_id, snap in snapshots.items():
+        macs_of = getattr(sm, "macs_of", None)
+        snap["macs"] = set(macs_of(dev_id)) if macs_of else ({snap["mac_address"]} - {"unknown", ""})
+        if snap["mac_address"] in ("unknown", "") and snap["macs"]:
+            snap["mac_address"] = sorted(snap["macs"])[0]
     reasons: dict = {}
 
     parent = {dev_id: dev_id for dev_id in dev_ids}
