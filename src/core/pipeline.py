@@ -1599,7 +1599,14 @@ class EnginePipeline:
                     # whichever address happened to be "most recently active" (client_ip). Falls
                     # back to the single client_ip if known_ips is empty (shouldn't happen post
                     # Phase 6, but keeps this resilient to states loaded from an older snapshot).
-                    known_ips_snapshot = state.known_ips.to_list() if getattr(state, "known_ips", None) else []
+                    # 2026-10-12: the addresses this device was seen at within the feature window, not its whole
+                    # history -- an old address may be another device's by now, and every reader below (features,
+                    # alerts, honeypot, destinations, ports, the safe-address check, the post-alert reset) would take
+                    # on that device's traffic (on .94 a monitor "looked up" names only another device uses).
+                    if hasattr(state, "recent_addresses"):
+                        known_ips_snapshot = state.recent_addresses(now, float(window_seconds))
+                    else:
+                        known_ips_snapshot = state.known_ips.to_list() if getattr(state, "known_ips", None) else []
                     if not known_ips_snapshot:
                         known_ips_snapshot = [client_ip] if client_ip else []
                     # BUGFIX: found via a live state-folder audit -- checking only the single

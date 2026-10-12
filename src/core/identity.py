@@ -25,7 +25,7 @@ from utils import (sanitize_hostname, infer_device_type, get_mac_vendor, hostnam
 # Pi-hole query statuses that mean "blocked" (the one shared definition).
 from extractors.pihole_codes import BLOCKED_STATUSES as _PIHOLE_BLOCKED_STATUSES
 from core.state_guard import StateManager
-from core.device_matching import AUTO_MERGE_CONFIDENCE
+from core.device_matching import AUTO_MERGE_CONFIDENCE, mac_from_eui64  # noqa: F401 (re-exported)
 from core.device_labels import get_label as get_confirmed_device_label
 from metrics import device_type_reclassifications_total
 
@@ -274,7 +274,7 @@ class DeviceIdentityManager:
         return hostname
 
     def _follow_merge_redirect(self, device_id: str, mac_addr: Optional[str], mac_observed: bool,
-                               client_ip: Optional[str] = None) -> str:
+                               client_ip: Optional[str] = None, anchor: bool = False) -> str:
         """Where an address-anchored id leads -- resolve_merge_redirect(), unless what is known now contradicts it (an
         address is a lease, not an identity -- StateManager). A device's MACs are its current MAC and every MAC the MAC
         index binds to it (the index survives a field wiped by a MAC-less event).
@@ -285,6 +285,10 @@ class DeviceIdentityManager:
         - No MAC observed: the redirect is followed (a dual-stack device's other addresses rely on it); such an event
           cannot change who the device is (_refresh_identity_signals), so a wrongly redirected one only adds history,
           which leaves again once the address's owner is observed (StateManager.prune_reassigned_addresses).
+        - `anchor` (the configured gateway, a trust anchor): the id is pinned to that role whatever MAC it shows (a
+          router has several), so a new MAC never makes a new device -- but an anchor merged into a device that does not
+          have the observed MAC is split all the same. On .94 the gateway's id redirected to a smart monitor, so all of
+          the router's traffic was filed under the monitor (2026-10-12).
         Without this, a redirect is permanent: every later sighting of a wrongly merged id lands on the wrong device."""
         target = self.state_manager.resolve_merge_redirect(device_id)
         if not self.state_manager.has_device(target):
@@ -299,11 +303,40 @@ class DeviceIdentityManager:
                 if former:
                     self._on_identity_split(device_id, former)
                 return device_id
+            if anchor:
+                return target
             own = self.state_manager.resolve_merge_redirect(stable_device_id(mac))
             LOGGER.info("🔀 NEW DEVICE ON A REUSED ADDRESS: %s (mac %s) used to be device %s (mac %s); the new device "
                         "is %s.", client_ip, mac, target, ", ".join(sorted(target_macs)), own)
             return own
         return target
+
+    def _anchor_ips(self) -> Set[str]:
+        """Addresses known to be a specific infrastructure device's own (the configured gateway)."""
+        gw = self.config.get("gateway_ip", "")
+        return {gw} if gw else set()
+
+    def _shared_macs(self, zeek_fx: Any) -> Set[str]:
+        fn = getattr(zeek_fx, "shared_macs", None) if zeek_fx else None
+        if fn is None:
+            return set()
+        try:
+            return set(fn(window=float(self.config.get("identity_shared_mac_window_seconds", 900.0))))
+        except Exception as exc:
+            LOGGER.debug("shared_macs() failed: %s", exc)
+            return set()
+
+    def _identity_mac(self, ip: str, mac: str, shared: Set[str]) -> str:
+        """The observed MAC as identity evidence for `ip`, or "unknown". A MAC that is the source of several IPv4
+        addresses at once (shared_macs: a router forwarding other subnets, a NAT, a MAC-rewriting repeater) is not
+        evidence for the addresses it forwards -- otherwise every device behind it becomes one device, or the router
+        (before 2026-10-12, and on a new network before the router is recognised). It still is for its owner's own
+        addresses: one built from it (EUI-64), or a known anchor address (the gateway)."""
+        if not mac or mac == "unknown" or mac not in shared:
+            return mac or "unknown"
+        if mac_from_eui64(ip) == mac or ip in self._anchor_ips():
+            return mac
+        return "unknown"
 
     def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
         """Hook: a merge was undone (LiveIdentityManager mirrors it into the graph)."""
@@ -328,7 +361,8 @@ class DeviceIdentityManager:
             if mac_addr and mac_addr != "unknown":
                 with self._lock:
                     self._gateway_mac = mac_addr
-            return self.state_manager.resolve_merge_redirect(stable_device_id(gateway_ip))
+            return self._follow_merge_redirect(stable_device_id(gateway_ip), mac_addr, mac_observed, client_ip,
+                                               anchor=True)
 
         # GENERAL FIX (2026-08-27): the router's OTHER addresses (most commonly its IPv6
         # link-local/ULA, which never equals gateway_ip literally) still deserve the same
@@ -339,7 +373,8 @@ class DeviceIdentityManager:
             with self._lock:
                 learned_gateway_mac = self._gateway_mac
             if learned_gateway_mac and mac_addr == learned_gateway_mac:
-                return self.state_manager.resolve_merge_redirect(stable_device_id(gateway_ip))
+                return self._follow_merge_redirect(stable_device_id(gateway_ip), mac_addr, mac_observed, client_ip,
+                                                   anchor=True)
 
         # PHASE 6 FIX (cross-address-family correlation): if this MAC address is already
         # bound to a known device_id — most commonly because we've already seen this same
@@ -393,6 +428,7 @@ class DeviceIdentityManager:
         active_device_ids: Set[str] = set()
         type_overrides = self.config.get("device_type_overrides", {})
         alpha = float(self.config.get("baseline_alpha", 0.05))
+        shared = self._shared_macs(zeek_fx)
 
         for row in dns_rows:
             client_ip = str(row.get("client_ip", "")).strip()
@@ -408,7 +444,8 @@ class DeviceIdentityManager:
                     hostname = sanitize_hostname(zeek_host) or "unknown"
 
             hostname = self._clean_fake_hostname(hostname)
-            observed_mac = (zeek_fx.get_mac(client_ip) if zeek_fx else None) or "unknown"
+            observed_mac = self._identity_mac(client_ip, (zeek_fx.get_mac(client_ip) if zeek_fx else None) or "unknown",
+                                              shared)
             mac_addr, hostname = self._enrich_from_cache(client_ip, observed_mac, hostname)
 
             dev_id = self.resolve_device_id(client_ip, mac_addr, hostname,
@@ -605,6 +642,8 @@ class DeviceIdentityManager:
         # IPv6 addresses instead of only the single "most recently active" client_ip.
         if client_ip and client_ip != "unknown":
             locked_state.known_ips.add(client_ip)
+            if hasattr(locked_state, "note_address"):
+                locked_state.note_address(client_ip, locked_state.last_seen)
         # A device's name stays put unless a really different name arrives (2026-10-06, .94: one laptop's name flipped
         # between "office-laptop", "office_laptop_fritz_box" and a UUID with every event, depending on which of its addresses the
         # event came from). The same name in another form ("office-laptop" vs "office_laptop_fritz_box") is not a change; a
@@ -631,6 +670,7 @@ class DeviceIdentityManager:
         active_device_ids: Set[str] = set()
         type_overrides = self.config.get("device_type_overrides", {})
         alpha = float(self.config.get("baseline_alpha", 0.05))
+        shared = self._shared_macs(zeek_fx)
 
         for event in zeek_events:
             # handle both conn/dns "id.orig_h" and dhcp "client_addr"
@@ -645,7 +685,8 @@ class DeviceIdentityManager:
                     hostname = sanitize_hostname(resolved_host) or "unknown"
 
             hostname = self._clean_fake_hostname(hostname)
-            observed_mac = (zeek_fx.get_mac(src_ip) if zeek_fx else None) or "unknown"
+            observed_mac = self._identity_mac(src_ip, (zeek_fx.get_mac(src_ip) if zeek_fx else None) or "unknown",
+                                              shared)
             mac_addr, hostname = self._enrich_from_cache(src_ip, observed_mac, hostname)
 
             dev_id = self.resolve_device_id(src_ip, mac_addr, hostname,

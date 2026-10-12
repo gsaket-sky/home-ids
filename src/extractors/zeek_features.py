@@ -1049,6 +1049,26 @@ class ZeekFeatureExtractor:
     def get_wire_ip(self, domain: str) -> Optional[str]: return self._wire_dns_resolutions.get(str(domain).lower().strip("."))
     @_synchronized
     def get_mac(self, ip: str) -> Optional[str]: return self._mac_bindings.get(ip)
+
+    @_synchronized
+    def shared_macs(self, now: Optional[float] = None, window: float = 900.0) -> set:
+        """MACs that are the source of more than one IPv4 address at the same time (within `window`): a router
+        forwarding traffic from other subnets, a NAT, or a repeater that rewrites MACs. Such a MAC says nothing about
+        which device an address belongs to (2026-10-12). IPv4 only -- one device legitimately has several IPv6
+        addresses; the DHCP placeholder 0.0.0.0 and IPv4 link-local (169.254/16, used before a lease) are not counted."""
+        now = time.time() if now is None else now
+        per_mac: Dict[str, set] = {}
+        for ip, mac in self._mac_bindings.items():
+            if not mac or now - self._mac_last_seen.get(ip, 0.0) > window:
+                continue
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                continue
+            if addr.version != 4 or addr.is_unspecified or addr.is_link_local:
+                continue
+            per_mac.setdefault(mac, set()).add(ip)
+        return {mac for mac, ips in per_mac.items() if len(ips) > 1}
     @_synchronized
     def get_dhcp_fingerprint(self, ip: str) -> Optional[dict]: return self._dhcp_fingerprints.get(ip)
     @_synchronized

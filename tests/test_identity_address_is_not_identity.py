@@ -237,9 +237,9 @@ def test_reconcile_a_mac_rotation_is_still_merged(sm):
 
 def test_reconcile_a_fragment_shared_by_two_devices_is_ambiguous_not_merged(sm):
     now = time.time()
-    _dev(sm, "a", "10.20.0.50", "aa:00:00:00:00:0a", seen=now, history=["10.20.0.52"])
-    _dev(sm, "b", "10.20.0.51", "aa:00:00:00:00:0b", seen=now, history=["10.20.0.52"])
-    _dev(sm, "fragment", "10.20.0.52", seen=now - 60)
+    _dev(sm, "a", "10.20.0.52", "aa:00:00:00:00:0a", seen=now)        # two devices claim the address now ...
+    _dev(sm, "b", "10.20.0.52", "aa:00:00:00:00:0b", seen=now)
+    _dev(sm, "fragment", "10.20.0.52", seen=now - 60)                  # ... so whose fragment this is is not known
     ambiguous = []
     assert _groups(sm, ambiguous) == []
     assert sorted(m["device_id"] for m in ambiguous[0]["members"]) == ["a", "b", "fragment"]
@@ -264,7 +264,8 @@ def test_reconcile_pass_on_the_94_shape_merges_nothing_and_heals_the_history(sm)
     assert EnginePipeline._identity_reconcile_pass(fake) == 0
     assert sorted(sm.get_all_device_ids()) == ["laptop", "phone"]
     with sm.lock_device("phone") as p:
-        assert LAPTOP_IP not in p.known_ips and LAPTOP_LL in p.known_ips   # .LL: its owner is not seen there yet
+        assert LAPTOP_IP not in p.known_ips           # the laptop holds it now
+        assert LAPTOP_LL not in p.known_ips           # built from the laptop's MAC (EUI-64): provably the laptop's
 
 
 # --- splits: a wrong merge is undone when the merged-away id's own traffic proves it -----------------------------------
@@ -551,3 +552,193 @@ def test_reconcile_never_takes_a_damaged_record_for_an_address_only_fragment(sm)
         p.mac_address = "unknown"                                     # ... but its field was wiped
     _dev(sm, "laptop", LAPTOP_IP, LAPTOP_MAC, seen=now)
     assert _groups(sm) == []
+
+
+# --- ownership evidence, not history (live on .94 after #43/#44, 2026-10-12) ---------------------------------------------
+# The reconcile linked a MAC-less fragment to a device whose address HISTORY held the fragment's address; a smart
+# monitor's history, filled by old wrong merges, pulled seven fragments of other devices into it in one pass -- two of
+# them EUI-64 addresses built from another device's MAC. And the gateway's id had been merged into that monitor, so the
+# gateway special case filed all of the router's traffic under it.
+
+MONITOR_MAC, ROUTER_MAC, OTHER_DEV_MAC = "f4:00:00:00:00:01", "50:00:00:00:00:28", "b0:00:00:00:00:e7"
+ROUTER_LL = "fe80::5200:ff:fe00:28"            # EUI-64 of ROUTER_MAC
+OTHER_LL = "fe80::b200:ff:fe00:e7"             # EUI-64 of OTHER_DEV_MAC
+
+
+def test_eui64_addresses_name_their_mac():
+    from core.device_matching import mac_from_eui64
+    assert mac_from_eui64(ROUTER_LL) == ROUTER_MAC and mac_from_eui64(LAPTOP_LL) == LAPTOP_MAC
+    assert mac_from_eui64("fe80::4bfd:eb85:3d11:dc4d") is None and mac_from_eui64("10.0.0.1") is None
+
+
+def test_reconcile_a_fragment_only_in_a_devices_history_is_not_folded_in(sm):
+    now = time.time()
+    _dev(sm, "monitor", "10.20.0.85", MONITOR_MAC, seen=now, history=["fd45::1234:5678:9abc:def0"])
+    _dev(sm, "fragment", "fd45::1234:5678:9abc:def0", seen=now - 60)
+    assert _groups(sm) == []
+
+
+def test_reconcile_an_eui64_fragment_joins_the_device_of_that_mac_only(sm):
+    now = time.time()
+    _dev(sm, "monitor", "10.20.0.85", MONITOR_MAC, seen=now, history=[OTHER_LL])      # polluted history
+    _dev(sm, "other", "10.20.0.45", OTHER_DEV_MAC, seen=now - 30)
+    _dev(sm, "fragment", OTHER_LL, seen=now - 60)
+    groups = find_fragmented_groups(sm)
+    assert [sorted(m["device_id"] for m in g) for g in groups] == [["fragment", "other"]]
+    assert any("built from MAC" in r for m in groups[0] for r in m["linked_by"])
+
+
+def test_eui64_evidence_heals_a_polluted_history(sm):
+    now = time.time()
+    _dev(sm, "monitor", "10.20.0.85", MONITOR_MAC, seen=now, history=[ROUTER_LL, OTHER_LL, "10.20.0.1"])
+    removed = {r["address"] for r in sm.prune_reassigned_addresses() if r["device_id"] == "monitor"}
+    assert removed == {ROUTER_LL, OTHER_LL}                          # provably other devices' addresses
+    with sm.lock_device("monitor") as m:
+        assert "10.20.0.1" in m.known_ips                           # no evidence either way: kept
+
+
+GATEWAY = "10.20.0.1"
+
+
+def _monitor_holding_the_gateway(sm):
+    gw_id = stable_device_id(GATEWAY)
+    _dev(sm, "monitor", "10.20.0.85", MONITOR_MAC, history=[GATEWAY, ROUTER_LL])
+    sm._merge_redirects[gw_id] = "monitor"                            # the old wrong merge
+    return gw_id
+
+
+def test_gateway_merged_into_another_device_is_split_by_the_routers_own_mac(sm):
+    mgr = DeviceIdentityManager(sm, {"gateway_ip": GATEWAY})
+    gw_id = _monitor_holding_the_gateway(sm)
+    assert mgr.resolve_device_id(GATEWAY, ROUTER_MAC, "unknown", mac_observed=False) == "monitor"   # nothing proven
+    assert mgr.resolve_device_id(GATEWAY, ROUTER_MAC, "unknown", mac_observed=True) == gw_id
+    assert gw_id in sm.get_identity_splits()
+    # the router's other addresses follow its learned MAC to the gateway, not to the monitor
+    assert mgr.resolve_device_id(ROUTER_LL, ROUTER_MAC, "unknown", mac_observed=True) == gw_id
+
+
+def test_a_routers_second_mac_never_makes_a_new_device(sm):
+    mgr = DeviceIdentityManager(sm, {"gateway_ip": GATEWAY})
+    gw_id = stable_device_id(GATEWAY)
+    _dev(sm, gw_id, GATEWAY, ROUTER_MAC)
+    assert mgr.resolve_device_id(GATEWAY, "50:00:00:00:00:29", "unknown", mac_observed=True) == gw_id
+
+
+def test_live_manager_trust_anchor_split(tmp_path):
+    from argus.identity.live_manager import LiveIdentityManager
+    from argus.identity.resolver import TrustAnchor
+    sm = StateManager(state_path=str(tmp_path / "ids_state.json"))
+    graph = _graph(tmp_path)
+    gw_id = _monitor_holding_the_gateway(sm)
+    graph.merge_device(gw_id, "monitor")
+    live = LiveIdentityManager(sm, {}, graph, {"gateway": TrustAnchor(role="gateway", ip=GATEWAY)})
+    live.process_zeek_identities([{"id.orig_h": GATEWAY}], _Zeek({GATEWAY: ROUTER_MAC}))
+    assert sm.has_device(gw_id) and gw_id in sm.get_identity_splits()
+    assert graph.resolve_canonical_device_id(gw_id) == gw_id
+    with sm.lock_device("monitor") as m:
+        assert m.mac_address == MONITOR_MAC and m.client_ip == "10.20.0.85"
+
+
+# --- the whole-code audit (owner, 2026-10-12): history is not current traffic; a router's MAC is not an identity -------
+
+def test_recent_addresses_are_the_ones_seen_in_the_window_not_the_history():
+    from core.state import DeviceState
+    now = time.time()
+    st = DeviceState(device_id="d", client_ip="10.20.0.5", hostname="h")
+    for ip in ("10.20.0.5", "10.20.0.6", "10.20.0.7"):
+        st.known_ips.add(ip)
+    st.note_address("10.20.0.5", now)
+    st.note_address("fe80::5", now - 120)
+    st.note_address("10.20.0.6", now - 3600)                   # this device's an hour ago; may be another's now
+    assert st.recent_addresses(now, 300) == ["10.20.0.5", "fe80::5"]
+    legacy = DeviceState.from_dict({k: v for k, v in st.to_dict().items() if k != "addr_seen"})
+    assert legacy.recent_addresses(now, 300) == ["10.20.0.5"]  # a state from before: current address, never history
+    assert DeviceState.from_dict(st.to_dict()).recent_addresses(now, 300) == ["10.20.0.5", "fe80::5"]
+
+
+def test_identity_records_when_each_address_was_seen_and_a_handover_forgets_it(sm, mgr):
+    mgr.process_zeek_identities([{"id.orig_h": "10.20.0.30"}], _Zeek({"10.20.0.30": LAPTOP_MAC}))
+    dev = sm.get_device_id_for_mac(LAPTOP_MAC)
+    with sm.lock_device(dev) as st:
+        assert "10.20.0.30" in st.addr_seen
+    sm.release_address(dev, "10.20.0.30")
+    with sm.lock_device(dev) as st:
+        assert "10.20.0.30" not in st.addr_seen
+
+
+def test_a_merge_carries_the_orphans_recent_addresses(sm):
+    now = time.time()
+    frag = _dev(sm, "fragment", "fe80::77")
+    frag.note_address("fe80::77", now)
+    _dev(sm, "device", "10.20.0.77", LAPTOP_MAC)
+    assert sm.merge_into_canonical("fragment", "device")
+    with sm.lock_device("device") as st:
+        assert "fe80::77" in st.recent_addresses(now, 300)
+
+
+class _ZeekShared(_Zeek):
+    def __init__(self, macs, shared):
+        super().__init__(macs)
+        self._shared = shared
+
+    def shared_macs(self, window=900.0):
+        return set(self._shared)
+
+
+def test_zeek_shared_macs_counts_concurrent_ipv4_sources_only():
+    from extractors.zeek_features import ZeekFeatureExtractor
+    zf = ZeekFeatureExtractor.__new__(ZeekFeatureExtractor)
+    import threading
+    zf._state_lock = threading.RLock()
+    now = time.time()
+    zf._mac_bindings = {"10.30.0.5": ROUTER_MAC, "10.30.0.6": ROUTER_MAC,          # two forwarded IPv4 sources
+                        "10.20.0.9": PHONE_MAC, "fe80::1": PHONE_MAC, "fe80::2": PHONE_MAC,   # one device, many IPv6
+                        "0.0.0.0": LAPTOP_MAC, "169.254.3.3": LAPTOP_MAC, "10.20.0.8": LAPTOP_MAC,
+                        "10.20.0.40": OTHER_DEV_MAC, "10.20.0.41": OTHER_DEV_MAC}
+    zf._mac_last_seen = {ip: now for ip in zf._mac_bindings}
+    zf._mac_last_seen["10.20.0.41"] = now - 7200                               # an old lease, not concurrent
+    assert zf.shared_macs(now=now, window=900) == {ROUTER_MAC}
+
+
+def test_new_network_router_not_yet_recognised_forwarded_devices_stay_apart(sm):
+    """No gateway configured or discovered yet. The router forwards two devices from another subnet: both arrive with
+    the router's MAC. They must not become one device -- and the router's own EUI-64 address still identifies it."""
+    mgr = DeviceIdentityManager(sm, {})
+    zeek = _ZeekShared({"10.30.0.5": ROUTER_MAC, "10.30.0.6": ROUTER_MAC, ROUTER_LL: ROUTER_MAC}, {ROUTER_MAC})
+    mgr.process_zeek_identities([{"id.orig_h": "10.30.0.5"}, {"id.orig_h": "10.30.0.6"}, {"id.orig_h": ROUTER_LL}], zeek)
+    a, b = stable_device_id("10.30.0.5"), stable_device_id("10.30.0.6")
+    assert sm.has_device(a) and sm.has_device(b) and a != b
+    for dev in (a, b):
+        with sm.lock_device(dev) as st:
+            assert st.mac_address == "unknown"                  # the router's MAC is not theirs
+    assert sm.get_device_id_for_mac(ROUTER_MAC) == stable_device_id(ROUTER_LL)   # the router's own address
+
+
+def test_router_recognised_forwarded_devices_are_never_filed_under_the_gateway(sm):
+    mgr = DeviceIdentityManager(sm, {"gateway_ip": GATEWAY})
+    gw_id = stable_device_id(GATEWAY)
+    zeek = _ZeekShared({GATEWAY: ROUTER_MAC, "10.30.0.5": ROUTER_MAC, ROUTER_LL: ROUTER_MAC}, {ROUTER_MAC})
+    mgr.process_zeek_identities([{"id.orig_h": GATEWAY}, {"id.orig_h": "10.30.0.5"}, {"id.orig_h": ROUTER_LL}], zeek)
+    assert sm.get_device_id_for_mac(ROUTER_MAC) == gw_id        # the gateway address keeps its own MAC
+    assert mgr.resolve_device_id(ROUTER_LL, ROUTER_MAC, "unknown", mac_observed=True) == gw_id
+    assert sm.has_device(stable_device_id("10.30.0.5"))          # the forwarded device is its own
+    with sm.lock_device(stable_device_id("10.30.0.5")) as st:
+        assert st.mac_address == "unknown"
+
+
+def test_live_manager_trust_anchor_keeps_its_shared_mac_for_its_own_address(tmp_path):
+    """The production resolver with an auto-discovered gateway anchor: the router's MAC is shared (it forwards another
+    subnet), so it is evidence only for the anchor's own address -- the forwarded device is never filed under it."""
+    from argus.identity.live_manager import LiveIdentityManager
+    from argus.identity.resolver import TrustAnchor
+    sm = StateManager(state_path=str(tmp_path / "ids_state.json"))
+    live = LiveIdentityManager(sm, {}, _graph(tmp_path), {"gateway": TrustAnchor(role="gateway", ip=GATEWAY)})
+    assert GATEWAY in live._anchor_ips()
+    zeek = _ZeekShared({GATEWAY: ROUTER_MAC, "10.30.0.5": ROUTER_MAC}, {ROUTER_MAC})
+    live.process_zeek_identities([{"id.orig_h": GATEWAY}, {"id.orig_h": "10.30.0.5"}], zeek)
+    gw_id = stable_device_id(GATEWAY)
+    assert sm.get_device_id_for_mac(ROUTER_MAC) == gw_id
+    forwarded = [d for d in sm.get_all_device_ids() if d != gw_id]
+    assert len(forwarded) == 1
+    with sm.lock_device(forwarded[0]) as st:
+        assert st.client_ip == "10.30.0.5" and st.mac_address == "unknown"

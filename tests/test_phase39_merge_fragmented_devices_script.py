@@ -24,8 +24,8 @@ from core.state_guard import StateManager
 from merge_fragmented_devices import find_fragmented_groups, pick_canonical
 
 IPV4 = "192.168.1.42"
-IPV6_LL = "fe80::1a2b:3c4d:5e6f:7788"
-IPV6_ULA = "fd7c:1234:5678::42"
+IPV6_LL = "fe80::a8bb:ccff:fedd:ee05"          # EUI-64 of MAC below: provably that device's
+IPV6_ULA = "fd7c:1234:5678:0:a8bb:ccff:fedd:ee05"  # likewise
 MAC = "aa:bb:cc:dd:ee:05"
 OTHER_MAC = "aa:bb:cc:dd:ee:06"
 
@@ -40,8 +40,7 @@ sm = StateManager(state_path="/tmp/_phase39_script_test_a.json")
 # or two that have none (a1y/a2y) -- an address is a lease, not an identity (StateManager).
 a1 = sm.get_or_create("share_ip_1", IPV4, "unknown")
 a1.mac_address = "aa:bb:cc:dd:ee:a1"
-a1.known_ips.add(IPV6_LL)  # the device has used the fragment's address
-a2 = sm.get_or_create("share_ip_2", IPV6_LL, "unknown")
+a2 = sm.get_or_create("share_ip_2", IPV4, "unknown")   # cold-started at the address the device uses now
 a2.last_seen = a1.last_seen - 60
 a1x = sm.get_or_create("diff_mac_1", "192.168.1.40", "unknown")
 a1x.mac_address = "aa:bb:cc:dd:ee:b1"
@@ -73,8 +72,8 @@ e2 = sm.get_or_create("generic_host_2", "192.168.1.81", "laptop")
 # (e) three-way TRANSITIVE grouping: f1-f2 share an IP, f2-f3 share a MAC, f1 and f3
 # share nothing directly -- union-find must still land all three in ONE group.
 f1 = sm.get_or_create("transitive_1", "192.168.1.90", "unknown")
-f2 = sm.get_or_create("transitive_2", "192.168.1.91", "unknown")
-f2.known_ips.add("192.168.1.90")  # f2 <-> f1 via shared IP
+f1.last_seen -= 60
+f2 = sm.get_or_create("transitive_2", "192.168.1.90", "unknown")   # f1 is an address-only fragment at f2's address
 f2.mac_address = OTHER_MAC
 f3 = sm.get_or_create("transitive_3", "192.168.1.92", "unknown")
 f3.mac_address = OTHER_MAC  # f3 <-> f2 via shared MAC
@@ -252,7 +251,7 @@ tmp_state_path_d2 = os.path.join(tmp_dir_d2, "ids_state.json")
 
 sm_d2 = StateManager(state_path=tmp_state_path_d2)
 canon_d2 = sm_d2.get_or_create("d2_canon", IPV4, "smart-tv")
-canon_d2.mac_address = OTHER_MAC
+canon_d2.mac_address = MAC   # the orphan's address (IPV6_ULA) is built from this MAC
 canon_d2.known_ips.add(IPV4)
 canon_d2.known_ips.add(IPV6_ULA)
 sm_d2.get_or_create("d2_orphan", IPV6_ULA, "unknown")

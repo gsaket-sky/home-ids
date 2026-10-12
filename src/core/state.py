@@ -14,7 +14,7 @@ RECENT FIXES (AUDIT CORRECTIONS):
 import logging
 import time
 from collections import deque, Counter, defaultdict, OrderedDict
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from extractors.pihole_codes import DNS_RATIO_SCHEME
 
@@ -203,8 +203,38 @@ class DeviceState:
         # a burst split across a device's addresses isn't silently diluted below threshold
         # on each address individually.
         self.known_ips = BoundedSet(max_size=8)
+        # When identity last attributed traffic from each address to this device (2026-10-12). known_ips is HISTORY --
+        # an address in it may belong to another device by now (DHCP reuse, a wrong merge); what this device's traffic
+        # is NOW comes from the addresses it was seen at within the feature window (recent_addresses()). Before, the
+        # detection features, the safe-address check and the post-alert counter reset all ran over the whole history,
+        # so a device took on the traffic of whoever used its old addresses (on .94 a smart monitor "looked up" names
+        # only another device uses).
+        self.addr_seen: Dict[str, float] = {}
 
         LOGGER.debug("DeviceState profile instantiated for ID: %s (IP: %s, Hostname: %s)", device_id, client_ip, hostname)
+
+    _MAX_ADDR_SEEN = 32
+
+    def note_address(self, ip: str, ts: float) -> None:
+        """Identity attributed traffic from `ip` to this device at `ts`."""
+        if not ip or ip == "unknown":
+            return
+        self.addr_seen[ip] = max(ts, self.addr_seen.get(ip, 0.0))
+        if len(self.addr_seen) > self._MAX_ADDR_SEEN:
+            for old in sorted(self.addr_seen, key=self.addr_seen.get)[:len(self.addr_seen) - self._MAX_ADDR_SEEN]:
+                del self.addr_seen[old]
+
+    def forget_address(self, ip: str) -> None:
+        self.addr_seen.pop(ip, None)
+
+    def recent_addresses(self, now: float, window: float) -> List[str]:
+        """The addresses this device's traffic came from within `window` seconds -- the ones its current traffic can be
+        read from -- most recent first, always including its current address. A state from before addr_seen existed
+        (no entries) falls back to the current address only, never to the whole history."""
+        out = [ip for ip, ts in sorted(self.addr_seen.items(), key=lambda kv: -kv[1]) if now - ts <= window]
+        if self.client_ip and self.client_ip != "unknown" and self.client_ip not in out:
+            out.insert(0, self.client_ip)
+        return out
 
     def is_poisoned(self, risk_score: float) -> bool:
         """Returns True if the device exhibits high risk, freezing baseline ingestion.
@@ -239,6 +269,7 @@ class DeviceState:
             "last_seen": self.last_seen,
             "device_type_is_override": self.device_type_is_override,
             "known_ips": self.known_ips.to_list(),
+            "addr_seen": dict(self.addr_seen),
             "rate_baseline": self.rate_baseline.to_dict(),
             "entropy_baseline": self.entropy_baseline.to_dict(),
             "unique_baseline": self.unique_baseline.to_dict(),
@@ -313,6 +344,7 @@ class DeviceState:
         obj.known_ips = BoundedSet(max_size=8, initial=data.get("known_ips", []))
         if obj.client_ip and obj.client_ip != "unknown":
             obj.known_ips.add(obj.client_ip)
+        obj.addr_seen = {str(k): float(v) for k, v in (data.get("addr_seen") or {}).items()}
         
         if "rate_baseline" in data: obj.rate_baseline = EWMABaseline.from_dict(data["rate_baseline"], alpha)
         if "entropy_baseline" in data: obj.entropy_baseline = EWMABaseline.from_dict(data["entropy_baseline"], alpha)

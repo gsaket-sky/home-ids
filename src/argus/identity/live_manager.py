@@ -262,7 +262,8 @@ class LiveIdentityManager(DeviceIdentityManager):
             if anchor.ip and anchor.ip == client_ip:
                 if mac_addr != "unknown" and not randomized:
                     self._learn_anchor_mac(role, mac_addr)
-                return self.state_manager.resolve_merge_redirect(v13_stable_device_id(anchor.ip))
+                return self._follow_merge_redirect(v13_stable_device_id(anchor.ip), mac_addr, mac_observed, client_ip,
+                                                   anchor=True)
 
         if mac_addr != "unknown" and not randomized:
             learned_anchor_macs = self._get_learned_anchor_macs()
@@ -270,7 +271,7 @@ class LiveIdentityManager(DeviceIdentityManager):
                 learned = learned_anchor_macs.get(role) or anchor.mac
                 if learned and learned == mac_addr:
                     anchor_id = v13_stable_device_id(anchor.ip) if anchor.ip else _anchor_device_id(role)
-                    return self.state_manager.resolve_merge_redirect(anchor_id)
+                    return self._follow_merge_redirect(anchor_id, mac_addr, mac_observed, client_ip, anchor=True)
 
         # Branch 3 (mac_bindings): reuses state_manager's own real, already-persisted
         # MAC->device_id index directly -- not reinvented. Checked regardless of
@@ -312,6 +313,11 @@ class LiveIdentityManager(DeviceIdentityManager):
         return self._follow_merge_redirect(v13_resolve_device_id(
             client_ip, client_mac=mac_addr, hostname=hostname, mac_bindings=mac_bindings,
         ), mac_addr, mac_observed, client_ip)
+
+    def _anchor_ips(self) -> set:
+        """The trust anchors' own addresses (auto-discovered at boot: argus/identity/discovery.py), plus the core
+        gateway_ip key if set."""
+        return {a.ip for a in self._trust_anchors.values() if a.ip} | super()._anchor_ips()
 
     def _on_identity_split(self, device_id: str, former_canonical: str) -> None:
         """Mirrors an undone merge into the graph: the id is un-tombstoned, so what the graph holds under it (evidence,

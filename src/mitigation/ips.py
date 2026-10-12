@@ -267,6 +267,27 @@ class IPSMitigator:
         found = cls._arp_target_ip(ip, mac, ipv4_candidates)
         return found if cls._is_arp_ipv4(found) else None
 
+    def _free_address_key(self, ip: str, mac: str) -> None:
+        """Caller holds self._lock. Tarpit entries are keyed by address, and an address can change hands (DHCP reuse;
+        identity hand-over, 2026-10-12). When the entry under `ip` belongs to another MAC than `mac`, it is the
+        contained device's, not the new holder's: it is re-keyed by its MAC ("mac:<mac>" -- not an address, so the ARP
+        loop resolves the device's current IPv4 by MAC and the NDP loop matches its MAC as always), so the contained
+        device stays contained and the new holder can get its own entry. Before, the registration answered "Already
+        tarpitted" for the wrong device, and _ensure_tarpit_target() overwrote the entry's MAC -- releasing the contained
+        device and cutting off the one that inherited its address."""
+        cur = self._tarpit_active_targets.get(ip)
+        cur_mac = str((cur or {}).get("mac") or "unknown").lower()
+        new_mac = str(mac or "unknown").lower()
+        if not cur or cur_mac == "unknown" or new_mac == "unknown" or cur_mac == new_mac:
+            return
+        entry = self._tarpit_active_targets.pop(ip)
+        if entry.get("arp_ip") == ip:
+            entry.pop("arp_ip", None)          # that address is the new holder's now
+        self._tarpit_active_targets[f"mac:{cur_mac}"] = entry
+        self._save_queues()
+        LOGGER.warning("Tarpit entry for %s re-keyed to mac:%s -- the address now belongs to another device (MAC %s); "
+                       "the contained device stays contained by its MAC.", ip, cur_mac, new_mac)
+
     def _publish_engine_tarpit_state(self) -> None:
         """The engine's instance records whether its tarpit is armed in the shared IPS state, for state-only instances
         in the API process (see __init__). Written at every engine start, so a restart without raw-socket access
@@ -575,6 +596,7 @@ class IPSMitigator:
             return
 
         with self._lock:
+            self._free_address_key(client_ip, mac_addr)
             target = self._tarpit_active_targets.get(client_ip)
             if target is None:
                 self._tarpit_active_targets[client_ip] = {"mac": mac_addr or "unknown", "hostname": hostname, "dev_id": dev_id}
@@ -641,6 +663,7 @@ class IPSMitigator:
         if not client_ip or client_ip == "unknown" or not mac_addr or mac_addr == "unknown":
             return False
         with self._lock:
+            self._free_address_key(client_ip, mac_addr)
             if client_ip in self._tarpit_active_targets:
                 return False
             graph_action_id = self._mirror_containment(
@@ -910,6 +933,7 @@ class IPSMitigator:
                     LOGGER.warning("⚠️ MAC address unknown for %s; tarpit activation deferred until a later Zeek/ARP identification update.", client_ip)
                 else:
                     with self._lock:
+                        self._free_address_key(client_ip, mac_addr)
                         if client_ip not in self._tarpit_active_targets:
                             if is_operator_released and lateral_threat:
                                 LOGGER.critical("🚨 [LATERAL THREAT OVERRIDE] Device %s attempted internal port scan during release cooldown! Layer-2 Tarpit re-enforced.", hostname)
@@ -1032,6 +1056,7 @@ class IPSMitigator:
             return False, "No known MAC address for this device -- the tarpit needs one."
         arp_ip = self._arp_ip_hint(ip, mac, ipv4_candidates)   # IPv4 fallback for the ARP half (see _arp_target_ip)
         with self._lock:
+            self._free_address_key(ip, mac)
             if ip in self._tarpit_active_targets:
                 return True, "Already tarpitted."
             graph_action_id = self._mirror_containment(dev_id, action_type="tarpit", status="active", target=ip, reason=reason)

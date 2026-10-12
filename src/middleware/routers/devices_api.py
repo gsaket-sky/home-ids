@@ -201,7 +201,11 @@ def get_device_top_domains(device_id: str, hours: int = 24, token: str = Depends
     identity = _identity_dict(sm, device_id)
     if identity is None:
         raise HTTPException(status_code=404, detail=f"No such device '{device_id}'.")
-    client_ips = list({identity.get("client_ip")} | set(identity.get("known_ips", []) or []))
+    # The addresses the device used within the window (2026-10-12): its whole history (known_ips) can hold addresses
+    # other devices use now, and their lookups showed up as this device's.
+    since_seen = time.time() - hours * 3600
+    recent = [ip for ip, ts in (identity.get("addr_seen") or {}).items() if ts >= since_seen]
+    client_ips = list({identity.get("client_ip")} | set(recent))
     client_ips = [ip for ip in client_ips if ip and ip != "unknown"]
     if not client_ips:
         return {"domains": [], "window_hours": hours, "note": "No known IP address on record for this device yet."}

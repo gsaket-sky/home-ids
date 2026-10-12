@@ -42,7 +42,7 @@ from core.state_guard import ADDRESS_HOLD_WINDOW_SECONDS, StateManager
 from core.identity import _is_generic_hostname
 from core.device_matching import (
     dhcp_fingerprint_match, ja4_overlap, hostname_corroborates,
-    match_confidence, AUTO_MERGE_CONFIDENCE,
+    match_confidence, AUTO_MERGE_CONFIDENCE, mac_from_eui64,
 )
 from argus.graph.store import GraphStore
 
@@ -103,13 +103,22 @@ def _link_reason(sa: dict, sb: dict, window: float) -> Optional[str]:
         return "same MAC"
     both_macs = bool(ma and mb)                       # here: two different MACs
     if not both_macs:
-        # An address-only fragment (cold-started before its MAC was known) is the device that has used its address,
-        # if that device was active at least as recently: a fragment seen after the device stopped using the address
-        # is more likely a new device that got the address.
+        # An address-only fragment (cold-started before its MAC was known) belongs to a device only on evidence of
+        # ownership: its address is built from one of the device's MACs (EUI-64), or it is the address the device uses
+        # NOW (and the device was active at least as recently). A device's address HISTORY is not evidence: it is
+        # exactly what wrong merges filled -- on .94 a smart monitor's polluted history pulled seven fragments of other
+        # devices into it in one reconcile pass (2026-10-12, 12:25).
         for frag, dev in ((sa, sb), (sb, sa)):
-            if (not _macs(frag) and _macs(dev) and frag.get("client_ip") and frag["client_ip"] in dev["known_ips"]
-                    and (frag.get("last_seen") or 0.0) <= (dev.get("last_seen") or 0.0) + window):
-                return f"address-only fragment {frag['client_ip']}"
+            addr = frag.get("client_ip")
+            if _macs(frag) or not _macs(dev) or not addr:
+                continue
+            eui = mac_from_eui64(addr)
+            if eui:
+                if eui in _macs(dev):
+                    return f"address-only fragment {addr} (built from MAC {eui})"
+                continue                      # provably another device's address
+            if addr == dev.get("client_ip") and (frag.get("last_seen") or 0.0) <= (dev.get("last_seen") or 0.0) + window:
+                return f"address-only fragment {addr} (the device's current address)"
     if both_macs and abs((sa.get("last_seen") or 0.0) - (sb.get("last_seen") or 0.0)) < window:
         return None                                   # two MACs active at the same time: two devices (or two NICs)
     rotation = " (MAC rotation)" if both_macs else ""

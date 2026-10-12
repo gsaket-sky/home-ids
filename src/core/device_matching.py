@@ -24,6 +24,7 @@ Deliberately conservative, on purpose:
   default and every candidate (even below the bar) is logged, so the operator can tune the
   threshold from real observed scores instead of guessing.
 """
+import ipaddress
 from typing import Any, Dict, Optional, Set
 
 # Below this, don't even log it as a candidate — pure noise.
@@ -118,3 +119,18 @@ def match_confidence(dhcp_score: float, ja4_sim: float, hostname_ok: bool) -> fl
     if hostname_ok:
         return 0.50
     return 0.0
+
+
+def mac_from_eui64(address: str) -> Optional[str]:
+    """The MAC an IPv6 address was built from (SLAAC EUI-64: interface id = MAC with ff:fe in the middle and the
+    universal/local bit flipped), or None -- privacy/random addresses carry no MAC. Exact evidence of which device an
+    address belongs to, independent of any history."""
+    try:
+        ip = ipaddress.IPv6Address(address)
+    except (ValueError, TypeError):
+        return None
+    iid = ip.packed[8:]
+    if iid[3:5] != bytes.fromhex("fffe"):
+        return None
+    mac = bytes([iid[0] ^ 0x02]) + iid[1:3] + iid[5:8]
+    return ":".join(f"{b:02x}" for b in mac)

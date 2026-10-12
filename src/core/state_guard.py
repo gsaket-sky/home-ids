@@ -28,6 +28,7 @@ from core.device_matching import (
     match_confidence,
     MIN_CANDIDATE_CONFIDENCE,
     AUTO_MERGE_CONFIDENCE,
+    mac_from_eui64,
 )
 from metrics import (
     transfer_learning_seeds_total,
@@ -235,6 +236,8 @@ class StateManager:
             st = self._states.get(device_id)
             if st is not None and hasattr(st, "known_ips"):
                 changed = st.known_ips.discard(ip)
+                if hasattr(st, "forget_address"):
+                    st.forget_address(ip)
             if self._ip_to_device_id.get(ip) == device_id:
                 del self._ip_to_device_id[ip]
                 changed = True
@@ -256,17 +259,31 @@ class StateManager:
                 cur = holder.get(ip)
                 if cur is None or (getattr(st, "last_seen", 0.0) or 0.0) > (getattr(cur[1], "last_seen", 0.0) or 0.0):
                     holder[ip] = (dev_id, st)
+            bound: Dict[str, set] = {}
+            for m, d in self._mac_to_device_id.items():
+                bound.setdefault(d, set()).add(m)
             for dev_id, st in self._states.items():
                 mac = getattr(st, "mac_address", "unknown")
-                if not mac or mac == "unknown":
-                    continue
+                macs = bound.get(dev_id, set()) | ({mac} - {"unknown", "", None})
                 for ip in list(getattr(st, "known_ips", None) or []):
+                    # An address built from ANOTHER MAC (EUI-64) is provably another device's, whoever uses it now --
+                    # this also clears histories filled by wrong merges whose owner is not active.
+                    eui = mac_from_eui64(ip)
+                    if eui and macs and eui not in macs and ip != getattr(st, "client_ip", ""):
+                        st.known_ips.discard(ip)
+                        st.forget_address(ip)
+                        removed.append({"device_id": dev_id, "address": ip,
+                                        "now_owned_by": self._mac_to_device_id.get(eui) or f"MAC {eui}"})
+                        continue
+                    if not mac or mac == "unknown":
+                        continue
                     owner = holder.get(ip)
                     if owner is None or owner[0] == dev_id or ip == getattr(st, "client_ip", ""):
                         continue
                     if getattr(owner[1], "mac_address", "unknown") == mac:
                         continue
                     st.known_ips.discard(ip)
+                    st.forget_address(ip)
                     removed.append({"device_id": dev_id, "address": ip, "now_owned_by": owner[0]})
         return removed
 
@@ -666,6 +683,9 @@ class StateManager:
             for ip in orphan_ips:
                 self._ip_to_device_id[ip] = canonical_id
                 canonical_state.known_ips.add(ip)
+            for ip, ts in (getattr(orphan_state, "addr_seen", None) or {}).items():
+                if hasattr(canonical_state, "note_address"):
+                    canonical_state.note_address(ip, ts)
 
             # BUGFIX (2026-09-20, identity-merge handover follow-up): carry forward the
             # orphan's operator-confirmed incident counters instead of silently dropping

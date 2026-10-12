@@ -165,3 +165,21 @@ def test_top_domains_missing_db_returns_503(graph_db, state_file, tmp_path, monk
     with pytest.raises(HTTPException) as exc:
         devices_api.get_device_top_domains("dev_a", hours=24, token="test")
     assert exc.value.status_code == 503
+
+
+def test_top_domains_reads_only_addresses_the_device_used_in_the_window(graph_db, state_file, pihole_db, monkeypatch):
+    """2026-10-12: the query used the device's whole address history, so another device's lookups from an address this
+    one used long ago showed up as this device's (on .94 a monitor "looked up" a name only another device uses)."""
+    sm = StateManager(state_path=str(state_file))
+    sm.load_from_disk()
+    with sm.lock_device("dev_a") as st:
+        st.known_ips.add("192.168.1.99")                      # history: another device uses it now
+        st.note_address("192.168.1.50", time.time())
+        st.note_address("192.168.1.99", time.time() - 3 * 86400)
+    sm.flush_to_disk()
+    real_get = devices_api.CONFIG.get
+    monkeypatch.setattr(devices_api.CONFIG, "get", staticmethod(
+        lambda k, d=None: str(pihole_db) if k == "pihole_db" else real_get(k, d)
+    ))
+    domains = {r["domain"] for r in devices_api.get_device_top_domains("dev_a", hours=24, token="test")["domains"]}
+    assert "someone-elses-device.example" not in domains and "example.com" in domains

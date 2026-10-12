@@ -215,3 +215,55 @@ def test_console_tarpit_for_an_ipv6_device_stores_the_ipv4_hint(tmp_path, monkey
     check.load_from_disk()
     target = check.get_ips_state()["tarpit_targets"][V6]
     assert target["dev_id"] == "dev_v6" and target["arp_ip"] == "192.168.1.60"
+
+
+# --- an address that changed hands (2026-10-12) -------------------------------------------------------------------------
+# Tarpit entries are keyed by address. When the contained device's address passes to another device, the contained
+# device must stay contained and the new holder must not inherit (or be refused) containment.
+
+OLD_MAC, NEW_MAC = "aa:bb:cc:dd:ee:21", "aa:bb:cc:dd:ee:22"
+
+
+def test_a_handed_over_address_keeps_the_old_device_contained_and_tarpits_the_new_one(mitigator, no_neighbours):
+    assert mitigator.operator_tarpit("old", "10.0.0.30", OLD_MAC, "old-host")[0]
+    ok, msg = mitigator.operator_tarpit("new", "10.0.0.30", NEW_MAC, "new-host")
+    assert ok and "Already" not in msg
+    t = mitigator._tarpit_active_targets
+    assert t[f"mac:{OLD_MAC}"]["dev_id"] == "old" and t["10.0.0.30"]["dev_id"] == "new"
+    assert "TARPITTED" in mitigator.get_containment_status(client_ip="10.0.0.99", dev_id="old")
+    assert mitigator.release_device("old") and f"mac:{OLD_MAC}" not in t and "10.0.0.30" in t
+
+
+def test_ensure_never_moves_containment_to_another_mac(mitigator, no_neighbours):
+    mitigator.operator_tarpit("old", "10.0.0.31", OLD_MAC, "old-host")
+    mitigator._ensure_tarpit_target(client_ip="10.0.0.31", mac_addr=NEW_MAC, hostname="new-host", dev_id="new")
+    t = mitigator._tarpit_active_targets
+    assert t[f"mac:{OLD_MAC}"]["mac"] == OLD_MAC and t["10.0.0.31"]["mac"] == NEW_MAC
+
+
+def test_same_or_unknown_mac_behaves_as_before(mitigator, no_neighbours):
+    mitigator.operator_tarpit("d", "10.0.0.32", OLD_MAC, "h")
+    assert mitigator.operator_tarpit("d", "10.0.0.32", OLD_MAC, "h")[1] == "Already tarpitted."
+    mitigator._tarpit_active_targets["10.0.0.33"] = {"mac": "unknown", "hostname": "h", "dev_id": "e"}
+    mitigator._ensure_tarpit_target(client_ip="10.0.0.33", mac_addr=NEW_MAC, hostname="h", dev_id="e")
+    assert mitigator._tarpit_active_targets["10.0.0.33"]["mac"] == NEW_MAC        # the MAC becoming known: filled in
+
+
+def test_arp_loop_reaches_a_rekeyed_device_at_its_current_ipv4(mitigator, monkeypatch):
+    monkeypatch.setattr(l2_raw, "ipv4_for_mac", lambda mac: {OLD_MAC: "10.0.0.41"}.get(mac))
+    monkeypatch.setattr(l2_raw, "open_raw", lambda proto=None: object())
+    monkeypatch.setattr(l2_raw, "interface_for", lambda ip: "eth0")
+    monkeypatch.setattr(l2_raw, "interface_mac", lambda ifname: "02:00:00:00:00:01")
+    sent = []
+    monkeypatch.setattr(l2_raw, "send_frame", lambda sock, ifname, frame: sent.append(frame))
+    real_sleep = time.sleep
+
+    def sleep(seconds):
+        if threading.current_thread() is not threading.main_thread():
+            return real_sleep(seconds)
+        raise _StopLoop
+    monkeypatch.setattr(ips_module.time, "sleep", sleep)
+    mitigator._tarpit_active_targets[f"mac:{OLD_MAC}"] = {"mac": OLD_MAC, "hostname": "old", "dev_id": "old"}
+    with pytest.raises(_StopLoop):
+        mitigator._arp_tarpit_loop()
+    assert [str(ipaddress.IPv4Address(f[-4:])) for f in sent] == ["10.0.0.41"]
